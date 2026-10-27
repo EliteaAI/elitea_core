@@ -322,9 +322,17 @@ class TestMentions:
         assert project_skills.resolve_mentioned_project_skills('~Reviewer', {'Reviewer'}, catalog, CHAT_PROJECT_ID) == []
         assert platform.body_requests == []
 
-    def test_at_most_the_per_turn_cap_is_loaded(self, project_skills, platform):
+    def test_more_project_mentions_than_the_limit_are_rejected_before_any_body_loads(self, project_skills, platform):
         catalog = [_entry(i, f's{i}') for i in range(1, 8)]
-        text = ' '.join(f'~s{i}' for i in range(1, 8))
+        text = ' '.join(f'~s{i}' for i in range(1, 7))
+        with pytest.raises(project_skills.SkillInvocationLimitError) as error:
+            project_skills.resolve_mentioned_project_skills(text, set(), catalog, CHAT_PROJECT_ID)
+        assert (error.value.count, error.value.max_allowed) == (6, 5)
+        assert platform.body_requests == []
+
+    def test_mentions_up_to_the_limit_all_load(self, project_skills, platform):
+        catalog = [_entry(i, f's{i}') for i in range(1, 8)]
+        text = ' '.join(f'~s{i}' for i in range(1, 6))
         mentioned = project_skills.resolve_mentioned_project_skills(text, set(), catalog, CHAT_PROJECT_ID)
         assert [m['name'] for m in mentioned] == ['s1', 's2', 's3', 's4', 's5']
         assert platform.body_requests == [[101, 102, 103, 104, 105]]
@@ -473,6 +481,45 @@ def _without_bodies(skills):
     return [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []]
 
 
+class TestPerMessageLimitCountsProjectSkills:
+    @pytest.fixture
+    def checked(self, env, project_skills, platform, monkeypatch):
+        calls = []
+        monkeypatch.setattr(env.mod, 'validate_message_skill_limit', lambda content, candidates: calls.append(candidates))
+        monkeypatch.setattr(env.mod, 'is_project_skills_in_chat_enabled', lambda project_id: True)
+        monkeypatch.setattr(env.mod, 'build_project_skill_catalog', lambda project_id, sender_id, conversation: [
+            _entry(1, 'release-notes'), _entry(2, 'sql-review'),
+        ])
+        return calls
+
+    @staticmethod
+    def _loaded_project_names(candidates):
+        return [c['name'] for c in candidates if c.get('origin') == 'project' and c.get('instructions')]
+
+    def test_the_check_before_the_turn_is_stored_counts_project_mentions(self, env, checked):
+        env.mod.validate_turn_skill_limit(
+            ParticipantRowsSession([]), 3, _recipient('dummy'), '~release-notes now', CHAT_PROJECT_ID, lambda: None,
+            conversation=_conversation(), sender_id=5,
+        )
+        [candidates] = checked
+        assert self._loaded_project_names(candidates) == ['release-notes']
+
+    def test_without_a_conversation_the_early_check_counts_only_agent_and_chat_skills(self, env, checked):
+        env.mod.validate_turn_skill_limit(
+            ParticipantRowsSession([]), 3, _recipient('dummy'), '~release-notes now', CHAT_PROJECT_ID, lambda: None,
+        )
+        [candidates] = checked
+        assert self._loaded_project_names(candidates) == []
+
+    def test_the_agent_payload_check_counts_project_mentions(self, env, checked):
+        result = {'user_input': '~sql-review this', 'version_details': {'agent_type': 'openai', 'skills': []}}
+        env.mod.apply_participant_skill_mentions(
+            ParticipantRowsSession([]), _msg_group('application'), result, CHAT_PROJECT_ID, strict_mentions=True,
+        )
+        [candidates] = checked
+        assert self._loaded_project_names(candidates) == ['sql-review']
+
+
 class TestPredictPayload:
     @pytest.fixture
     def build(self, builder):
@@ -546,6 +593,14 @@ class TestPlumbing:
         assert strict_calls('api/v2/regenerate.py') == [False]
         function = _function('rpc/chat_all.py', 'generate_payload')
         assert 'strict_mentions=strict_skill_mentions' in ast.unparse(function)
+
+    def test_the_send_time_check_hands_over_the_conversation_and_sender(self):
+        function = _function('rpc/chat_all.py', 'predict_sio')
+        [call] = [
+            node for node in ast.walk(function)
+            if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'validate_turn_skill_limit'
+        ]
+        assert {keyword.arg for keyword in call.keywords} >= {'conversation', 'sender_id'}
 
     def test_generate_payload_turns_an_unknown_mention_into_a_payload_error(self):
         function = _function('rpc/chat_all.py', 'generate_payload')

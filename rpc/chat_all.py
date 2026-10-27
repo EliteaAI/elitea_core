@@ -38,10 +38,11 @@ from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
-from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
+from ..utils.application_utils import build_skill_mappings_list
+from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
 from ..utils.project_skills import UnknownSkillMentionError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
-    apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
+    apply_participant_skill_mentions, validate_turn_skill_limit, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.input_guardrail import (
@@ -60,6 +61,7 @@ from ..utils.toolkit_authorization import (
     authorization_identity, pending_authorization_requests,
     retire_all_authorization_requests, retire_authorization_requests,
 )
+from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
@@ -90,6 +92,14 @@ CHAT_PREDICT_MAPPER = {
     ParticipantTypes.skill: 'applications_predict_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }
+
+
+def authoring_kwargs(conversation, participant, chat_project_id, rpc_func) -> dict:
+    """The ``authoring`` flag of ``applications_predict_sio`` for a turn of the editor's test chat (#7213), read from the
+    conversation row this process loaded, never from the client's turn; nothing for any other turn or participant."""
+    if rpc_func != CHAT_PREDICT_MAPPER[ParticipantTypes.application]:
+        return {}
+    return {"authoring": True} if is_authoring_conversation(conversation, participant, chat_project_id) else {}
 
 
 def _get_agent_type(
@@ -433,7 +443,14 @@ def process_attachment_message_items(
 
 class PayloadGenerationError(Exception):
     """Custom exception for errors during payload generation."""
-    pass
+
+    def __init__(self, message, code: Optional[str] = None):
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def content(self):
+        return {'code': self.code, 'error': str(self)} if self.code else str(self)
 
 
 def generate_summary_payload(
@@ -969,6 +986,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         apply_participant_skill_mentions(
             session, msg_group, result, predict_payload.project_id, strict_mentions=strict_skill_mentions,
         )
+    except SkillInvocationLimitError as e:
+        raise PayloadGenerationError(str(e), code=e.code) from e
     except UnknownSkillMentionError as e:
         raise PayloadGenerationError(str(e)) from e
 
@@ -995,6 +1014,28 @@ def resolve_target_application_context(
             owner_project_id, application_id, exc_info=True,
         )
         return False, []
+
+
+def read_target_version_skills(session, conversation_id: int, participant, chat_project_id: int) -> Optional[dict]:
+    if participant is None or participant.entity_name != ParticipantTypes.application:
+        return None
+    version_id = _pinned_version_id(session, conversation_id, participant.id)
+    owner_project_id = participant.entity_meta.get('project_id')
+    if owner_project_id is None or owner_project_id == chat_project_id:
+        return _version_skills(session, version_id)
+    with db.get_session(owner_project_id) as owner_session:
+        return _version_skills(owner_session, version_id)
+
+
+def _version_skills(session, version_id) -> Optional[dict]:
+    if not version_id:
+        return None
+    version = session.query(ApplicationVersion).options(
+        selectinload(ApplicationVersion.skill_mappings),
+    ).filter(ApplicationVersion.id == version_id).first()
+    if not version:
+        return None
+    return {'agent_type': version.agent_type, 'skills': build_skill_mappings_list(version.skill_mappings)}
 
 
 def _pinned_version_id(session, conversation_id: int, participant_id: int):
@@ -1231,6 +1272,25 @@ class RPC:
                     to=sid,
                 )
                 return {"error": blocked.type, **blocked.body()}
+
+            target = session.get(Participant, parsed.participant_id) if parsed.participant_id else None
+            try:
+                validate_turn_skill_limit(
+                    session, conversation.id, target, parsed.user_input, parsed.project_id,
+                    lambda: read_target_version_skills(session, conversation.id, target, parsed.project_id),
+                    conversation=conversation, sender_id=(author_participant.entity_meta or {}).get('id'),
+                )
+            except SkillInvocationLimitError as limit:
+                if sid:
+                    raise SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error=limit.refusal(),
+                        stream_id=parsed.conversation_uuid,
+                        message_id=parsed.question_id,
+                    )
+                return limit.refusal()
 
             self.check_and_generate_conversation_name(
                 parsed.project_id, parsed.user_input, room, conversation
@@ -1506,11 +1566,13 @@ class RPC:
                         #     message_id=parsed.question_id,
                         # )
                         log.error(e)
+                        response_msg.is_streaming = False
+                        session.commit()
                         self.context.sio.emit(
                             event=SioEvents.socket_validation_error.value,
                             data={
                                 'event': SioEvents.chat_predict.value,
-                                'content': str(e),
+                                'content': e.content,
                                 'type': 'error',
                                 'stream_id': parsed.conversation_uuid,
                                 'message_id': parsed.question_id
@@ -1582,6 +1644,7 @@ class RPC:
                             routing_projection=payload.pop('_routing_projection', None),
                             **pop_chat_skills(payload),
                             **skill_rpc_kwargs,
+                            **authoring_kwargs(conversation, msg_group.sent_to, parsed.project_id, rpc_func),
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2412,7 +2475,7 @@ class RPC:
                     sio=self.context.sio,
                     sid=sid,
                     event=SioEvents.chat_predict.value,
-                    error=str(e),
+                    error=e.content,
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
@@ -2540,6 +2603,7 @@ class RPC:
                     routing_projection=payload.pop('_routing_projection', None),
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
+                    **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

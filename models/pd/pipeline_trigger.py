@@ -200,6 +200,9 @@ class PipelineTriggerResponse(BaseModel):
     secret_header: Optional[str] = None
     secret_value: Optional[str] = None
     secret_instructions: Optional[str] = None
+    # Set by a PUT of an unattended trigger under governance when the version is not bound (#7213): the trigger is
+    # saved, its runs will be refused until an operator binds the version and approves a mandate
+    governance_notice: Optional[str] = None
 
     class Config:
         use_enum_values = True

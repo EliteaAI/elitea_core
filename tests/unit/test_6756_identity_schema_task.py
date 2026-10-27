@@ -115,6 +115,29 @@ def test_the_startup_guard_asks_the_catalog_once_and_decodes_project_ids(schema)
     assert params == {"names": ["agent_identity_binding", "execution_security_context"], "expected": 2}
 
 
+def test_the_startup_guard_finds_the_schemas_that_still_refuse_a_null_binding_reference(schema):
+    log = []
+    use_sessions(schema, log, rows=[("p_4",)])
+    assert schema.schema.project_ids_with_not_null_binding_ref() == [4]
+    [(_, sql, params)] = [entry for entry in log if entry[0] == "execute"]
+    assert "information_schema.columns" in sql and "is_nullable = 'NO'" in sql and "p_[0-9]+" in sql
+    assert params == {"table": "execution_security_context", "column": "agent_binding_ref"}
+
+
+def test_relaxing_the_binding_reference_is_one_statement_per_project_and_a_dry_run_touches_nothing(schema):
+    log = []
+    use_sessions(schema, log)
+    assert schema.schema.apply_nullable_binding_ref([3, 8]) == ([3, 8], [])
+    statements = [(pid, str(sql)) for kind, sql, *_ in log if kind == "execute" for pid in [None]]
+    assert len(statements) == 2 and all(
+        'ALTER COLUMN agent_binding_ref DROP NOT NULL' in sql for _, sql in statements)
+    assert 'ALTER TABLE "p_3".execution_security_context' in statements[0][1]
+    assert [entry[0] for entry in log].count("commit") == 2
+    log.clear()
+    assert schema.schema.apply_nullable_binding_ref([3], dry_run=True) == ([3], [])
+    assert log == []
+
+
 def test_nothing_to_do_means_no_ddl_at_boot(schema, monkeypatch):
     log = []
     use_sessions(schema, log, rows=[])
@@ -175,6 +198,15 @@ def admin_tasks(isolated_sys_modules):
     fake.failing = set()
     fake.project_ids_missing_identity_tables = lambda: list(fake.missing)
     fake.apply_identity_tables = apply_identity_tables
+    # the binding reference that must accept NULL (#7213): which projects still refuse it, and what was relaxed
+    fake.strict, fake.relaxed = [], []
+
+    def apply_nullable_binding_ref(project_ids, dry_run=False):
+        fake.relaxed.append((list(project_ids), dry_run))
+        return list(project_ids), []
+
+    fake.project_ids_with_not_null_binding_ref = lambda: list(fake.strict)
+    fake.apply_nullable_binding_ref = apply_nullable_binding_ref
     sys.modules[fake.__name__] = fake
     spec = importlib.util.spec_from_file_location(
         "elitea_core.methods.admin_tasks", os.path.join(PLUGIN_ROOT, "methods", "admin_tasks.py"),
@@ -221,7 +253,7 @@ def test_all_creates_the_tables_in_every_created_project_that_lacks_them(admin_t
     result, calls = run_task(admin_tasks, param, missing=[1, 5, 77])
     assert admin_tasks.schema_fake.applied == [([1, 5], False)]
     assert calls == [{"filter_": {"create_success": True}}]
-    assert result == {"migrated": 2, "failed": 0, "failed_projects": [], "dry_run": False}
+    assert result == {"migrated": 2, "failed": 0, "failed_projects": [], "relaxed": 0, "dry_run": False}
 
 
 @pytest.mark.parametrize("param", ["project_id=5", " project_id=5 ", "dry_run;project_id=5"])
@@ -247,7 +279,17 @@ def test_dry_run_is_passed_through(admin_tasks, param):
 def test_failures_are_reported_per_project(admin_tasks):
     admin_tasks.schema_fake.failing = {2}
     result, _ = run_task(admin_tasks, "project_id=all")
-    assert result == {"migrated": 2, "failed": 1, "failed_projects": [{"project_id": 2}], "dry_run": False}
+    assert result == {"migrated": 2, "failed": 1, "failed_projects": [{"project_id": 2}], "relaxed": 0, "dry_run": False}
+
+
+def test_projects_whose_context_table_refuses_a_null_binding_are_relaxed_and_reported(admin_tasks):
+    admin_tasks.schema_fake.strict = [2, 5, 77]   # 77 is not a created project: not touched
+    result, _ = run_task(admin_tasks, "project_id=all", missing=[1])
+    assert admin_tasks.schema_fake.relaxed == [([2, 5], False)] and result["relaxed"] == 2 and result["migrated"] == 1
+    admin_tasks.schema_fake.relaxed.clear()
+    result, _ = run_task(admin_tasks, "project_id=5;dry_run", missing=[])
+    assert admin_tasks.schema_fake.relaxed == [([5], True)] and result == {
+        "migrated": 0, "failed": 0, "failed_projects": [], "relaxed": 1, "dry_run": True}
 
 
 def test_a_failing_project_list_is_a_readable_error_and_changes_nothing(admin_tasks):

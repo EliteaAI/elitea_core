@@ -140,6 +140,22 @@ class SkillLimitExceededError(SkillError):
         self.max_allowed = max_allowed
 
 
+class SkillInvocationLimitError(SkillError):
+    http_status = 400
+    code = 'SKILL_INVOCATION_LIMIT'
+
+    def __init__(self, count: int, max_allowed: int):
+        super().__init__(
+            f"This message references {count} skills with ~skill-name. "
+            f"Maximum allowed is {max_allowed} per message."
+        )
+        self.count = count
+        self.max_allowed = max_allowed
+
+    def refusal(self) -> dict:
+        return {'code': self.code, 'error': str(self)}
+
+
 class SkillInstructionsTooLongError(SkillError):
     http_status = 400
 
@@ -1689,12 +1705,8 @@ def _find_skill_mention_spans(
 def consume_invoked_skills(
     text: Optional[str],
     attached_skills: List[dict],
-    cap: Optional[int] = None,
 ) -> Tuple[Optional[str], List[dict]]:
-    """Resolve ``~skill`` control tokens AND consume them from ``text``.
-
-    ``cap`` bounds how many skills resolve; ``None`` resolves every match.
-    """
+    """Resolve ``~skill`` control tokens AND consume them from ``text``."""
     # Fast path: the overwhelming majority of turns/instructions contain no
     # ``~`` token, so return the original text object unchanged (identity).
     if not text or not attached_skills or '~' not in text:
@@ -1718,7 +1730,7 @@ def consume_invoked_skills(
     pieces.append(text[cursor:])
     cleaned_text = ''.join(pieces)
 
-    # Resolve: dedup by name (document order), skip blank bodies, cap.
+    # Resolve: dedup by name (document order), skip blank bodies.
     by_name: dict = {}
     for skill in attached_skills:
         name = skill.get('name')
@@ -1751,17 +1763,21 @@ def consume_invoked_skills(
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         })
-        if cap is not None and len(invoked) >= cap:
-            break
 
     return cleaned_text, invoked
 
 
+def _validate_invocation_limit(message_skills: List[dict]) -> List[dict]:
+    max_allowed = get_max_invoked_skills_per_turn()
+    if len(message_skills) > max_allowed:
+        raise SkillInvocationLimitError(len(message_skills), max_allowed)
+    return message_skills
+
+
 def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
-    cap = get_max_invoked_skills_per_turn()
     if isinstance(message_content, str):
-        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates, cap)
-        return cleaned_message or 'continue', message_skills
+        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates)
+        return cleaned_message or 'continue', _validate_invocation_limit(message_skills)
     if not isinstance(message_content, list):
         return message_content, []
 
@@ -1769,10 +1785,8 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
     rebuilt_blocks: list = []
     for block in message_content:
         if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
-            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates, cap)
+            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates)
             for skill in block_skills:
-                if len(message_skills) >= cap:
-                    break
                 if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
                     message_skills.append(skill)
             if cleaned_text.strip():
@@ -1784,7 +1798,11 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
         for b in rebuilt_blocks
     ):
         rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
-    return rebuilt_blocks, message_skills
+    return rebuilt_blocks, _validate_invocation_limit(message_skills)
+
+
+def validate_message_skill_limit(message_content, candidates: List[dict]) -> None:
+    consume_message_skills(message_content, candidates)
 
 
 def apply_runtime_skills(version_details: dict) -> None:

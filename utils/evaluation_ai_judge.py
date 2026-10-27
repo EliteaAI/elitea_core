@@ -248,6 +248,15 @@ def render_trajectory(trajectory: dict) -> str:
     lines = []
     for number, step in enumerate(trajectory.get('steps') or [], 1):
         scope = f"[in {step['parent_agent']}] " if step.get('parent_agent') else ''
+        if step.get('kind') == 'node':
+            line = f"{number}. NODE {step.get('node')} ({step.get('node_type') or 'unknown'}) [{step.get('status') or 'unknown'}]"
+            edge = step.get('edge') or {}
+            if edge.get('next'):
+                line += f" → {edge['next']}"
+            lines.append(line)
+            if step.get('error'):
+                lines.append('   error: ' + _excerpt(step['error']))
+            continue
         if step.get('kind') == 'llm':
             tokens = step.get('tokens') or {}
             line = f"{number}. {scope}LLM {step.get('model') or ''}".rstrip()

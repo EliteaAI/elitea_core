@@ -447,7 +447,7 @@ def test_promote_prefills_expected_trajectory_per_case(promote):
     rows = captured['rows']
     assert [r['input'] for r in rows] == ['q1', 'q2', 'q3']
     assert rows[0]['expected_trajectory'] == {
-        'match': 'superset', 'tools': [{'name': 'jira_search'}, {'name': 'post_comment'}],
+        'match': 'superset', 'calls': 'own', 'tools': [{'name': 'jira_search'}, {'name': 'post_comment'}],
         'forbidden': [], 'allow_repeat': []}
     assert rows[1]['expected_trajectory'] is None and rows[2]['expected_trajectory'] is None
 

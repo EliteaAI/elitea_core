@@ -6,7 +6,7 @@ from sqlalchemy import func
 from tools import context, db, rpc_tools
 
 from .folder_access import build_folder_ids_exclusion_clause
-from .skill_utils import get_max_invoked_skills_per_turn
+from .skill_utils import SkillInvocationLimitError, get_max_invoked_skills_per_turn
 from .support_utils import get_support_config
 from ..models.enums.all import ParticipantTypes
 from ..models.skill import Skill, SkillVersion
@@ -127,7 +127,10 @@ def resolve_mentioned_project_skills(user_input, known_names: set, catalog: list
                 suggestions.append(f'No skill named "~{token}". Did you mean ~{close[0]}?')
         if suggestions:
             raise UnknownSkillMentionError(' '.join(suggestions))
-    mentioned = [by_name[token] for token in tokens if token in by_name][:get_max_invoked_skills_per_turn()]
+    mentioned = [by_name[token] for token in tokens if token in by_name]
+    max_allowed = get_max_invoked_skills_per_turn()
+    if len(mentioned) > max_allowed:
+        raise SkillInvocationLimitError(len(mentioned), max_allowed)
     if not mentioned:
         return []
     with db.with_project_schema_session(project_id) as session:

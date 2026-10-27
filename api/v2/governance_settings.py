@@ -2,7 +2,7 @@
 
 GET /api/v2/elitea_core/governance_settings/administration  - what is in effect, what is stored, what the deployment
                                                               fixes, the preflight, and the texts the page shows
-PUT /api/v2/elitea_core/governance_settings/administration  - change the mode, the policy revision and the two flags
+PUT /api/v2/elitea_core/governance_settings/administration  - change the mode, the policy revision and the flags
 
 Reading needs ``governance.settings.view`` (super administrators and platform administrators). Changing needs
 ``governance.settings.manage`` and, in addition to the permission, the ``super_admin`` role (a role matrix edit cannot
@@ -33,6 +33,10 @@ PUT_BODY = {
                                     "description": "Required for audit_only and enforce."},
                 "admit_legacy_pat": {"type": "boolean"},
                 "allow_runtime_domain_binding": {"type": "boolean"},
+                "allow_development_runs": {"type": "boolean", "nullable": True,
+                                           "description": "May the editor's test chat run an unbound version as the "
+                                                          "author (#7213)? Absent or null: the default of the mode "
+                                                          "(on under audit_only, off under enforce)."},
                 "environment": {"type": "string", "nullable": True, "maxLength": 64,
                                 "description": "Refused with FIELD_LOCKED when the deployment sets the label."},
                 "change_note": {"type": "string", "minLength": 1, "maxLength": 256},

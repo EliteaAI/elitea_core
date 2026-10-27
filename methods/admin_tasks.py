@@ -591,9 +591,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def create_agent_identity_tables(self, *args, **kwargs):
         """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
 
-        Creates ``agent_identity_binding`` and ``execution_security_context`` where they are missing.
-        New projects get them from ``create_all`` and a startup guard covers the rest, so this is the
-        operator's way to report (dry run) and re-run. Idempotent; schemas that have both are left alone.
+        Creates ``agent_identity_binding`` and ``execution_security_context`` where they are missing, and drops the
+        NOT NULL of ``execution_security_context.agent_binding_ref`` where it is still there (a development run has no
+        binding, #7213; ``relaxed`` in the result). New projects get them from ``create_all`` and a startup guard
+        covers the rest, so this is the operator's way to report (dry run) and re-run. Idempotent; schemas that have
+        both tables and the relaxed column are left alone.
 
         Param format (required):
             "project_id=<all|N>[;dry_run]"
@@ -604,7 +606,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "project_id=3"            - project 3 only
         """
         from ..utils.agent_identity_schema import (  # pylint: disable=C0415
-            apply_identity_tables, project_ids_missing_identity_tables,
+            apply_identity_tables, apply_nullable_binding_ref, project_ids_missing_identity_tables,
+            project_ids_with_not_null_binding_ref,
         )
 
         param = kwargs.get("param", "") or ""
@@ -640,16 +643,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     )
                 ]
             missing = set(project_ids_missing_identity_tables())
+            strict = set(project_ids_with_not_null_binding_ref())
         except Exception:  # pylint: disable=W0703
             log.exception("create_agent_identity_tables: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
 
         migrated, failed = apply_identity_tables([pid for pid in project_ids if pid in missing], dry_run=dry_run)
+        relaxed, not_relaxed = apply_nullable_binding_ref([pid for pid in project_ids if pid in strict], dry_run=dry_run)
         log.info(
-            "%screate_agent_identity_tables: migrated=%s failed=%s",
-            "[DRY RUN] " if dry_run else "", len(migrated), len(failed),
+            "%screate_agent_identity_tables: migrated=%s failed=%s relaxed=%s",
+            "[DRY RUN] " if dry_run else "", len(migrated), len(failed), len(relaxed),
         )
-        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": dry_run}
+        return {"migrated": len(migrated), "failed": len(failed) + len(not_relaxed),
+                "failed_projects": failed + not_relaxed, "relaxed": len(relaxed), "dry_run": dry_run}
 
     @web.method()
     def manage_agent_identity_binding(self, *args, **kwargs):
@@ -716,8 +722,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """Admin task: create the tables of the credential governance switch in the public schema (R-2.0.8, #7120, C-1009).
 
         Creates ``credential_governance_settings`` and ``credential_governance_settings_history`` where they are
-        missing. They are not created at startup, so until this runs the switch reads as "no stored row" (governance
-        off) and the Admin UI cannot save. Idempotent.
+        missing, and adds to an existing table the columns that came after it (``allow_development_runs``, #7213).
+        They are not created at startup, so until this runs the switch reads as "no stored row" (governance off) and
+        the Admin UI cannot save; a table without the column reads with the flag's default and cannot be saved either.
+        Idempotent.
 
         Param format (optional):
             "dry_run"  - report which tables would be created (``would_create``) and create nothing
@@ -1100,14 +1108,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
         carry only the definition and meta.builtin_check.
 
-        Insert-only and idempotent: an entry already present under its name is left as is, so an
-        admin's weight/target edits survive a re-run. A same-named entry that is *not* the
-        built-in check is reported as a conflict and left alone. No dry run needed.
+        Idempotent. A missing entry is inserted. An entry already present has only its
+        description refreshed to the plugin's wording, since that text documents the script the
+        plugin ships (#7015), and the refreshed entries are resynced into the projects holding a
+        copy; an admin's weight/target edits survive a re-run. A same-named entry that is *not*
+        the built-in check is reported as a conflict and left alone. No dry run needed.
         """
         from ..models.eval_platform_dimension import EvalPlatformDimension  # pylint: disable=C0415
         from ..utils.evaluation_trajectory_checks import builtin_key, registry_seed  # pylint: disable=C0415
+        from ..utils import eval_platform_dimension_utils as platform_dimensions  # pylint: disable=C0415
 
-        inserted, present, conflicts = [], [], []
+        inserted, present, updated, conflicts = [], [], [], []
+        updated_uuids = []
         try:
             with db.with_project_schema_session(None) as session:
                 existing = {row.name: row for row in session.query(EvalPlatformDimension).all()}
@@ -1117,7 +1129,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         session.add(EvalPlatformDimension(**values))
                         inserted.append(values['name'])
                     elif builtin_key(row.meta) == values['meta']['builtin_check']:
-                        present.append(values['name'])
+                        if row.description != values['description']:
+                            row.description = values['description']
+                            updated.append(values['name'])
+                            updated_uuids.append(str(row.uuid))
+                        else:
+                            present.append(values['name'])
                     else:
                         conflicts.append(values['name'])
                 session.commit()
@@ -1125,7 +1142,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("seed_eval_trajectory_dimensions: failed")
             return {"ok": False, "error": str(exc)}
         #
-        result = {"ok": True, "inserted": inserted, "present": present, "conflicts": conflicts}
+        # Projects copy a registry row when they attach it and are only refreshed by a resync.
+        resync_failures = []
+        for dimension_uuid in updated_uuids:
+            try:
+                resync_failures.extend(platform_dimensions.resync_dimension(dimension_uuid)['failures'])
+            except Exception as exc:  # pylint: disable=W0703
+                log.exception("seed_eval_trajectory_dimensions: resync of %s failed", dimension_uuid)
+                resync_failures.append({"dimension_uuid": dimension_uuid, "error": str(exc)})
+        #
+        result = {"ok": True, "inserted": inserted, "updated": updated, "present": present,
+                  "conflicts": conflicts, "resync_failures": resync_failures}
         log.info("seed_eval_trajectory_dimensions: %s", result)
         return result
 

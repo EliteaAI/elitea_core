@@ -17,7 +17,7 @@ from .llm_settings import normalize_runtime_max_tokens
 from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates, strip_skill_bodies
-from .skill_utils import consume_message_skills, resolve_runtime_skills
+from .skill_utils import SkillInvocationLimitError, consume_message_skills, resolve_runtime_skills
 from .stored_oauth_tokens import inject_stored_oauth_tokens
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
@@ -566,7 +566,10 @@ def generate_predict_payload(
         disclosable_skills = merge_disclosable_skills(own_disclosable_skills, chat_skills)
 
         mention_candidates = merge_mention_candidates(attached_skills, chat_skills, project_skills)
-        payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
+        try:
+            payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
+        except SkillInvocationLimitError as e:
+            raise PredictPayloadError(str(e)) from e
         payload['invoked_skills'] = message_skills
 
         # Message-invoked only: an instruction-referenced skill counts as applied

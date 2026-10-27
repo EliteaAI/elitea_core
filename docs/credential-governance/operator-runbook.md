@@ -15,8 +15,9 @@ Two operators are needed: every approval must come from someone other than the c
    such as `prod-eu`. Do not use the deprecated `..._ENABLED`.
 2. **Create the tables** (once per environment; `dry_run` first):
    `create_governance_settings_tables`, then `create_agent_identity_tables`, `create_mandate_tables` (elitea_core)
-   and `create_credential_governance_tables` (secrets) with `project_id=all`. Run the secrets task again after
-   an upgrade: it also adds the personal-reference index.
+   and `create_credential_governance_tables` (secrets) with `project_id=all`. Run the first two and the secrets task
+   again after an upgrade: `create_governance_settings_tables` adds the `allow_development_runs` column, the identity
+   task lets a development run's context have no binding, and the secrets task adds the personal-reference index.
 3. **Read the preflight** on Governance > Overview. Fix every failed check (identity verifier, RPC
    authentication mode, security audit, credential services, master key). Warnings (`corporate_vault`,
    `governed_worker`) limit features but do not block.
@@ -76,6 +77,35 @@ Governance > **Grants** (`manage_credential_grant`). A grant ties one agent bind
 one active reference and one person. It starts *pending approval* and a second operator approves it.
 Without a grant the run is refused with `DENIED_GRANT`. Set an end date for temporary access.
 
+## 5a. Let developers test unbound versions (development runs)
+
+Under Enforce the editor's test chat would refuse every version that has no active binding (`DENIED_BINDING`), so
+authoring would stop. The switch **Allow development runs** on Overview (next to *Admit legacy API tokens*) lets
+the agent and pipeline editor's test chat run such a version as a **development run**:
+
+- the run acts as the signed-in author only (a verified identity; API tokens cannot author), who must hold the
+  right to edit the application; there is no binding and no mandate;
+- a toolkit credential is released only if the author could already use it: a personal credential of the author,
+  or a project credential on which the author's subject holds an active grant on any agent and toolkit. Otherwise
+  the turn is refused with `DENIED_DEVELOPMENT_CREDENTIAL` ("This credential needs a grant before a draft can use
+  it"). Toolkits without a credential, built-in tools and attachments need nothing. The decision is made for every
+  turn, so the author may change the draft's toolkits between turns; a sub-agent of the draft inherits exactly the
+  draft's decisions and nothing more (`DENIED_DEVELOPMENT_CHILD`);
+- only the editor's own private test conversation is a development run. Shared chats, public agents, the API,
+  schedules, webhooks and mandate runs of the same version take the governed path and are refused as before. A
+  schedule or webhook saved on an unbound version is kept, and the editor shows a notice that its runs need a binding
+  and a mandate;
+- the audit trail records the admission as `ADMITTED_DEVELOPMENT` with `development:<definition digest>` where a
+  governed run names its binding, and every credential release of the run carries the same digest (a per-turn
+  record of what was in play). The context row has `profile = development`. Both appear in Overview > Security
+  events and in the summary.
+
+Default: **on under Audit only** (the editor is then rehearsed as a development run instead of being recorded as a
+would-deny), **off under Enforce** until an operator chooses it. The choice is a setting like the others: change note,
+history row, super administrator. Switch it off for a hard Enforce: the editor then refuses unbound versions with
+`DENIED_BINDING`. The built-in Elitea tools (internal MCP) still authenticate with the user's API token; under
+Enforce they are refused unless *Admit legacy API tokens* is on, until #7214 gives the run its own identity.
+
 ## 6. Schedules and webhooks (mandates)
 
 A governed agent's schedule or webhook is refused until it has an approved mandate.
@@ -98,7 +128,10 @@ The user sees a short message with a code. Find the event in Overview > Security
 | Code | First thing to check |
 |---|---|
 | `IDENTITY_*` | The person signed in with the identity provider; the user is linked to it; the verifier configuration |
-| `DENIED_BINDING`, `BINDING_DIGEST_MISMATCH` | Binding of *this version* is active; rebind after an edit |
+| `DENIED_BINDING`, `BINDING_DIGEST_MISMATCH` | Binding of *this version* is active; rebind after an edit. From the editor's test chat: *Allow development runs* (section 5a) |
+| `DENIED_DEVELOPMENT_CREDENTIAL` | A development run: the author has no personal credential and no active grant on this project credential (section 5a) |
+| `DENIED_DEVELOPMENT_CHILD` | A sub-agent of a development run asked for a credential the draft was not admitted for |
+| `IDENTITY_KIND_NOT_ADMITTED` | The run started with an API token (the built-in Elitea tools included): *Admit legacy API tokens*, or #7214 |
 | `MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` | A schedule or webhook has no active mandate, or it was suspended or expired |
 | `CREDENTIAL_REFERENCE_REQUIRED` | The toolkit selects its credential by title or inline; select the saved credential and register it |
 | `CREDENTIAL_REFERENCE_INACTIVE`, `CREDENTIAL_GENERATION_MISMATCH` | Reference is active; the configuration changed after approval, so re-probe and re-approve |

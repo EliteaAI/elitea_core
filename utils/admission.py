@@ -9,6 +9,12 @@ Everything fails closed: any step that cannot be proven denies, and a deny is au
 transaction so a failing audit never lets a run through. No token, cookie, delegation material or
 exception text from a dependency is written to the row, the audit event, a log line or a message.
 
+A run from the agent or pipeline editor's test chat (entry point ``editor_chat``, #7213) may be admitted as a
+``development`` run when the operator allows it: the version needs no binding, the subject is the signed-in author,
+and each credential is released only if the author could already use it (a personal credential, or a project credential
+the author's subject holds an active grant on, whatever the binding). Nothing is released by virtue of the draft, and a
+child of such a run inherits exactly its decisions.
+
 Runs under an autonomous mandate (#6947) are also stopped by Main: once a minute ``enforce_run_deadlines`` stops a
 tracked task that ran past its mandate's time limit, or whose context was revoked meanwhile. Known limits: only the
 tasks this process dispatched and tracks are reached (children that inherit a mandate context are not tracked: a
@@ -34,12 +40,13 @@ from sqlalchemy.exc import IntegrityError
 from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
-from ..models.pd.admission import AdmissionRequest, ExecutionSecurityContextView
+from ..models.pd.admission import ENTRY_EDITOR_CHAT, AdmissionRequest, ExecutionSecurityContextView
 from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
-    ALLOWED as CREDENTIAL_USE_ALLOWED, WHOLE_TARGET, CredentialDecisionContext, CredentialDecisionError,
-    binding_ref, collect_credential_uses, decide_credential_uses, read_configuration_facts, recheck_credentials,
-    toolkit_secret_fields, user_may_use_credentials, walk_scope,
+    ALLOWED as CREDENTIAL_USE_ALLOWED, DEVELOPMENT_GRANT_REQUIRED, PROFILE_DEVELOPMENT, USE_PERMISSION, WHOLE_TARGET,
+    CredentialDecisionContext, CredentialDecisionError, binding_ref, collect_credential_uses, decide_credential_uses,
+    read_configuration_facts, recheck_credentials, recheck_development, toolkit_secret_fields, user_may_use_credentials,
+    walk_scope,
 )
 from .credential_slots import FREE_FORM_SECRET_MARK, seal_payload
 from .definition_digest import DigestError, digest_for_version, toolkit_rows
@@ -59,9 +66,12 @@ LIVE_STATES = ("admitted", "running")
 # Codes that explain why a context was revoked; the worker is told the same reason, not a generic one
 REVOKE_CODES = frozenset({
     "EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING",
-    "CREDENTIAL_REFERENCE_INACTIVE", "CREDENTIAL_GENERATION_MISMATCH", "DENIED_GRANT",
+    "CREDENTIAL_REFERENCE_INACTIVE", "CREDENTIAL_GENERATION_MISMATCH", "DENIED_GRANT", DEVELOPMENT_GRANT_REQUIRED,
     "MANDATE_INACTIVE", "MANDATE_EXPIRED", "RUNTIME_LIMIT_EXCEEDED",
 })
+PROFILES = frozenset({"governed", PROFILE_DEVELOPMENT})   # the context profiles this version understands
+DEVELOPMENT_LABEL = "development:"   # + the definition digest: what a development run has instead of a binding ref
+AUTHOR_PERMISSION = "models.applications.application.update"   # what the editor itself needs: who may author
 _CODE = re.compile(r"^[A-Z0-9_]{1,64}$")
 STOP_CHUNK = 500   # context ids per query of the sweep
 INHERITED_KEY = "c1009:inh:"   # set when a context is reopened for its children: the release cap reads it
@@ -89,7 +99,9 @@ MESSAGES = {
     "RUNTIME_LIMIT_EXCEEDED": "The run exceeded the time its mandate allows and was stopped.",
     "IDENTITY_EVIDENCE_MISSING": "No verifiable user identity came with this run; it was not started.",
     "IDENTITY_SUBJECT_UNLINKED": "The signed-in user does not match the verified identity; the run was not started.",
-    "IDENTITY_KIND_NOT_ADMITTED": "This kind of credential cannot run governed agents; the run was not started.",
+    "IDENTITY_KIND_NOT_ADMITTED": "Runs started with an API token (the built-in Elitea tools included) are refused until "
+                                  "legacy API tokens are admitted or the run carries its own identity (#7214); the run "
+                                  "was not started.",
     "IDENTITY_REVOKED": "This session or token was revoked; the run was not started.",
     "IDENTITY_EXPIRED": "Sign in again to run governed agents.",
     "IDENTITY_SIGNATURE_INVALID": "The user identity could not be verified; the run was not started.",
@@ -107,6 +119,10 @@ MESSAGES = {
     "CREDENTIAL_CLASS_NOT_ALLOWED": "This agent uses a personal credential that belongs to someone else; the run was not started.",
     "DENIED_GRANT": "This agent is not allowed to use one of its credentials for you.",
     "DENIED_RBAC": "You do not have permission to use this agent's credentials.",
+    # development runs (#7213): the editor's test chat of an unbound version runs on the author's own rights only
+    DEVELOPMENT_GRANT_REQUIRED: "This credential needs a grant before a draft can use it.",
+    "DENIED_DEVELOPMENT_CHILD": "A sub-agent of a draft asked for a credential the draft was not admitted for; the run "
+                                "was not started.",
     # the release of credential material to a worker (#6946); fixed per code, no titles, ids or field names
     "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
     "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
@@ -125,6 +141,7 @@ GENERIC_MESSAGE = "The run was not started."
 class AdmissionSettings:
     allow_runtime_domain_binding: bool = False
     admit_legacy_pat: bool = False
+    allow_development_runs: bool = False   # the editor's test chat may run an unbound version as the author (#7213)
     context_ttl_s: int = 3600
     environment: Optional[str] = None
 
@@ -410,6 +427,44 @@ def _find_binding(request: AdmissionRequest, settings: AdmissionSettings):
     return binding, mappings
 
 
+# What a development run has where a governed one has its binding: no id, no epoch, the digest of what runs (#7213)
+Draft = namedtuple("Draft", "id revocation_epoch definition_digest")
+
+
+def _binding_label(binding) -> str:
+    """How the audit trail names what was admitted: the binding id, or ``development:<digest>`` for a draft."""
+    return str(binding.id) if binding.id is not None else DEVELOPMENT_LABEL + binding.definition_digest
+
+
+def _read_draft(request: AdmissionRequest):
+    """Step 4 of a development run (#7213): the definition that runs, with no binding to hold it to. One session reads
+    the version (it must exist and belong to the application), its toolkit rows and the digest of both; the rows feed the
+    credential decision as in ``_find_binding``."""
+    if request.version_id is None or request.application_id is None:
+        raise _denied("DENIED_BINDING")
+    from ..models.all import ApplicationVersion  # pylint: disable=C0415
+    with db.get_session(request.binding_project_id) as session:
+        version = session.query(ApplicationVersion).filter(ApplicationVersion.id == request.version_id).first()
+        if version is None or version.application_id != request.application_id:
+            raise _denied("DENIED_BINDING")
+        mappings = toolkit_rows(session, request.version_id)
+        try:
+            digest = digest_for_version(session, request.version_id, (version, mappings))
+        except DigestError as exc:
+            raise _denied("DENIED_BINDING" if exc.reason_code == "VERSION_NOT_FOUND" else "DEPENDENCY_UNAVAILABLE") from None
+    return Draft(None, None, digest), mappings
+
+
+def _author_permissions(request: AdmissionRequest) -> set:
+    """Step 4a of a development run: what the author may do in the agent's project, read once (the editor's own right
+    and ``credentials.use`` are both in it)."""
+    try:
+        return set(auth.get_user_permissions(request.caller_id, mode="default", project_id=request.binding_project_id))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the author permissions could not be read (%s)", type(exc).__name__)
+        raise _denied("DEPENDENCY_UNAVAILABLE") from None
+
+
 def _subject_of(principal: dict) -> dict:
     """Step 5: only a verified user becomes a delegation subject; an asserted one needs a mandate (#6947)."""
     evidence = principal.get("evidence")
@@ -425,16 +480,20 @@ def _subject_of(principal: dict) -> dict:
 
 def _decide_credentials(  # pylint: disable=R0913
     module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False, rows=None,
+    can_use=None,
 ) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
     agent without governed credentials), or ``AdmissionDenied`` for the first refusal. ``shadow``: audit only, the
-    refusal is counted as a ``would_deny``. ``rows``: the toolkit rows ``_find_binding`` has read."""
+    refusal is counted as a ``would_deny``. ``rows``: the toolkit rows ``_find_binding`` has read. ``can_use``: the
+    ``credentials.use`` answer when the caller read the permissions already (a development run, #7213: the rule is then
+    the author's own right, not a grant to the binding)."""
     user_id = subject.get("user_id", request.caller_id)   # a mandate acts for its owner
     context = CredentialDecisionContext(
-        binding_project_id=request.binding_project_id, agent_binding_ref=str(binding.id), subject_ref=subject["ref"],
+        binding_project_id=request.binding_project_id, agent_binding_ref=_binding_label(binding), subject_ref=subject["ref"],
         policy_revision=module.governance_profile.policy_revision, now=_now(), expires_at=expires_at,
-        can_use=user_may_use_credentials(user_id, request.binding_project_id),
+        can_use=can_use or user_may_use_credentials(user_id, request.binding_project_id),
         subject_kind="mandate" if subject["kind"] == "mandate" else "user_delegation", subject_user_id=user_id,
+        profile=PROFILE_DEVELOPMENT if binding.id is None else "governed",
     )
     try:
         inline_fields = lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id)  # noqa: E731
@@ -460,10 +519,13 @@ def _store_admission(  # pylint: disable=R0913,R0914
     module, request: AdmissionRequest, run_id, *, binding, subject, decisions, user_epochs, extra_epochs, caller,
     expires_at,
 ) -> ExecutionSecurityContextView:
-    """Step 6: the context row and the allow events, in one transaction."""
+    """Step 6: the context row and the allow events, in one transaction. A development run (``binding`` a ``Draft``,
+    #7213) stores ``profile=development``, no binding reference and the digest of the definition that runs; its events
+    name ``development:<digest>`` where a governed run names its binding, under ``ADMITTED_DEVELOPMENT``."""
     settings = module.admission_settings
     policy_revision = module.governance_profile.policy_revision
     user_ref = subject.get("user_ref", subject["ref"])
+    label, profile = _binding_label(binding), PROFILE_DEVELOPMENT if binding.id is None else "governed"
     context_id = uuid.uuid4()
     for _ in range(3):
         with db.get_session(request.project_id) as session:
@@ -473,7 +535,7 @@ def _store_admission(  # pylint: disable=R0913,R0914
                     .where(ExecutionSecurityContext.run_id == run_id)
                 ).scalar() or 0)
                 session.add(ExecutionSecurityContext(
-                    id=context_id, schema_version=SCHEMA_VERSION, profile="governed",
+                    id=context_id, schema_version=SCHEMA_VERSION, profile=profile,
                     policy_revision=policy_revision, tenant=subject["tid"], environment=settings.environment,
                     project_id=request.project_id, binding_project_id=request.binding_project_id,
                     entry_point=request.entry_point, caller=caller,
@@ -493,7 +555,7 @@ def _store_admission(  # pylint: disable=R0913,R0914
                         event_id=decision.decision_id, tenant=subject["tid"], project_id=request.project_id,
                         application_id=request.application_id, environment=settings.environment,
                         caller_ref=caller["ref"], user_ref=user_ref, mandate_ref=subject.get("mandate_ref"),
-                        agent_binding_ref=str(binding.id),
+                        agent_binding_ref=label,
                         run_id=run_id, attempt=attempt, credential_ref=decision.credential_ref,
                         credential_generation=decision.credential_generation,
                         toolkit_instance_id=decision.toolkit_instance_id, target_ref=WHOLE_TARGET,
@@ -501,11 +563,11 @@ def _store_admission(  # pylint: disable=R0913,R0914
                         traceparent=request.trace_ref,
                     ))
                 _tracing().security_audit_record(session, _event(
-                    event_type="admission", decision="allow", reason_code="ADMITTED",
+                    event_type="admission", decision="allow", reason_code=_admitted_code(profile),
                     tenant=subject["tid"], project_id=request.project_id, application_id=request.application_id,
                     environment=settings.environment, caller_ref=caller["ref"], user_ref=user_ref,
                     mandate_ref=subject.get("mandate_ref"),
-                    agent_binding_ref=str(binding.id), run_id=run_id, attempt=attempt,
+                    agent_binding_ref=label, run_id=run_id, attempt=attempt,
                     policy_revision=policy_revision, revocation_epoch=binding.revocation_epoch,
                     traceparent=request.trace_ref,
                 ))
@@ -525,9 +587,14 @@ def _store_admission(  # pylint: disable=R0913,R0914
     return ExecutionSecurityContextView(
         context_ref=str(context_id), run_id=run_id, attempt=attempt, project_id=request.project_id,
         application_id=request.application_id, version_id=request.version_id,
-        agent_binding_ref=str(binding.id), policy_revision=policy_revision, expires_at=expires_at,
+        agent_binding_ref=label, policy_revision=policy_revision, expires_at=expires_at,
         allowed_bindings=[binding_ref(d) for d in decisions],
     )
+
+
+def _admitted_code(profile) -> str:
+    """The reason code of an allow: ``ADMITTED_DEVELOPMENT`` names a development run in every audit view."""
+    return "ADMITTED_DEVELOPMENT" if profile == PROFILE_DEVELOPMENT else "ADMITTED"
 
 
 def _record_shadow_allow(  # pylint: disable=R0913
@@ -538,6 +605,7 @@ def _record_shadow_allow(  # pylint: disable=R0913
     settings = module.admission_settings
     policy_revision = module.governance_profile.policy_revision
     user_ref = subject.get("user_ref", subject["ref"])
+    label, profile = _binding_label(binding), PROFILE_DEVELOPMENT if binding.id is None else "governed"
     with db.get_session(request.project_id) as session:
         try:
             for decision in decisions:
@@ -545,17 +613,17 @@ def _record_shadow_allow(  # pylint: disable=R0913
                     event_type="decision", decision="allow", reason_code=CREDENTIAL_USE_ALLOWED, would_deny=False,
                     event_id=decision.decision_id, tenant=subject["tid"], project_id=request.project_id,
                     application_id=request.application_id, environment=settings.environment,
-                    caller_ref=caller["ref"], user_ref=user_ref, agent_binding_ref=str(binding.id), run_id=run_id,
+                    caller_ref=caller["ref"], user_ref=user_ref, agent_binding_ref=label, run_id=run_id,
                     credential_ref=decision.credential_ref, credential_generation=decision.credential_generation,
                     toolkit_instance_id=decision.toolkit_instance_id, target_ref=WHOLE_TARGET,
                     policy_revision=policy_revision, revocation_epoch=decision.reference_epoch,
                     traceparent=request.trace_ref,
                 ))
             _tracing().security_audit_record(session, _event(
-                event_type="admission", decision="allow", reason_code="ADMITTED", would_deny=False,
+                event_type="admission", decision="allow", reason_code=_admitted_code(profile), would_deny=False,
                 tenant=subject["tid"], project_id=request.project_id, application_id=request.application_id,
                 environment=settings.environment, caller_ref=caller["ref"], user_ref=user_ref,
-                agent_binding_ref=str(binding.id), run_id=run_id, policy_revision=policy_revision,
+                agent_binding_ref=label, run_id=run_id, policy_revision=policy_revision,
                 revocation_epoch=binding.revocation_epoch, traceparent=request.trace_ref,
             ))
             session.commit()
@@ -758,13 +826,24 @@ def _admit(  # pylint: disable=R0914
         raise _denied("DEPENDENCY_UNAVAILABLE")
     # 3. who is asking
     principal = _verify_identity(request, settings)
-    # 4. which approved agent definition runs
-    binding, rows = _find_binding(request, settings)
+    can_use = None
+    if _is_development(request, settings):
+        # 4. (development, #7213) the definition that runs, with no binding: the author's own right stands for it. Decided
+        # here, before any binding is looked for, so the governed path reads nothing more than before
+        binding, rows = _read_draft(request)
+        permissions = _author_permissions(request)
+        if AUTHOR_PERMISSION not in permissions:   # 4a. only someone who may edit the agent may author it
+            raise _denied("DENIED_RBAC")
+        can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
+    else:
+        # 4. which approved agent definition runs
+        binding, rows = _find_binding(request, settings)
     # 5. on whose behalf
     subject = _subject_of(principal)
     expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
     # 5b. which credentials the run uses, and whether the agent may use them for this user
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows)
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows,
+                                    can_use=can_use)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     if shadow:
         _record_shadow_allow(module, request, run_id, binding=binding, subject=subject, decisions=decisions,
@@ -775,6 +854,14 @@ def _admit(  # pylint: disable=R0914
     return _store_admission(
         module, request, run_id, binding=binding, subject=subject, decisions=decisions, caller=caller,
         user_epochs=epochs, extra_epochs={}, expires_at=expires_at)
+
+
+def _is_development(request: AdmissionRequest, settings: AdmissionSettings) -> bool:
+    """Is this run the editor's test chat of a signed-in person, and does the operator allow development runs (#7213)?
+    Decided from the request kind alone: no read. Anything else (a shared or public chat, the API, a trigger, a system
+    user, a token) takes the governed path, as does the editor when the setting is off (``DENIED_BINDING`` as before)."""
+    return (settings.allow_development_runs and request.entry_point == ENTRY_EDITOR_CHAT
+            and request.run_kind == "interactive" and request.caller_type == "user")
 
 
 def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=None) -> ExecutionSecurityContextView:
@@ -925,7 +1012,8 @@ class _AsOf:
     def admission_settings(self):
         effective = self.governance_effective
         return replace(self._module.admission_settings, allow_runtime_domain_binding=effective.allow_runtime_domain_binding,
-                       admit_legacy_pat=effective.admit_legacy_pat, environment=effective.environment)
+                       admit_legacy_pat=effective.admit_legacy_pat, environment=effective.environment,
+                       allow_development_runs=effective.allow_development_runs)
 
 
 def _carries_parent_context(call_kwargs) -> bool:
@@ -1035,6 +1123,11 @@ def parent_entries_scope():
 
 def _parent_entries(project_id, context_ref) -> list:
     """The credential-use decisions (``allowed_bindings``) of the parent context."""
+    return _parent_admission(project_id, context_ref)[0]
+
+
+def _parent_admission(project_id, context_ref) -> tuple:
+    """``(allowed_bindings, profile)`` of the parent context: one read, remembered for the fan-out scope."""
     if isinstance(project_id, bool) or not isinstance(project_id, int):
         raise _denied("STALE_CONTEXT")
     try:
@@ -1045,14 +1138,16 @@ def _parent_entries(project_id, context_ref) -> list:
     if read is not None and (project_id, context_id) in read:
         return read[(project_id, context_id)]
     with db.get_session(project_id) as session:
-        entries = session.execute(
-            select(ExecutionSecurityContext.allowed_bindings).where(ExecutionSecurityContext.id == context_id)
-        ).scalar_one_or_none()
-    if not isinstance(entries, list):
+        row = session.execute(
+            select(ExecutionSecurityContext.allowed_bindings, ExecutionSecurityContext.profile)
+            .where(ExecutionSecurityContext.id == context_id)
+        ).one_or_none()
+    if row is None or not isinstance(row.allowed_bindings, list):
         raise _denied("STALE_CONTEXT")
+    found = (row.allowed_bindings, row.profile)
     if read is not None:
-        read[(project_id, context_id)] = entries
-    return entries
+        read[(project_id, context_id)] = found
+    return found
 
 
 def _seal_dispatch(payload, entries_of, decided=False, shadow=False) -> None:
@@ -1080,10 +1175,21 @@ def _seal_inherited(module, payload, context_ref, call_kwargs, run_id):
     and configuration) and refuse any other credential (a credential-bearing sub-agent, a conversation toolkit). A
     configuration without a decision of the parent must be shown not to be a credential."""
     project_id = (call_kwargs.get("meta") or {}).get("project_id") or payload.get("project_id")
+    parent = {}
+
+    def entries():
+        parent["admission"] = _parent_admission(project_id, context_ref)
+        return parent["admission"][0]
+
     try:
-        _seal_dispatch(payload, lambda: _parent_entries(project_id, context_ref))
+        _seal_dispatch(payload, entries)
     except AdmissionDenied as exc:
-        _refuse_dispatch(module, exc.reason_code, call_kwargs, run_id)
+        code = exc.reason_code
+        if code == "CREDENTIAL_REFERENCE_REQUIRED" and parent.get("admission", (None, None))[1] == PROFILE_DEVELOPMENT:
+            # a child of a development run asked for a credential the author's draft was not admitted for: the author's
+            # identity is not lent beyond the draft's own decisions (#7213)
+            code = "DENIED_DEVELOPMENT_CHILD"
+        _refuse_dispatch(module, code, call_kwargs, run_id)
 
 
 def _refuse_dispatch(module, code, call_kwargs, run_id):
@@ -1319,7 +1425,8 @@ def _revoke_overrun(module, project_id, context_ref, code):
     _record_deny(
         module, code, event_type="decision", project_id=project_id,
         application_id=row.application_id, run_id=row.run_id, attempt=row.attempt,
-        agent_binding_ref=str(row.agent_binding_ref), policy_revision=row.policy_revision, environment=row.environment,
+        agent_binding_ref=None if row.agent_binding_ref is None else str(row.agent_binding_ref),
+        policy_revision=row.policy_revision, environment=row.environment,
         mandate_ref=subject_ref[len("mandate:"):] if isinstance(subject_ref, str) else None,
     )
     _metric(CONTEXT_VALIDATION, "execution_context_validation_total", "result", "deny", code)
@@ -1389,7 +1496,8 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
             .where(columns.id == context_id)
         ).one_or_none()
         binding = None
-        if row is not None and (row.binding_project_id or project_id) == project_id:   # the same schema: the same read
+        if (row is not None and row.agent_binding_ref is not None
+                and (row.binding_project_id or project_id) == project_id):   # the same schema: the same read
             binding = session.execute(
                 select(AgentIdentityBinding.state, AgentIdentityBinding.revocation_epoch,
                        AgentIdentityBinding.definition_digest)
@@ -1397,12 +1505,13 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
             ).one_or_none()
     if row is None:
         raise _denied("STALE_CONTEXT")
-    known.update(application_id=row.application_id, agent_binding_ref=str(row.agent_binding_ref),
+    development = row.profile == PROFILE_DEVELOPMENT   # a development run has no binding to hold it to (#7213)
+    known.update(application_id=row.application_id, agent_binding_ref=context_binding_label(row),
                  policy_revision=row.policy_revision, environment=row.environment)   # as admitted, not as today
     is_mandate = (row.subject or {}).get("kind") == "mandate"
     if is_mandate and str((row.subject or {}).get("ref")).startswith("mandate:"):
         known["mandate_ref"] = str(row.subject["ref"])[len("mandate:"):]
-    if row.schema_version != SCHEMA_VERSION or row.profile != "governed":
+    if row.schema_version != SCHEMA_VERSION or row.profile not in PROFILES:
         raise _denied("UNKNOWN_SCHEMA_VERSION")
     if (caller.get("kind") != "indexer_worker" or caller.get("task_name") not in ADMITTED_TASKS
             or caller.get("run_id") != row.run_id):
@@ -1439,14 +1548,15 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
     if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
         raise revoke("EPOCH_MISMATCH")
     #
-    if (row.binding_project_id or project_id) != project_id:   # the agent lives in another project
-        binding = _read_binding(row.binding_project_id, row.agent_binding_ref)
-    if binding is None or binding.state != "active":
-        raise revoke("DENIED_BINDING")
-    if binding.revocation_epoch != stamped.get("binding"):
-        raise revoke("EPOCH_MISMATCH")
-    if binding.definition_digest != row.definition_digest:
-        raise revoke("BINDING_DIGEST_MISMATCH")
+    if not development:
+        if (row.binding_project_id or project_id) != project_id:   # the agent lives in another project
+            binding = _read_binding(row.binding_project_id, row.agent_binding_ref)
+        if binding is None or binding.state != "active":
+            raise revoke("DENIED_BINDING")
+        if binding.revocation_epoch != stamped.get("binding"):
+            raise revoke("EPOCH_MISMATCH")
+        if binding.definition_digest != row.definition_digest:
+            raise revoke("BINDING_DIGEST_MISMATCH")
     #
     if is_mandate:
         code = _mandate_revoke_code(row, stamped)
@@ -1455,9 +1565,7 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
     #
     if isinstance(row.allowed_bindings, list) and row.allowed_bindings:
         try:
-            code = recheck_credentials(
-                row.binding_project_id or project_id, row.allowed_bindings, (row.subject or {}).get("ref"),
-                str(row.agent_binding_ref), _now())
+            code = recheck_context_credentials(row, project_id, _now())
         except Exception as exc:  # pylint: disable=W0703
             log.error("validate_context: credential facts unreadable (%s)", type(exc).__name__)
             raise _denied("DEPENDENCY_UNAVAILABLE") from None   # unknown, not revoked: the run may be retried
@@ -1471,9 +1579,27 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
     return {
         "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
         "project_id": row.project_id, "application_id": row.application_id, "version_id": row.version_id,
-        "agent_binding_ref": str(row.agent_binding_ref), "policy_revision": row.policy_revision,
+        "agent_binding_ref": context_binding_label(row), "policy_revision": row.policy_revision,
         "expires_at": _aware(row.expires_at).isoformat(),
     }
+
+
+def context_binding_label(row) -> str:
+    """What a context row was admitted on, as the audit trail and the worker see it: the binding id, or
+    ``development:<digest>`` for a development run (#7213)."""
+    if row.agent_binding_ref is None:
+        return DEVELOPMENT_LABEL + str(row.definition_digest)
+    return str(row.agent_binding_ref)
+
+
+def recheck_context_credentials(row, project_id, now) -> Optional[str]:
+    """Do the credential decisions of a context still hold? The governed recheck against the binding's grants, or the
+    development one against the author's own grants (#7213). ``None`` when they hold, else the code to revoke with."""
+    binding_project_id = row.binding_project_id or project_id
+    subject_ref = (row.subject or {}).get("ref")
+    if row.profile == PROFILE_DEVELOPMENT:
+        return recheck_development(binding_project_id, row.allowed_bindings, subject_ref, now)[0]
+    return recheck_credentials(binding_project_id, row.allowed_bindings, subject_ref, str(row.agent_binding_ref), now)
 
 
 def validate_context(module, project_id, context_ref, caller) -> dict:

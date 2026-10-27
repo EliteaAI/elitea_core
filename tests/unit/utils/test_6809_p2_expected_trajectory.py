@@ -103,10 +103,26 @@ def test_max_tool_calls_zero_is_kept(et):
 
 # --- promote pre-fill builder ----------------------------------------------------------------
 
-def test_from_tool_calls_is_names_only_superset(et):
+def test_from_tool_calls_is_names_only_superset_of_own_calls(et):
     assert et.from_tool_calls(['a', 'b', 'a']) == {
-        'match': 'superset', 'tools': [{'name': 'a'}, {'name': 'b'}, {'name': 'a'}],
+        'match': 'superset', 'calls': 'own', 'tools': [{'name': 'a'}, {'name': 'b'}, {'name': 'a'}],
         'forbidden': [], 'allow_repeat': []}
+
+
+# --- calls (#7015 P3) --------------------------------------------------------------------------
+
+def test_calls_is_omitted_when_absent(et):
+    assert 'calls' not in et.normalize_expected_trajectory({'tools': [{'name': 'a'}]})
+
+
+@pytest.mark.parametrize('calls', ['own', 'all'])
+def test_calls_is_kept(et, calls):
+    assert et.normalize_expected_trajectory({'calls': calls})['calls'] == calls
+
+
+def test_an_unknown_calls_is_rejected(et):
+    with pytest.raises(ValueError, match='calls must be one of'):
+        et.normalize_expected_trajectory({'calls': 'children'})
 
 
 def test_from_tool_calls_without_calls_is_none(et):
@@ -237,6 +253,7 @@ def trace_model(monkeypatch, turns):
     import sqlalchemy
     step = types.SimpleNamespace(message_group_id=_Col('message_group_id'),
                                  tool_name=_Col('tool_name'), kind=_Col('kind'),
+                                 parent_agent_name=_Col('parent_agent_name'),
                                  started_at=_Col('started_at'), id=_Col('id'))
     mod = types.ModuleType('plugins.elitea_core.models.message_trace_step')
     mod.MessageTraceStep = step
@@ -260,13 +277,20 @@ def trace_model(monkeypatch, turns):
 
 
 def test_tool_calls_by_group_is_one_names_only_query(turns, trace_model):
-    session = _Session([(3, 'jira_search'), (7, 'post'), (3, None), (3, 'jira_get')])
+    session = _Session([(3, 'jira_search', None), (7, 'post', None), (3, None, None), (3, 'jira_get', None)])
     assert turns.tool_calls_by_group(session, [3, 7]) == {3: ['jira_search', 'jira_get'], 7: ['post']}
     assert [e[0] for e in session.log].count('query') == 1
-    assert session.log[0] == ('query', ('message_group_id', 'tool_name'))
+    assert session.log[0] == ('query', ('message_group_id', 'tool_name', 'parent_agent_name'))
     filters = session.log[1][1]
     assert ('in', 'message_group_id', (3, 7)) in filters and ('eq', 'kind', 'tool_call') in filters
     assert session.log[2][1] == (('asc_nullslast', 'started_at'), ('asc', 'id'))
+
+
+def test_tool_calls_by_group_leaves_out_sub_agent_calls(turns, trace_model):
+    # #7015 P3: the reference names the call to the sub-agent, not what the sub-agent did inside.
+    session = _Session([(3, 'RD-OrderReader', None), (3, 'read_file', 'RD-OrderReader'),
+                        (3, 'list_files', 'RD-OrderReader'), (3, 'RD-DecisionReader', None)])
+    assert turns.tool_calls_by_group(session, [3]) == {3: ['RD-OrderReader', 'RD-DecisionReader']}
 
 
 def test_tool_calls_by_group_without_groups_skips_the_query(turns):

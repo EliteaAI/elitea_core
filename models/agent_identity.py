@@ -79,6 +79,8 @@ class ExecutionSecurityContext(db_tools.AbstractBaseMixin, db.Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     schema_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default='1')
+    # ``governed``: admitted on an active binding; ``development`` (#7213): the editor's test chat of an unbound
+    # version, admitted on the author's own identity and credentials, with no binding (``agent_binding_ref`` is NULL)
     profile: Mapped[str] = mapped_column(String(16), nullable=False, default='governed', server_default='governed')
     policy_revision: Mapped[str] = mapped_column(String(128), nullable=False)
     tenant: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -88,7 +90,7 @@ class ExecutionSecurityContext(db_tools.AbstractBaseMixin, db.Base):
     entry_point: Mapped[str] = mapped_column(String(32), nullable=False)
     caller: Mapped[dict] = mapped_column(JSONB, nullable=False)
     subject: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    agent_binding_ref: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_binding_ref: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     agent_session_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     application_id: Mapped[int] = mapped_column(Integer, nullable=False)
     version_id: Mapped[int] = mapped_column(Integer, nullable=False)

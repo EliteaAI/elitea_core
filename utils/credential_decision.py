@@ -17,6 +17,11 @@ The caller's personal reference wins even when it is not active (fail closed): w
 suspended the owner's runs are refused, and they do not fall back to the shared credential. The facts carry a ``note``
 saying so for the UI.
 
+A development run (#7213, ``profile="development"``) has no binding, so no grant can name one. Its rule is the author's
+own right: a personal credential of the author (the custodian check above), or a project credential on which the
+author's subject holds an active grant on any binding and toolkit (``subject_grants``, facts version 5). Anything else is
+``DENIED_DEVELOPMENT_CREDENTIAL``. Decided for every turn of the editor's chat, since every turn is admitted anew.
+
 Known limits (follow-ups, no code yet): the owner of a mandate is read at admission, and a change of owner after it is
 not re-read when a queued run is re-checked; the facts' fallback to another owner's personal reference is capped, so a
 crowded configuration can crowd another out (both only change which refusal is named); and ``ref_ids`` are keyed by
@@ -25,7 +30,7 @@ configuration id, so one configuration's two references asked for together retur
 import contextlib
 import contextvars
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Callable, Literal, Mapping, Optional
 
@@ -40,11 +45,14 @@ MAX_GOVERNED_CREDENTIALS_PER_RUN = 64
 MAX_CANDIDATE_CONFIGURATIONS = 256   # configurations looked up per run, platform-internal ones included
 MAX_FACT_SELECTORS = 64              # what one call of a facts method accepts
 GRANTS_FOR_FACTS_VERSION = 4         # the secrets facts that answer the grants of a configuration's reference in the same call
+SUBJECT_GRANTS_FACTS_VERSION = 5     # the secrets facts that answer the grants a subject holds on a credential (#7213)
 MAX_CACHED_SECRET_FIELDS = 512
 CREDENTIAL_SECTION = "credentials"
 USE_PERMISSION = "credentials.use"
 STORE_KINDS = frozenset({"database", "corporate_vault"})
 ALLOWED = "CREDENTIAL_USE_ALLOWED"
+DEVELOPMENT_GRANT_REQUIRED = "DENIED_DEVELOPMENT_CREDENTIAL"
+PROFILE_GOVERNED, PROFILE_DEVELOPMENT = "governed", "development"
 WHOLE_TARGET = "*"
 MANDATE_SUBJECT_PREFIX = "mandate:"
 NESTED_FIELD = "<nested>"
@@ -88,6 +96,8 @@ class CredentialDecisionContext:
     # owner is its custodian, and only a grant made to the mandate (not to the person) counts (#6947)
     subject_kind: str = "user_delegation"
     subject_user_id: Optional[int] = None
+    # ``development``: the editor's test chat of an unbound version (#7213); the grant is the author's, on any binding
+    profile: str = PROFILE_GOVERNED
 
 
 @dataclass(frozen=True)
@@ -95,6 +105,7 @@ class CredentialFacts:
     configurations: Mapping[str, Mapping]   # configuration uuid -> {id, project_id, type, section, generation}
     references: Mapping[int, Mapping]       # configuration id -> live credential reference
     grants: Mapping[str, Mapping]           # "binding|toolkit|credential|target|subject" -> live grant
+    subject_grants: Mapping[str, list] = field(default_factory=dict)   # "credential|subject" -> active grants (#7213)
 
 
 class Decision(BaseModel):
@@ -135,6 +146,22 @@ def subject_kind_of(subject_ref) -> str:
 def grant_key(binding_ref_, toolkit_instance_id, credential_ref, subject_ref) -> str:
     """The unique key of a use grant as ``credential_use_facts`` returns it (whole target only in slice 1)."""
     return "|".join((str(binding_ref_), str(toolkit_instance_id), str(credential_ref), WHOLE_TARGET, subject_ref))
+
+
+def subject_grant_key(credential_ref, subject_ref) -> str:
+    """The key of a subject's grants on a credential as ``credential_use_facts`` returns them (``subject_grants``)."""
+    return "|".join((str(credential_ref), subject_ref))
+
+
+def subject_grant_in_force(grants, now, grant_id=None) -> Optional[Mapping]:
+    """The first grant of a subject on a credential that is in force for a person (``user_delegation``); with
+    ``grant_id`` exactly that one, or None."""
+    for grant in grants if isinstance(grants, list) else ():
+        if grant_id is not None and grant.get("grant_id") != grant_id:
+            continue
+        if grant_in_force(grant, now) and grant.get("subject_kind") == "user_delegation":
+            return grant
+    return None
 
 
 # --- collecting the uses ---------------------------------------------------------------------
@@ -406,6 +433,15 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
         return verdict(False, "CREDENTIAL_GENERATION_MISMATCH")
     if not ctx.can_use():                                                          # 7. the user may use credentials
         return verdict(False, "DENIED_RBAC")
+    if ctx.profile == PROFILE_DEVELOPMENT:                                         # 8d. the author's own right (#7213)
+        if reference.get("ownership_class") == "personal":                         #     the author's personal one (5.)
+            return verdict(True, ALLOWED, reference_epoch=reference.get("revocation_epoch"))
+        grant = subject_grant_in_force(                                            #     or a grant to the author, on
+            facts.subject_grants.get(subject_grant_key(reference.get("ref_id"), ctx.subject_ref)), ctx.now)   # any binding
+        if grant is None:
+            return verdict(False, DEVELOPMENT_GRANT_REQUIRED)
+        return verdict(True, ALLOWED, reference_epoch=reference.get("revocation_epoch"),
+                       grant_id=grant.get("grant_id"), grant_epoch=grant.get("revocation_epoch"))
     grant = facts.grants.get(grant_key(                                            # 8, 9. this binding, toolkit, user
         ctx.agent_binding_ref, use.toolkit_instance_id, reference.get("ref_id"), ctx.subject_ref))
     if not grant_in_force(grant, ctx.now) or grant.get("subject_kind") != ctx.subject_kind:
@@ -414,14 +450,25 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
                    grant_id=grant.get("grant_id"), grant_epoch=grant.get("revocation_epoch"))
 
 
-def facts_answer_grants() -> bool:
-    """Does the secrets plugin answer the grants of a configuration's reference in the same call as the reference
-    (``grants_for``, facts version 4)? An older one is asked twice. Unreadable counts as no."""
+def _facts_version() -> int:
+    """The shape version of the secrets plugin's facts; unreadable counts as 0."""
     try:
         version = this.for_module("secrets").module.credential_facts_version()
     except Exception:  # pylint: disable=W0703
-        return False
-    return isinstance(version, int) and not isinstance(version, bool) and version >= GRANTS_FOR_FACTS_VERSION
+        return 0
+    return version if isinstance(version, int) and not isinstance(version, bool) else 0
+
+
+def facts_answer_grants() -> bool:
+    """Does the secrets plugin answer the grants of a configuration's reference in the same call as the reference
+    (``grants_for``, facts version 4)? An older one is asked twice. Unreadable counts as no."""
+    return _facts_version() >= GRANTS_FOR_FACTS_VERSION
+
+
+def facts_answer_subject_grants() -> bool:
+    """Does the secrets plugin answer the grants a subject holds on a credential (``subject_grants``, facts version 5)?
+    A development run with a project credential cannot be decided without it."""
+    return _facts_version() >= SUBJECT_GRANTS_FACTS_VERSION
 
 
 def _read_decision_facts(ctx, uses, configurations) -> CredentialFacts:
@@ -435,6 +482,13 @@ def _read_decision_facts(ctx, uses, configurations) -> CredentialFacts:
            and fact.get("project_id") == ctx.binding_project_id}
     if not own:
         return CredentialFacts(configurations, {}, {})
+    if ctx.profile == PROFILE_DEVELOPMENT:   # the author's grants on each credential, whatever the binding (#7213)
+        if not facts_answer_subject_grants():
+            raise CredentialDecisionError("DEPENDENCY_UNAVAILABLE")
+        found = _credential_use_facts(ctx.binding_project_id, sorted(own), [], None,
+                                      subject_grants=[(config_id, ctx.subject_ref) for config_id in sorted(own)],
+                                      **_caller_of(ctx))
+        return CredentialFacts(configurations, found["references"], {}, found.get("subject_grants") or {})
     wanted = sorted({(ctx.agent_binding_ref, use.toolkit_instance_id, fact["id"], WHOLE_TARGET, ctx.subject_ref)
                      for use, fact in named if fact is not None and fact.get("id") in own})
     if len(wanted) <= MAX_FACT_SELECTORS and facts_answer_grants():
@@ -492,6 +546,25 @@ def recheck_credentials(project_id, entries, subject_ref, agent_binding_ref, now
     return recheck_failure(project_id, entries, subject_ref, agent_binding_ref, now)[0]
 
 
+def _reference_recheck_code(entry, reference, configurations, subject_ref) -> Optional[str]:
+    """The checks of one recorded decision that do not depend on the grant: the reference is active, still the
+    custodian's for a personal one, at the same epoch and generation, and its configuration unchanged."""
+    if reference is None or reference.get("state") != "active":
+        return "CREDENTIAL_REFERENCE_INACTIVE"
+    if (reference.get("ownership_class") == "personal" and subject_kind_of(subject_ref) == "user_delegation"
+            and reference.get("custodian_subject_ref") != subject_ref):   # a mandate's owner is checked at admission
+        return "CREDENTIAL_CLASS_NOT_ALLOWED"
+    if reference.get("revocation_epoch") != entry["reference_epoch"]:
+        return "EPOCH_MISMATCH"
+    config = configurations.get(entry["configuration_uuid"])
+    if config is None:
+        return "CREDENTIAL_REFERENCE_INACTIVE"
+    if (reference.get("generation") != entry["credential_generation"]
+            or config.get("generation") != entry["configuration_generation"]):
+        return "CREDENTIAL_GENERATION_MISMATCH"
+    return None
+
+
 def recheck_failure(project_id, entries, subject_ref, agent_binding_ref, now) -> tuple:  # pylint: disable=R0911,R0914
     """``recheck_credentials`` that also says which entry failed: ``(code, entry)``, ``(None, None)`` when all hold."""
     if not entries:
@@ -504,23 +577,41 @@ def recheck_failure(project_id, entries, subject_ref, agent_binding_ref, now) ->
     uuids = sorted({entry["configuration_uuid"] for entry in entries})
     configurations = read_configuration_facts(((cfg_uuid, project_id) for cfg_uuid in uuids))
     for entry in entries:
-        reference = references.get(entry["credential_ref"])
-        if reference is None or reference.get("state") != "active":
-            return "CREDENTIAL_REFERENCE_INACTIVE", entry
-        if (reference.get("ownership_class") == "personal" and subject_kind_of(subject_ref) == "user_delegation"
-                and reference.get("custodian_subject_ref") != subject_ref):   # a mandate's owner is checked at admission
-            return "CREDENTIAL_CLASS_NOT_ALLOWED", entry
-        if reference.get("revocation_epoch") != entry["reference_epoch"]:
-            return "EPOCH_MISMATCH", entry
-        config = configurations.get(entry["configuration_uuid"])
-        if config is None:
-            return "CREDENTIAL_REFERENCE_INACTIVE", entry
-        if (reference.get("generation") != entry["credential_generation"]
-                or config.get("generation") != entry["configuration_generation"]):
-            return "CREDENTIAL_GENERATION_MISMATCH", entry
+        code = _reference_recheck_code(entry, references.get(entry["credential_ref"]), configurations, subject_ref)
+        if code is not None:
+            return code, entry
         grant = grants.get(grant_key(agent_binding_ref, entry["toolkit_instance_id"], entry["credential_ref"], subject_ref))
         if not grant_in_force(grant, now) or grant.get("subject_kind") != subject_kind_of(subject_ref):
             return "DENIED_GRANT", entry
+        if grant.get("revocation_epoch") != entry["grant_epoch"]:
+            return "EPOCH_MISMATCH", entry
+    return None, None
+
+
+def recheck_development(project_id, entries, subject_ref, now) -> tuple:
+    """``recheck_failure`` for the decisions of a development run (#7213): the same reference checks, then, for a
+    project credential, the grant the author was admitted on must still be in force at the same epoch (a personal
+    credential, recorded without a grant, needs the custodian check only). One read of the facts."""
+    if not entries:
+        return None, None
+    granted = [entry for entry in entries if entry.get("grant_id") is not None]
+    facts = _credential_use_facts(
+        project_id, [], [], [entry["credential_ref"] for entry in entries],
+        subject_grants=sorted({(entry["credential_ref"], subject_ref) for entry in granted}) if granted else None)
+    references = {reference["ref_id"]: reference for reference in facts["references"].values()}
+    held = facts.get("subject_grants") or {}
+    uuids = sorted({entry["configuration_uuid"] for entry in entries})
+    configurations = read_configuration_facts(((cfg_uuid, project_id) for cfg_uuid in uuids))
+    for entry in entries:
+        code = _reference_recheck_code(entry, references.get(entry["credential_ref"]), configurations, subject_ref)
+        if code is not None:
+            return code, entry
+        if entry.get("grant_id") is None:
+            continue
+        grant = subject_grant_in_force(
+            held.get(subject_grant_key(entry["credential_ref"], subject_ref)), now, grant_id=entry["grant_id"])
+        if grant is None:
+            return DEVELOPMENT_GRANT_REQUIRED, entry
         if grant.get("revocation_epoch") != entry["grant_epoch"]:
             return "EPOCH_MISMATCH", entry
     return None, None

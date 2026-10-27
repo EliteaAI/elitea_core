@@ -315,32 +315,49 @@ def _resolve_participants(participants) -> list[dict]:
                         toolkit_id=entity_meta.get('id'),
                     ) or {}
                     p['meta']['name'] = details.get('name') or details.get('toolkit_name')
+                case ParticipantTypes.skill.value:
+                    from .skill_participant_utils import load_skill_participant_details  # pylint: disable=C0415
+                    p['meta']['name'] = load_skill_participant_details(entity_meta).get('name')
         except Exception as e:  # pylint: disable=W0703
             log.warning("Chat export: failed to resolve participant %s name: %s", p['id'], e)
     return result
 
 
-def collect_attachment_sizes(project_id: int, attachments: list[dict]) -> dict[str, int]:
-    """Best-effort {filepath: size}, one listing per distinct bucket."""
+def collect_attachment_sizes(project_id: int, attachments: list[dict]) -> tuple[dict[str, int], bool]:
+    """Best-effort ({filepath: size}, complete), one listing per distinct bucket.
+
+    complete is False when storage could not be listed, so a missing size means "unknown", not "deleted".
+    """
     names_by_bucket = {}
     for item in attachments:
         names_by_bucket.setdefault(item['bucket'], set()).add(item['name'])
     sizes = {}
     if not names_by_bucket:
-        return sizes
+        return sizes, True
     try:
         mc = MinioClient.from_project_id(project_id)
     except Exception as e:  # pylint: disable=W0703
         log.warning("Chat export: failed to init storage client for project %s: %s", project_id, e)
-        return sizes
+        return sizes, False
+    complete = True
+    existing_buckets = None
     for bucket, names in names_by_bucket.items():
         try:
             for file_info in mc.list_files(bucket):
                 if file_info['name'] in names:
                     sizes[f"/{bucket}/{file_info['name']}"] = file_info['size']
         except Exception as e:  # pylint: disable=W0703
+            # A deleted bucket means its files are confirmed missing, not that the check failed
+            try:
+                if existing_buckets is None:
+                    existing_buckets = set(mc.list_bucket())
+                if bucket not in existing_buckets:
+                    continue
+            except Exception:  # pylint: disable=W0703
+                pass
             log.warning("Chat export: failed to list bucket %s: %s", bucket, e)
-    return sizes
+            complete = False
+    return sizes, complete
 
 
 def build_export_zip(project_id: int, payload: dict, groups: list[dict], json_file_name: str):

@@ -119,6 +119,14 @@ class FakePredictPayload:
         self.llm_settings = types.SimpleNamespace(model_dump=lambda **kwargs: llm_settings) if llm_settings else None
 
 
+class SkillInvocationLimitError(Exception):
+    code = 'SKILL_INVOCATION_LIMIT'
+
+    def __init__(self, count, max_allowed):
+        super().__init__(f'This message references {count} skills with ~skill-name. Maximum allowed is {max_allowed} per message.')
+        self.count, self.max_allowed = count, max_allowed
+
+
 @pytest.fixture
 def env(isolated_sys_modules):
     for name in ('plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.pd',
@@ -171,7 +179,9 @@ def env(isolated_sys_modules):
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
     _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)),
-          get_max_invoked_skills_per_turn=lambda: 5)
+          get_max_invoked_skills_per_turn=lambda: 5,
+          validate_message_skill_limit=lambda content, candidates: None,
+          SkillInvocationLimitError=SkillInvocationLimitError)
     _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
           build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)
     _stub('utils.support_utils', get_support_config=lambda: {'enabled': False, 'project_id': None})
