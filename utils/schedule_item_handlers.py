@@ -96,15 +96,26 @@ def _owner_name(owner_id: int) -> str | None:
     return user.get("name") or user.get("email")
 
 
+def _delivery(row) -> dict:
+    """The delivery object of a row; the table keeps it as three flat columns."""
+    target = row.delivery_conversation_uuid
+    return {
+        "mode": row.delivery_mode,
+        "conversation_uuid": str(target) if target is not None else None,
+        "participant_id": row.delivery_participant_id,
+    }
+
+
 def _details(row, scope: ScheduleScope) -> dict:
     """Shape a row as the API answers it, with the owner's and the confirmer's name for the edit page (US-32)."""
-    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by"}
+    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by", "delivery"}
     confirmer = row.approval_confirmed_by
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
         "owner": {"id": row.created_by, "name": _owner_name(row.created_by)},
         "approval_confirmed_by": _owner_name(confirmer) if confirmer is not None else None,
         "allowed_actions": allowed_actions(row, scope),
+        "delivery": _delivery(row),
     }).model_dump(mode="json")
 
 

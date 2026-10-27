@@ -251,6 +251,12 @@ def _text(what: str, who: str, errors: str) -> str:
     """A description for people: what the operation does, who may call it, the main errors."""
     return f"{what}\n\nWho may call: {who}.\n\nErrors: {errors}."
 
+DELIVERY_TEXT = (
+    "Optional `delivery` object: `mode` is `run_history` (default) or `conversation`. Mode `conversation` "
+    "needs `conversation_uuid` and `participant_id`, and each run then posts into that chat. Mode "
+    "`run_history` clears both fields."
+)
+
 
 OPERATIONS = {
     ("get", ""): {
@@ -271,7 +277,7 @@ OPERATIONS = {
         "description": _text(
             "Create a schedule for an agent or a pipeline version. The caller becomes the owner; "
             "the body never sets the owner. The answer has the findings of the risk review as `warnings`. "
-            + RISK_REVIEW_TEXT,
+            + RISK_REVIEW_TEXT + " " + DELIVERY_TEXT,
             "a project member with `schedules.create`",
             "400 an invalid field, `approval_rule_not_allowed` or `risk_name_mismatch` (`risk_ack`); "
             "403 no permission; 404 the agent or pipeline is not found or not visible; 409 "
@@ -310,7 +316,8 @@ OPERATIONS = {
         "name": "Read a schedule",
         "summary": "Read a schedule",
         "description": _text(
-            "Answer the details of one schedule, with the owner's name and the allowed actions.",
+            "Answer the details of one schedule, with the owner's name, the allowed actions and the `delivery` "
+            "object (mode, chat uuid and participant id; both target fields are null for `run_history`).",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
             "403 no permission; 404 not found, or another owner's schedule for a regular user"),
         "parameters": ITEM_PARAMS,
@@ -324,7 +331,8 @@ OPERATIONS = {
             "This call does not pause or resume: a body with `enabled` answers 400, use the pause and "
             "resume actions. When an admin edits another owner's schedule, the owner gets a notice. "
             "The risk review checks the resulting version, name and rule. " + RISK_REVIEW_TEXT
-            + " A change back to \"Pause and ask me\" clears the recorded confirmation.",
+            + " A change back to \"Pause and ask me\" clears the recorded confirmation. "
+            + DELIVERY_TEXT + " A body without `delivery` keeps the stored delivery.",
             OWNER_OR_ADMIN.format(permission="schedules.update"),
             "400 an invalid field, `enabled` in the body, `approval_rule_not_allowed` or `risk_name_mismatch` "
             "(`risk_ack`); 403 no permission; 404 not found; 409 `schedule_blocked`, "
