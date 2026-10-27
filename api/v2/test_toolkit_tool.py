@@ -16,6 +16,8 @@
 #   limitations under the License.
 
 """ API for Testing Toolkit Tools """
+import json
+
 from flask import request
 from pydantic import ValidationError
 from tools import api_tools, auth, config as c, serialize
@@ -71,7 +73,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # as): it must be the caller's own
             holder = auth.sio_users.get(test_data.sid)
             caller_id = (auth.current_user() or {}).get('id')
-            if holder is None or auth.current_user(auth_data=holder).get('id') != caller_id:
+            owner_id = (auth.current_user(auth_data=holder) or {}).get('id') if holder is not None else None
+            if caller_id is None or owner_id != caller_id:
                 return {'error': 'The socket does not belong to the caller'}, 403
         
         try:
@@ -104,6 +107,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # refused by governance (#7229): the readable reason and its code, as a refused predict
             return {'code': result['code'], 'message': result.get('error')}, 403
         
+        refused = _worker_refusal(result.get('result'))
+        if refused is not None:
+            # refused by the worker (its context was not valid any more, #7229): the same shape as a refusal by Main
+            return refused, 403
+
         task_id = result.get('task_id')
         if await_response:
             if not result.get('result'):
@@ -115,6 +123,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": "Timeout"}, 400
         
         return serialize(result), 200
+
+
+def _worker_refusal(result):
+    """``{code, message}`` of a governed refusal the toolkit runner returned (``reason_code``, and the readable
+    ``{code, error}`` as its error text), else None."""
+    if not isinstance(result, dict) or not isinstance(result.get('reason_code'), str):
+        return None
+    message = result.get('error')
+    try:
+        parsed = json.loads(message) if isinstance(message, str) else None
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get('error'), str):
+        message = parsed['error']
+    return {'code': result['reason_code'], 'message': message if isinstance(message, str) else None}
 
 
 class API(api_tools.APIBase):

@@ -162,10 +162,13 @@ def test_the_same_unbound_version_from_any_other_entry_point_is_refused_as_befor
     assert [event["reason_code"] for event in env.denied] == ["DENIED_BINDING", "DENIED_BINDING"]
 
 
-def test_with_the_setting_off_the_editor_is_refused_as_before(ns, env):
+def test_with_the_setting_off_the_editor_is_refused_with_the_readable_reason(ns, env):
     unbound_version(env)
     error = refusal(env, ns, module_=module(env, allow_development_runs=False))
-    assert (error.reason_code, error.message) == ("DENIED_BINDING", ns.adm.MESSAGES["DENIED_BINDING"])
+    # the same card as a toolkit test or a reindex with the setting off (#7227 D10), not "no active binding"
+    assert (error.reason_code, error.message) == (
+        "DEVELOPMENT_RUNS_DISABLED", ns.adm.MESSAGES["DEVELOPMENT_RUNS_DISABLED"])
+    assert "Admin \u2192 Governance" in error.message
     assert contexts(env, ns) == []
 
 
@@ -340,12 +343,12 @@ def test_audit_only_rehearses_the_editor_as_a_development_run_and_records_a_woul
     assert "credential_slot" not in str(call)   # the real payload is not sealed in audit only
 
 
-def test_audit_only_with_the_setting_off_records_the_would_deny_as_before(ns, env):
+def test_audit_only_with_the_setting_off_records_the_readable_would_deny(ns, env):
     unbound_version(env)
     ns.adm.admit_dispatch(env.module(governed=False, audit=True, allow_development_runs=False), "indexer_agent",
                           call_kwargs({}), env.request(entry_point="editor_chat"))
     [event] = env.denied
-    assert (event["reason_code"], event["would_deny"]) == ("DENIED_BINDING", True)
+    assert (event["reason_code"], event["would_deny"]) == ("DEVELOPMENT_RUNS_DISABLED", True)
 
 
 # --- the worker: validation and release against a development context ------------------------------------------------------
@@ -478,7 +481,7 @@ def test_a_child_of_a_governed_run_keeps_the_governed_refusal(ns, env):
 
 # --- the setting: default by mode, explicit under enforce ------------------------------------------------------------------
 
-def test_the_setting_defaults_on_under_audit_only_and_off_under_enforce_until_chosen(ns):
+def test_the_setting_defaults_on_under_audit_only_and_enforce_until_chosen(ns):
     gs = ns.governance_settings
 
     def stored(mode, chosen=None):
@@ -489,9 +492,12 @@ def test_the_setting_defaults_on_under_audit_only_and_off_under_enforce_until_ch
     def effective(mode, chosen=None, ceiling="enforce"):
         return gs.resolve(stored(mode, chosen), ceiling=ceiling, env_environment=None, preflight=[], read="ok")
 
-    assert gs.development_runs_default("audit_only") and not gs.development_runs_default("enforce")
+    # on under audit only and under enforce (#7227 D14), off under off
+    assert gs.development_runs_default("audit_only") and gs.development_runs_default("enforce")
+    assert not gs.development_runs_default("off")
     assert effective("audit_only").allow_development_runs is True
-    assert effective("enforce").allow_development_runs is False
+    assert effective("enforce").allow_development_runs is True
+    assert effective("enforce", chosen=False).allow_development_runs is False
     assert effective("off").allow_development_runs is False
     assert effective("enforce", chosen=True).allow_development_runs is True
     assert effective("audit_only", chosen=False).allow_development_runs is False

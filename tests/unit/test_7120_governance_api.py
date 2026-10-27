@@ -482,7 +482,7 @@ def test_history_lists_the_changes_newest_first_with_who_and_when(ns, env, modul
     assert newest["changed_by"] == {"id": 2, "email": "ops@example.test"}
     assert oldest["changed_by"] == {"id": 1, "email": "root@example.test"} and oldest["revision"] == 1
     assert newest["flags"] == {"admit_legacy_pat": False, "allow_runtime_domain_binding": False,
-                               "allow_development_runs": None}
+                               "allow_development_runs": True}   # switched on with enforce (#7227 D14)
     assert newest["changed_at"] is not None
 
 
@@ -624,21 +624,56 @@ def test_every_refusal_is_a_fixed_message_with_a_code_and_no_input(ns):
 # --- allow_development_runs (#7213): stored when chosen, the default of the mode otherwise, added to an older table ----------
 
 def test_put_stores_the_development_choice_when_made_and_null_when_not(ns, env, module):
-    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7"))
-    assert status == 200 and result["stored"]["allow_development_runs"] is None
-    assert result["effective"]["allow_development_runs"] is False       # not chosen under enforce: off
-    assert module.governance_state.effective.allow_development_runs is False
-    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7", allow_development_runs=True,
-                                          expected_revision=1, change_note="let developers test"))
-    assert status == 200 and result["stored"]["allow_development_runs"] is True
-    assert result["effective"]["allow_development_runs"] is True
-    assert module.governance_state.effective.allow_development_runs is True
-    result, status = put(ns, module, body(expected_revision=2, change_note="back to measuring"))   # audit only, not chosen
+    result, status = put(ns, module, body())   # audit only, not chosen
     assert status == 200 and result["stored"]["allow_development_runs"] is None
     assert result["effective"]["allow_development_runs"] is True        # not chosen under audit only: on
+    result, status = put(ns, module, body(allow_development_runs=False, expected_revision=1, change_note="off"))
+    assert status == 200 and result["stored"]["allow_development_runs"] is False
+    assert module.governance_state.effective.allow_development_runs is False
+    result, status = put(ns, module, body(expected_revision=2, change_note="back to the default"))
+    assert status == 200 and result["stored"]["allow_development_runs"] is None
     history_, _ = history(ns, module)
-    assert [row["flags"]["allow_development_runs"] for row in history_["rows"]] == [None, True, None]
+    assert [row["flags"]["allow_development_runs"] for row in history_["rows"]] == [None, False, None]
     assert put(ns, module, body(allow_development_runs="yes", expected_revision=3))[0]["code"] == "INVALID_REQUEST"
+
+
+# --- #7227 D14: switching to enforce switches development runs on, in the same write; opting out afterwards sticks ------
+
+@pytest.mark.parametrize("before", ["off", "audit_only"])
+def test_switching_to_enforce_switches_development_runs_on_in_the_same_write(ns, env, module, before):
+    revision = 0
+    if before == "audit_only":   # a running platform that measured first, with development runs switched off then
+        assert put(ns, module, body(allow_development_runs=False))[1] == 200
+        revision = 1
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7", expected_revision=revision,
+                                          change_note="enforce", **({"allow_development_runs": False}
+                                                                    if before == "audit_only" else {})))
+    assert status == 200 and result["stored"]["allow_development_runs"] is True   # the value the form held: on
+    assert result["effective"]["allow_development_runs"] is True
+    assert module.governance_state.effective.allow_development_runs is True   # the admission reads it right away
+    history_, _ = history(ns, module)
+    assert history_["rows"][0]["flags"]["allow_development_runs"] is True      # one write: the mode and the switch
+    # the operator opts out afterwards: that sticks for every later enforce write that keeps it
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7", allow_development_runs=False,
+                                          expected_revision=revision + 1, change_note="no drafts"))
+    assert status == 200 and result["effective"]["allow_development_runs"] is False
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-8", allow_development_runs=False,
+                                          expected_revision=revision + 2, change_note="new revision"))
+    assert status == 200 and result["effective"]["allow_development_runs"] is False
+
+
+def test_an_operator_who_switches_development_runs_off_in_the_same_edit_as_enforce_is_heard(ns, env, module):
+    assert put(ns, module, body(allow_development_runs=True))[1] == 200
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7", allow_development_runs=False,
+                                          expected_revision=1, change_note="enforce, no drafts"))
+    assert status == 200 and result["stored"]["allow_development_runs"] is False
+
+
+def test_a_fresh_install_whose_first_write_is_enforce_has_development_runs_on(ns, env, module):
+    assert module.governance_state.effective.mode == "off"   # no row: off
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-1"))
+    assert status == 200 and result["stored"]["revision"] == 1 and result["stored"]["allow_development_runs"] is True
+    assert module.governance_state.effective.allow_development_runs is True
 
 
 def drop_development_columns(ns, env):

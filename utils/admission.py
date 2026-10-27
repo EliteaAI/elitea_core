@@ -41,14 +41,15 @@ from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 from ..models.pd.admission import (
-    ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, AdmissionRequest, ExecutionSecurityContextView,
+    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, AdmissionRequest,
+    ExecutionSecurityContextView,
 )
 from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
     ALLOWED as CREDENTIAL_USE_ALLOWED, DEVELOPMENT_GRANT_REQUIRED, PROFILE_DEVELOPMENT, USE_PERMISSION, WHOLE_TARGET,
     CredentialDecisionContext, CredentialDecisionError, _uuid_text, binding_ref, collect_credential_uses, decide_credential_uses,
-    configurations_in, read_configuration_facts, recheck_credentials, recheck_development, toolkit_secret_fields,
-    user_may_use_credentials, walk_scope,
+    CREDENTIAL_SECTION, _int_or_none, configurations_in, read_configuration_facts, recheck_credentials,
+    recheck_development, toolkit_secret_fields, user_may_use_credentials, walk_scope, want_configuration_facts,
 )
 from .credential_slots import FREE_FORM_SECRET_MARK, prefetched_tool_lists, seal_payload
 from .definition_digest import DIGEST_VERSION, DigestError, definition_digest, digest_for_version, norm_json, toolkit_rows
@@ -138,8 +139,15 @@ MESSAGES = {
     "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
                                 "draft started (only the sub-agents the draft calls are checked, each on its own); the "
                                 "run was not started.",
-    "DEVELOPMENT_RUNS_DISABLED": "Toolkit tests and on-demand indexing run as development runs of the signed-in person, "
-                                 "which this platform does not allow for this run; the run was not started.",
+    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat, toolkit tests and on-demand indexing) are "
+                                 "switched off on this platform; an administrator can switch them on in Admin → "
+                                 "Governance. The run was not started.",
+    "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
+                                      "included) are not admitted yet; run the toolkit from the Elitea UI or through a "
+                                      "governed agent. The run was not started.",
+    "SUB_AGENT_CREDENTIAL_NOT_ADMITTED": "Sub-agents that use credentials are not admitted yet for scheduled or webhook "
+                                         "runs; the run was not started.",
+    "DENIED_ENTRY_POINT": "This kind of run cannot be started from here; the run was not started.",
     # the release of credential material to a worker (#6946); fixed per code, no titles, ids or field names
     "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
     "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
@@ -564,10 +572,9 @@ def _read_children(request: AdmissionRequest, order, settings: AdmissionSettings
     return read
 
 
-def _uncovered(prefetched, decisions) -> bool:
-    """Does a prefetched sub-agent carry a configuration the run's own decisions do not name (toolkit, field and
-    uuid)? Dict reads only."""
-    decided = {(d.toolkit_instance_id, d.field, d.configuration_uuid) for d in decisions}
+def _prefetched_configurations(prefetched, project_id):
+    """``(toolkit id, field, uuid, project id)`` of every configuration the prefetched sub-agents carry (the walk the
+    seal makes, remembered for the ``walk_scope``). Dict reads only."""
     for tools in prefetched.values():
         for tool in tools:
             settings = tool.get("settings")
@@ -576,9 +583,59 @@ def _uncovered(prefetched, decisions) -> bool:
             top = {id(value): field for field, value in settings.items() if isinstance(value, dict)}
             for found in configurations_in(settings):
                 data = found["data"]
-                if (str(tool.get("id")), top.get(id(data)), _uuid_text(data.get("configuration_uuid"))) not in decided:
-                    return True
-    return False
+                yield (str(tool.get("id")), top.get(id(data)), _uuid_text(data.get("configuration_uuid")),
+                       _int_or_none(data.get("configuration_project_id")) or project_id)
+
+
+def _want_prefetched_facts(payload) -> None:
+    """Have the run's own facts read (its credential decision) take the configurations of its sub-agents too: the
+    check below and the seal then read none of their own (#7227, the governed path reads nothing more)."""
+    prefetched = prefetched_tool_lists(payload)
+    if prefetched:
+        want_configuration_facts((cfg_uuid, project_id) for *_, cfg_uuid, project_id
+                                 in _prefetched_configurations(prefetched, payload.get("project_id")))
+
+
+def _uncovered(prefetched, decisions, project_id) -> bool:
+    """Does a prefetched sub-agent carry a credential the run's own decisions do not name (toolkit, field and uuid)?
+    A configuration the facts show to be platform-internal (a vector store, an embedding or a model) is not one, as the
+    seal classifies it; one whose section cannot be established is. The facts are those the decision read with the
+    run's own (``_want_prefetched_facts``): no read of their own."""
+    decided = {(d.toolkit_instance_id, d.field, d.configuration_uuid) for d in decisions}
+    pairs = []
+    for toolkit_id, field, cfg_uuid, cfg_project in _prefetched_configurations(prefetched, project_id):
+        if (toolkit_id, field, cfg_uuid) in decided:
+            continue
+        if cfg_uuid is None:
+            return True
+        pairs.append((cfg_uuid, cfg_project))
+    if not pairs:
+        return False
+    facts = read_configuration_facts(pairs)
+    return any(not isinstance(facts.get(cfg_uuid), dict) or facts[cfg_uuid].get("section") == CREDENTIAL_SECTION
+               for cfg_uuid, _ in pairs)
+
+
+def _named_refusal(denied: AdmissionDenied, payload, key, tools) -> AdmissionDenied:
+    """The refusal of a sub-agent's credential, naming the sub-agent and its toolkit by their saved names (#7227 D6):
+    the author sees which credential of which sub-agent to ask a grant for. Main read both names (the prefetch); the
+    request contributes nothing to the text."""
+    application = payload.get("application") if isinstance(payload.get("application"), dict) else {}
+    entry = (application.get("subagent_version_details") or {}).get(key)
+    agent = entry.get("name") if isinstance(entry, dict) else None
+    toolkit_id = str(denied.audit.get("toolkit_instance_id"))
+    tool = next((tool for tool in tools if str(tool.get("id")) == toolkit_id), None) or {}
+    toolkit = tool.get("toolkit_name") or tool.get("name") or tool.get("type")
+    names = [f"{kind} \u201c{_printable(value)}\u201d" for kind, value in (("sub-agent", agent), ("toolkit", toolkit))
+             if isinstance(value, str) and value.strip()]
+    if not names:
+        return denied
+    return AdmissionDenied(denied.reason_code, f"{denied.message} ({', '.join(names)})", denied.audit)
+
+
+def _printable(value: str, limit=80) -> str:
+    text = "".join(char for char in value if char.isprintable()).strip()
+    return text if len(text) <= limit else text[:limit - 1] + "\u2026"
 
 
 def _admit_children(  # pylint: disable=R0913,R0914
@@ -596,7 +653,7 @@ def _admit_children(  # pylint: disable=R0913,R0914
     sub-agents are those the prefetch expanded (same project, its depth and node limits). ``[ChildAdmission]``, or
     ``AdmissionDenied`` for the first refusal, which refuses the whole run."""
     prefetched = prefetched_tool_lists(payload)
-    if not prefetched or (not development and not _uncovered(prefetched, decisions)):
+    if not prefetched or (not development and not _uncovered(prefetched, decisions, payload.get("project_id"))):
         return []
     read = _read_children(request, _child_order(payload, prefetched), module.admission_settings)
     admitted, children = {}, []
@@ -608,10 +665,13 @@ def _admit_children(  # pylint: disable=R0913,R0914
         while parent is not None and parent not in admitted:   # the nearest caller that has a context of its own
             parent = next(item[1] for item in read if item[0] == parent)
         lineage = [*admitted[parent].lineage, str(admitted[parent].context_id)] if parent else [str(root_id)]
-        decisions = _decide_credentials(
-            module, request.model_copy(update={"application_id": application_id, "version_id": version_id}), subject,
-            binding, {"project_id": payload.get("project_id"), "tools": prefetched[key]}, expires_at, shadow=shadow,
-            rows=rows, can_use=can_use)
+        try:
+            decisions = _decide_credentials(
+                module, request.model_copy(update={"application_id": application_id, "version_id": version_id}),
+                subject, binding, {"project_id": payload.get("project_id"), "tools": prefetched[key]}, expires_at,
+                shadow=shadow, rows=rows, can_use=can_use)
+        except AdmissionDenied as denied:
+            raise _named_refusal(denied, payload, key, prefetched[key]) from None
         child = ChildAdmission(key, uuid.uuid4(), admitted[parent].context_id if parent else root_id, lineage,
                                application_id, version_id, binding, decisions)
         admitted[key] = child
@@ -968,7 +1028,13 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
     deadline = (RunDeadline(by_validity, "MANDATE_EXPIRED") if by_validity < by_runtime
                 else RunDeadline(by_runtime, "RUNTIME_LIMIT_EXCEEDED"))
     # 5b. which credentials the run uses, and whether the agent may use them for the mandate
+    _want_prefetched_facts(payload)
     decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, rows=rows)
+    # 5c. its sub-agents: none is admitted for a mandate yet, so one that carries a credential the mandate's own
+    # decisions do not name refuses the run readably (the seal would refuse it too, less readably)
+    prefetched = prefetched_tool_lists(payload)
+    if prefetched and _uncovered(prefetched, decisions, payload.get("project_id")):
+        raise _denied("SUB_AGENT_CREDENTIAL_NOT_ADMITTED")
     # 6. context row and allow events, atomically
     caller = {"kind": "trigger", "ref": _caller_ref(request), "user_id": owner}
     view = _store_admission(
@@ -1013,11 +1079,16 @@ def _admit(  # pylint: disable=R0914
     # 2. a run with no person behind it needs a mandate
     if request.run_kind == "system":
         raise _denied("MANDATE_REQUIRED")
+    if request.entry_point in TOOLKIT_ENTRY_POINTS and request.caller_type == "token":
+        # a toolkit run is the development run of a signed-in person; an API token (the MCP server's toolkit tools,
+        # the REST test) is not one yet (scoped tokens, #7230): said as such, whatever the development setting is
+        raise _denied("TOOLKIT_RUN_TOKEN_NOT_ADMITTED")
     if not run_id:
         raise _denied("DEPENDENCY_UNAVAILABLE")
     # 3. who is asking
     principal = _verify_identity(request, settings)
     can_use = None
+    children_of_drafts = None
     if request.entry_point in TOOLKIT_ENTRY_POINTS:
         # 4. (a toolkit Test run or on-demand indexing, #7229) a development run of the person, or nothing: a toolkit has
         # no binding of its own to be governed by
@@ -1034,19 +1105,35 @@ def _admit(  # pylint: disable=R0914
         if AUTHOR_PERMISSION not in permissions:   # 4a. only someone who may edit the agent may author it
             raise _denied("DENIED_RBAC")
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
+    elif _is_plain_llm_chat(request):
+        # 4. (a plain LLM chat of the chat page, #7227 D1) the person's own run: no agent, so no definition to bind and
+        # nothing to decide. It runs under a development context of its own (no binding), with no credential decision:
+        # any credential configuration its payload carries is refused at the seal; platform-internal ones are not.
+        # A sub-agent it calls is admitted only on a binding of its own, never as a draft
+        binding, rows, children_of_drafts = Draft(None, None, _LLM_CHAT_DIGEST), [], False
     else:
         # 4. which approved agent definition runs
-        binding, rows = _find_binding(request, settings)
+        try:
+            binding, rows = _find_binding(request, settings)
+        except AdmissionDenied as denied:
+            if denied.reason_code == "DENIED_BINDING" and _is_development(
+                    request, replace(settings, allow_development_runs=True)):
+                # the editor's test chat of a draft while development runs are switched off: said as such (#7227 D10)
+                raise _denied("DEVELOPMENT_RUNS_DISABLED") from None
+            raise
     # 5. on whose behalf
     subject = _subject_of(principal)
     expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
-    # 5b. which credentials the run uses, and whether the agent may use them for this user
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows,
-                                    can_use=can_use)
+    # 5b. which credentials the run uses, and whether the agent may use them for this user. The facts of the
+    # sub-agents' configurations are read with the run's own (#7227)
+    _want_prefetched_facts(payload)
+    decisions = [] if children_of_drafts is False else _decide_credentials(
+        module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows, can_use=can_use)
     # 5c. the sub-agents it runs in its own process, each on its own decision (#7227)
     context_id = uuid.uuid4()
     children = _admit_children(
-        module, request, subject, payload, expires_at, context_id, development=binding.id is None, shadow=shadow,
+        module, request, subject, payload, expires_at, context_id,
+        development=binding.id is None and children_of_drafts is not False, shadow=shadow,
         can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     if shadow:
@@ -1063,6 +1150,17 @@ def _admit(  # pylint: disable=R0914
 
 # What audit only rehearses for a run: the decisions dispatch would seal against, the run's and each sub-agent's (#7227)
 ShadowAllowed = namedtuple("ShadowAllowed", "entries children")
+
+
+def _is_plain_llm_chat(request: AdmissionRequest) -> bool:
+    """A plain LLM chat of the chat page (#7227 D1): a signed-in person, interactively, with no agent version. Decided
+    from the request alone: no read."""
+    return (request.entry_point == ENTRY_CHAT_LLM and request.run_kind == "interactive" and request.caller_type == "user"
+            and request.application_id is None and request.version_id is None)
+
+
+# What a plain LLM chat runs instead of an agent definition: nothing the platform stores (#7227 D1)
+_LLM_CHAT_DIGEST = definition_digest({"v": DIGEST_VERSION, "kind": "llm_chat"})
 
 
 def _is_development(request: AdmissionRequest, settings: AdmissionSettings) -> bool:
@@ -1204,8 +1302,8 @@ def _shadow_evaluate(  # pylint: disable=R0912,R0913
                 allowed = _admit(module, admission, run_id, snapshot, shadow=True)
                 span = time.perf_counter() - started   # as for enforce: the admission, not the sealing that follows it
                 if allowed is not None:   # the seal enforce does after admitting, on the copy of the toolkits
-                    _seal_dispatch(snapshot, lambda: allowed.entries, decided=True, shadow=True,
-                                   children=allowed.children or None)
+                    _seal_dispatch(snapshot, lambda: allowed.entries, decided=not _is_plain_llm_chat(admission),
+                                   shadow=True, children=allowed.children or None)
         except AdmissionDenied as exc:
             decision = "would_deny"
             if exc.reason_code != "AUDIT_UNAVAILABLE":   # the audit trail cannot take it: a metric and a log line only
@@ -1321,7 +1419,9 @@ def admit_dispatch(  # pylint: disable=R0911
         return _refuse_dispatch(module, "CREDENTIAL_REFERENCE_REQUIRED", call_kwargs, run_id)
     if admission is CREDENTIAL_FREE:
         # the platform's own read of chat attachments (a built-in toolkit, no toolkit row): not admitted, and nothing
-        # was decided for it, so any credential configuration in it is refused
+        # was decided for it, so any credential configuration in it is refused. Only the toolkit runner reads it
+        if task_name != TOOLKIT_TASK:
+            return _refuse_dispatch(module, "DENIED_ENTRY_POINT", call_kwargs, run_id)
         try:
             _seal_dispatch(view_payload, lambda: [])
         except AdmissionDenied as denied:
@@ -1348,6 +1448,10 @@ def admit_dispatch(  # pylint: disable=R0911
         return _refuse_dispatch(module, "DEPENDENCY_UNAVAILABLE", call_kwargs, run_id)
     if admission is None:
         return _refuse_dispatch(module, "IDENTITY_EVIDENCE_MISSING", call_kwargs, run_id)
+    if (task_name == TOOLKIT_TASK) != (admission.entry_point in TOOLKIT_ENTRY_POINTS):
+        # a toolkit run is admitted only for the toolkit runner, and the toolkit runner only as a toolkit run: an agent
+        # dispatch never takes the toolkit branch (no binding, no author check), whatever entry point it names
+        return _refuse_dispatch(module, "DENIED_ENTRY_POINT", call_kwargs, run_id)
     #
     if admission.trace_ref is None and isinstance(meta.get("traceparent"), str):
         admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
@@ -1356,7 +1460,9 @@ def admit_dispatch(  # pylint: disable=R0911
         try:
             # admission decided every credential of this payload: those are sealed, anything else is not a credential;
             # the toolkits of each sub-agent admitted with the run against its own decisions (#7227)
-            _seal_dispatch(view_payload, lambda: view.allowed_bindings, decided=True, children=view.children or None)
+            # (a plain LLM chat decided nothing: every configuration of it must be shown not to be a credential)
+            _seal_dispatch(view_payload, lambda: view.allowed_bindings, decided=not _is_plain_llm_chat(admission),
+                           children=view.children or None)
         except AdmissionDenied as denied:
             track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
             _record_deny(
@@ -1523,17 +1629,23 @@ CHILD_COLUMNS = (
 
 def descendant_contexts(project_id, run_id, ancestor_ref) -> list:
     """The live, unexpired contexts of the sub-agents admitted under ``ancestor_ref`` (at any depth: its ref is in their
-    lineage), in admission order. One read, by the run id (indexed)."""
-    with db.get_session(project_id) as session:
-        rows = session.execute(
-            select(*CHILD_COLUMNS)
-            .where(ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.parent_context_ref.isnot(None),
-                   ExecutionSecurityContext.state.in_(LIVE_STATES))
-            .order_by(ExecutionSecurityContext.attempt)
-        ).all()
+    lineage), in admission order. One read, by the run id (indexed); within a ``parent_entries_scope`` (one fan-out)
+    once per run, however many children are dispatched."""
+    read, key = _PARENTS.get(), ("descendants", project_id, run_id)
+    rows = read.get(key) if read is not None else None
+    if rows is None:
+        with db.get_session(project_id) as session:
+            rows = session.execute(
+                select(*CHILD_COLUMNS)
+                .where(ExecutionSecurityContext.run_id == run_id,
+                       ExecutionSecurityContext.parent_context_ref.isnot(None),
+                       ExecutionSecurityContext.state.in_(LIVE_STATES))
+                .order_by(ExecutionSecurityContext.attempt)
+            ).all()
+        if read is not None:
+            read[key] = rows
     now, ancestor = _now(), str(ancestor_ref)
-    return [row for row in rows if ancestor in (row.call_lineage or []) and row.state in LIVE_STATES
-            and _aware(row.expires_at) > now]
+    return [row for row in rows if ancestor in (row.call_lineage or []) and _aware(row.expires_at) > now]
 
 
 def _seal_with_children(payload, project_id, context_ref, parent_admission) -> Optional[str]:

@@ -21,6 +21,8 @@ ENTRY_EDITOR_CHAT = "editor_chat"
 # entry (``test_toolkit_tool_sio``, ``do_runtool``) from the tool it was asked to run, never from the payload
 ENTRY_TOOLKIT_TEST = "toolkit_test"
 ENTRY_INDEX_ON_DEMAND = "index_on_demand"
+# A plain LLM chat of the chat page (no agent): the person's own run, with no definition to bind (#7227 D1)
+ENTRY_CHAT_LLM = "chat_sio_llm"
 
 
 class AdmissionRequest(BaseModel):

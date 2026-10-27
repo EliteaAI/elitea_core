@@ -166,10 +166,16 @@ def test_a_mandate_is_never_lent_to_a_sub_agent_of_a_draft(ns, env):
 
 def test_a_draft_sub_agent_with_a_credential_the_author_holds_no_grant_on_refuses_the_run(ns, env):
     tree = Tree(env, child_grants=False, grandchild=False)
+    tree.payload["application"]["subagent_version_details"]["8:80"]["version_details"]["tools"][0]["toolkit_name"] = \
+        "Jira of the team\n"
     with pytest.raises(ns.exceptions.AdmissionDenied) as err:
         dispatch(env, ns, tree.payload)
-    assert (err.value.reason_code, err.value.message) == (DEV_CODE, ns.adm.MESSAGES[DEV_CODE])
+    # the card names the sub-agent and its toolkit by their saved names, so the author knows what to ask a grant for
+    assert err.value.reason_code == DEV_CODE
+    assert err.value.message == (ns.adm.MESSAGES[DEV_CODE]
+                                 + " (sub-agent \u201cagent 8:80\u201d, toolkit \u201cJira of the team\u201d)")
     assert contexts(env, ns) == [] and env.denied[-1]["reason_code"] == DEV_CODE
+    assert "Jira" not in str(env.denied[-1])   # the audit event keeps references only
 
 
 def test_a_sub_agent_that_is_not_a_version_of_its_application_refuses_a_draft(ns, env):
@@ -228,6 +234,51 @@ def test_the_governed_path_reads_nothing_more_when_its_sub_agents_need_no_decisi
     shares_the_toolkit = prefetch(payload_of(cred), "8:80", cred.tool())   # sealed with the run's own decision
     assert sessions_of(env, ns, shares_the_toolkit) == baseline
     assert len(contexts(env, ns)) == 1
+
+
+def platform_internal_sub_agent(env, toolkit_id=55):
+    """A sub-agent toolkit with a vector store configuration (a platform-internal section, no credential)."""
+    cfg_uuid = str(uuid.uuid4())
+    env.configurations[(1, cfg_uuid)] = {"id": 9, "project_id": 1, "type": "pgvector", "section": "vectorstore",
+                                         "generation": 1}
+    return {"id": toolkit_id, "type": "datasource", "settings": {"pgvector_configuration": {
+        "elitea_title": "vectors", "configuration_uuid": cfg_uuid, "configuration_project_id": 1,
+        "configuration_type": "pgvector", "connection_string": "postgresql://internal"}}}
+
+
+def statements_of(env, ns, payload, **request):
+    """What one governed dispatch reads: sessions, configuration-facts calls and secrets-facts calls."""
+    before = (len(env.sessions), len(env.configuration_calls), len(env.secrets_calls))
+    dispatch(env, ns, payload, module_=env.module(), entry_point="chat_sio", **request)
+    return tuple(after - first for after, first in zip(
+        (len(env.sessions), len(env.configuration_calls), len(env.secrets_calls)), before))
+
+
+def test_the_governed_path_reads_nothing_more_for_a_sub_agent_with_a_platform_internal_configuration(ns, env):
+    def fresh():
+        env.reset()
+        env.facts_version = 5
+        return Credential(env, env.seed_agent())
+
+    cred = fresh()
+    baseline = statements_of(env, ns, payload_of(cred))   # main: the run's own toolkit, no sub-agent read
+    cred = fresh()
+    payload = prefetch(payload_of(cred), "8:80", platform_internal_sub_agent(env))
+    assert statements_of(env, ns, payload) == baseline   # its facts ride on the run's own read; nothing is read for it
+    assert len(contexts(env, ns)) == 1 and env.digest_calls == 1   # the run's own binding only
+    [call] = env.configuration_calls
+    assert len(call[1]) == 2   # the run's configuration and the sub-agent's, in one call
+
+
+def test_a_sub_agent_credential_of_a_governed_parent_is_still_found_and_refused(ns, env):
+    env.seed_agent()
+    draft(env, 8, 80, CHILD_DIGEST)
+    child = Credential(env, uuid.uuid4(), tool_id=2, config_id=6, version_id=80)
+    payload = prefetch({"application": {"version_details": {"tools": [app_tool(8, 80, 802)]}}}, "8:80",
+                       platform_internal_sub_agent(env), child.tool())
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        dispatch(env, ns, payload, module_=env.module(), entry_point="chat_sio")
+    assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
 
 
 def test_the_profile_of_a_sub_agent_is_decided_before_the_context_rows_are_written_in_one_transaction(ns, env):
@@ -312,6 +363,19 @@ def test_a_fan_out_child_of_a_draft_runs_under_its_own_context_with_its_own_toke
     resumed["kwargs"].pop("internal_run_token", None)
     assert ns.adm.admit_dispatch(module(env), "indexer_agent", resumed, None) is None
     assert resumed["kwargs"]["envelope"]["context_ref"] == child_ref
+
+
+def test_a_fan_out_reads_the_parent_and_its_sub_agents_once_however_many_children_it_dispatches(ns, env, monkeypatch):
+    tree = Tree(env)
+    call, ref = dispatch(env, ns, tree.payload)
+    monkeypatch.setattr(ns.adm.internal_obo, "mint_for_context", lambda *args: {"token": "t"})
+    children = [call_kwargs(fan_out_child(call), context_ref=ref) for _ in range(3)]
+    before = len(env.sessions)
+    with ns.adm.parent_entries_scope():
+        for child in children:
+            ns.adm.admit_dispatch(module(env), "indexer_agent", child, None)
+    assert len(env.sessions) - before == 2   # the parent's decisions and its sub-agents' contexts: one read each
+    assert {child["kwargs"]["envelope"]["context_ref"] for child in children} == {str(contexts(env, ns)[1].id)}
 
 
 def test_the_reconcile_of_a_draft_runs_under_the_parents_context_with_its_sub_agents_sealed(ns, env):
@@ -433,7 +497,12 @@ def test_a_toolkit_run_needs_development_runs_switched_on_and_a_signed_in_person
     env.verify_result = {"ok": True, "principal": admission_env.principal()}
     error = refused_toolkit(env, ns, toolkit_call(cred), module_=module(env, admit_legacy_pat=True),
                             caller_type="token", caller_reference=None)
-    assert error.reason_code == "DEVELOPMENT_RUNS_DISABLED"   # a token is not a person testing a toolkit
+    # a token is not a person testing a toolkit: said as such, whatever the development setting is (#7230 scoped tokens)
+    assert (error.reason_code, error.message) == (
+        "TOOLKIT_RUN_TOKEN_NOT_ADMITTED", ns.adm.MESSAGES["TOOLKIT_RUN_TOKEN_NOT_ADMITTED"])
+    error = refused_toolkit(env, ns, toolkit_call(cred), module_=module(env, admit_legacy_pat=True,
+                            allow_development_runs=False), caller_type="token", caller_reference=None)
+    assert error.reason_code == "TOOLKIT_RUN_TOKEN_NOT_ADMITTED"
     assert contexts(env, ns) == [] and env.denied[0]["reason_code"] == "DEVELOPMENT_RUNS_DISABLED"
 
 
@@ -549,12 +618,7 @@ def test_the_test_entry_says_which_kind_of_toolkit_run_from_the_tool_and_passes_
     assert "platform_read=True" in (PLUGIN_ROOT / "utils" / "attachments.py").read_text()
     index = (PLUGIN_ROOT / "utils" / "application_tools.py").read_text()
     assert "admission=admission," in function(index, "start_index_task", "def ")
-    runtool = (PLUGIN_ROOT / "methods" / "runtool.py").read_text()
-    assert "entry_point=ENTRY_TOOLKIT_TEST" in runtool and "admission=admission" in runtool and "sid=None" in runtool
-    api = (PLUGIN_ROOT / "api" / "v2" / "test_toolkit_tool.py").read_text()
-    assert "'message': result.get('error')}, 403" in api and "'message': e.error.get('error')}, 403" in api
-    # the socket an async REST test streams to is the caller's own: its holder is who the run is admitted as
-    assert "auth.current_user(auth_data=holder).get('id') != caller_id" in api
+    # (``do_runtool``, the REST test and ``_toolkit_run_refused``: behaviour tests in test_7227_toolkit_entries.py)
     # no payload-wide unsecret under governance: a template in the test parameters is refused, not passed on
     assert "is_governed(self) and has_secret_template(data.get('tool_params'))" in test
 
@@ -568,3 +632,84 @@ def test_the_internal_mcp_checks_see_the_toolkits_of_a_sub_agent_as_main_prefetc
     tool = {"id": 5, "type": "mcp", "settings": {"url": "https://x"}}
     payload = prefetch({"application": {"version_details": {"tools": []}}}, "8:80", tool)
     assert any(tools and tool in tools for tools in ns.internal_obo._tool_lists(payload))  # pylint: disable=W0212
+
+
+# --- #7227 D1: a plain LLM chat of the chat page -------------------------------------------------------------------------
+
+LLM_TASK = "indexer_predict_agent"
+
+
+def llm_dispatch(env, ns, payload, module_=None, **over):
+    values = dict(entry_point="chat_sio_llm", application_id=None, version_id=None)
+    values.update(over)
+    call = call_kwargs(payload)
+    return call, ns.adm.admit_dispatch(module_ or env.module(), LLM_TASK, call, env.request(**values))
+
+
+def test_a_plain_llm_chat_is_admitted_with_no_decision_whatever_the_development_setting(ns, env):
+    for allow in (False, True):
+        env.reset()
+        _call, ref = llm_dispatch(env, ns, {"tools": [], "application": {"instructions": "be brief"}},
+                                  module_=env.module(allow_development_runs=allow))
+        [row] = contexts(env, ns)
+        assert ref == str(row.id) and row.profile == "development" and row.agent_binding_ref is None
+        assert (row.application_id, row.version_id, row.allowed_bindings, row.parent_context_ref) == (
+            None, None, [], None)
+        assert [e["reason_code"] for e in admissions(env)] == ["ADMITTED_DEVELOPMENT"]
+        assert env.permission_calls == [] and env.secrets_calls == []   # nothing to decide: nothing read for it
+
+
+def test_a_plain_llm_chat_with_a_platform_internal_configuration_runs_and_a_credential_is_refused(ns, env):
+    tool = platform_internal_sub_agent(env, toolkit_id=31)
+    call, _ref = llm_dispatch(env, ns, {"tools": [tool]})
+    assert "connection_string" in dumped(call)   # not a credential: left as it is
+    cred = Credential(env, uuid.uuid4())   # a personal or project credential on a conversation toolkit
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        llm_dispatch(env, ns, {"tools": [cred.tool()]})
+    assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"   # no decision covers it (follow-up, not here)
+    assert contexts(env, ns)[-1].revoked_reason == "NOT_DISPATCHED"
+
+
+def test_only_a_signed_in_person_has_a_plain_llm_chat_admitted(ns, env):
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        llm_dispatch(env, ns, {"tools": []}, run_kind="system")
+    assert err.value.reason_code == "MANDATE_REQUIRED"
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:   # an agent version never takes the LLM chat branch
+        llm_dispatch(env, ns, {"tools": []}, application_id=7, version_id=70)
+    assert err.value.reason_code == "DENIED_BINDING"
+    assert contexts(env, ns) == []
+
+
+# --- #7227 review: the toolkit branch belongs to the toolkit runner only ----------------------------------------------------
+
+def test_an_agent_dispatch_naming_a_toolkit_entry_point_is_refused(ns, env):
+    for entry_point in ("toolkit_test", "index_on_demand"):
+        with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+            dispatch(env, ns, {"application": {"version_details": {"tools": []}}}, entry_point=entry_point,
+                     application_id=None, version_id=None, toolkit_id=None)
+        assert err.value.reason_code == "DENIED_ENTRY_POINT"
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:   # and the toolkit runner only as a toolkit run
+        ns.adm.admit_dispatch(module(env), TOOLKIT_TASK, toolkit_call(Credential(env, uuid.uuid4())),
+                              env.request(entry_point="editor_chat"))
+    assert err.value.reason_code == "DENIED_ENTRY_POINT"
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:   # the platform's unadmitted read: toolkit runner only
+        ns.adm.admit_dispatch(module(env), "indexer_agent", call_kwargs({"tools": []}), ns.adm.CREDENTIAL_FREE)
+    assert err.value.reason_code == "DENIED_ENTRY_POINT"
+    assert contexts(env, ns) == []
+    assert [event["reason_code"] for event in env.denied] == ["DENIED_ENTRY_POINT"] * 4
+
+
+def test_the_configuration_facts_are_read_once_per_dispatch_with_what_later_steps_will_ask(ns):
+    cd, calls = ns.credential_decision, []
+
+    def reader(project_id, uuids):
+        calls.append((project_id, list(uuids)))
+        return {item: {"section": "credentials" if item == "a" else "vectorstore"} for item in uuids}
+
+    with cd.walk_scope():
+        cd.want_configuration_facts([("b", 1), ("c", 2)])
+        assert set(cd.read_configuration_facts([("a", 1)], reader)) == {"a"}
+        assert set(cd.read_configuration_facts([("b", 1), ("c", 2)], reader)) == {"b", "c"}
+        assert cd.read_configuration_facts([("a", 1)], reader)["a"]["section"] == "credentials"
+    assert sorted(calls) == [(1, ["a", "b"]), (2, ["c"])]   # one read per project, none after
+    assert set(cd.read_configuration_facts([("a", 1)], reader)) == {"a"} and len(calls) == 3   # outside: as before
