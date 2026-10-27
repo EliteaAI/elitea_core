@@ -2,6 +2,8 @@
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
+from uuid import UUID
+
 from flask import request
 from pydantic import BaseModel, Field, StrictBool, ValidationError
 from pylon.core.tools import log
@@ -73,6 +75,16 @@ class ScheduleProjectHandlers:
             name = e.errors()[0]["loc"][0]
             text = "limit must be between 1 and 100" if name == "limit" else f"{name} is not valid"
             return {"code": INVALID_INPUT, "error": text, "field": name}, 400
+
+        chat = args.get("delivery_conversation_uuid")
+        if chat is not None:
+            try:
+                chat = UUID(chat)
+            except ValueError:
+                return {"code": INVALID_INPUT, "error": "delivery_conversation_uuid is not valid",
+                        "field": "delivery_conversation_uuid"}, 400
+            # the filters model has no such field; the query reads it from the filters object
+            filters = filters.model_copy(update={"delivery_conversation_uuid": chat})
 
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
