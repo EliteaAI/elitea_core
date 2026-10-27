@@ -1017,3 +1017,36 @@ def test_the_preflight_fails_for_a_platform_that_cannot_decide_a_mandate_run(ns,
         assert failed == [expected]   # exactly this check, nothing else
     finally:
         ns.install_fakes(env)
+
+
+# --- #7227: a mandate admits no sub-agent yet ---------------------------------------------------------------------------
+
+def with_sub_agent(payload, tool):
+    payload["application"]["subagent_version_details"] = {
+        "8:80": {"name": "child", "description": "", "version_details": {"tools": [tool]}}}
+    return payload
+
+
+def sub_agent_tool(env, section):
+    cfg_uuid = str(uuid.uuid4())
+    env.configurations[(1, cfg_uuid)] = {"id": 8, "project_id": 1, "type": "github", "section": section, "generation": 1}
+    return {"id": 2, "type": "github", "settings": {"credentials": {
+        "elitea_title": "child", "configuration_uuid": cfg_uuid, "configuration_project_id": 1,
+        "configuration_type": "github", "token": "child-token-value"}}}
+
+
+def test_a_sub_agent_with_a_credential_refuses_a_mandate_run_readably(ns, env, agent):
+    credential = MandateCredential(env, agent)
+    error = refusal(ns, env, agent, payload=with_sub_agent(credential.payload, sub_agent_tool(env, "credentials")))
+    assert (error.reason_code, error.message) == (
+        "SUB_AGENT_CREDENTIAL_NOT_ADMITTED", ns.adm.MESSAGES["SUB_AGENT_CREDENTIAL_NOT_ADMITTED"])
+    assert "scheduled or webhook" in error.message
+    assert contexts(env, ns) == [] and env.denied[-1]["reason_code"] == "SUB_AGENT_CREDENTIAL_NOT_ADMITTED"
+
+
+def test_a_mandate_run_whose_sub_agents_carry_no_credential_of_their_own_is_admitted(ns, env, agent):
+    credential = MandateCredential(env, agent)
+    admit(ns, env, agent, payload=with_sub_agent(credential.payload, sub_agent_tool(env, "vectorstore")))
+    shared = credential.payload["application"]["version_details"]["tools"][0]   # the mandate's own toolkit
+    admit(ns, env, agent, run_id="run-2", payload=with_sub_agent(credential.payload, shared))
+    assert len(contexts(env, ns)) == 2

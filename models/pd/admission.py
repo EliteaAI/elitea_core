@@ -17,6 +17,12 @@ CALLER_TYPES = ("user", "token")
 # author's own identity and credentials, no binding). Set by ``chat_all.predict_sio`` from the conversation row it
 # loaded, never from anything the client sent with the turn.
 ENTRY_EDITOR_CHAT = "editor_chat"
+# A person testing a toolkit's tool, or indexing it on demand (#7229): development runs of that person, set by the test
+# entry (``test_toolkit_tool_sio``, ``do_runtool``) from the tool it was asked to run, never from the payload
+ENTRY_TOOLKIT_TEST = "toolkit_test"
+ENTRY_INDEX_ON_DEMAND = "index_on_demand"
+# A plain LLM chat of the chat page (no agent): the person's own run, with no definition to bind (#7227 D1)
+ENTRY_CHAT_LLM = "chat_sio_llm"
 
 
 class AdmissionRequest(BaseModel):
@@ -27,7 +33,8 @@ class AdmissionRequest(BaseModel):
     application_id: Optional[int] = None
     version_id: Optional[int] = None
     run_kind: Literal["interactive", "system", "mandate"]
-    entry_point: Literal["chat_sio", "editor_chat", "chat_sio_llm", "predict_api", "schedule", "webhook"]
+    entry_point: Literal["chat_sio", "editor_chat", "chat_sio_llm", "predict_api", "schedule", "webhook", "toolkit_test",
+                         "index_on_demand"]
     caller_type: Literal["user", "token", "public", "trigger"]
     caller_id: Optional[int] = None
     caller_reference: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
@@ -36,6 +43,8 @@ class AdmissionRequest(BaseModel):
     # (``schedule:version:<id>`` / ``webhook:version:<id>``). Only the trusted trigger paths build these.
     mandate_ref: Optional[str] = None
     trigger_ref: Optional[str] = None
+    # A toolkit run (#7229): the saved toolkit it tests or indexes (no application, no version)
+    toolkit_id: Optional[int] = None
 
 
 class ExecutionSecurityContextView(BaseModel):
@@ -46,8 +55,8 @@ class ExecutionSecurityContextView(BaseModel):
     run_id: str
     attempt: int
     project_id: int
-    application_id: int
-    version_id: int
+    application_id: Optional[int] = None   # None for a toolkit run (#7229)
+    version_id: Optional[int] = None
     agent_binding_ref: str
     policy_revision: str
     expires_at: datetime
@@ -62,6 +71,9 @@ class ExecutionSecurityContextView(BaseModel):
     subject_ref: Optional[str] = None
     subject_user_id: Optional[int] = None
     binding_project_id: Optional[int] = None
+    # The sub-agents admitted with the run (#7227): their decisions by prefetch key (``<application id>:<version id>``),
+    # which dispatch seals each one's toolkits against
+    children: dict = Field(default_factory=dict)
 
 
 def _holder(sid):
@@ -76,7 +88,7 @@ def _holder(sid):
 
 
 def admission_request_from(  # pylint: disable=R0913
-    module, *, sid, project_id, binding_project_id, version_row, run_kind, entry_point,
+    module, *, sid, project_id, binding_project_id, version_row, run_kind, entry_point, toolkit_id=None,
 ) -> Optional[AdmissionRequest]:
     """The admission request for this call, or ``None`` when governance is off (nothing is built or read). Audit only
     builds it too: the same request is evaluated, and nothing is refused.
@@ -106,4 +118,5 @@ def admission_request_from(  # pylint: disable=R0913
         caller_type=caller_type,
         caller_id=caller_id,
         caller_reference=reference if isinstance(reference, str) and reference else None,
+        toolkit_id=toolkit_id if isinstance(toolkit_id, int) and not isinstance(toolkit_id, bool) else None,
     )
