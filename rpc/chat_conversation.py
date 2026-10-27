@@ -1,13 +1,14 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, or_, func
+from sqlalchemy import desc, asc, Integer, or_, func, select
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
-from ..models.pd.conversation import ConversationListExtended, ConversationDetails
+from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
@@ -31,6 +32,37 @@ from ..utils.model_defaults import creation_llm_settings, chat_request_default
 # and CLI tools may pass larger values, but anything above this is rejected
 # silently rather than fanning into a heavy GROUP BY.
 LIST_CONVERSATIONS_MAX_LIMIT = 100
+
+
+def _schedule_runs(session, conversations) -> dict[int, dict]:
+    """The run record of each run row, keyed by conversation id (CR-22, US-38 D6).
+
+    One query bounded by the page's run ids (at most LIST_CONVERSATIONS_MAX_LIMIT); the schedule name is read live,
+    so a rename shows at once. A row whose meta has no integer run id, whose run is gone, or whose run belongs
+    to another conversation, gets no entry.
+    """
+    run_of = {}
+    for conv in conversations:
+        run_id = (conv.meta or {}).get('schedule_run_id')
+        if isinstance(run_id, int) and not isinstance(run_id, bool):
+            run_of[conv.id] = run_id
+    if not run_of:
+        return {}
+    # Meta is user-writable: a run counts only when its own conversation_id names this conversation
+    runs = {
+        (run_id, conversation_id): ScheduleRunRef(
+            id=run_id, schedule_id=schedule_id, schedule_name=name, status=status, trigger=trigger,
+        ).model_dump()
+        for run_id, conversation_id, schedule_id, name, status, trigger in (
+            session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
+                          EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
+            .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+            .filter(EntityScheduleRun.id.in_(set(run_of.values())),
+                    EntityScheduleRun.conversation_id.in_(list(run_of)))
+            .all()
+        )
+    }
+    return {conv_id: runs[(run_id, conv_id)] for conv_id, run_id in run_of.items() if (run_id, conv_id) in runs}
 
 
 class RPC:
@@ -226,7 +258,7 @@ class RPC:
 
                 if meta is not None:
                     conversation.meta = conversation.meta or {}
-                    conversation.meta.update(strip_server_owned_meta(dict(meta), conversation.meta))
+                    conversation.meta.update(strip_server_owned_meta(drop_run_keys(dict(meta)), conversation.meta))
                     # #5392: instructions are per-persona now, but meta['default_instructions'] was
                     # baked in at creation time from the then-active persona. When the persona
                     # changes here, re-resolve it from the owner's personalization so a switched
@@ -388,6 +420,7 @@ class RPC:
         participant_id: int = None,
         entity_name: str = None,
         entity_project_id: int = None,
+        schedule_id: int | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -399,6 +432,7 @@ class RPC:
         Args:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
+            schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -462,6 +496,14 @@ class RPC:
                     )
                 base_query = base_query.filter(*filters)
 
+            if schedule_id is not None:
+                # The run row owns the link, so the filter uses its indexed column, not user-writable meta
+                base_query = base_query.filter(
+                    Conversation.id.in_(
+                        select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.schedule_id == schedule_id)
+                    ),
+                )
+
             base_query = base_query.order_by(sorting(sorting_by))
 
             # Cap page size: keeps the IN(...) lists in the aggregation queries
@@ -514,6 +556,8 @@ class RPC:
                 else calculate_conversation_durations_batch(conv_ids, session)
             )
 
+            schedule_runs = _schedule_runs(session, conversations)
+
             rows = []
             for conv in conversations:
                 conv_dict = {
@@ -522,6 +566,7 @@ class RPC:
                     "participants_count": participants_count.get(conv.id, 0),
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
+                    "schedule_run": schedule_runs.get(conv.id),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 

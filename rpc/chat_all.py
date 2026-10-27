@@ -62,6 +62,10 @@ from ..utils.toolkit_authorization import (
 )
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
+from ..utils.schedule_runs import (
+    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
+    apply_schedule_decision, check_schedule_decision,
+)
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
@@ -79,6 +83,7 @@ from ..utils.pipeline_hitl_history import (
     create_pipeline_hitl_resume_segments,
     get_direct_pipeline_hitl_interrupt,
 )
+from ..utils.pipeline_execution import TriggerType, with_execution_type
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -101,6 +106,11 @@ def authoring_kwargs(conversation, participant, chat_project_id, rpc_func) -> di
     return {"authoring": True} if is_authoring_conversation(conversation, participant, chat_project_id) else {}
 
 
+def _chat_trigger_kwargs(rpc_func: str) -> dict:
+    """The chat trigger source of an agent, pipeline or skill run; the other predict RPCs take no such argument."""
+    return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
+
+
 def _get_agent_type(
     session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
 ) -> str | None:
@@ -121,6 +131,54 @@ def _get_agent_type(
         except Exception:
             log.debug(f"Could not fetch agent_type for version {app_version_id}")
     return agent_type
+
+
+# The answer of each refused schedule decision (EL-7011)
+_SCHEDULE_REFUSALS = {
+    ScheduleDecisionForbidden: {"error": "Only the schedule owner can approve or reject this run", "status": 403},
+    ScheduleDecisionInvalid: {
+        "error": "hitl_action must be approve, edit, answer, block_with_comment or reject",
+        "field": "hitl_action", "status": 400,
+    },
+    ScheduleRunNotWaiting: {"error": "This schedule run is not waiting for approval", "status": 409},
+}
+
+
+def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
+    """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
+
+    The (run id, decision) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    """
+    if not parsed.hitl_resume:
+        return None, None
+    with db.get_session(parsed.project_id) as session:
+        meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
+    run_id = (meta or {}).get('schedule_run_id')
+    if run_id is None:
+        return None, None
+    decisions = parsed.hitl_decisions
+    # A non-dict item has no action, so it is refused as invalid (400) instead of failing (500)
+    actions = (
+        [item.get('action') if isinstance(item, dict) else None for item in decisions]
+        if decisions else [parsed.hitl_action]
+    )
+    try:
+        decision = check_schedule_decision(
+            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id))
+    except tuple(_SCHEDULE_REFUSALS) as e:
+        return None, _SCHEDULE_REFUSALS[type(e)]
+    return ((run_id, decision) if decision else None), None
+
+
+def _apply_schedule_decision(project_id, pending) -> dict | None:
+    """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
+    if pending is None:
+        return None
+    try:
+        apply_schedule_decision(project_id, *pending)
+    except ScheduleRunNotWaiting:
+        return _SCHEDULE_REFUSALS[ScheduleRunNotWaiting]
+    return None
 
 
 def generate_toolkit_payload(
@@ -1230,6 +1288,7 @@ class RPC:
                 )
                 return {"error": "This message has already been submitted"}
 
+            conversation.meta = with_execution_type(conversation.meta, TriggerType.CHAT)
             # Checkpoint A (#6886): before the turn is stored, broadcast or used to
             # name the conversation. A blocked turn is stored redacted with the refusal
             # as its answer (plan D5), so the card survives a reload; REST callers get
@@ -1636,6 +1695,8 @@ class RPC:
                             **pop_chat_skills(payload),
                             **skill_rpc_kwargs,
                             **authoring_kwargs(conversation, msg_group.sent_to, parsed.project_id, rpc_func),
+                            **_chat_trigger_kwargs(rpc_func),
+
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2075,6 +2136,13 @@ class RPC:
         else:
             current_user = auth.current_user()
 
+        # Owner check of a scheduled run before any resume (EL-7011); an internal replay was checked already
+        schedule_decision = None
+        if _internal_token is not INTERNAL_CONTINUE_TOKEN:
+            schedule_decision, denied = _check_schedule_decision(parsed, current_user['id'])
+            if denied:
+                return self._refuse_schedule_decision(sid, parsed, denied)
+
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
         # — without this, a fan-out child whose stash was cleared on stop falls
@@ -2127,6 +2195,11 @@ class RPC:
         # and the reconcile gate wakes the parent.
         child_resume = self._continue_child_resume(sid, parsed, current_user)
         if child_resume is not None:
+            # lean: the write follows the child start, so a decision that came too late is only logged;
+            # move it into _continue_child_resume when a schedule run must refuse a parked child
+            if _apply_schedule_decision(parsed.project_id, schedule_decision):
+                log.warning("Schedule run decision came too late for the resumed child (message_id=%s)",
+                            parsed.message_id)
             return child_resume
 
         # A durable child approval must never degrade into the ordinary parent
@@ -2165,6 +2238,11 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
+
+        # The decision changes the schedule run only now: a guard above that refused left it waiting (EL-7011)
+        denied = _apply_schedule_decision(parsed.project_id, schedule_decision)
+        if denied:
+            return self._refuse_schedule_decision(sid, parsed, denied)
 
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
@@ -2595,6 +2673,8 @@ class RPC:
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
                     **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
+                    **_chat_trigger_kwargs(rpc_func),
+
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout
@@ -2653,6 +2733,16 @@ class RPC:
             data=serialize(MessageGroupDetail.model_validate(response_msg)),
             room=get_chat_room(response_msg.conversation.uuid),
         )
+
+    @web.method()
+    def _refuse_schedule_decision(self, sid, parsed, denied: dict) -> dict:
+        """The error dict of a refused schedule decision for REST; the socket path raises it (EL-7011)."""
+        if sid:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value, error=denied['error'],
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+        return denied
 
     @web.method()
     def _continue_child_resume(self, sid, parsed, current_user):

@@ -129,17 +129,49 @@ def test_plan_carries_the_expected_handler(bindings):
     assert plan["pipeline_scheduling"]["rpc_func"] == "pipelines_check_scheduling"
 
 
-def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
-    registered = {
+def _rpc_names(module_file):
+    return {
         arg.value
-        for node in ast.walk(ast.parse((PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text()))
+        for node in ast.walk(ast.parse((PLUGIN_ROOT / "rpc" / module_file).read_text()))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "rpc"
         for arg in node.args
         if isinstance(arg, ast.Constant)
     }
-    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["index_scheduling"] in registered
+
+
+def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
+    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["index_scheduling"] in _rpc_names("index_scheduling.py")
+
+
+def test_r4_4_el_7011_pipeline_row_is_bound_to_the_generic_tick(bindings):
+    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["pipeline_scheduling"] in _rpc_names(
+        "entity_schedules_check.py"
+    )
+
+
+def test_r3_4_el_7011_pipeline_scheduling_off_makes_the_tick_row_inactive(bindings):
+    """R3.4: with pipeline_scheduling off the managed row of the generic tick is inactive, so no step runs."""
+    plan = {e["name"]: e for e in bindings.build_scheduler_sync_plan({"pipeline_scheduling": {"enabled": False}})}
+    assert (plan["pipeline_scheduling"]["rpc_func"], plan["pipeline_scheduling"]["active"]) == (
+        "pipelines_check_scheduling", False,
+    )
+
+
+def test_r4_4_el_7011_every_rpc_module_keeps_the_rpc_class_the_loader_expects():
+    modules = [path for path in (PLUGIN_ROOT / "rpc").glob("*.py") if path.name != "__init__.py"]
+    missing = [
+        path.name for path in modules
+        if not any(isinstance(node, ast.ClassDef) and node.name == "RPC" for node in ast.parse(path.read_text()).body)
+    ]
+    assert missing == []
+
+
+def test_the_old_rpc_names_resolve_to_the_tick_handler():
+    names = _rpc_names("entity_schedules_check.py")
+    assert {"entity_schedules_check", "pipelines_check_scheduling", "check_pipeline_scheduling"} <= names
+    assert not {"pipelines_check_scheduling", "check_pipeline_scheduling"} & _rpc_names("pipeline_scheduling.py")
 
 
 def test_every_binding_declares_a_handler(bindings):
