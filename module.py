@@ -527,6 +527,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.8",
             )
             this.for_module("admin").module.register_admin_task(
+                "prune_orphaned_index_schedules", self.prune_orphaned_index_schedules,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_skill_run_settings_column", self.migrate_skill_run_settings_column,
                 group="R-2.0.8",
             )
@@ -1280,6 +1284,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "set_index_schedule_expiration", self.set_index_schedule_expiration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "prune_orphaned_index_schedules", self.prune_orphaned_index_schedules
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables
