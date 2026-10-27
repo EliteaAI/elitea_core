@@ -2206,8 +2206,14 @@ def _validate(project_id, context_ref, caller, known, touch=True, ttl=None):  # 
     # (#7229): the run's sub-agents and its parked root stay as live as the run itself
     now = _now()
     members = (row, root) if root is not None else (row,)
-    due = not is_mandate and bool(ttl) and any(
-        _aware(member.expires_at) < now + timedelta(seconds=int(ttl) / 2) for member in members)
+    due = False
+    if not is_mandate and ttl:
+        # only a deadline that would actually move: live, inside its last half window and short of the run's cap (an
+        # expired root or a run at its cap would otherwise ask for a write on every verdict that moves nothing)
+        target = min(now + timedelta(seconds=int(ttl)),
+                     min(_aware(member.created_at) for member in members) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+        due = any(now < _aware(member.expires_at) < min(now + timedelta(seconds=int(ttl) / 2), target)
+                  for member in members)
     if touch or row.state != "running" or due:   # the internal MCP asks per request: no write once running (#7214)
         with db.get_session(project_id) as session:
             if (touch or row.state != "running") \
@@ -2260,7 +2266,11 @@ def _slide(session, run_id, created_at, ttl, now, allow_expired=False) -> int:
     decision), neither is one past its window. The number of rows moved."""
     if ttl <= 0 or not run_id:
         return 0
-    deadline = min(now + timedelta(seconds=ttl), _aware(created_at) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+    # the cap is the run's: the earliest admission among its live contexts (each row's own cap is never passed)
+    first = session.execute(select(func.min(ExecutionSecurityContext.created_at)).where(
+        ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.state.in_(LIVE_STATES))).scalar()
+    started = min(_aware(created_at), _aware(first)) if first is not None else _aware(created_at)
+    deadline = min(now + timedelta(seconds=ttl), started + timedelta(seconds=MAX_RUN_LIFETIME_S))
     conditions = [ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.state.in_(LIVE_STATES),
                   ExecutionSecurityContext.expires_at < deadline]
     if not allow_expired:

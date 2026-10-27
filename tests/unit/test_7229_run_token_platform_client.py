@@ -642,6 +642,36 @@ def test_the_run_cap_holds_however_long_the_run_is_in_use(ns, env, clock):
     assert claims["exp"] <= cap.timestamp() + 5
 
 
+def test_near_its_cap_a_run_in_use_writes_nothing_more(ns, env, clock):
+    _call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    cap = ns.adm._aware(context_row(env, ns, ref).created_at) + timedelta(seconds=ns.adm.MAX_RUN_LIFETIME_S)  # pylint: disable=W0212
+    with env.get_session(1) as session:   # the run slid all the way to its cap
+        session.execute(env.ns.sa.update(ns.models.ExecutionSecurityContext)
+                        .where(ns.models.ExecutionSecurityContext.id == uuid.UUID(ref)).values(expires_at=cap))
+        session.commit()
+    for seconds in (TTL // 3, TTL // 4, 60):   # verdicts in its last half window: the deadline cannot move
+        clock["now"] = cap - timedelta(seconds=seconds)
+        assert not updates_during(env, lambda: verdict(ns, env, ref))
+    assert ns.adm._aware(context_row(env, ns, ref).expires_at) == cap  # pylint: disable=W0212
+
+
+def test_a_resume_never_moves_any_context_past_the_runs_own_cap(ns, env, clock):
+    root_ref, child_ref, _details = draft_fan_out(env, ns)
+    run_to_running(env, ns, root_ref)
+    root_created = ns.adm._aware(context_row(env, ns, root_ref).created_at)  # pylint: disable=W0212
+    with env.get_session(1) as session:   # the child was admitted an hour after its root
+        session.execute(env.ns.sa.update(ns.models.ExecutionSecurityContext)
+                        .where(ns.models.ExecutionSecurityContext.id == uuid.UUID(child_ref))
+                        .values(created_at=root_created + timedelta(hours=1)))
+        session.commit()
+    cap = root_created + timedelta(seconds=ns.adm.MAX_RUN_LIFETIME_S)
+    clock["now"] = cap - timedelta(seconds=60)   # the person decides a minute before the run's cap
+    assert ns.adm.slide_for_resume(env.module(), 1, child_ref) > 0
+    for row in env.query(1, ns.models.ExecutionSecurityContext):
+        assert ns.adm._aware(row.expires_at) <= cap  # pylint: disable=W0212
+
+
 def test_a_mandate_context_never_slides(ns, env, clock):
     _call, ref = admitted_run(ns, env)
     with env.get_session(1) as session:   # the row as a mandate run has it
