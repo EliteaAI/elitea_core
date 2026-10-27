@@ -157,60 +157,77 @@ def _skills(count):
 
 
 class TestInvocationCaps:
-    def test_a_message_invokes_at_most_five_skills_by_default(self, skill_utils_module, admin_config):  # noqa: F811
+    def test_a_message_over_the_default_cap_is_rejected(self, skill_utils_module, admin_config):  # noqa: F811
         message = ' '.join(f'~skill-{i}' for i in range(1, 8))
 
-        _cleaned, invoked, capped = skill_utils_module.consume_message_skills(message, _skills(50))
+        with pytest.raises(skill_utils_module.SkillInvocationLimitError) as exc:
+            skill_utils_module.consume_message_skills(message, _skills(50))
+
+        assert (exc.value.count, exc.value.max_allowed) == (7, 5)
+        assert 'Maximum allowed is 5' in str(exc.value)
+
+    def test_the_early_chat_check_rejects_a_message_over_the_cap(self, skill_utils_module, admin_config):  # noqa: F811
+        message = ' '.join(f'~skill-{i}' for i in range(1, 7))
+
+        with pytest.raises(skill_utils_module.SkillInvocationLimitError):
+            skill_utils_module.validate_message_skill_limit(message, _skills(50))
+
+    def test_the_early_chat_check_accepts_a_message_at_the_cap(self, skill_utils_module, admin_config):  # noqa: F811
+        message = ' '.join(f'~skill-{i}' for i in range(1, 6))
+
+        assert skill_utils_module.validate_message_skill_limit(message, _skills(50)) is None
+
+    def test_a_message_at_the_cap_invokes_every_mention(self, skill_utils_module, admin_config):  # noqa: F811
+        message = ' '.join(f'~skill-{i}' for i in range(1, 6))
+
+        _cleaned, invoked = skill_utils_module.consume_message_skills(message, _skills(50))
 
         assert [s['name'] for s in invoked] == [f'skill-{i}' for i in range(1, 6)]
-        assert capped == [{'skill_id': 6, 'name': 'skill-6'}, {'skill_id': 7, 'name': 'skill-7'}]
 
     def test_the_per_message_cap_is_configured_apart_from_the_attach_limit(
         self, skill_utils_module, admin_config,  # noqa: F811
     ):
         admin_config({'skills': {'max_skills_per_agent': 50, 'max_invoked_skills_per_turn': 7}})
-        message = ' '.join(f'~skill-{i}' for i in range(1, 10))
 
-        _cleaned, invoked, capped = skill_utils_module.consume_message_skills(message, _skills(50))
+        _cleaned, invoked = skill_utils_module.consume_message_skills(
+            ' '.join(f'~skill-{i}' for i in range(1, 8)), _skills(50),
+        )
+        assert len(invoked) == 7
+        with pytest.raises(skill_utils_module.SkillInvocationLimitError):
+            skill_utils_module.consume_message_skills(' '.join(f'~skill-{i}' for i in range(1, 9)), _skills(50))
 
-        assert [s['name'] for s in invoked] == [f'skill-{i}' for i in range(1, 8)]
-        assert [s['name'] for s in capped] == ['skill-8', 'skill-9']
-
-    def test_the_cap_holds_across_text_blocks(self, skill_utils_module, admin_config):  # noqa: F811
+    def test_the_cap_counts_mentions_across_text_blocks(self, skill_utils_module, admin_config):  # noqa: F811
         blocks = [
             {'type': 'text', 'text': '~skill-1 ~skill-2 ~skill-3'},
             {'type': 'text', 'text': '~skill-4 ~skill-5 ~skill-6'},
         ]
 
-        _rebuilt, invoked, capped = skill_utils_module.consume_message_skills(blocks, _skills(50))
+        with pytest.raises(skill_utils_module.SkillInvocationLimitError):
+            skill_utils_module.consume_message_skills(blocks, _skills(50))
+
+    def test_a_skill_mentioned_in_two_text_blocks_counts_once(self, skill_utils_module, admin_config):  # noqa: F811
+        blocks = [
+            {'type': 'text', 'text': ' '.join(f'~skill-{i}' for i in range(1, 6))},
+            {'type': 'text', 'text': 'and again ~skill-1'},
+        ]
+
+        _rebuilt, invoked = skill_utils_module.consume_message_skills(blocks, _skills(50))
 
         assert [s['name'] for s in invoked] == [f'skill-{i}' for i in range(1, 6)]
-        assert [s['name'] for s in capped] == ['skill-6']
 
-    def test_a_message_within_the_cap_caps_nothing(self, skill_utils_module, admin_config):  # noqa: F811
-        message = ' '.join(f'~skill-{i}' for i in range(1, 6))
-
-        _cleaned, invoked, capped = skill_utils_module.consume_message_skills(message, _skills(50))
-
-        assert len(invoked) == 5
-        assert capped == []
-
-    def test_a_repeated_mention_does_not_push_a_skill_over_the_cap(
-        self, skill_utils_module, admin_config,  # noqa: F811
-    ):
+    def test_a_repeated_mention_counts_once(self, skill_utils_module, admin_config):  # noqa: F811
         message = '~skill-1 ~skill-1 ~skill-2 ~skill-3 ~skill-4 ~skill-5 ~skill-2'
 
-        _cleaned, invoked, capped = skill_utils_module.consume_message_skills(message, _skills(50))
+        _cleaned, invoked = skill_utils_module.consume_message_skills(message, _skills(50))
 
         assert [s['name'] for s in invoked] == [f'skill-{i}' for i in range(1, 6)]
-        assert capped == []
 
-    def test_an_over_cap_mention_keeps_its_name_in_the_text(self, skill_utils_module, admin_config):  # noqa: F811
-        message = ' '.join(f'~skill-{i}' for i in range(1, 8))
+    def test_an_unknown_name_does_not_count(self, skill_utils_module, admin_config):  # noqa: F811
+        message = ' '.join(f'~skill-{i}' for i in range(1, 6)) + ' ~nobody'
 
-        cleaned, _invoked, _capped = skill_utils_module.consume_message_skills(message, _skills(50))
+        _cleaned, invoked = skill_utils_module.consume_message_skills(message, _skills(50))
 
-        assert cleaned == ' '.join(f'skill-{i}' for i in range(1, 8))
+        assert len(invoked) == 5
 
     def test_instructions_may_reference_every_attached_skill(self, skill_utils_module, admin_config):  # noqa: F811
         skills = _skills(50)

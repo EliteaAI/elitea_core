@@ -17,7 +17,7 @@ from .llm_settings import normalize_runtime_max_tokens
 from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
-from .skill_utils import consume_message_skills, resolve_runtime_skills
+from .skill_utils import SkillInvocationLimitError, consume_message_skills, resolve_runtime_skills
 from .stored_oauth_tokens import inject_stored_oauth_tokens
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
@@ -324,7 +324,6 @@ def generate_predict_payload(
     skip_expansion: bool = False,
     chat_skills: Optional[list] = None,
     invoked_skills: Optional[list] = None,
-    capped_skills: Optional[list] = None,
 ) -> dict:
     """
     :param parsed: payload
@@ -497,7 +496,6 @@ def generate_predict_payload(
         'supports_vision': supports_vision,
         'return_chat_history': return_chat_history,
         'invoked_skills': invoked_skills or [],
-        'capped_skills': capped_skills or [],
         # Non-interactive predicts (scheduled/webhook/blocking REST) pass sid=None,
         # so bool(sid) alone gates this off for them without a separate flag.
         'next_input_suggestion': {
@@ -564,15 +562,11 @@ def generate_predict_payload(
         disclosable_skills = merge_disclosable_skills(own_disclosable_skills, chat_skills)
 
         mention_candidates = merge_mention_candidates(attached_skills, chat_skills)
-        payload['user_input'], payload['invoked_skills'], capped_skills = consume_message_skills(
-            payload.get('user_input'), mention_candidates
-        )
-        instruction_referenced = {
-            (s.get('name') or '').strip().lower() for s in own_disclosable_skills if s.get('instruction_referenced')
-        }
-        payload['capped_skills'] = [
-            s for s in capped_skills if (s.get('name') or '').strip().lower() not in instruction_referenced
-        ]
+        try:
+            payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
+        except SkillInvocationLimitError as e:
+            raise PredictPayloadError(str(e)) from e
+        payload['invoked_skills'] = message_skills
 
         # Message-invoked only: an instruction-referenced skill counts as applied
         # only when the model actually loads it (folded in by the indexer).

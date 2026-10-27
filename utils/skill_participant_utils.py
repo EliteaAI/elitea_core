@@ -11,8 +11,8 @@ from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTa
     build_skill_run_target, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
 from .skill_llm_override import select_llm_override
-from .skill_mentions import resolves_mentions_in_predict
-from .skill_utils import consume_message_skills
+from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
+from .skill_utils import consume_message_skills, validate_message_skill_limit
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -24,7 +24,6 @@ from ..models.skill import Skill
 SKILL_DISPATCH_KEY = '_skill_dispatch'
 CHAT_SKILLS_KEY = '_chat_skills'
 INVOKED_SKILLS_KEY = '_invoked_skills'
-CAPPED_SKILLS_KEY = '_capped_skills'
 FOREIGN_SKILL_ERROR = 'A skill participant must come from this project or the public catalog'
 SKILL_NOT_FOUND_ERROR = 'Skill not found'
 
@@ -309,18 +308,19 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
     candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    if not candidates:
+    if candidates:
+        result[CHAT_SKILLS_KEY] = candidates
+    if not has_skill_mention(result.get('user_input')):
         return
-    result[CHAT_SKILLS_KEY] = candidates
-    if is_dummy and has_skill_mention(result.get('user_input')):
-        result['user_input'], result[INVOKED_SKILLS_KEY], result[CAPPED_SKILLS_KEY] = consume_message_skills(
-            result['user_input'], candidates
-        )
+    if not is_dummy:
+        agent_skills = (result.get('version_details') or {}).get('skills') or []
+        validate_message_skill_limit(result['user_input'], merge_mention_candidates(agent_skills, candidates))
+    elif candidates:
+        result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(result['user_input'], candidates)
 
 
 def pop_chat_skills(payload: dict) -> dict:
     return {
         'chat_skills': payload.pop(CHAT_SKILLS_KEY, None),
         'invoked_skills': payload.pop(INVOKED_SKILLS_KEY, None),
-        'capped_skills': payload.pop(CAPPED_SKILLS_KEY, None),
     }

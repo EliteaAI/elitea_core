@@ -319,23 +319,23 @@ CANDIDATE = {'skill_id': 4, 'skill_version_id': 40, 'name': 'Tester', 'version_n
 
 class TestMessageSkillConsumption:
     def test_text_mention_resolves_and_keeps_the_name(self, skill_modules):
-        cleaned, skills, _capped = skill_modules.skill_utils.consume_message_skills('ask ~Tester now', [CANDIDATE])
+        cleaned, skills = skill_modules.skill_utils.consume_message_skills('ask ~Tester now', [CANDIDATE])
         assert cleaned == 'ask Tester now'
         assert [s['skill_version_id'] for s in skills] == [40]
 
     def test_unknown_name_stays_plain_text(self, skill_modules):
-        cleaned, skills, _capped = skill_modules.skill_utils.consume_message_skills('ask ~Nobody', [CANDIDATE])
+        cleaned, skills = skill_modules.skill_utils.consume_message_skills('ask ~Nobody', [CANDIDATE])
         assert (cleaned, skills) == ('ask ~Nobody', [])
 
     def test_block_input_is_rebuilt_without_touching_the_original(self, skill_modules):
         blocks = [{'type': 'text', 'text': '~Tester'}, {'type': 'image_url', 'image_url': 'x'}]
-        rebuilt, skills, _capped = skill_modules.skill_utils.consume_message_skills(blocks, [CANDIDATE])
+        rebuilt, skills = skill_modules.skill_utils.consume_message_skills(blocks, [CANDIDATE])
         assert blocks[0]['text'] == '~Tester'
         assert rebuilt[0]['text'] == 'Tester'
         assert [s['name'] for s in skills] == ['Tester']
 
     def test_no_candidates_means_nothing_is_invoked(self, skill_modules):
-        assert skill_modules.skill_utils.consume_message_skills('ask ~Tester', []) == ('ask ~Tester', [], [])
+        assert skill_modules.skill_utils.consume_message_skills('ask ~Tester', []) == ('ask ~Tester', [])
 
 
 class FakeSkillRow:
@@ -599,7 +599,7 @@ class TestSkillParticipantMentionsInPredict:
         build, llm, rpc = builder
         consumed = []
         build.__globals__['consume_message_skills'] = (
-            lambda content, candidates: consumed.append(candidates) or ('ask Tester', [CANDIDATE], [])
+            lambda content, candidates: consumed.append(candidates) or ('ask Tester', [CANDIDATE])
         )
         build.__globals__['merge_disclosable_skills'] = lambda own, chat: [*own, *chat]
         build.__globals__['log'] = types.SimpleNamespace(debug=lambda *a, **k: None)
@@ -614,7 +614,7 @@ class TestSkillParticipantMentionsInPredict:
     def test_attached_agent_skills_come_before_mention_candidates(self, builder):
         build, llm, rpc = builder
         consumed = []
-        build.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [], [])
+        build.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [])
         build.__globals__['log'] = types.SimpleNamespace(debug=lambda *a, **k: None)
         request = _predict_harness.parsed(llm, agent=True, auto=False)
         attached = [{**CANDIDATE, 'name': 'Attached'}]

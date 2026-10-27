@@ -89,6 +89,60 @@ def _pins(chat_skills):
     return [(s['skill_project_id'], s['skill_id'], s['skill_version_id']) for s in chat_skills]
 
 
+def _agent_skills(count):
+    return [_skill(f'agent-skill-{i}', 900 + i) for i in range(1, count + 1)]
+
+
+class TestAgentMessageSkillLimit:
+    @pytest.fixture
+    def checked(self, env, monkeypatch):
+        calls = []
+        monkeypatch.setattr(env.mod, 'validate_message_skill_limit',
+                            lambda content, candidates: calls.append((content, candidates)))
+        return calls
+
+    def test_an_agent_message_is_checked_against_its_own_and_the_chat_skills(self, env, checked):
+        own = _agent_skills(2)
+        result = _apply(env, 'application', user_input='~agent-skill-1 do it',
+                        version_details={'agent_type': 'openai', 'skills': own})
+        [(content, candidates)] = checked
+        assert content == '~agent-skill-1 do it'
+        assert candidates[:2] == own
+        assert candidates[2:] == result[env.mod.CHAT_SKILLS_KEY]
+        assert env.mod.INVOKED_SKILLS_KEY not in result
+
+    def test_an_agent_without_chat_skills_is_still_checked(self, env, checked):
+        session = ParticipantRowsSession([])
+        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient('application'))
+        own = _agent_skills(6)
+        result = {'user_input': '~agent-skill-1', 'version_details': {'agent_type': 'openai', 'skills': own}}
+        env.mod.apply_participant_skill_mentions(session, msg_group, result, CHAT_PROJECT_ID)
+        assert checked == [('~agent-skill-1', own)]
+
+    def test_the_limit_error_reaches_the_caller(self, env, monkeypatch):
+        class SkillInvocationLimitError(Exception):
+            pass
+
+        def over_the_limit(content, candidates):
+            raise SkillInvocationLimitError('This message references 6 skills')
+
+        monkeypatch.setattr(env.mod, 'validate_message_skill_limit', over_the_limit)
+        with pytest.raises(SkillInvocationLimitError):
+            _apply(env, 'application', user_input='~agent-skill-1',
+                   version_details={'agent_type': 'openai', 'skills': _agent_skills(6)})
+
+    @pytest.mark.parametrize('entity_name,user_input,version_details', [
+        ('application', 'no mention here', {'agent_type': 'openai', 'skills': _agent_skills(6)}),
+        ('application', '~agent-skill-1', {'agent_type': 'pipeline', 'skills': _agent_skills(6)}),
+        ('dummy', '~agent-skill-1', None),
+    ])
+    def test_messages_the_predict_never_resolves_are_not_checked(
+        self, env, checked, entity_name, user_input, version_details,
+    ):
+        _apply(env, entity_name, user_input=user_input, version_details=version_details)
+        assert checked == []
+
+
 class TestChatSkillsReachTheResponder:
     @pytest.mark.parametrize('entity_name', ['application', 'skill'])
     def test_agents_and_skills_get_the_chat_skills_without_a_tilde(self, env, entity_name):
@@ -125,13 +179,8 @@ class TestChatSkillsReachTheResponder:
         assert result == {'user_input': 'hi'}
 
     def test_the_internal_keys_leave_the_payload_for_the_rpc_kwargs(self, env):
-        payload = {
-            'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked'],
-            env.mod.CAPPED_SKILLS_KEY: ['capped'],
-        }
-        assert env.mod.pop_chat_skills(payload) == {
-            'chat_skills': ['chat'], 'invoked_skills': ['invoked'], 'capped_skills': ['capped'],
-        }
+        payload = {'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked']}
+        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'invoked_skills': ['invoked']}
         assert payload == {'user_input': 'hi'}
 
 
@@ -191,7 +240,7 @@ class TestPredictPayloadListsChatSkills:
     def test_chat_skills_are_tilde_candidates_for_the_agent(self, build):
         run, llm = build
         consumed = []
-        run.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [], [])
+        run.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [])
         chat_skill = _skill('ui-review', 5)
         run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True, chat_skills=[chat_skill])
         assert consumed == [[chat_skill]]
@@ -208,29 +257,19 @@ class TestPredictPayloadListsChatSkills:
         result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True, invoked_skills=[resolved])
         assert result['invoked_skills'] == [resolved]
 
-    def test_a_model_chat_hands_the_over_cap_mentions_to_the_runtime(self, build):
+    def test_an_agent_message_over_the_skill_cap_is_rejected_as_a_payload_error(self, build):
         run, llm = build
-        capped = [{'skill_id': 6, 'name': 'over-cap'}]
-        result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True, capped_skills=capped)
-        assert result['capped_skills'] == capped
 
-    def test_an_agent_chat_hands_the_over_cap_mentions_to_the_runtime(self, build):
-        run, llm = build
-        capped = [{'skill_id': 6, 'name': 'over-cap'}]
-        run.__globals__['consume_message_skills'] = lambda content, candidates: (content, [], capped)
-        result = run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True)
-        assert result['capped_skills'] == capped
+        class SkillInvocationLimitError(Exception):
+            pass
 
-    def test_an_instruction_referenced_skill_is_never_capped(self, build):
-        run, llm = build
-        required = {'skill_id': 6, 'name': 'Formatter', 'instruction_referenced': True}
-        optional = {'skill_id': 7, 'name': 'over-cap', 'instruction_referenced': False}
-        run.__globals__['resolve_runtime_skills'] = lambda version: [required, optional]
-        run.__globals__['consume_message_skills'] = lambda content, candidates: (
-            content, [], [{'skill_id': 6, 'name': 'formatter'}, {'skill_id': 7, 'name': 'over-cap'}]
-        )
-        result = run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True)
-        assert result['capped_skills'] == [{'skill_id': 7, 'name': 'over-cap'}]
+        def over_the_cap(content, candidates):
+            raise SkillInvocationLimitError('This message references 7 skills with ~skill-name. Maximum allowed is 5 per message.')
+
+        run.__globals__['SkillInvocationLimitError'] = SkillInvocationLimitError
+        run.__globals__['consume_message_skills'] = over_the_cap
+        with pytest.raises(run.__globals__['PredictPayloadError'], match='Maximum allowed is 5 per message'):
+            run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True)
 
     @pytest.mark.parametrize('agent', [False, True])
     def test_a_request_body_cannot_supply_skills(self, build, agent):
@@ -262,3 +301,40 @@ def test_every_predict_dispatch_hands_over_the_chat_skills(relative_path, expect
             k.arg is None and isinstance(k.value, ast.Call) and getattr(k.value.func, 'id', None) == 'pop_chat_skills'
             for k in call.keywords
         )
+
+
+def test_a_skill_participant_message_over_the_cap_becomes_a_payload_generation_error():
+    tree = ast.parse((PLUGIN_ROOT / 'rpc/chat_all.py').read_text())
+    guards = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Try) and any(
+            isinstance(call, ast.Call) and getattr(call.func, 'id', None) == 'apply_participant_skill_mentions'
+            for stmt in node.body for call in ast.walk(stmt)
+        )
+    ]
+
+    assert len(guards) == 1
+    handlers = [h for h in guards[0].handlers if getattr(h.type, 'id', None) == 'SkillInvocationLimitError']
+    assert len(handlers) == 1
+    raised = handlers[0].body[-1]
+    assert isinstance(raised, ast.Raise) and getattr(raised.exc.func, 'id', None) == 'PayloadGenerationError'
+
+
+def test_a_rejected_chat_payload_stops_the_reply_placeholder_streaming():
+    tree = ast.parse((PLUGIN_ROOT / 'rpc/chat_all.py').read_text())
+    handlers = [
+        handler
+        for node in ast.walk(tree) if isinstance(node, ast.Try)
+        and any(isinstance(call, ast.Call) and getattr(call.func, 'id', None) == 'generate_payload'
+                for stmt in node.body for call in ast.walk(stmt))
+        for handler in node.handlers if getattr(handler.type, 'id', None) == 'PayloadGenerationError'
+    ]
+
+    assert handlers
+    for handler in handlers:
+        resets = [
+            stmt for stmt in handler.body
+            if isinstance(stmt, ast.Assign) and isinstance(stmt.targets[0], ast.Attribute)
+            and stmt.targets[0].attr == 'is_streaming' and getattr(stmt.value, 'value', None) is False
+        ]
+        assert resets, f'handler at line {handler.lineno} leaves the reply streaming'
