@@ -522,3 +522,23 @@ def test_a_plain_chat_without_configured_toolkits_still_decides_and_reads_nothin
     [row] = env.query(1, ns.models.ExecutionSecurityContext)
     assert ref == str(row.id) and row.allowed_bindings == []
     assert env.permission_calls == [] and env.secrets_calls == []
+
+
+@pytest.mark.parametrize("bad_id", ["²", "99999999999", 2 ** 40, -3, "1e3", True])
+def test_a_chat_toolkit_id_that_names_no_stored_toolkit_is_refused_typed(ns, env, bad_id):
+    cred = Credential(env, uuid.uuid4())
+    refusal = chat_refusal(env, ns, {"tools": [{**cred.tool(), "id": bad_id}]})
+    assert isinstance(refusal, ns.exceptions.AdmissionDenied) and refusal.reason_code != "DEPENDENCY_UNAVAILABLE"
+
+
+def test_a_chat_toolkit_with_only_a_platform_internal_configuration_takes_no_development_read(ns, env):
+    cfg_uuid = str(uuid.uuid4())
+    env.configurations[(1, cfg_uuid)] = {"id": 9, "project_id": 1, "type": "pgvector", "section": "vectorstore",
+                                         "generation": 1}
+    tool = {"id": 31, "type": "datasource", "settings": {"pgvector_configuration": {
+        "elitea_title": "vectors", "configuration_uuid": cfg_uuid, "configuration_project_id": 1,
+        "configuration_type": "pgvector", "connection_string": "postgresql://internal"}}}
+    _call, ref = chat(env, ns, {"tools": [tool]})
+    [row] = env.query(1, ns.models.ExecutionSecurityContext)
+    assert ref == str(row.id) and row.allowed_bindings == [] and env.permission_calls == []
+    assert len(env.configuration_calls) == 1   # the facts the seal reads anyway, once

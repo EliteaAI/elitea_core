@@ -531,7 +531,7 @@ def _read_toolkit(request: AdmissionRequest):
 
 def _chat_toolkit_ids(payload) -> list:
     """The ids of a plain LLM chat's own toolkits that carry a configuration (#7229 D15). Dict reads only; a toolkit
-    without an id is still listed (as None): it declares nothing, so its credential is refused."""
+    without a readable id declares nothing, so its credential is refused."""
     return [tool.get("id") for tool in _payload_toolkits(payload)
             if isinstance(tool.get("settings"), dict) and configurations_in(tool["settings"])]
 
@@ -541,8 +541,9 @@ def _read_chat_toolkits(request: AdmissionRequest, toolkit_ids):
     Test run (``_read_toolkit``), in one read in the chat's project. They are the authority on which credential each
     selects; one that is not saved there declares nothing. The digest is of the stored toolkits."""
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
-    ids = sorted({int(item) for item in toolkit_ids
-                  if (isinstance(item, int) and not isinstance(item, bool)) or (isinstance(item, str) and item.isdigit())})
+    readable = (int(item) for item in toolkit_ids if (isinstance(item, int) and not isinstance(item, bool))
+                or (isinstance(item, str) and item.isascii() and item.isdecimal() and len(item) <= 10))
+    ids = sorted({item for item in readable if 0 < item < 2 ** 31})   # an integer column: anything else names nothing
     with db.get_session(request.binding_project_id) as session:
         tools = session.query(EliteATool).filter(EliteATool.id.in_(ids)).all() if ids else []
         try:
@@ -1159,12 +1160,13 @@ def _admit(  # pylint: disable=R0914
         # any credential configuration its payload carries is refused at the seal; platform-internal ones are not.
         # A sub-agent it calls is admitted only on a binding of its own, never as a draft
         children_of_drafts = False
-        configured = _chat_toolkit_ids(payload) if settings.allow_development_runs else []
-        if configured:
-            # (#7229 D15) its toolkits carry configurations: a development run of the person, decided as a toolkit
-            # Test run is (personal credential, or a project one granted to them), on the stored toolkits. With
-            # development runs off nothing is decided, and a credential is refused at the seal as switched off
-            binding, rows = _read_chat_toolkits(request, configured)
+        if settings.allow_development_runs and _uncovered(
+                {"chat": _payload_toolkits(payload or {})}, [], (payload or {}).get("project_id")):
+            # (#7229 D15) its toolkits carry a credential: a development run of the person, decided as a toolkit Test
+            # run is (personal credential, or a project one granted to them), on the stored toolkits. The facts read
+            # here are the ones the seal reads anyway (walk_scope). With development runs off nothing is decided, and
+            # a credential is refused at the seal as switched off
+            binding, rows = _read_chat_toolkits(request, _chat_toolkit_ids(payload))
             permissions = _author_permissions(request)
             can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
         else:
