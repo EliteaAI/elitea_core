@@ -11,6 +11,9 @@
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(16) NOT NULL DEFAULT 'run_history';
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_conversation_uuid UUID NULL;
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_participant_id INTEGER NULL;
+# Index for the list filter by delivery chat: the chat badge request runs on every chat open.
+# Revert by hand: DROP INDEX IF EXISTS {pid}.ix_entity_schedules_delivery_conversation_uuid
+CREATE INDEX IF NOT EXISTS ix_entity_schedules_delivery_conversation_uuid ON {pid}.entity_schedules (delivery_conversation_uuid);
 
 # R-2.0.8 — Schedules (EL-7011)
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
