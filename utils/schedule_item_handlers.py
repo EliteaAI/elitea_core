@@ -11,6 +11,7 @@ from tools import auth, db
 from ..models.entity_schedule import EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
+    DbId,
     ScheduleCreate,
     ScheduleDetails,
     ScheduleRiskCheck,
@@ -208,7 +209,7 @@ def _validation_response(error: ValidationError) -> tuple[dict, int]:
     return refusal(INVALID_INPUT, first["msg"].removeprefix("Value error, "), field=field)
 
 
-def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate, reviewed: bool = False, module=None):
+def _apply_update(project_id: int, schedule_id: DbId, body: ScheduleUpdate, reviewed: bool = False, module=None):
     """Save an edit, a pause or a resume through the service in one commit and answer the details.
 
     `reviewed` runs the risk review of an edit first and adds the governance notice; a pause or a resume

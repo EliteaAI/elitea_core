@@ -109,7 +109,7 @@ class ScheduleRiskCheck(BaseModel):
     entity_type: EntityType
     application_id: ApplicationId
     version_id: VersionId
-    schedule_id: int | None = Field(
+    schedule_id: DbId | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
 
