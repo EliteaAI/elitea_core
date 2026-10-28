@@ -669,7 +669,12 @@ def test_a_v1_audience_of_the_exchanging_app_is_accepted(ns, env):
     assert admitted(ns, env, Delegated(env, env.seed_agent())).release()["ok"] is True
 
 
+def test_the_release_budget_of_two_slots_stays_within_the_workers_wait(ns):
+    assert ns.entra_obo.request_budget(2) == 13 < 15 + 0.5 * 2   # the worker still waits for the reply
+
+
 def test_two_delegated_slots_share_one_budget_within_the_workers_wait(ns, env, monkeypatch):
+    ns.need_transport()   # the first slot must seal before the second one runs out of budget
     binding = env.seed_agent()
     first = Delegated(env, binding)
     second = Delegated(env, binding, tool_id=2, config_id=6)
@@ -693,8 +698,7 @@ def test_two_delegated_slots_share_one_budget_within_the_workers_wait(ns, env, m
     reply = run.release()
     assert reply["reason_code"] == "DEPENDENCY_UNAVAILABLE" and (reply["toolkit_instance_id"], reply["field"]) == (
         "2", "credentials")
-    assert clock[0] - started <= ns.entra_obo.request_budget(2) < 15 + 0.5 * 2   # the worker still waits for the reply
-    assert ns.entra_obo.request_budget(2) == 13
+    assert clock[0] - started <= ns.entra_obo.request_budget(2)
 
 
 def test_the_authority_path_is_built_from_the_checked_tenant(ns, env):
