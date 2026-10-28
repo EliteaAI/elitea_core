@@ -26,15 +26,11 @@ class UnknownSkillMentionError(ValueError):
 
 def read_platform_project_skills_settings() -> dict:
     platform_settings = (this.descriptor.config.get('skills') or {}).get('project_skills_in_chat') or {}
-    return {
-        'available': platform_settings.get('available') is True,
-        'project_default': platform_settings.get('project_default') is True,
-    }
+    return {'available': platform_settings.get('available') is True}
 
 
 def is_project_skills_in_chat_enabled(project_id: int) -> bool:
-    platform_settings = read_platform_project_skills_settings()
-    if not platform_settings['available']:
+    if not read_platform_project_skills_settings()['available']:
         return False
     try:
         record = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_first_filtered_project(
@@ -44,9 +40,7 @@ def is_project_skills_in_chat_enabled(project_id: int) -> bool:
         log.warning('Could not read project skills setting of project %s: %s', project_id, exc)
         return False
     project_choice = ((record or {}).get('data') or {}).get('enabled')
-    if project_choice is not None:
-        return project_choice is True
-    return platform_settings['project_default']
+    return project_choice is None or project_choice is True
 
 
 def build_project_skill_catalog(project_id: int, sender_id, conversation) -> list:

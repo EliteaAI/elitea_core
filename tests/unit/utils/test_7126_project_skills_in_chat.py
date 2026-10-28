@@ -81,30 +81,33 @@ class TestSetting:
         )))
         return state
 
-    @pytest.mark.parametrize('project_default, record, expected', [
-        (False, None, False),
-        (True, None, True),
-        (False, {'data': {'enabled': None}}, False),
-        (True, {'data': {'enabled': None}}, True),
-        (False, {'data': {'enabled': True}}, True),
-        (True, {'data': {'enabled': False}}, False),
-        (False, {'data': {'enabled': 'yes'}}, False),
-        (True, {'data': None}, True),
-    ], ids=['default off', 'default on', 'unset choice, default off', 'unset choice, default on',
-            'project on over default off', 'project off over default on', 'non-boolean choice', 'empty record'])
-    def test_a_project_choice_overrides_the_platform_default(self, project_skills, setting, project_default, record, expected):
-        setting.platform.update(available=True, project_default=project_default)
+    @pytest.mark.parametrize('record, expected', [
+        (None, True),
+        ({'data': {'enabled': None}}, True),
+        ({'data': None}, True),
+        ({'data': {'enabled': True}}, True),
+        ({'data': {'enabled': False}}, False),
+        ({'data': {'enabled': 'yes'}}, False),
+    ], ids=['no record', 'unset choice', 'empty record', 'project on', 'project off', 'non-boolean choice'])
+    def test_with_the_platform_switch_on_a_project_follows_it_unless_it_turned_skills_off(
+            self, project_skills, setting, record, expected):
+        setting.platform.update(available=True)
         setting.record = record
 
         assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is expected
 
     @pytest.mark.parametrize('available', [False, None, 'true'])
-    def test_without_the_master_switch_no_project_can_turn_it_on(self, project_skills, setting, available):
-        setting.platform.update(available=available, project_default=True)
+    def test_without_the_platform_switch_no_project_can_turn_it_on(self, project_skills, setting, available):
+        setting.platform.update(available=available)
         setting.record = {'data': {'enabled': True}}
 
         assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is False
         assert setting.reads == 0
+
+    def test_a_retired_project_default_of_off_no_longer_keeps_projects_off(self, project_skills, setting):
+        setting.platform.update(available=True, project_default=False)
+
+        assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is True
 
     def test_the_record_is_read_by_type(self, project_skills, setting):
         setting.platform.update(available=True)
@@ -114,33 +117,34 @@ class TestSetting:
         assert setting.filter_fields == (CHAT_PROJECT_ID, {'type': 'project_skills'})
 
     def test_a_failing_read_means_off(self, project_skills, setting):
-        setting.platform.update(available=True, project_default=True)
+        setting.platform.update(available=True)
         setting.read_error = RuntimeError('configurations down')
 
         assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is False
 
 
 class TestPlatformSettings:
-    @pytest.mark.parametrize('name, config_key', [
-        ('project_skills_in_chat_available', 'available'),
-        ('project_skills_in_chat_project_default', 'project_default'),
-    ])
-    def test_the_admin_switches_write_where_the_resolver_reads(self, name, config_key):
-        field = json.loads((PLUGIN_ROOT / 'admin_schema.json').read_text())['properties'][name]
+    def test_the_admin_switch_writes_where_the_resolver_reads(self):
+        field = json.loads((PLUGIN_ROOT / 'admin_schema.json').read_text())['properties']['project_skills_in_chat_available']
 
-        assert field['path'] == f'skills.project_skills_in_chat.{config_key}'
+        assert field['path'] == 'skills.project_skills_in_chat.available'
         assert (field['section'], field['type'], field['default'], field['requires_restart']) == ('skills', 'boolean', False, False)
+
+    def test_the_platform_has_one_project_skills_switch(self):
+        properties = json.loads((PLUGIN_ROOT / 'admin_schema.json').read_text())['properties']
+
+        assert [key for key, field in properties.items() if field.get('path', '').startswith('skills.project_skills_in_chat.')] == [
+            'project_skills_in_chat_available',
+        ]
 
 
 class TestPlatformSettingsForTheProjectCard:
     @pytest.mark.parametrize('config, expected', [
-        ({}, {'available': False, 'project_default': False}),
-        ({'skills': {'project_skills_in_chat': {'available': True, 'project_default': True}}},
-         {'available': True, 'project_default': True}),
-        ({'skills': {'project_skills_in_chat': {'available': 'true', 'project_default': 1}}},
-         {'available': False, 'project_default': False}),
-        ({'skills': None}, {'available': False, 'project_default': False}),
-    ], ids=['unset', 'both on', 'non-boolean values', 'no skills section'])
+        ({}, {'available': False}),
+        ({'skills': {'project_skills_in_chat': {'available': True, 'project_default': False}}}, {'available': True}),
+        ({'skills': {'project_skills_in_chat': {'available': 'true'}}}, {'available': False}),
+        ({'skills': None}, {'available': False}),
+    ], ids=['unset', 'on', 'non-boolean value', 'no skills section'])
     def test_only_literal_true_reads_as_on(self, project_skills, monkeypatch, config, expected):
         monkeypatch.setattr(project_skills, 'this', types.SimpleNamespace(descriptor=types.SimpleNamespace(config=config)))
 
