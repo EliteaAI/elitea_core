@@ -96,6 +96,7 @@ ENDPOINT_OPERATIONS = {
     ("POST", "elitea_core/public_skill_predict/{mode}/{project_id}/{public_skill_id}"): "run",
     ("POST", "elitea_core/generate_project_context_draft/{mode}/{project_id}"): "run",
     ("POST", "elitea_core/generate_skill_draft/{mode}/{project_id}"): "run",
+    ("POST", "elitea_core/schedules/{mode}/{project_id}/{schedule_id}/run"): "run",
     # build: platform entities
     ("POST", "elitea_core/applications/{mode}/{project_id}"): "build",
     ("POST", "elitea_core/versions/{mode}/{project_id}/{application_id}"): "build",
@@ -126,6 +127,9 @@ ENDPOINT_OPERATIONS = {
     ("PUT", "social/folder/{mode}/{project_id}/{folder_id}"): "build",
     ("PUT", "social/move_to_folder/{mode}/{project_id}"): "build",
     ("PUT", "notifications/notification/{mode}/{project_id}/{notification_id}"): "build",
+    ("POST", "elitea_core/schedules/{mode}/{project_id}"): "build",
+    ("PUT", "elitea_core/schedules/{mode}/{project_id}/{schedule_id}"): "build",
+    ("DELETE", "elitea_core/schedules/{mode}/{project_id}/{schedule_id}"): "build",
 }
 # The RBAC half of the scope: an operation is in scope only when the user holds one of these in the agent's project.
 # A coarse pre-filter: the endpoint's own decorator still decides every call. ``read`` needs no extra permission.

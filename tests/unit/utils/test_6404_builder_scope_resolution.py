@@ -198,16 +198,18 @@ class TestSubAgentPathIsScoped:
 
 class TestScopedSuffixes:
 
-    def test_the_three_builder_entity_groups_are_scoped(self, internal_tools):
+    def test_the_builder_entity_groups_are_scoped(self, internal_tools):
         assert internal_tools.MCP_PROJECT_SCOPED_SUFFIXES == {
             'elitea_core/skills',
             'elitea_core/project_context',
             'elitea_core/applications',
+            'elitea_core/schedules',
         }
 
 
 @pytest.fixture
 def injected_urls(internal_tools, monkeypatch):
+    monkeypatch.setattr(internal_tools, 'run_token_applies', lambda: False)
     monkeypatch.setattr(internal_tools, '_get_user_token', lambda user_id: 'pat-token')
     monkeypatch.setattr(internal_tools, '_get_internal_base_url', lambda: 'http://localhost')
     monkeypatch.setattr(
@@ -240,7 +242,8 @@ class TestInjectedToolkitUrls:
 
     def test_builder_groups_carry_the_scope(self, injected_urls):
         urls = injected_urls(['internal_mcp', 'skill_builder', 'project_context_builder'], CONVERSATION_PROJECT)
-        for suffix in ('elitea_core/applications', 'elitea_core/skills', 'elitea_core/project_context'):
+        for suffix in ('elitea_core/applications', 'elitea_core/skills', 'elitea_core/project_context',
+                       'elitea_core/schedules'):
             assert urls[suffix].endswith(f'?scope_project_id={CONVERSATION_PROJECT}'), suffix
 
     def test_other_groups_are_left_unconfined(self, injected_urls):

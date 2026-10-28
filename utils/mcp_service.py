@@ -41,6 +41,9 @@ class _RunTokenRefusal(Exception):
     """A tool call the run token's scope does not allow (#7214); its text is the readable refusal."""
 
 
+_SCHEDULES_API_ROOT = "/api/v2/elitea_core/schedules/"
+
+
 class McpProjectScopeError(Exception):
     """Raised when a tool argument names a project the session is not confined to."""
 
@@ -56,6 +59,15 @@ def _same_path_value(supplied, scoped) -> bool:
         return float(supplied) == float(scoped)
     except (TypeError, ValueError):
         return str(supplied).strip() == str(scoped).strip()
+
+
+def _consent_refusal(path: str, body: dict) -> str | None:
+    """The refusal for a schedule tool call that carries the consent for "Run without asking" (a person gives it)."""
+    if path.startswith(_SCHEDULES_API_ROOT) and (
+            "risk_ack" in body or body.get("approval_rule") == "run_without_asking"):
+        return ('An agent cannot set "Run without asking" or send `risk_ack`: ask the user to confirm the risk '
+                "review in the Elitea UI. Save the schedule with the rule \"Pause and ask me\".")
+    return None
 
 
 def _run_token_claims():
@@ -111,6 +123,8 @@ class McpApiToolExecutor:
             path_params, query_params, body_params = McpApiToolExecutor._parse_arguments(
                 arguments, parameters, default_path_params, scoped_path_params
             )
+            if refusal := _consent_refusal(path, body_params):
+                return {"error": refusal}
             url_path = McpApiToolExecutor._build_url_path(path, path_params)
             if _run_token_claims() is not None:
                 from .internal_obo import operation_of  # pylint: disable=C0415
@@ -429,10 +443,16 @@ class McpService:
                     response_content = json.dumps(result["result"])
             elif api_tool := self.__get_api_tool_by_name(request.params.name):
                 log.debug("Starting API tool call: %s", request.params.name)
-                result = McpApiToolExecutor.execute(
-                    api_tool, request.params.arguments, self.__session_default_path_params(),
-                    self.__session_scoped_path_params()
-                )
+                try:
+                    default_path_params = self.__session_default_path_params()
+                    scoped_path_params = self.__session_scoped_path_params(api_tool)
+                except McpProjectScopeError as exc:
+                    log.warning("Refused API tool call %s: %s", request.params.name, exc)
+                    result = {"error": f"Access denied: {exc}"}
+                else:
+                    result = McpApiToolExecutor.execute(
+                        api_tool, request.params.arguments, default_path_params, scoped_path_params
+                    )
                 if "error" not in result:
                     response_content = json.dumps(result["result"])
             else:
@@ -793,8 +813,14 @@ class McpService:
             return {'project_id': self.session.project_id}
         return {}
 
-    def __session_scoped_path_params(self) -> dict:
+    def __session_scoped_path_params(self, api_tool: dict) -> dict:
         scope_project_id = getattr(self.session, 'scope_project_id', None)
+        if api_tool.get("path", "").startswith(_SCHEDULES_API_ROOT):
+            # Tools are found by name across all categories, so the clamp follows the tool, not the session category.
+            pinned = scope_project_id if scope_project_id is not None else self.session.project_id
+            if pinned is None:
+                raise McpProjectScopeError("schedule tools need a session with a project")
+            return {'project_id': pinned}
         if scope_project_id is not None and self.session.entity_category in MCP_PROJECT_SCOPED_SUFFIXES:
             return {'project_id': scope_project_id}
         return {}

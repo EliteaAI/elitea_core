@@ -2,16 +2,20 @@
 
 One entry per row of `ROUTES` in `api/v2/schedules.py`, with the same (method, URL tail) key; a test
 checks that both tables match. `Module._register_openapi` registers every entry under the
-`elitea_core/schedules` tag and keeps it out of the MCP tools.
+`elitea_core/schedules` tag; only the operations of `MCP_TOOL_NAMES` are MCP tools, each under its name there.
 """
+import inspect
 from typing import get_args
+
+from pydantic import create_model
+from pylon.core.tools import log
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
-from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
+from .schedule_item_handlers import ENABLED_NOT_BOOLEAN, MAX_RUNS_LIMIT, RUN_NOT_FOUND
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
 from .schedule_settings import ScheduleProjectSettings
 
@@ -252,13 +256,20 @@ def _text(what: str, who: str, errors: str) -> str:
     return f"{what}\n\nWho may call: {who}.\n\nErrors: {errors}."
 
 
+DELIVERY_TEXT = (
+    "Optional `delivery` object: `mode` is `run_history` (default) or `conversation`. Mode `conversation` "
+    "needs `conversation_uuid` and `participant_id`, and each run then posts into that chat. Mode "
+    "`run_history` clears both fields."
+)
+
+
 OPERATIONS = {
     ("get", ""): {
         "name": "List schedules",
         "summary": "List schedules",
         "description": _text(
-            "Answer one page of schedules with filters, sort and paging. Each row has the owner's name "
-            "and the actions the caller may take on it.",
+            "Answer one page of schedules with filters, sort and paging. Each row has the full details of "
+            "the schedule, with the owner's name and the actions the caller may take on it.",
             "a project member with `schedules.list`; only a schedules admin sees other owners' schedules",
             "400 an invalid query option; 403 no permission"),
         "parameters": PROJECT_PARAMS + LIST_QUERY_PARAMS,
@@ -271,7 +282,7 @@ OPERATIONS = {
         "description": _text(
             "Create a schedule for an agent or a pipeline version. The caller becomes the owner; "
             "the body never sets the owner. The answer has the findings of the risk review as `warnings`. "
-            + RISK_REVIEW_TEXT,
+            + RISK_REVIEW_TEXT + " " + DELIVERY_TEXT,
             "a project member with `schedules.create`",
             "400 an invalid field, `approval_rule_not_allowed` or `risk_name_mismatch` (`risk_ack`); "
             "403 no permission; 404 the agent or pipeline is not found or not visible; 409 "
@@ -310,7 +321,8 @@ OPERATIONS = {
         "name": "Read a schedule",
         "summary": "Read a schedule",
         "description": _text(
-            "Answer the details of one schedule, with the owner's name and the allowed actions.",
+            "Answer the details of one schedule, with the owner's name, the allowed actions and the `delivery` "
+            "object (mode, chat uuid and participant id; both target fields are null for `run_history`).",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
             "403 no permission; 404 not found, or another owner's schedule for a regular user"),
         "parameters": ITEM_PARAMS,
@@ -321,19 +333,25 @@ OPERATIONS = {
         "summary": "Edit a schedule",
         "description": _text(
             "Change the fields of a schedule; send only the fields to change. The owner never changes. "
-            "This call does not pause or resume: a body with `enabled` answers 400, use the pause and "
-            "resume actions. When an admin edits another owner's schedule, the owner gets a notice. "
+            "Send `enabled` false to pause the schedule or true to resume it, alone or with other fields, "
+            "in one save: when the resume is refused, nothing is saved. "
+            "When an admin edits another owner's schedule, the owner gets a notice. "
             "The risk review checks the resulting version, name and rule. " + RISK_REVIEW_TEXT
-            + " A change back to \"Pause and ask me\" clears the recorded confirmation.",
+            + " A change back to \"Pause and ask me\" clears the recorded confirmation. "
+            + DELIVERY_TEXT + " A body without `delivery` keeps the stored delivery.",
             OWNER_OR_ADMIN.format(permission="schedules.update"),
-            "400 an invalid field, `enabled` in the body, `approval_rule_not_allowed` or `risk_name_mismatch` "
-            "(`risk_ack`); 403 no permission; 404 not found; 409 `schedule_blocked`, "
-            "`risk_confirmation_required` or `risk_changed`"),
+            "400 an invalid field, `enabled` that is not true or false, a resume of a schedule without a "
+            "version, `approval_rule_not_allowed` or `risk_name_mismatch` (`risk_ack`); 403 no permission; "
+            "404 not found; 409 `schedule_blocked`, `risk_confirmation_required`, `risk_changed` or the "
+            "project limit of active schedules on a resume"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleEdit,
-        "responses": _responses(200, "The schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE[0]), 403: None, 404: None,
-            409: ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`; the body has the findings",
+        "responses": _responses(200, "The schedule details and `warnings`; `enabled` shows the new state",
+                                SAVED_EXAMPLE, {
+            400: (SAVE_BAD_INPUT[0] + "; `enabled` that is not true or false; or a resume without a version",
+                  ENABLED_NOT_BOOLEAN[0]), 403: None, 404: None,
+            409: (("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`, the body has the findings; "
+                   "or the project limit of active schedules on a resume"),
                   {**SAVE_CONFLICTS[1], "code": "schedule_blocked", "sensitive": [], "blocking": [SIGNIN_FINDING],
                    "error": "You can't save this schedule: a scheduled run cannot do what the blocking findings need"})}),
     },
@@ -531,7 +549,79 @@ OPERATIONS = {
             403: None, 503: "The settings store is unavailable"}),
     },
 }
+# One schedule URL serves several actions, so the names the shared registry derives from the URL (the method and
+# the last two fixed path parts) would clash. The six operations are tools under these names, the single read too.
+MCP_TOOL_NAMES = {
+    ("get", ""): "list_schedules",
+    ("get", ITEM): "get_schedule",
+    ("post", ""): "create_schedule",
+    ("put", ITEM): "update_schedule",
+    ("delete", ITEM): "delete_schedule",
+    ("post", f"{ITEM}/run"): "run_schedule_now",
+}
+MCP_RISK_TEXT = (
+    "The risk review runs first. A blocking finding answers 409 `schedule_blocked`: fix the agent or pipeline. "
+    "Sensitive tools or a personal credential answer 409 `risk_confirmation_required`: a person confirms them in "
+    "the schedule page, an agent cannot. An agent never sets \"Run without asking\": the rule stays "
+    "\"Pause and ask me\"."
+)
+MCP_SAVE_ERRORS = ("403 no permission; 404 not found or not visible; 409 `schedule_blocked`, "
+                   "`risk_confirmation_required` or the project limit of active schedules")
+MCP_SAVE_TEXTS = {
+    ("post", ""): _text(
+        "Create a schedule for an agent or a pipeline version. The caller becomes the owner. "
+        + MCP_RISK_TEXT + " " + DELIVERY_TEXT,
+        "a project member with `schedules.create`", "400 an invalid field; " + MCP_SAVE_ERRORS),
+    ("put", ITEM): _text(
+        "Change the fields of a schedule; send only the fields to change. Send `enabled` false to pause the "
+        "schedule or true to resume it, alone or with other fields, in one save. "
+        + MCP_RISK_TEXT + " " + DELIVERY_TEXT + " A body without `delivery` keeps the stored delivery.",
+        OWNER_OR_ADMIN.format(permission="schedules.update"), "400 an invalid field; " + MCP_SAVE_ERRORS),
+}
+
+
+def _mcp_body(model):
+    """The save body as a chat model sees it: the same fields without `risk_ack`, the human consent."""
+    return create_model(f"{model.__name__}Mcp", **{
+        name: (field.annotation, field) for name, field in model.model_fields.items() if name != "risk_ack"})
+
+
+MCP_SAVE_OVERRIDES = {
+    key: {"mcp_request_body": _mcp_body(OPERATIONS[key]["request_body"]), "mcp_description": text}
+    for key, text in MCP_SAVE_TEXTS.items()
+}
 OPENAPI_ENDPOINTS = [
-    {"method": method, "path": f"{BASE_URL}/{tail}".rstrip("/"), **operation}
+    {"method": method, "path": f"{BASE_URL}/{tail}".rstrip("/"), **operation,
+     "mcp_tool": (method, tail) in MCP_TOOL_NAMES, **MCP_SAVE_OVERRIDES.get((method, tail), {})}
     for (method, tail), operation in OPERATIONS.items()
 ]
+
+
+class _NamedToolRegistry:
+    """Passes the `MCP_TOOL_NAMES` name of an endpoint to the registry as `tool_name`.
+
+    A shared plugin without `tool_name` derives the names from the URLs. The single read would then clash with
+    the list, so it is not a tool until the shared plugin is deployed.
+    """
+
+    def __init__(self, registry):
+        self._registry = registry
+        parameters = inspect.signature(registry.register_endpoint).parameters.values()
+        self._named = any(p.name == "tool_name" or p.kind is p.VAR_KEYWORD for p in parameters)
+        if not self._named:
+            log.warning("The shared plugin has no tool_name: schedule MCP tools keep their URL-based names")
+
+    def register_endpoint(self, **endpoint):
+        key = (endpoint["method"], endpoint["path"].removeprefix(BASE_URL).lstrip("/"))
+        if self._named and key in MCP_TOOL_NAMES:
+            endpoint["tool_name"] = MCP_TOOL_NAMES[key]
+        elif key == ("get", ITEM):
+            endpoint["mcp_tool"] = False
+        return self._registry.register_endpoint(**endpoint)
+
+
+def register_schedule_endpoints(registry, tag: str) -> None:
+    """Register every schedule operation; the ones of `MCP_TOOL_NAMES` also as MCP tools."""
+    registry = _NamedToolRegistry(registry)
+    for endpoint in OPENAPI_ENDPOINTS:
+        registry.register_endpoint(plugin_name="elitea_core", tags=[tag], available_to_users=True, **endpoint)

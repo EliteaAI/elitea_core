@@ -84,6 +84,12 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     approval_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The legacy version trigger a migrated row replaced, read back by restore_version_trigger; NULL on rows moved before the column existed
     original_trigger: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Where a run posts its result: Run History only, or one chat; the target columns stay NULL in run_history
+    delivery_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default='run_history', server_default='run_history'
+    )
+    delivery_conversation_uuid: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    delivery_participant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

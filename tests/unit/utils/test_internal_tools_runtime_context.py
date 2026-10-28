@@ -130,8 +130,9 @@ class TestSkillRequestWithoutSkillBuilder:
 
 class TestCurrentProjectSuffixes:
 
-    def test_skills_and_project_context_follow_the_active_project(self, internal_tools):
+    def test_skills_project_context_and_schedules_follow_the_active_project(self, internal_tools):
         assert internal_tools.MCP_CURRENT_PROJECT_SUFFIXES == {
             'elitea_core/skills',
             'elitea_core/project_context',
+            'elitea_core/schedules',
         }
