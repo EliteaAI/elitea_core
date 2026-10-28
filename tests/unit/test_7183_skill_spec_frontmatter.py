@@ -5,7 +5,9 @@ fields travel as ``metadata.elitea-*`` strings so the export passes spec validat
 """
 
 import contextlib
+import hashlib
 import importlib.util
+import json
 import pathlib
 import sys
 import types
@@ -287,6 +289,12 @@ class FakeQuery:
     def first(self):
         return self.skill
 
+    def all(self):
+        return self.skill
+
+    def order_by(self, *args):
+        return self
+
 
 @pytest.fixture
 def skill_utils(monkeypatch):
@@ -492,3 +500,213 @@ class TestPublishingKeepsFrontmatter:
         publish.publish_skill_additional_version(1, 50, snapshot, 'v2', 3, snapshot['source'])
 
         assert public.added[0].meta['frontmatter'] == self.FRONTMATTER
+
+
+EMBEDDED_VERSION = {
+    'name': 'v2',
+    'instructions': 'Collect the PRs.',
+    'tags': [{'name': 'release'}],
+    'run_settings': {'llm_settings': {'model_name': 'gpt-4.1', 'temperature': 0.3}, 'ignore_project_context': True},
+    'meta': {'icon_meta': {'url': 'i'}, 'frontmatter': {'license': 'MIT', 'metadata': {'author': 'me'}}},
+}
+
+
+class TestSkillsEmbeddedInAgentMarkdown:
+    def test_the_block_carries_frontmatter_tags_and_run_settings(self, md):
+        assert md.build_embedded_skill_frontmatter(EMBEDDED_VERSION) == {
+            'license': 'MIT',
+            'metadata': {
+                'author': 'me',
+                'elitea-tags': '["release"]',
+                'elitea-model': 'gpt-4.1',
+                'elitea-temperature': '0.3',
+                'elitea-ignore-project-context': 'true',
+            },
+        }
+
+    def test_a_plain_skill_gets_no_block(self, md):
+        assert md.build_embedded_skill_frontmatter({'name': 'base', 'instructions': 'Do it.'}) == {}
+
+    def test_the_block_unpacks_back_into_the_version(self, md):
+        block = md.build_embedded_skill_frontmatter(EMBEDDED_VERSION)
+        imported = {'name': 'v2', 'instructions': 'Collect the PRs.', 'meta': {'frontmatter': block}}
+
+        unpacked = md.unpack_embedded_skill_frontmatter(imported)
+
+        assert unpacked['tags'] == [{'name': 'release'}]
+        assert unpacked['run_settings'] == {
+            'ignore_project_context': True,
+            'llm_settings': {'model_name': 'gpt-4.1', 'temperature': 0.3},
+        }
+        assert unpacked['meta'] == {'frontmatter': {'license': 'MIT', 'metadata': {'author': 'me'}}}
+
+    def test_tags_and_run_settings_already_on_the_version_win(self, md):
+        version = {
+            'tags': [{'name': 'kept'}],
+            'run_settings': {'ignore_project_context': False},
+            'meta': {'frontmatter': {'metadata': {'elitea-tags': '["ignored"]', 'elitea-temperature': '0.9'}}},
+        }
+
+        unpacked = md.unpack_embedded_skill_frontmatter(version)
+
+        assert unpacked['tags'] == [{'name': 'kept'}]
+        assert unpacked['run_settings'] == {'ignore_project_context': False}
+        assert unpacked['meta'] == {'frontmatter': {}}
+
+    def test_a_version_without_frontmatter_is_returned_as_is(self, md):
+        version = {'name': 'base', 'instructions': 'Do it.', 'meta': {'icon_meta': {}}}
+        assert md.unpack_embedded_skill_frontmatter(version) is version
+
+    @pytest.mark.parametrize('frontmatter, message', [
+        ('license: MIT', 'must be a mapping'),
+        ({'compatibility': 'x' * 501}, 'compatibility'),
+        ({'metadata': {'elitea-tags': '[1, 2]'}}, 'All tags must be strings'),
+    ])
+    def test_invalid_frontmatter_is_rejected(self, md, frontmatter, message):
+        with pytest.raises(ValueError, match=message):
+            md.unpack_embedded_skill_frontmatter({'meta': {'frontmatter': frontmatter}})
+
+
+@pytest.fixture
+def agent_markdown(monkeypatch, md):
+    for name in (
+        'tools', 'pylon', 'pylon.core', 'pylon.core.tools', 'sqlalchemy', 'sqlalchemy.orm',
+        f'{PKG}.models.all', f'{PKG}.models.elitea_tools', f'{PKG}.models.enums.all',
+        f'{PKG}.models.pd.application', f'{PKG}.models.pd.export_import', f'{PKG}.models.pd.tool',
+        f'{PKG}.utils.toolkit_meta', f'{PKG}.utils.utils',
+    ):
+        monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    return _load(monkeypatch, 'utils/export_import.py', f'{PKG}.utils.export_import')
+
+
+def test_agent_markdown_embeds_the_skill_frontmatter(agent_markdown):
+    skills = [{'import_uuid': 'u1', 'name': 'release-notes', 'description': 'Drafts notes', 'versions': [EMBEDDED_VERSION]}]
+    version = {'skills': [{'import_uuid': 'u1', 'version_name': 'v2'}]}
+
+    [block] = agent_markdown._extract_skills_for_md(version, skills)
+
+    assert block['frontmatter']['license'] == 'MIT'
+    assert block['frontmatter']['metadata']['elitea-tags'] == '["release"]'
+
+
+@pytest.fixture
+def skill_rpc(monkeypatch, md):
+    for name in (
+        'tools', 'pylon', 'pylon.core', 'pylon.core.tools', 'sqlalchemy', f'{PKG}.rpc',
+        f'{PKG}.models.enums.all', f'{PKG}.models.pd.search', f'{PKG}.utils.searches',
+        f'{PKG}.utils.folder_access', f'{PKG}.utils.skill_publish_utils',
+    ):
+        monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    rpc_package = types.ModuleType(f'{PKG}.rpc')
+    rpc_package.__path__ = []
+    monkeypatch.setitem(sys.modules, rpc_package.__name__, rpc_package)
+    pylon_tools = types.ModuleType('pylon.core.tools')
+    pylon_tools.web = types.SimpleNamespace(rpc=lambda *names: (lambda function: function))
+    pylon_tools.log = types.SimpleNamespace(error=lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, 'pylon.core.tools', pylon_tools)
+    imported = []
+    skill_utils = sys.modules[f'{PKG}.utils.skill_utils']
+    for name in ('get_skill_details', 'create_skill', 'build_skill_detail', 'attach_skill_to_agent',
+                 'detach_skill_from_agent', 'get_available_skills_for_agent'):
+        monkeypatch.setattr(skill_utils, name, mock.MagicMock(name=name), raising=False)
+    skill_utils.import_skill = lambda **kwargs: imported.append(kwargs) or (
+        types.SimpleNamespace(id=9, reused=False, versions={'base': 90})
+    )
+    module = _load(monkeypatch, 'rpc/skill.py', f'{PKG}.rpc.skill')
+    module.imported = imported
+    return module
+
+
+def test_the_import_wizard_unpacks_embedded_skill_frontmatter(skill_rpc, md):
+    model_data = {
+        'name': 'release-notes',
+        'description': 'Drafts notes',
+        'versions': [{
+            'name': 'base',
+            'instructions': 'Collect the PRs.',
+            'meta': {'frontmatter': md.build_embedded_skill_frontmatter(EMBEDDED_VERSION)},
+        }],
+    }
+
+    result, errors = skill_rpc.RPC.applications_import_skill(None, model_data, 2, 3)
+
+    assert errors == []
+    [version] = skill_rpc.imported[0]['versions']
+    assert version['tags'] == [{'name': 'release'}]
+    assert version['run_settings']['llm_settings'] == {'model_name': 'gpt-4.1', 'temperature': 0.3}
+    assert version['meta']['frontmatter'] == {'license': 'MIT', 'metadata': {'author': 'me'}}
+
+
+def test_the_import_wizard_reports_invalid_embedded_frontmatter(skill_rpc):
+    model_data = {'name': 'bad', 'versions': [{'name': 'base', 'instructions': 'x', 'meta': {'frontmatter': 'oops'}}]}
+
+    result, errors = skill_rpc.RPC.applications_import_skill(None, model_data, 2, 3)
+
+    assert result is None
+    assert 'must be a mapping' in errors[0]
+    assert skill_rpc.imported == []
+
+
+@pytest.fixture
+def agent_publish(monkeypatch, md):
+    for name in (
+        'tools', 'pylon', 'pylon.core', 'pylon.core.tools', 'sqlalchemy', 'sqlalchemy.orm',
+        f'{PKG}.models.all', f'{PKG}.models.elitea_tools', f'{PKG}.models.enums.all',
+        f'{PKG}.models.pd.application', f'{PKG}.models.pd.version', f'{PKG}.models.pd.publish',
+        f'{PKG}.models.skill', f'{PKG}.utils.create_utils', f'{PKG}.utils.export_import',
+        f'{PKG}.utils.toolkit_meta', f'{PKG}.utils.llm_judge', f'{PKG}.utils.utils',
+        f'{PKG}.utils.category_utils', f'{PKG}.utils.application_utils',
+    ):
+        monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    sys.modules[f'{PKG}.utils.skill_utils'].attach_skill_to_public_copy = lambda **kwargs: None
+    return _load(monkeypatch, 'utils/publish_utils.py', f'{PKG}.utils.publish_utils')
+
+
+class TestAgentPublishReusesSkillCopiesOnlyWhenFrontmatterMatches:
+    def test_skills_without_frontmatter_keep_their_existing_fingerprint(self, agent_publish):
+        run_settings = {'ignore_project_context': True}
+        legacy = json.dumps({'instructions': 'Do it.', 'run_settings': run_settings}, sort_keys=True, separators=(',', ':'))
+
+        assert agent_publish._skill_content_sha('Do it.') == hashlib.sha256(b'Do it.').hexdigest()
+        assert agent_publish._skill_content_sha('Do it.', run_settings, {}) == hashlib.sha256(legacy.encode()).hexdigest()
+
+    def test_a_changed_licence_changes_the_fingerprint(self, agent_publish):
+        mit = agent_publish._skill_content_sha('Do it.', None, {'license': 'MIT'})
+        apache = agent_publish._skill_content_sha('Do it.', None, {'license': 'Apache-2.0'})
+
+        assert len({agent_publish._skill_content_sha('Do it.'), mit, apache}) == 3
+
+    def test_publishing_reads_each_skill_frontmatter(self, agent_publish, monkeypatch):
+        skill_version = types.SimpleNamespace(run_settings=None, meta={'frontmatter': {'license': 'MIT'}})
+        session = types.SimpleNamespace(query=lambda model: FakeQuery([types.SimpleNamespace(skill_version=skill_version)]))
+
+        @contextlib.contextmanager
+        def get_session(project_id):
+            yield session
+
+        resolved = []
+        monkeypatch.setattr(agent_publish, 'db', types.SimpleNamespace(get_session=get_session))
+        monkeypatch.setattr(agent_publish, 'build_skill_mappings_list',
+                            lambda mappings: [{'skill_id': 7, 'skill_version_id': 70, 'name': 'docx'}])
+        monkeypatch.setattr(agent_publish, '_resolve_or_fork_skill_twin',
+                            lambda source, public, skill, user: resolved.append(skill) or (8, 80))
+        monkeypatch.setattr(agent_publish, 'attach_skill_to_public_copy', lambda **kwargs: None)
+
+        assert agent_publish.publish_attached_skills(2, 1, 20, 10, 3) is None
+        assert resolved[0]['frontmatter'] == {'license': 'MIT'}
+
+    def test_the_copy_lookup_fingerprints_the_frontmatter(self, agent_publish, monkeypatch):
+        fingerprinted = []
+        session = types.SimpleNamespace(query=lambda *columns: FakeQuery((8, 80)))
+
+        @contextlib.contextmanager
+        def get_session(project_id):
+            yield session
+
+        monkeypatch.setattr(agent_publish, 'db', types.SimpleNamespace(get_session=get_session))
+        monkeypatch.setattr(agent_publish, '_skill_content_sha', lambda *args: fingerprinted.append(args) or 'sha')
+        skill = {'skill_id': 7, 'skill_version_id': 70, 'instructions': 'Do it.', 'run_settings': None,
+                 'frontmatter': {'license': 'MIT'}}
+
+        assert agent_publish._resolve_or_fork_skill_twin(2, 1, skill, 3) == (8, 80)
+        assert fingerprinted == [('Do it.', None, {'license': 'MIT'})]

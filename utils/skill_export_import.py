@@ -391,6 +391,10 @@ def validate_skill_frontmatter(meta: dict) -> None:
         if value is None or (isinstance(value, str) and not value.strip()):
             raise ValueError(f'Required field "{field}" is missing or empty')
 
+    validate_elitea_frontmatter_fields(meta)
+
+
+def validate_elitea_frontmatter_fields(meta: dict) -> None:
     if 'elitea_version' in meta:
         version = meta['elitea_version']
         if not isinstance(version, str) or not version.strip():
@@ -412,6 +416,38 @@ def validate_skill_frontmatter(meta: dict) -> None:
             raise ValueError(
                 f'Unknown "{RUN_SETTINGS_FRONTMATTER_KEY}" field(s): {", ".join(unknown)}'
             )
+
+
+def build_embedded_skill_frontmatter(version: dict) -> Dict[str, Any]:
+    return compose_export_frontmatter(
+        identity={},
+        passthrough=(version.get('meta') or {}).get(FRONTMATTER_META_KEY) or {},
+        elitea_metadata=encode_elitea_metadata(
+            version_name=None,
+            tags=_normalize_tags(version),
+            run_settings=version.get('run_settings'),
+        ),
+    )
+
+
+def unpack_embedded_skill_frontmatter(version: dict) -> dict:
+    frontmatter = (version.get('meta') or {}).get(FRONTMATTER_META_KEY)
+    if not frontmatter:
+        return version
+    if not isinstance(frontmatter, dict):
+        raise ValueError(f'"meta.{FRONTMATTER_META_KEY}" must be a mapping')
+
+    passthrough = extract_passthrough_frontmatter(frontmatter)
+    elitea_fields = decode_elitea_metadata(frontmatter.get('metadata') or {})
+    validate_elitea_frontmatter_fields(elitea_fields)
+
+    unpacked = {**version, 'meta': {**version['meta'], FRONTMATTER_META_KEY: passthrough}}
+    if elitea_fields.get('tags') and not version.get('tags'):
+        unpacked['tags'] = [{'name': tag} for tag in elitea_fields['tags']]
+    run_settings = run_settings_from_frontmatter(elitea_fields)
+    if run_settings and not version.get('run_settings'):
+        unpacked['run_settings'] = run_settings
+    return unpacked
 
 
 def validate_skill_import_filename(filename: Optional[str]) -> None:

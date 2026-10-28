@@ -21,7 +21,7 @@ from ..utils.skill_utils import (
     get_available_skills_for_agent,
     import_skill,
 )
-from ..utils.skill_export_import import ensure_base_version
+from ..utils.skill_export_import import ensure_base_version, unpack_embedded_skill_frontmatter
 from ..utils.skill_publish_utils import get_default_skill_validation_rules
 
 
@@ -51,9 +51,11 @@ class RPC:
         self, model_data: dict, project_id: int, author_id: int, force_new: bool = False,
         instructions_already_saved: bool = False,
     ):
-        # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
-        versions = ensure_base_version(model_data.get('versions') or [])
         try:
+            # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
+            versions = ensure_base_version([
+                unpack_embedded_skill_frontmatter(version or {}) for version in model_data.get('versions') or []
+            ])
             imported = import_skill(
                 project_id=project_id,
                 name=model_data['name'],

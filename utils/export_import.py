@@ -17,6 +17,7 @@ from tools import db, rpc_tools, serialize
 from pylon.core.tools import log
 
 from .export_import_utils import slugify
+from .skill_export_import import build_embedded_skill_frontmatter
 from .toolkit_meta import drop_index_schedules
 from .utils import get_public_project_id
 
@@ -965,6 +966,9 @@ def _extract_skills_for_md(version: dict, skills: list) -> list:
             'version': version_name,
             'instructions': skill_version.get('instructions', ''),
         }
+        frontmatter = build_embedded_skill_frontmatter(skill_version)
+        if frontmatter:
+            block['frontmatter'] = frontmatter
         out.append(block)
 
     return out

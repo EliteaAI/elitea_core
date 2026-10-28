@@ -230,7 +230,11 @@ def modules():
             'is_valid_category': lambda name: True,
         },
         'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': lambda ms: list(ms)},
-        'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': noop},
+        'plugins.elitea_core.utils.skill_export_import': {
+            'build_skill_fork_payload': noop,
+            'build_embedded_skill_frontmatter': lambda version: {},
+        },
+        'plugins.elitea_core.utils.skill_frontmatter': {'FRONTMATTER_META_KEY': 'frontmatter'},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': noop},
     }
     for name, attrs in stubs.items():
