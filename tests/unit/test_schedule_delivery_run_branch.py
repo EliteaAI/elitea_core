@@ -17,6 +17,7 @@ PROJECT_ID, SCHEDULE_ID, RUN_ID, OWNER, AGENT_ID, VERSION_ID = 34, 7, 31, 12, 5,
 RUN_CHAT_ID, RUN_CHAT_UUID = 77, "uuid-1"
 TARGET_CHAT_ID, TARGET_CHAT_UUID = 55, "3f1c9a0e-5b7d-4c2a-8e6f-0b1d3c5a7e9f"
 PARTICIPANT_ID, GROUP_ID, GROUP_UUID = 8, 901, "group-uuid-1"
+OTHER_AGENT_ID, OTHER_OWNER = 6, 99
 PROMPT = "Daily summary"
 
 
@@ -28,7 +29,7 @@ class FakeQuery:
 
     def filter_by(self, **filters):
         world = self.world
-        if world.link_error:
+        if world.link_error and "create" in world.names():
             raise world.link_error
         if self.model == "Conversation":
             row_id = world.chats.get(str(filters["uuid"]))
@@ -76,7 +77,8 @@ class World:
         self.budget_scope = None
         self.create_error = self.link_error = self.predict_error = None
         self.participant_in_chat = True
-        self.owner_in_chat = True
+        self.owner_id = OWNER
+        self.chat_members = {OWNER}
         self.chats = {RUN_CHAT_UUID: RUN_CHAT_ID, TARGET_CHAT_UUID: TARGET_CHAT_ID}
         self.schedule = SimpleNamespace(
             id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
@@ -90,6 +92,8 @@ class World:
             ("EntitySchedule", SCHEDULE_ID): self.schedule,
             ("ApplicationVersion", VERSION_ID): SimpleNamespace(id=VERSION_ID, application_id=AGENT_ID, name="v3"),
             ("Application", AGENT_ID): SimpleNamespace(name="Daily report"),
+            ("Participant", PARTICIPANT_ID): SimpleNamespace(
+                entity_name="application", entity_meta={"id": AGENT_ID, "project_id": PROJECT_ID}),
             ("EntityScheduleRun", RUN_ID): self.run,
         }
 
@@ -106,7 +110,7 @@ def world(monkeypatch):
 
     def prerun(project_id, schedule, run_id):
         state.calls.append(("prerun", run_id))
-        return SimpleNamespace(ok=state.prerun_ok, owner_id=OWNER if state.prerun_ok else None)
+        return SimpleNamespace(ok=state.prerun_ok, owner_id=state.owner_id if state.prerun_ok else None)
 
     def create(**kwargs):
         state.calls.append(("create", kwargs))
@@ -126,10 +130,12 @@ def world(monkeypatch):
         "models.all": {"Application": type("Application", (), {}), "ApplicationVersion": type("ApplicationVersion", (), {})},
         "models.conversation": {"Conversation": type("Conversation", (), {})},
         "models.message_group": {"ConversationMessageGroup": type("ConversationMessageGroup", (), {})},
-        "models.participants": {"ParticipantMapping": type("ParticipantMapping", (), {})},
+        "models.participants": {"Participant": type("Participant", (), {}),
+                                "ParticipantMapping": type("ParticipantMapping", (), {})},
+        "models.enums.all": {"ParticipantTypes": SimpleNamespace(application=SimpleNamespace(value="application"))},
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
                                    "EntityScheduleRun": type("EntityScheduleRun", (), {})},
-        "utils.conversation_access": {"is_conversation_participant": lambda session, chat_id, user_id: state.owner_in_chat},
+        "utils.conversation_access": {"is_conversation_participant": lambda session, chat_id, user_id: user_id in state.chat_members},
         "utils.schedule_prerun": {"run_prerun_check": prerun},
         "utils.schedule_runs": {
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
@@ -217,21 +223,63 @@ def test_failed_prerun_writes_nothing_into_the_chat(world):
     assert world.names() == ["prerun"]
 
 
-def test_failed_predict_closes_the_run_and_keeps_the_chat_link(world):
-    error = RuntimeError("rpc down")
-    world.predict_error = error
+def test_failed_predict_posts_a_fixed_message_and_closes_the_run(world):
+    world.predict_error = RuntimeError("rpc down at 10.0.0.5")
     _run(world)
     assert world.names().count("create") == 1
-    assert world.call("finish_error") == ("finish_error", PROJECT_ID, GROUP_UUID, error)
+    assert world.call("finish_error") == ("finish_error", PROJECT_ID, GROUP_UUID, "the run call failed")
     assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run call failed")
     assert (world.run.conversation_id, world.run.conversation_uuid) == (TARGET_CHAT_ID, TARGET_CHAT_UUID)
 
 
-@pytest.mark.parametrize("step", ["create_error", "link_error"])
-def test_delivery_write_or_link_error_closes_the_run_and_calls_no_predict(world, step):
-    setattr(world, step, RuntimeError("db down"))
+def test_closed_budget_door_after_the_write_posts_a_fixed_message(world):
+    error = world.module.BudgetDoorClosedError("door closed for user 12")
+    error.scope = "daily"
+    world.predict_error = error
+    _run(world)
+    assert world.call("finish_error") == ("finish_error", PROJECT_ID, GROUP_UUID, "the daily budget is used up")
+    assert world.call("block") == ("block", PROJECT_ID, RUN_ID, "the daily budget is used up")
+
+
+def test_run_history_failed_predict_keeps_the_error_text_in_its_private_chat(world):
+    world.schedule.delivery_mode = "run_history"
+    error = RuntimeError("rpc down")
+    world.predict_error = error
+    _run(world)
+    assert world.call("finish_error") == ("finish_error", PROJECT_ID, "response-1", error)
+
+
+def test_failed_chat_write_leaves_no_group_to_end(world):
+    world.create_error = RuntimeError("db down")
+    _run(world)
+    assert "finish_error" not in world.names()
+    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run could not start")
+
+
+def test_failed_link_ends_the_streaming_group_before_the_run_closes(world):
+    world.link_error = RuntimeError("db down")
     _run(world)
     assert "predict" not in world.names()
+    ended = world.names().index("finish_error")
+    assert world.names().index("fail") == ended + 1
+    assert world.calls[ended] == ("finish_error", PROJECT_ID, GROUP_UUID, "the run could not start")
+    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run could not start")
+
+
+def test_missing_run_row_ends_the_streaming_group_before_the_run_closes(world):
+    world.rows.pop(("EntityScheduleRun", RUN_ID))
+    _run(world)
+    assert "predict" not in world.names()
+    assert world.calls[world.names().index("finish_error")] == (
+        "finish_error", PROJECT_ID, GROUP_UUID, "run not found")
+    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "run not found")
+
+
+def test_run_history_failed_link_ends_no_group(world):
+    world.schedule.delivery_mode = "run_history"
+    world.link_error = RuntimeError("db down")
+    _run(world)
+    assert "finish_error" not in world.names()
     assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run could not start")
 
 
@@ -247,15 +295,46 @@ def test_run_history_schedule_keeps_its_own_run_chat(world, mode):
     assert (world.run.conversation_uuid, world.run.message_group_id) == (None, None)
 
 
-@pytest.mark.parametrize("lost", ["chat", "participant", "owner"])
+@pytest.mark.parametrize("lost", ["chat", "participant", "owner", "foreign_agent", "user_participant", "no_participant"])
 def test_lost_delivery_target_runs_the_run_history_path(world, lost):
+    participant = world.rows[("Participant", PARTICIPANT_ID)]
     if lost == "chat":
         world.chats.pop(TARGET_CHAT_UUID)
     elif lost == "participant":
         world.participant_in_chat = False
+    elif lost == "owner":
+        world.chat_members = set()
+    elif lost == "foreign_agent":
+        participant.entity_meta = {"id": OTHER_AGENT_ID, "project_id": PROJECT_ID}
+    elif lost == "user_participant":
+        participant.entity_name, participant.entity_meta = "user", {"id": AGENT_ID}
     else:
-        world.owner_in_chat = False
+        world.rows.pop(("Participant", PARTICIPANT_ID))
     _run(world)
     assert "target_conversation" not in world.call("create")[1]
+    assert "participant_id" not in world.call("predict")[1]
     assert world.run.conversation_id == RUN_CHAT_ID
     assert world.run.message_group_id is None
+
+
+def test_participant_id_stored_as_text_still_matches_the_agent(world):
+    world.rows[("Participant", PARTICIPANT_ID)].entity_meta = {"id": str(AGENT_ID), "project_id": PROJECT_ID}
+    _run(world)
+    assert world.call("create")[1]["target_conversation"] == TARGET_CHAT_ID
+
+
+def test_new_owner_outside_the_chat_gets_no_delivery_rights(world):
+    world.schedule.created_by = world.owner_id = OTHER_OWNER
+    _run(world)
+    created = world.call("create")[1]
+    assert "target_conversation" not in created
+    assert created["user_id"] == OTHER_OWNER
+    assert world.run.conversation_id == RUN_CHAT_ID
+
+
+def test_new_owner_inside_the_chat_delivers_as_that_owner(world):
+    world.schedule.created_by = world.owner_id = OTHER_OWNER
+    world.chat_members = {OTHER_OWNER}
+    _run(world)
+    created = world.call("create")[1]
+    assert (created["target_conversation"], created["user_id"]) == (TARGET_CHAT_ID, OTHER_OWNER)
