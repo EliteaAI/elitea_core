@@ -761,7 +761,18 @@ def test_a_fan_out_child_resumed_after_a_long_pause_runs_on_with_its_root(ns, en
     reconcile = copy.deepcopy(draft_fan_out.root_call)
     assert ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", reconcile, None) is None
     assert reconcile["kwargs"]["envelope"]["context_ref"] == root_ref
-    # and the release of the child's slot honours the slid deadline
+
+
+def test_the_release_of_a_child_resumed_after_a_long_pause_honours_the_slid_deadline(ns, env, clock):
+    ns.need_transport()   # sealing a release needs the shared transport (absent when this plugin is checked out alone)
+    root_ref, child_ref, details = draft_fan_out(env, ns)
+    run_to_running(env, ns, root_ref)
+    clock["now"] = ns.adm._aware(context_row(env, ns, child_ref).expires_at) + timedelta(seconds=2 * TTL)  # pylint: disable=W0212
+    assert ns.adm.slide_for_resume(env.module(), 1, child_ref) > 0
+    resumed = call_kwargs({"application": {"id": 8, "version_id": 80, "version_details": copy.deepcopy(details)}},
+                          context_ref=child_ref)
+    ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", resumed, None)
+    assert verdict(ns, env, child_ref, touch=True)["ok"] is True
     _private, public = ns.keypair()
     slot = resumed["kwargs"]["application"]["version_details"]["tools"][0]["settings"]["credentials"]["credential_slot"]
     released = ns.credential_release.release_credential(
