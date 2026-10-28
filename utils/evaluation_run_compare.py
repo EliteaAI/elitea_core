@@ -21,6 +21,12 @@ differs between the two runs is listed under ``coverage.limit_changed`` and left
 figures and the timeout lists; its tokens, cost and tool calls are still compared. When that is
 every matched case, latency and timeout verdicts are withheld (``not_comparable``).
 
+A few matched cases out of many are not a sample of the run: p95 of three cases is the slowest of
+three. When the two runs only partly overlap and the matched cases are fewer than
+:data:`MIN_MATCHED_CASES` or under :data:`MIN_MATCHED_SHARE` of this run's cases, the latency
+verdicts are withheld (``few_matched_cases``) and the figures kept. Tokens, cost, tool calls and the
+timeout lists are still compared, so a newly timed-out case still marks the run slower (#7261).
+
 The pure part (:func:`performance_diff`) takes plain dicts so it is unit-testable without a DB;
 :func:`compare_run_performance` loads the rows and resolves the reference.
 """
@@ -36,6 +42,10 @@ from .evaluation_usage import COST_PENDING, COST_UNPRICED, ROLE_AGENT, USAGE_REC
 LATENCY_NOISE_RELATIVE = 0.15
 LATENCY_NOISE_ABSOLUTE_MS = 2000
 
+#: The least overlap that latency verdicts are given on, unless both runs measured the same cases.
+MIN_MATCHED_CASES = 5
+MIN_MATCHED_SHARE = 0.5
+
 VERDICT_BETTER = 'better'
 VERDICT_WORSE = 'worse'
 VERDICT_NOISE = 'within_noise'
@@ -44,6 +54,7 @@ VERDICT_UNCHANGED = 'unchanged'
 REASON_TIME_LIMIT_CHANGED = 'time_limit_changed'
 REASON_DIFFERENT_DATASET = 'different_dataset'
 REASON_NO_CASES = 'no_comparable_cases'
+REASON_FEW_MATCHED_CASES = 'few_matched_cases'
 
 SOURCE_EXPLICIT = 'explicit'
 SOURCE_BASELINE = 'baseline'
@@ -137,6 +148,14 @@ def _paired(pairs: List[tuple], field: str) -> tuple:
     return [a for a, _ in both], [b for _, b in both], len(pairs) - len(both)
 
 
+def few_matched_cases(matched: int, run_cases: int) -> bool:
+    """Whether ``matched`` of this run's ``run_cases`` are too few to judge latency on. A full
+    overlap is always enough; an empty one is already ``no_comparable_cases``."""
+    if not matched or matched >= run_cases:
+        return False
+    return matched < MIN_MATCHED_CASES or matched / run_cases < MIN_MATCHED_SHARE
+
+
 def performance_diff(run: dict, reference: dict) -> dict:
     """The diff of two runs. Each argument is ``{snapshot, dataset_id, case_time_limit_seconds,
     cases: {dataset_case_id: case_view(...)}}``, where ``case_time_limit_seconds`` is the suite
@@ -164,6 +183,9 @@ def performance_diff(run: dict, reference: dict) -> dict:
     if cap_changed:
         reasons.append(REASON_TIME_LIMIT_CHANGED)
     latency_block = REASON_TIME_LIMIT_CHANGED if cap_changed else None
+    if few_matched_cases(len(matched), len(run_cases)):
+        reasons.append(REASON_FEW_MATCHED_CASES)
+        latency_block = latency_block or REASON_FEW_MATCHED_CASES
 
     metrics = {}
     for key, field, percent in (('p50_latency_ms', 'latency_ms', 50), ('p95_latency_ms', 'latency_ms', 95),
@@ -171,6 +193,8 @@ def performance_diff(run: dict, reference: dict) -> dict:
         a, b, excluded = _paired(latency_pairs, field)
         metrics[key] = _metric(_percentile(a, percent), _percentile(b, percent), len(a),
                                excluded + len(limit_changed), noisy=True, not_comparable=latency_block)
+    # Timeouts are listed per case, so only a time limit change withholds them, not a small overlap.
+    timeouts_block = REASON_TIME_LIMIT_CHANGED if cap_changed else None
     for key, field in (('tool_calls', 'tool_calls'), ('agent_tokens', 'tokens'), ('agent_cost', 'cost')):
         a, b, excluded = _paired(pairs, field)
         metrics[key] = _metric(sum(a) if a else None, sum(b) if b else None, len(a), excluded)
@@ -209,10 +233,11 @@ def performance_diff(run: dict, reference: dict) -> dict:
             'only_in_run': sorted(set(run_cases) - set(ref_cases)),
             'only_in_reference': sorted(set(ref_cases) - set(run_cases)),
             'limit_changed': limit_changed,
+            'min_matched': {'cases': MIN_MATCHED_CASES, 'share': MIN_MATCHED_SHARE},
         },
         'metrics': metrics,
         'timeouts': {
-            'not_comparable': latency_block,
+            'not_comparable': timeouts_block,
             'run': len(timed_out),
             'reference': len(ref_timed_out),
             'newly_timed_out': newly_timed_out,
