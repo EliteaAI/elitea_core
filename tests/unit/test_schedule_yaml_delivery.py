@@ -106,6 +106,21 @@ def test_import_of_an_unchanged_export_keeps_the_stored_chat_delivery_and_says_s
     assert entry['note'] == 'The target chat is not imported; the schedule keeps its stored delivery'
 
 
+def test_import_says_so_when_the_file_mode_differs_from_the_stored_mode_of_an_updated_schedule(env):
+    key = uuid.UUID(int=9)
+    seed(env, uuid=key, delivery_mode='conversation', delivery_conversation_uuid=CHAT, delivery_participant_id=5)
+    report = env.import_items(item(key=str(key), delivery=delivery_of(
+        mode='run_history', conversation_uuid=None, participant_id=None, include_history=False,
+    )))
+    (row,) = env.rows()
+    (entry,) = report['updated']
+    assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
+        'conversation', CHAT, 5,
+    )
+    assert entry['note'] == ('The file says delivery mode run_history; the schedule keeps its stored mode '
+                             'conversation')
+
+
 def test_import_without_a_delivery_object_creates_and_updates_as_before(env):
     key = str(uuid.UUID(int=8))
     created = env.import_items(item(key=key))

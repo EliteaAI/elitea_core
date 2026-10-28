@@ -294,7 +294,8 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
 
     Returns:
         `{created, updated, skipped, failed}`; every entry has the item name, a created or updated one the
-        `schedule_id` and a `note` when the approval rule changed or a chat delivery was not imported, a
+        `schedule_id` and a `note` when the approval rule changed, a chat delivery was not imported or the
+        file's delivery mode differs from the stored mode of an updated row, a
         skipped or failed one the `reason`.
     """
     # late: the export loads without these modules
@@ -325,6 +326,10 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
                     where = 'delivers to the run history' if row.delivery_mode == 'run_history' else (
                         'keeps its stored delivery')
                     entry['note'] = '; '.join(filter(None, (entry.get('note'), CHAT_NOT_IMPORTED + where)))
+                elif item.delivery and group == 'updated' and item.delivery.mode != row.delivery_mode:
+                    mode_note = (f'The file says delivery mode {item.delivery.mode}; '
+                                 f'the schedule keeps its stored mode {row.delivery_mode}')
+                    entry['note'] = '; '.join(filter(None, (entry.get('note'), mode_note)))
                 entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name
                 report[group].append(entry)
             except _Skipped as e:
