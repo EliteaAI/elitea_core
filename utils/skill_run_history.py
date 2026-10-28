@@ -89,6 +89,7 @@ def chat_skill_runs(session, conversation_ids: list[int], skill_id: int, skill_p
     )
     return {
         conversation_id: {
+            'is_chat_run': True,
             'duration': durations.get(conversation_id, 0.0),
             'skill_version_id': latest_versions.get(conversation_id),
             'run_started_at': run_started_at.get(conversation_id),

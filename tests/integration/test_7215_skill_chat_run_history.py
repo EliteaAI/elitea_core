@@ -326,8 +326,10 @@ def test_a_chat_row_carries_the_skill_share_of_the_chat(rpc_module, project):
 
     assert rows[2]['duration'] == 9.0
     assert rows[2]['skill_version_id'] == 88
+    assert rows[2]['is_chat_run'] is True
     assert rows[1]['duration'] == 3.0
     assert rows[1]['skill_version_id'] is None
+    assert rows[1]['is_chat_run'] is False
 
 
 def test_a_skill_reply_in_an_agent_run_panel_stays_in_the_agent_history(rpc_module, project):
