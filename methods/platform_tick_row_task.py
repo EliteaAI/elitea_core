@@ -46,9 +46,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Param format: ``dry_run=false``. Dry run by default.
 
+        Returns ``{"dry_run": bool, "found": [ids], "renamed": [ids], "switched_off": [ids]}``, or
+        ``{"error": "<message>"}`` when the task fails.
+
         Examples::
 
-            ""                - dry run: log the row ids it would rename and switch off
+            ""                - dry run: report the row ids it would rename and switch off
             "dry_run=false"   - write the changes
         """
         log.info("Starting fix_platform_tick_row")
@@ -60,12 +63,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             from plugins.scheduling.models.schedule import Schedule  # pylint: disable=C0415,E0401
             with db.get_session(None) as session:
                 plan = platform_tick_row.repair(session, Schedule, dry_run=dry_run)
-            log.info(
-                "fix_platform_tick_row%s: found=%s renamed=%s switched_off=%s",
-                " (dry run)" if dry_run else "", plan["found"], plan["rename"], plan["switch_off"],
-            )
-        except:  # pylint: disable=W0702
+        except Exception as exc:  # pylint: disable=W0703  # noqa: BLE001 - the caller gets the error, not a silent None
             log.exception("Got exception during fix_platform_tick_row")
-        #
-        end_ts = time.time()
-        log.info("Exiting fix_platform_tick_row (duration = %s)", end_ts - start_ts)
+            return {"error": str(exc)}
+        report = platform_tick_row.report(plan, dry_run)
+        log.info(
+            "fix_platform_tick_row%s: found=%s renamed=%s switched_off=%s (duration = %s)",
+            " (dry run)" if dry_run else "", report["found"], report["renamed"], report["switched_off"],
+            time.time() - start_ts,
+        )
+        return report

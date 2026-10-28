@@ -36,6 +36,16 @@ def plan_repair(rows) -> dict:
     }
 
 
+def report(plan: dict, dry_run: bool) -> dict:
+    """The task result: in a dry run `renamed` and `switched_off` name the rows a real run would change."""
+    return {
+        "dry_run": dry_run,
+        "found": plan["found"],
+        "renamed": plan["rename"],
+        "switched_off": plan["switch_off"],
+    }
+
+
 def repair(session, schedule_model, dry_run: bool = True) -> dict:
     """Plan the repair on the rows of `schedule_model` and, unless `dry_run`, write it and commit."""
     rows = (

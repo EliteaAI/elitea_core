@@ -131,3 +131,49 @@ def test_the_boot_does_not_repair_schedule_rows():
     src = (PLUGIN_ROOT / "module.py").read_text()
     body = src[src.index("    def _bootstrap_platform_schedules"):src.index("    def get_managed_schedules")]
     assert "platform_tick_row" not in body and "rebind" not in body
+
+
+def test_the_report_names_the_rows_found_renamed_and_switched_off(tick_row):
+    plan = {"found": [1, 2], "rename": [1], "switch_off": [2]}
+    assert tick_row.report(plan, True) == {"dry_run": True, "found": [1, 2], "renamed": [1], "switched_off": [2]}
+
+
+def _task(tick_row, session=None, model=None):
+    """The admin task method from methods/platform_tick_row_task.py, run without the pylon plugin."""
+    import contextlib
+    import types
+
+    src = (PLUGIN_ROOT / "methods" / "platform_tick_row_task.py").read_text()
+    body = src[src.index("    # pylint: disable=R,W0613"):]
+    body = body.replace("            from plugins.scheduling.models.schedule import Schedule"
+                        "  # pylint: disable=C0415,E0401\n", "            Schedule = _model()\n")
+    logged = []
+
+    def _model():
+        if model is None:
+            raise ImportError("No module named 'plugins.scheduling'")
+        return model
+
+    namespace = {
+        "time": __import__("time"),
+        "web": types.SimpleNamespace(method=lambda *a, **k: (lambda f: f)),
+        "log": types.SimpleNamespace(info=lambda *a, **k: None, exception=logged.append),
+        "db": types.SimpleNamespace(get_session=lambda _p: contextlib.nullcontext(session)),
+        "platform_tick_row": tick_row,
+        "_model": _model,
+    }
+    exec(compile("class Method:\n" + body, "platform_tick_row_task.py", "exec"), namespace)  # noqa: S102 - runs the task method without the pylon plugin
+    return namespace["Method"]().fix_platform_tick_row, logged
+
+
+def test_the_task_returns_the_report(tick_row):
+    session = _session([("pipeline_scheduling", None, OLD, True), ("pipeline_scheduling", None, OLD, True)])
+    task, _ = _task(tick_row, session, Schedule)
+    assert task(param="dry_run=false") == {"dry_run": False, "found": [1, 2], "renamed": [1], "switched_off": [2]}
+    assert _rows(session) == [(1, NEW, True), (2, OLD, False)]
+
+
+def test_a_failing_task_returns_the_error_to_the_caller(tick_row):
+    task, logged = _task(tick_row)
+    assert task(param="") == {"error": "No module named 'plugins.scheduling'"}
+    assert logged == ["Got exception during fix_platform_tick_row"]
