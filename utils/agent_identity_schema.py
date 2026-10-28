@@ -5,8 +5,9 @@ table (#6947).
 startup safety net in ``module.py`` or from the ``create_agent_identity_tables`` and
 ``create_mandate_tables`` admin tasks. All only create what is missing, so a steady-state boot issues no DDL.
 
-A development run (#7213) has no binding, so ``execution_security_context.agent_binding_ref`` must accept NULL: a
-schema that predates that gets the constraint dropped by the same safety net and task (``apply_nullable_binding_ref``).
+A development run (#7213) has no binding, so ``execution_security_context.agent_binding_ref`` must accept NULL, and a
+toolkit run (#7229) has no application version, so ``application_id`` and ``version_id`` must too: a schema that predates
+that gets the constraints dropped by the same safety net and task (``apply_nullable_binding_ref``).
 """
 from sqlalchemy import bindparam, text
 from pylon.core.tools import log
@@ -17,6 +18,7 @@ from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, Exe
 IDENTITY_TABLES = (AgentIdentityBinding, ExecutionSecurityContext)
 MANDATE_TABLES = (AutonomousMandate,)
 CONTEXT_TABLE, BINDING_REF_COLUMN = ExecutionSecurityContext.__tablename__, "agent_binding_ref"
+NULLABLE_COLUMNS = (BINDING_REF_COLUMN, "application_id", "version_id")   # #7213, #7229
 
 # Only fully provisioned project schemas (they already hold elitea_core's own tables) are considered.
 _MISSING_QUERY = text(
@@ -27,10 +29,11 @@ _MISSING_QUERY = text(
 ).bindparams(bindparam("names", expanding=True))
 
 
-# Project schemas whose context table still refuses a NULL binding reference (created before #7213)
+# Project schemas whose context table still refuses a NULL in one of ``NULLABLE_COLUMNS`` (created before #7213/#7229)
 _NOT_NULL_QUERY = text(
-    "SELECT table_schema FROM information_schema.columns "
-    "WHERE table_name = :table AND column_name = :column AND is_nullable = 'NO' AND table_schema ~ '^p_[0-9]+$'")
+    "SELECT DISTINCT table_schema FROM information_schema.columns "
+    "WHERE table_name = :table AND column_name IN :columns AND is_nullable = 'NO' AND table_schema ~ '^p_[0-9]+$'"
+).bindparams(bindparam("columns", expanding=True))
 
 
 def project_ids_missing_tables(models=IDENTITY_TABLES):
@@ -78,15 +81,17 @@ def apply_mandate_tables(project_ids, dry_run=False):
 
 
 def project_ids_with_not_null_binding_ref():
-    """One catalog query: project schemas where ``execution_security_context.agent_binding_ref`` is still NOT NULL."""
+    """One catalog query: project schemas where a column of ``NULLABLE_COLUMNS`` of ``execution_security_context`` is
+    still NOT NULL."""
     with db.get_session(None) as session:
-        rows = session.execute(_NOT_NULL_QUERY, {"table": CONTEXT_TABLE, "column": BINDING_REF_COLUMN}).fetchall()
+        rows = session.execute(_NOT_NULL_QUERY, {"table": CONTEXT_TABLE, "columns": list(NULLABLE_COLUMNS)}).fetchall()
     return [int(row[0][2:]) for row in rows]
 
 
 def apply_nullable_binding_ref(project_ids, dry_run=False):
-    """Drop the NOT NULL of ``agent_binding_ref`` where it is still there (#7213), one transaction per project. Returns
-    ``(migrated, failed)`` as ``apply_tables``. The schema name is built from the integer project id only."""
+    """Drop the NOT NULL of ``NULLABLE_COLUMNS`` where it is still there (#7213, #7229), one transaction per project
+    (dropping it from a column that has none is a no-op). Returns ``(migrated, failed)`` as ``apply_tables``. The schema
+    name is built from the integer project id only, the column names are the constants above."""
     migrated, failed = [], []
     for pid in project_ids:
         if dry_run:
@@ -94,8 +99,9 @@ def apply_nullable_binding_ref(project_ids, dry_run=False):
             continue
         try:
             with db.get_session(pid) as session:
-                session.execute(text(
-                    f'ALTER TABLE "p_{int(pid)}".{CONTEXT_TABLE} ALTER COLUMN {BINDING_REF_COLUMN} DROP NOT NULL'))
+                for column in NULLABLE_COLUMNS:
+                    session.execute(text(
+                        f'ALTER TABLE "p_{int(pid)}".{CONTEXT_TABLE} ALTER COLUMN {column} DROP NOT NULL'))
                 session.commit()
             migrated.append(pid)
         except Exception:  # pylint: disable=W0703

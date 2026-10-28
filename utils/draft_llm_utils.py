@@ -11,9 +11,9 @@ from typing import Optional
 from pylon.core.tools import log
 from tools import rpc_tools
 
+from .error_text import last_exception_line
 from .utils import get_public_project_id
 
-ERROR_LINE_MAX_LENGTH = 300
 MAX_LISTED_MODEL_NAMES = 20
 PARSE_FAILURE_WINDOW = 120
 PARSE_FAILURE_TAIL = 80
@@ -158,13 +158,6 @@ def resolve_model(
     return unavailable, None
 
 
-def _last_exception_line(error_text) -> str:
-    lines = [line.strip() for line in str(error_text).splitlines() if line.strip()]
-    line = lines[-1] if lines else str(error_text).strip()
-    if len(line) > ERROR_LINE_MAX_LENGTH:
-        return line[:ERROR_LINE_MAX_LENGTH] + "..."
-    return line
-
 
 def _thinking_steps(result) -> list:
     inner = result.get("result") if isinstance(result, dict) else None
@@ -233,7 +226,7 @@ def _failure_text(container: dict) -> Optional[str]:
         return container["message"]
 
     curated = container.get("human_readable")
-    detail = _last_exception_line(container["error"]) if container.get("error") else None
+    detail = last_exception_line(container["error"]) if container.get("error") else None
     if curated and detail and not _already_states(curated, detail):
         return f"{curated} ({detail})"
     return curated or detail
@@ -364,7 +357,7 @@ def _describe_validation_error(error: dict) -> str:
         for key, label in LENGTH_RULES:
             if key in context:
                 return f"{field} is {len(value)} characters, the {label} is {context[key]}"
-    return f"{field}: {_last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
+    return f"{field}: {last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
 
 
 def describe_validation_failure(errors) -> str:

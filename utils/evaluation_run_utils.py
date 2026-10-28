@@ -138,11 +138,25 @@ def _load_suite_config(s, suite_id: int, *, judge_model_override: Optional[dict]
     bindings = [_binding_dict(b) for b in binding_rows]
 
     dim_ids = {b['dimension_id'] for b in bindings if b['dimension_id'] is not None}
-    dimensions = (
-        [_dimension_dict(d) for d in s.query(EvalDimension).filter(EvalDimension.id.in_(dim_ids)).all()]
-        if dim_ids else []
-    )
+    dimension_rows = s.query(EvalDimension).filter(EvalDimension.id.in_(dim_ids)).all() if dim_ids else []
+    _apply_dimension_target_defaults(bindings, dimension_rows)
+    dimensions = [_dimension_dict(d) for d in dimension_rows]
     return suite, bindings, dimensions
+
+
+def _apply_dimension_target_defaults(bindings: List[dict], dimension_rows) -> None:
+    """A binding without its own target pair runs against the dimension's current default — the same
+    value the suite screen shows on the card. Without this a target set or changed on the dimension
+    after it was attached never reached the run snapshot and the target check was skipped. The pair
+    moves together: a half-pair can't be evaluated."""
+    defaults = {d.id: d for d in dimension_rows}
+    for b in bindings:
+        if b['target'] is not None or b['target_operator'] is not None:
+            continue
+        dim = defaults.get(b['dimension_id'])
+        if dim is not None and dim.default_target is not None and dim.default_target_operator is not None:
+            b['target'] = dim.default_target
+            b['target_operator'] = dim.default_target_operator
 
 
 def _resolve_version(bindings: List[dict], override: Optional[int]) -> int:

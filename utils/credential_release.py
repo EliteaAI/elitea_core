@@ -364,7 +364,8 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
                    columns.run_id, columns.attempt, columns.application_id, columns.agent_binding_ref,
                    columns.binding_project_id, columns.project_id, columns.tenant, columns.subject,
                    columns.allowed_bindings, columns.trace_ref, columns.revocation_epochs, columns.caller,
-                   columns.definition_digest, columns.policy_revision, columns.environment)
+                   columns.definition_digest, columns.policy_revision, columns.environment, columns.parent_context_ref,
+                   columns.call_lineage, columns.entry_point)
             .where(columns.id == context_id)
         ).one_or_none()
         if row is None:
@@ -387,25 +388,31 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
     #   3a. a live, running context of this worker's run
     if row.schema_version != adm.SCHEMA_VERSION or row.profile not in adm.PROFILES:
         raise adm._denied("STALE_CONTEXT")
-    if first.task_name not in adm.ADMITTED_TASKS or first.caller.get("run_id") != row.run_id:
+    if (first.task_name not in adm.ADMITTED_TASKS or first.caller.get("run_id") != row.run_id
+            or not adm.task_fits_entry(first.task_name, row.entry_point)):   # C9-SEC-32
         raise adm._denied("STALE_CONTEXT")
     if row.state != "running":
         reason = row.revoked_reason if row.state == "revoked" else None
         raise adm._denied(reason if reason in adm.REVOKE_CODES else "STALE_CONTEXT")
     if adm._now() >= adm._aware(row.expires_at):
         raise adm._denied("STALE_CONTEXT")
+    if not adm.root_context_live(first.project_id, row):   # a fan-out sub-agent of a run that ended (#7227)
+        raise adm._denied("STALE_CONTEXT")
     #   4. the exact use the context was admitted for, for every slot
-    entries = []
-    for request in requests:
-        slot = request.slot
-        wanted = (request.toolkit_instance_id, request.field, slot["credential_ref"], slot["credential_generation"],
-                  slot["decision_id"])
-        entry = next((item for item in row.allowed_bindings or [] if isinstance(item, dict) and wanted == (
-            item.get("toolkit_instance_id"), item.get("field"), item.get("credential_ref"),
-            item.get("credential_generation"), item.get("decision_id"))), None)
-        if entry is None:
-            raise _denied_at(request, "CREDENTIAL_REFERENCE_REQUIRED")
-        entries.append(entry)
+    entries, missing = _entries_of(row, requests)
+    if missing is not None:
+        # a sub-agent the run calls in its own process was admitted with a context of its own (#7227): its slots are
+        # checked and released against that context. Read only when a slot is not the run's own
+        owner = next((child for child in adm.descendant_contexts(first.project_id, row.run_id, first.context_ref)
+                      if _entries_of(child, requests)[1] is None), None)
+        if owner is None or owner.schema_version != adm.SCHEMA_VERSION or owner.profile not in adm.PROFILES:
+            raise _denied_at(missing, "CREDENTIAL_REFERENCE_REQUIRED")
+        row, entries = owner, _entries_of(owner, requests)[0]
+        binding_project_id = row.binding_project_id or row.project_id
+        binding = None if row.agent_binding_ref is None else adm._read_binding(binding_project_id, row.agent_binding_ref)
+        label = adm.context_binding_label(row)
+        for request in requests:
+            request.known.update(application_id=row.application_id, attempt=row.attempt, agent_binding_ref=label)
     #   5. a bounded number of releases per use
     remaining = max(1, int((adm._aware(row.expires_at) - adm._now()).total_seconds()))
     _count_releases(module, requests, remaining)
@@ -425,6 +432,23 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
         _revoke(first, code)
 
     return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), events, on_revoke=on_revoke)
+
+
+def _entries_of(row, requests: list) -> tuple:
+    """``(entries, None)``: the decision of ``row`` each slot names (toolkit, field, credential, generation, decision),
+    in order; or ``([], request)`` for the first slot ``row`` holds no decision for."""
+    entries = []
+    for request in requests:
+        slot = request.slot
+        wanted = (request.toolkit_instance_id, request.field, slot["credential_ref"], slot["credential_generation"],
+                  slot["decision_id"])
+        entry = next((item for item in row.allowed_bindings or [] if isinstance(item, dict) and wanted == (
+            item.get("toolkit_instance_id"), item.get("field"), item.get("credential_ref"),
+            item.get("credential_generation"), item.get("decision_id"))), None)
+        if entry is None:
+            return [], request
+        entries.append(entry)
+    return entries, None
 
 
 def _revoke(request: _Request, code) -> None:

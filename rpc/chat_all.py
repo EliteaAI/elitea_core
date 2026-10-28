@@ -38,9 +38,11 @@ from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
-from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
+from ..utils.application_utils import build_skill_mappings_list
+from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
+from ..utils.project_skills import UnknownSkillMentionError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
-    apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
+    apply_participant_skill_mentions, validate_turn_skill_limit, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.input_guardrail import (
@@ -61,6 +63,10 @@ from ..utils.toolkit_authorization import (
 )
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
+from ..utils.schedule_runs import (
+    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
+    apply_schedule_decision, check_schedule_decision,
+)
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
@@ -78,6 +84,7 @@ from ..utils.pipeline_hitl_history import (
     create_pipeline_hitl_resume_segments,
     get_direct_pipeline_hitl_interrupt,
 )
+from ..utils.pipeline_execution import TriggerType, with_execution_type
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -100,6 +107,11 @@ def authoring_kwargs(conversation, participant, chat_project_id, rpc_func) -> di
     return {"authoring": True} if is_authoring_conversation(conversation, participant, chat_project_id) else {}
 
 
+def _chat_trigger_kwargs(rpc_func: str) -> dict:
+    """The chat trigger source of an agent, pipeline or skill run; the other predict RPCs take no such argument."""
+    return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
+
+
 def _get_agent_type(
     session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
 ) -> str | None:
@@ -120,6 +132,54 @@ def _get_agent_type(
         except Exception:
             log.debug(f"Could not fetch agent_type for version {app_version_id}")
     return agent_type
+
+
+# The answer of each refused schedule decision (EL-7011)
+_SCHEDULE_REFUSALS = {
+    ScheduleDecisionForbidden: {"error": "Only the schedule owner can approve or reject this run", "status": 403},
+    ScheduleDecisionInvalid: {
+        "error": "hitl_action must be approve, edit, answer, block_with_comment or reject",
+        "field": "hitl_action", "status": 400,
+    },
+    ScheduleRunNotWaiting: {"error": "This schedule run is not waiting for approval", "status": 409},
+}
+
+
+def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
+    """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
+
+    The (run id, decision) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    """
+    if not parsed.hitl_resume:
+        return None, None
+    with db.get_session(parsed.project_id) as session:
+        meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
+    run_id = (meta or {}).get('schedule_run_id')
+    if run_id is None:
+        return None, None
+    decisions = parsed.hitl_decisions
+    # A non-dict item has no action, so it is refused as invalid (400) instead of failing (500)
+    actions = (
+        [item.get('action') if isinstance(item, dict) else None for item in decisions]
+        if decisions else [parsed.hitl_action]
+    )
+    try:
+        decision = check_schedule_decision(
+            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id))
+    except tuple(_SCHEDULE_REFUSALS) as e:
+        return None, _SCHEDULE_REFUSALS[type(e)]
+    return ((run_id, decision) if decision else None), None
+
+
+def _apply_schedule_decision(project_id, pending) -> dict | None:
+    """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
+    if pending is None:
+        return None
+    try:
+        apply_schedule_decision(project_id, *pending)
+    except ScheduleRunNotWaiting:
+        return _SCHEDULE_REFUSALS[ScheduleRunNotWaiting]
+    return None
 
 
 def generate_toolkit_payload(
@@ -441,7 +501,14 @@ def process_attachment_message_items(
 
 class PayloadGenerationError(Exception):
     """Custom exception for errors during payload generation."""
-    pass
+
+    def __init__(self, message, code: Optional[str] = None):
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def content(self):
+        return {'code': self.code, 'error': str(self)} if self.code else str(self)
 
 
 def generate_summary_payload(
@@ -752,7 +819,8 @@ def _resolve_application_llm_settings(
     return llm_settings
 
 
-def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel) -> dict:
+def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel,
+                     strict_skill_mentions: bool = False) -> dict:
     participant_chat_settings: ParticipantMapping = session.query(
         ParticipantMapping.entity_settings
     ).where(
@@ -972,7 +1040,14 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
 
-    apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
+    try:
+        apply_participant_skill_mentions(
+            session, msg_group, result, predict_payload.project_id, strict_mentions=strict_skill_mentions,
+        )
+    except SkillInvocationLimitError as e:
+        raise PayloadGenerationError(str(e), code=e.code) from e
+    except UnknownSkillMentionError as e:
+        raise PayloadGenerationError(str(e)) from e
 
     return result
 
@@ -997,6 +1072,28 @@ def resolve_target_application_context(
             owner_project_id, application_id, exc_info=True,
         )
         return False, []
+
+
+def read_target_version_skills(session, conversation_id: int, participant, chat_project_id: int) -> Optional[dict]:
+    if participant is None or participant.entity_name != ParticipantTypes.application:
+        return None
+    version_id = _pinned_version_id(session, conversation_id, participant.id)
+    owner_project_id = participant.entity_meta.get('project_id')
+    if owner_project_id is None or owner_project_id == chat_project_id:
+        return _version_skills(session, version_id)
+    with db.get_session(owner_project_id) as owner_session:
+        return _version_skills(owner_session, version_id)
+
+
+def _version_skills(session, version_id) -> Optional[dict]:
+    if not version_id:
+        return None
+    version = session.query(ApplicationVersion).options(
+        selectinload(ApplicationVersion.skill_mappings),
+    ).filter(ApplicationVersion.id == version_id).first()
+    if not version:
+        return None
+    return {'agent_type': version.agent_type, 'skills': build_skill_mappings_list(version.skill_mappings)}
 
 
 def _pinned_version_id(session, conversation_id: int, participant_id: int):
@@ -1197,6 +1294,7 @@ class RPC:
                 )
                 return {"error": "This message has already been submitted"}
 
+            conversation.meta = with_execution_type(conversation.meta, TriggerType.CHAT)
             # Checkpoint A (#6886): before the turn is stored, broadcast or used to
             # name the conversation. A blocked turn is stored redacted with the refusal
             # as its answer (plan D5), so the card survives a reload; REST callers get
@@ -1233,6 +1331,27 @@ class RPC:
                     to=sid,
                 )
                 return {"error": blocked.type, **blocked.body()}
+
+            target = session.get(Participant, parsed.participant_id) if parsed.participant_id else None
+            try:
+                with session.no_autoflush:
+                    validate_turn_skill_limit(
+                        session, conversation.id, target, parsed.user_input, parsed.project_id,
+                        lambda: read_target_version_skills(session, conversation.id, target, parsed.project_id),
+                        conversation=conversation, sender_id=(author_participant.entity_meta or {}).get('id'),
+                    )
+            except SkillInvocationLimitError as limit:
+                self.check_and_generate_conversation_name(parsed.project_id, 'New Chat', room, conversation)
+                if sid:
+                    raise SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error=limit.refusal(),
+                        stream_id=parsed.conversation_uuid,
+                        message_id=parsed.question_id,
+                    )
+                return limit.refusal()
 
             self.check_and_generate_conversation_name(
                 parsed.project_id, parsed.user_input, room, conversation
@@ -1495,7 +1614,9 @@ class RPC:
                 # here we need to generate payload
                 if rpc_func := CHAT_PREDICT_MAPPER.get(msg_group.sent_to.entity_name):
                     try:
-                        payload: dict = generate_payload(session, msg_group=msg_group, predict_payload=parsed)
+                        payload: dict = generate_payload(
+                            session, msg_group=msg_group, predict_payload=parsed, strict_skill_mentions=True,
+                        )
                     except PayloadGenerationError as e:
                         # raise SioValidationError(
                         #     sio=self.context.sio,
@@ -1506,11 +1627,13 @@ class RPC:
                         #     message_id=parsed.question_id,
                         # )
                         log.error(e)
+                        response_msg.is_streaming = False
+                        session.commit()
                         self.context.sio.emit(
                             event=SioEvents.socket_validation_error.value,
                             data={
                                 'event': SioEvents.chat_predict.value,
-                                'content': str(e),
+                                'content': e.content,
                                 'type': 'error',
                                 'stream_id': parsed.conversation_uuid,
                                 'message_id': parsed.question_id
@@ -1583,6 +1706,8 @@ class RPC:
                             **pop_chat_skills(payload),
                             **skill_rpc_kwargs,
                             **authoring_kwargs(conversation, msg_group.sent_to, parsed.project_id, rpc_func),
+                            **_chat_trigger_kwargs(rpc_func),
+
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2022,6 +2147,13 @@ class RPC:
         else:
             current_user = auth.current_user()
 
+        # Owner check of a scheduled run before any resume (EL-7011); an internal replay was checked already
+        schedule_decision = None
+        if _internal_token is not INTERNAL_CONTINUE_TOKEN:
+            schedule_decision, denied = _check_schedule_decision(parsed, current_user['id'])
+            if denied:
+                return self._refuse_schedule_decision(sid, parsed, denied)
+
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
         # — without this, a fan-out child whose stash was cleared on stop falls
@@ -2074,6 +2206,11 @@ class RPC:
         # and the reconcile gate wakes the parent.
         child_resume = self._continue_child_resume(sid, parsed, current_user)
         if child_resume is not None:
+            # lean: the write follows the child start, so a decision that came too late is only logged;
+            # move it into _continue_child_resume when a schedule run must refuse a parked child
+            if _apply_schedule_decision(parsed.project_id, schedule_decision):
+                log.warning("Schedule run decision came too late for the resumed child (message_id=%s)",
+                            parsed.message_id)
             return child_resume
 
         # A durable child approval must never degrade into the ordinary parent
@@ -2112,6 +2249,11 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
+
+        # The decision changes the schedule run only now: a guard above that refused left it waiting (EL-7011)
+        denied = _apply_schedule_decision(parsed.project_id, schedule_decision)
+        if denied:
+            return self._refuse_schedule_decision(sid, parsed, denied)
 
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
@@ -2413,7 +2555,7 @@ class RPC:
                     sio=self.context.sio,
                     sid=sid,
                     event=SioEvents.chat_predict.value,
-                    error=str(e),
+                    error=e.content,
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
@@ -2542,6 +2684,8 @@ class RPC:
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
                     **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
+                    **_chat_trigger_kwargs(rpc_func),
+
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout
@@ -2600,6 +2744,16 @@ class RPC:
             data=serialize(MessageGroupDetail.model_validate(response_msg)),
             room=get_chat_room(response_msg.conversation.uuid),
         )
+
+    @web.method()
+    def _refuse_schedule_decision(self, sid, parsed, denied: dict) -> dict:
+        """The error dict of a refused schedule decision for REST; the socket path raises it (EL-7011)."""
+        if sid:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value, error=denied['error'],
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+        return denied
 
     @web.method()
     def _continue_child_resume(self, sid, parsed, current_user):

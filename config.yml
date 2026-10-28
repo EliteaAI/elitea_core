@@ -29,6 +29,23 @@ scheduler:
   index_scheduling:
     enabled: true
     cron: "* * * * *"
+  schedules:
+    min_interval_minutes: 5
+    max_enabled_per_project: 50
+    agent_scheduling_enabled: true
+    dispatch_cap: 100
+    stale_run_minutes: 120
+    max_parallel_runs: 100
+    approval_wait_hours: 24
+    legacy_step_enabled: true
+
+# Optional badge and effect text of a sensitive tool, shown by the schedule risk review (EL-7011).
+# Badges: sends_messages, deletes_data, changes_data, runs_code, needs_approval (the default).
+# Manage it from Admin -> Guardrails; a tool without an entry shows "needs_approval".
+# toolkit_security:
+#   sensitive_tool_info:
+#     outlook:
+#       send_email: {badge: sends_messages, effect: "Sends e-mail to people inside and outside the company"}
 
 pgvector_engine_cache:
   pool_size: 5              # persistent connections per cached engine

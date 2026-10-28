@@ -168,6 +168,8 @@ def rpc_module():
     _module(f'{PKG}.models.participants', Participant=Participant, ParticipantMapping=ParticipantMapping)
     _module(f'{PKG}.models.message_group', ConversationMessageGroup=ConversationMessageGroup)
     _module(f'{PKG}.models.message_trace_step', MessageTraceStep=MessageTraceStep)
+    _module(f'{PKG}.models.entity_schedule', EntitySchedule=stub, EntityScheduleRun=stub)
+    _module(f'{PKG}.utils.pipeline_execution', TriggerType=types.SimpleNamespace(VALUES=()))
     _module(f'{PKG}.models.message_items.base', MessageItem=stub)
     _module(f'{PKG}.models.message_items.text', TextMessageItem=stub)
     _module(f'{PKG}.models.pd.message', MessageGroupDetail=BaseModel)

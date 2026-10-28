@@ -88,13 +88,15 @@ _module(
 _module('utils.next_input_suggestion_utils', next_input_suggestion_config=lambda _project_id: {'enabled': False})
 _module(
     'utils.skill_utils',
+    SkillInvocationLimitError=type('SkillInvocationLimitError', (Exception,), {}),
     consume_message_skills=lambda message, _skills: (message, []),
     resolve_runtime_skills=lambda _details: [],
 )
 _module(
     'utils.skill_mentions',
-    merge_mention_candidates=lambda attached, chat: [*attached, *chat],
+    merge_mention_candidates=lambda attached, chat, project=None: [*attached, *chat, *(project or [])],
     merge_disclosable_skills=lambda own, chat: [*own, *chat],
+    strip_skill_bodies=lambda skills: [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []],
 )
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
 _module(

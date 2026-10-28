@@ -233,17 +233,30 @@ def toolkit_secret_fields(tool_type, project_id, user_id) -> frozenset:
 # --- one walk of a toolkit's settings per dispatch ---------------------------------------------
 
 _WALKS = contextvars.ContextVar("c1009_settings_walks", default=None)
+# Within a walk_scope: the configuration facts read so far, by (project id, uuid) (None: not found), and the pairs a
+# later step will ask for, read together with the first read (#7227: the run's decision, its sub-agents and the seal)
+_FACTS = contextvars.ContextVar("c1009_configuration_facts", default=None)
 
 
 @contextlib.contextmanager
 def walk_scope():
     """Within this scope the configurations found in one toolkit's settings are looked for once, whoever asks: the
-    credential decision at admission and the seal that follows it walk the same settings."""
-    token = _WALKS.set({})
+    credential decision at admission and the seal that follows it walk the same settings. The facts of a configuration
+    (its section) are read once too, and the configurations of the run's sub-agents with the run's own."""
+    token, facts = _WALKS.set({}), _FACTS.set({"read": {}, "wanted": set()})
     try:
         yield
     finally:
+        _FACTS.reset(facts)
         _WALKS.reset(token)
+
+
+def want_configuration_facts(pairs) -> None:
+    """Within a ``walk_scope``: read the facts of these ``(uuid, project id)`` pairs with the next read, in the same
+    calls (the configurations of the sub-agents a run carries, which the seal classifies). Nothing is read here."""
+    scope = _FACTS.get()
+    if scope is not None:
+        scope["wanted"].update((cfg_uuid, project_id) for cfg_uuid, project_id in pairs if cfg_uuid)
 
 
 def configurations_in(settings) -> list:
@@ -345,17 +358,33 @@ def _caller_of(ctx) -> dict:
 def read_configuration_facts(pairs, reader=None) -> dict:
     """``{uuid: facts}`` for ``(uuid, project id)`` pairs, at most ``MAX_FACT_SELECTORS`` per call."""
     reader = reader or _configuration_facts
-    wanted = {}
-    for cfg_uuid, project_id in pairs:
-        if cfg_uuid:
-            wanted.setdefault(project_id, set()).add(cfg_uuid)
-    if sum(len(uuids) for uuids in wanted.values()) > MAX_CANDIDATE_CONFIGURATIONS:
+    asked = {(cfg_uuid, project_id) for cfg_uuid, project_id in pairs if cfg_uuid}
+    if len(asked) > MAX_CANDIDATE_CONFIGURATIONS:
         raise CredentialDecisionError("CREDENTIAL_REFERENCE_REQUIRED")
+    scope = _FACTS.get()
+    known = scope["read"] if scope is not None else {}
+    missing = {pair for pair in asked if (pair[1], pair[0]) not in known}
+    if missing and scope is not None:
+        extra = {pair for pair in scope["wanted"] if (pair[1], pair[0]) not in known} - missing
+        if len(missing) + len(extra) <= MAX_CANDIDATE_CONFIGURATIONS:   # else read on their own, when asked
+            missing |= extra
+            scope["wanted"].clear()
+    wanted = {}
+    for cfg_uuid, project_id in missing:
+        wanted.setdefault(project_id, set()).add(cfg_uuid)
     facts = {}
     for project_id, uuids in wanted.items():
         ordered = sorted(uuids)
         for start in range(0, len(ordered), MAX_FACT_SELECTORS):
-            facts.update(reader(project_id, ordered[start:start + MAX_FACT_SELECTORS]))
+            found = reader(project_id, ordered[start:start + MAX_FACT_SELECTORS])
+            if scope is None:
+                facts.update(found)
+                continue
+            for cfg_uuid in ordered[start:start + MAX_FACT_SELECTORS]:
+                known[(project_id, cfg_uuid)] = found.get(cfg_uuid) if isinstance(found, Mapping) else None
+    if scope is not None:
+        facts = {cfg_uuid: known[(project_id, cfg_uuid)] for cfg_uuid, project_id in asked
+                 if known.get((project_id, cfg_uuid)) is not None}
     return facts
 
 

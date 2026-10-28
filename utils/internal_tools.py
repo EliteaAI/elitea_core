@@ -562,6 +562,16 @@ def resolve_user_token_state(user_id: int) -> tuple[str, str | None]:
         return 'MISSING', None
 
 
+def run_token_applies() -> bool:
+    """Enforce (#7214): the internal MCP toolkits of a governed run authenticate with the run token minted at its
+    admission (``internal_obo``), so no personal or system token is looked up, created or put in their settings."""
+    from .governance import is_governed  # pylint: disable=C0415
+    try:
+        return is_governed(this.module)
+    except Exception:  # pylint: disable=W0703
+        return False
+
+
 def _get_user_token(user_id: int) -> str | None:
     """Get the first non-expired access token for the user, or None if missing/expired."""
     state, token = resolve_user_token_state(user_id)
@@ -703,8 +713,10 @@ def inject_mcp_toolkits(
         log.debug(f"[MCP Injection] Private project not found for user {user_id} — skipping MCP injection")
         return []
 
-    system_token = _get_user_token(user_id)
-    if not system_token:
+    # under enforce the run token is the bearer (added by the worker for the run's own origin only, #7214)
+    governed = run_token_applies()
+    system_token = None if governed else _get_user_token(user_id)
+    if not governed and not system_token:
         log.debug(f"[MCP Injection] No valid token for user {user_id} — skipping MCP injection")
         return []
 
@@ -729,7 +741,7 @@ def inject_mcp_toolkits(
             'description': f"Elitea platform MCP — {ep['suffix']}",
             'settings': {
                 'url': url,
-                'headers': {'Authorization': f'Bearer {system_token}'},
+                'headers': {} if governed else {'Authorization': f'Bearer {system_token}'},
                 'timeout': 300,
                 'cache_ttl': 300,
             },
@@ -848,8 +860,13 @@ def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
     return True, prebuilt_url
 
 
-def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int) -> None:
-    token = _TOKEN_UNSET
+def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int,
+                               admitted_run: bool = True) -> None:
+    """``admitted_run``: the payload is for an admitted run, which under enforce authenticates its internal
+    toolkits with the run token minted at admission, so no personal token is filled in (#7214). The toolkit test
+    run is admitted too (#7229). The MCP connection test is dispatched without admission and gets no run token; it
+    passes ``admitted_run=False`` and keeps the user's own token, as the discovery path does."""
+    token = None if admitted_run and run_token_applies() else _TOKEN_UNSET
     for tool in tools or []:
         try:
             matched, prebuilt_url = _match_internal_mcp(tool)

@@ -13,7 +13,7 @@ values and calls it, and so does the operator REST API (#7105). It raises ``Bind
 import re
 
 from pylon.core.tools import log
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from tools import db, this
 
@@ -21,14 +21,19 @@ from ..models.agent_identity import IDENTITY_MODES, REFERENCE_PATTERN, AgentIden
 from .admission import revoke_binding_contexts, version_application_id
 from .binding_state import InvalidTransition, bumps_epoch, transition_binding
 from .definition_digest import DigestError, digest_for_version
+from .internal_obo import OPERATIONS as PLATFORM_OPERATIONS
 
 ACTIONS = ("create", "submit", "activate", "suspend", "resume", "retire", "rebind")
 USAGE = (
     "Format: project_id=N;application_id=A;version_id=V;mode=<dedicated_agent|runtime_domain_binding|elitea_native>;"
-    "action=<create|submit|activate|suspend|resume|retire|rebind>[;approval_ref=...][;policy_revision=...][;dry_run]"
+    "action=<create|submit|activate|suspend|resume|retire|rebind>[;approval_ref=...][;policy_revision=...]"
+    "[;platform_operations=read,build,credentials,run][;dry_run]"
 )
 INT_KEYS = ("project_id", "application_id", "version_id")
-TEXT_KEYS = ("mode", "action", "approval_ref", "policy_revision")
+TEXT_KEYS = ("mode", "action", "approval_ref", "policy_revision", "platform_operations")
+# The actions that may set what the agent may do on the platform through the internal MCP (#7214): it is part of what
+# is approved, so it is set on a new binding or sent back to approval with ``rebind``
+OPERATIONS_ACTIONS = ("create", "rebind")
 # The states each action walks through, by the state it starts from
 PATHS = {
     "submit": {"draft": ("provisioning", "pending_approval")},
@@ -94,7 +99,27 @@ def parse_binding_param(param):
     for key in given:
         if not re.fullmatch(REFERENCE_PATTERN, values[key]):
             return None, f"invalid {key}: use letters, digits and . _ : / @ - (at most 128 characters)"
+    if "platform_operations" in values:
+        operations, error = parse_platform_operations(values["platform_operations"], values["action"])
+        if error:
+            return None, error
+        values["platform_operations"] = operations
     return values, None
+
+
+def parse_platform_operations(raw, action):
+    """``(sorted list, None)`` or ``(None, readable error)`` for a ``platform_operations`` value (#7214): a comma list,
+    or a list, of ``read``/``build``/``credentials``/``run``, on a create or a rebind only. Empty means read only (as no list, §21)."""
+    if action not in OPERATIONS_ACTIONS:
+        return None, "platform_operations belongs to action=create or action=rebind only"
+    items = raw.split(",") if isinstance(raw, str) else raw
+    if not isinstance(items, (list, tuple)):
+        return None, "invalid platform_operations"
+    operations = {str(item).strip() for item in items if str(item).strip()}
+    unknown = sorted(operations - set(PLATFORM_OPERATIONS))
+    if unknown:
+        return None, f"invalid platform_operations: use {', '.join(PLATFORM_OPERATIONS)}"
+    return [op for op in PLATFORM_OPERATIONS if op in operations], None
 
 
 def _lifecycle_event(values, binding, target, actor_user_id, epoch):
@@ -111,6 +136,8 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch):
     if target == "active":   # what the row holds now: the approver's own text for an activation, the stored one for a resume
         event["approver_ref"] = binding.approval_ref
         event["policy_revision"] = binding.policy_revision
+    if values.get("platform_operations") is not None and target in ("draft", "pending_approval"):
+        event["operation_id"] = "platform_operations:" + (",".join(values["platform_operations"]) or "none")
     return {key: value for key, value in event.items() if value is not None}
 
 
@@ -124,6 +151,7 @@ def _create(session, tracing, values, actor_user_id):
         project_id=values["project_id"], application_id=values["application_id"],
         version_id=values["version_id"], identity_mode=values["mode"],
         definition_digest=digest, state="draft", created_by=actor_user_id or None,
+        allowed_platform_operations=values.get("platform_operations"),
     )
     session.add(binding)
     session.flush()
@@ -184,6 +212,10 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
         tracing.security_audit_record(
             session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch))
         state = target
+    if action == "rebind" and values.get("platform_operations") is not None:
+        session.execute(update(AgentIdentityBinding).where(AgentIdentityBinding.id == binding_id)
+                        .values(allowed_platform_operations=values["platform_operations"])
+                        .execution_options(synchronize_session=False))
     session.commit()
     return {"action": action, "binding_ref": str(binding_id), "state": state, "dry_run": False}
 

@@ -64,6 +64,29 @@
         }
       ]
     },
+    "sensitive_tool_info": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "badge": {
+              "type": "string",
+              "enum": ["sends_messages", "deletes_data", "changes_data", "runs_code", "needs_approval"]
+            },
+            "effect": { "type": "string" }
+          }
+        }
+      },
+      "title": "Sensitive Tool Effects",
+      "description": "Optional badge and effect text per sensitive tool, shown when a schedule is saved. Map of toolkit type to tool name to {badge, effect}. A tool without an entry shows the badge \"needs_approval\" and the effect \"This tool can change data outside ELITEA.\"",
+      "path": "toolkit_security.sensitive_tool_info",
+      "section": "guardrails",
+      "default": {},
+      "requires_restart": false,
+      "enum_source_keys": "toolkit_names"
+    },
     "sensitive_action_company_name": {
       "type": "string",
       "title": "Company Name for Policy Message",
@@ -659,7 +682,7 @@
     "max_invoked_skills_per_turn": {
       "type": "integer",
       "title": "Max ~Skill Invocations Per Message",
-      "description": "Maximum number of skills one chat message can invoke with ~skill-name. Skills referenced in agent instructions are not limited by this. Allowed range: 1–50.",
+      "description": "Maximum number of skills one chat message can invoke with ~skill-name. A message that references more is rejected with an error. Skills referenced in agent instructions are not limited by this. Allowed range: 1–50.",
       "path": "skills.max_invoked_skills_per_turn",
       "section": "runtime",
       "default": 5,
@@ -688,6 +711,26 @@
         "maximum": 200000
       }
     },
+    "project_skills_in_chat_available": {
+      "type": "boolean",
+      "title": "Allow project skills in chat",
+      "description": "Master switch for offering every project skill to model and agent chats without adding it as a participant. While it is off, no project can turn the feature on.",
+      "path": "skills.project_skills_in_chat.available",
+      "section": "skills",
+      "strict_type": true,
+      "default": false,
+      "requires_restart": false
+    },
+    "project_skills_in_chat_project_default": {
+      "type": "boolean",
+      "title": "On by default for projects",
+      "description": "Whether project skills in chat are on in projects whose admins have not chosen On or Off for their own project. Applies only while the master switch is on.",
+      "path": "skills.project_skills_in_chat.project_default",
+      "section": "skills",
+      "strict_type": true,
+      "default": false,
+      "requires_restart": false
+    },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
       "title": "Pipeline Scheduling Enabled",
@@ -706,6 +749,120 @@
       "format": "cron",
       "default": "* * * * *",
       "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
+    },
+    "schedules_min_interval_minutes": {
+      "type": "integer",
+      "title": "Schedules Minimum Interval (minutes)",
+      "description": "Smallest allowed gap in minutes between two runs of one schedule. A schedule that fires more often is rejected when it is saved. Allowed range: 1–1440.",
+      "path": "scheduler.schedules.min_interval_minutes",
+      "section": "runtime",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 1440,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1440
+      }
+    },
+    "schedules_max_enabled_per_project": {
+      "type": "integer",
+      "title": "Schedules Max Enabled Per Project",
+      "description": "Maximum number of enabled schedules in one project. Disabled schedules do not count. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.max_enabled_per_project",
+      "section": "runtime",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "agent_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Agent Scheduling Enabled",
+      "description": "When disabled, agent schedules are skipped and their next_run is unchanged. Pipeline schedules still run. Enable to include agent schedules in the tick.",
+      "path": "scheduler.schedules.agent_scheduling_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": true
+    },
+    "schedules_dispatch_cap": {
+      "type": "integer",
+      "title": "Schedules Dispatch Cap",
+      "description": "Maximum number of due schedules dispatched per tick, across all projects. Rows left over keep their next_run and go in the next tick. Allowed range: 1–10000.",
+      "path": "scheduler.schedules.dispatch_cap",
+      "section": "runtime",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 10000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000
+      }
+    },
+    "schedules_stale_run_minutes": {
+      "type": "integer",
+      "title": "Schedules Stale Run Minutes",
+      "description": "Minutes a scheduled run may stay in running state before the tick fails it with the reason 'the run did not finish in time'. Allowed range: 1–10080.",
+      "path": "scheduler.schedules.stale_run_minutes",
+      "section": "runtime",
+      "default": 120,
+      "minimum": 1,
+      "maximum": 10080,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10080
+      }
+    },
+    "schedules_max_parallel_runs": {
+      "type": "integer",
+      "title": "Schedules Max Parallel Runs",
+      "description": "Maximum number of scheduled runs this process starts at the same time. Keep this value at least the dispatch cap: a due run without a free slot fails at once and the schedule tries again at its next due time. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.max_parallel_runs",
+      "section": "runtime",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": true,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_approval_wait_hours": {
+      "type": "integer",
+      "title": "Schedules Approval Wait Hours",
+      "description": "Hours a scheduled run waits for the owner to approve a sensitive tool before it fails. Allowed range: 1–720.",
+      "path": "scheduler.schedules.approval_wait_hours",
+      "section": "runtime",
+      "default": 24,
+      "minimum": 1,
+      "maximum": 720,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 720
+      }
+    },
+    "schedules_legacy_step_enabled": {
+      "type": "boolean",
+      "title": "Schedules Legacy Step Enabled",
+      "description": "When enabled, the tick moves legacy pipeline schedule triggers into schedules and still fires the ones it could not move. Disable after every project is migrated. Set it to false before a revert with the RPC schedules_restore_legacy_triggers(project_id); rows migrated before the original trigger was stored cannot be restored.",
+      "path": "scheduler.schedules.legacy_step_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": true
     },
     "index_scheduling_enabled": {
       "type": "boolean",

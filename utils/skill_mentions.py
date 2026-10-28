@@ -1,8 +1,11 @@
 from ..models.enums.all import AgentTypes, ParticipantTypes
 
 
-def merge_mention_candidates(attached_skills: list, chat_skills: list) -> list:
-    return [*attached_skills, *chat_skills]
+SKILL_ORIGIN_PARTICIPANT = 'participant'
+
+
+def merge_mention_candidates(attached_skills: list, chat_skills: list, project_skills: list = None) -> list:
+    return [*attached_skills, *chat_skills, *(project_skills or [])]
 
 
 def skill_name_key(skill: dict) -> str:
@@ -16,8 +19,12 @@ def merge_disclosable_skills(own_skills: list, chat_skills: list) -> list:
         key = skill_name_key(skill)
         if key and key not in taken:
             taken.add(key)
-            merged.append({**skill, 'instruction_referenced': False})
+            merged.append({**skill, 'instruction_referenced': False, 'origin': SKILL_ORIGIN_PARTICIPANT})
     return merged
+
+
+def strip_skill_bodies(skills: list) -> list:
+    return [{key: value for key, value in skill.items() if key != 'instructions'} for skill in skills or []]
 
 
 def resolves_mentions_in_predict(entity_name: str, version_details) -> bool:

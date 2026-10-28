@@ -70,11 +70,19 @@ def rpc(monkeypatch):
     version = types.SimpleNamespace(
         id=mock.MagicMock(), skill_id=mock.MagicMock(), name=mock.MagicMock(), meta=mock.MagicMock(),
     )
-    conversation = types.SimpleNamespace(id=mock.MagicMock(), uuid=mock.MagicMock())
+    conversation = types.SimpleNamespace(
+        id=mock.MagicMock(), uuid=mock.MagicMock(),
+        name=mock.MagicMock(), is_private=mock.MagicMock(),
+        author_id=mock.MagicMock(), source=mock.MagicMock(),
+        meta=mock.MagicMock(), created_at=mock.MagicMock(),
+    )
     application = types.SimpleNamespace(id=mock.MagicMock(), name=mock.MagicMock())
+    participant = mock.MagicMock()
+    participant_mapping = mock.MagicMock()
     schemas = Schemas({
         'skill': {skill.id}, 'version': {version.id}, 'conversation': {conversation.id},
         'application': {application.id},
+        'participant_mapping': {participant_mapping.conversation_id},
     })
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(get_session=schemas.session)
@@ -91,6 +99,7 @@ def rpc(monkeypatch):
     models = {
         'all': {'Application': application, 'ApplicationVersion': mock.MagicMock()},
         'conversation': {'Conversation': conversation},
+        'participants': {'Participant': participant, 'ParticipantMapping': participant_mapping},
         'skill': {'Skill': skill, 'SkillVersion': version},
         'utils': {'get_public_project_id': lambda: PUBLIC_PROJECT_ID},
     }
@@ -171,12 +180,18 @@ class TestScopedSkills:
 
 class TestConversations:
     def test_uuids_resolve_to_this_projects_ids(self, rpc):
-        rpc.schemas.rows[(PROJECT_ID, 'conversation')] = [(1701, uuid.UUID(CONVERSATION))]
+        rpc.schemas.rows[(PROJECT_ID, 'conversation')] = [
+            (1701, uuid.UUID(CONVERSATION), 'My Chat', False, None, None, None, None),
+        ]
 
         result = call(rpc, conversation_uuids=[CONVERSATION, 'not-a-uuid'])
 
-        assert result['conversations'] == [{'uuid': CONVERSATION, 'id': 1701}]
-        assert rpc.schemas.reads == [(PROJECT_ID, 'conversation')]
+        assert result['conversations'] == [{
+            'uuid': CONVERSATION, 'id': 1701, 'name': 'My Chat', 'is_private': False,
+            'author_id': None, 'source': None, 'is_hidden': False, 'created_at': None,
+            'participant_types': [],
+        }]
+        assert all(project_id == PROJECT_ID for project_id, _ in rpc.schemas.reads)
 
     def test_only_malformed_uuids_read_nothing(self, rpc):
         assert call(rpc, conversation_uuids=['x'])['conversations'] == []
