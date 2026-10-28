@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from fixtures.sio_harness import sio_helper
+
 CONVERSATION_UUID = 'conv-uuid-1'
 QUESTION_ID = 'question-1'
 MESSAGE_ID = 'message-1'
@@ -121,3 +123,41 @@ def test_code_is_only_sent_when_set(sio_all):
     sio = MagicMock()
     sio_all.SioValidationError(sio=sio, sid='sid-1', event='x', error='e', stream_id='s')
     assert 'code' not in sio.emit.call_args.kwargs['data']
+
+
+def test_a_refusal_the_runner_already_sent_is_not_followed_by_a_second_frame(sio_all, handler, parsed_payload):
+    """The paths inside the runner that refuse a send answer it themselves and return, so the wrapper that
+    turns an unexpected exception into a reply has nothing to add and must not send a second frame."""
+    sio_all.auth.is_sio_user_in_project.return_value = True
+    utils = sio_helper('sio_utils')
+
+    def runner(**_kwargs):
+        utils.emit_refusal(
+            handler.context.sio, 'sid-1', 'room', 'chat_predict', 'Conversation is locked', 'conv-uuid-1', 'question-1',
+        )
+        return {'error': 'Conversation is locked'}
+
+    handler.chat_predict_sio.side_effect = runner
+
+    sio_all.SIO.predict(handler, 'sid-1', {})
+
+    frames = [call.kwargs for call in handler.context.sio.emit.call_args_list]
+    assert len(frames) == 1
+    assert frames[0]['data']['content'] == 'Conversation is locked'
+
+
+def test_a_guardrail_refusal_is_reported_once(sio_all, handler, parsed_payload):
+    """The input guardrail answers through the stream and then raises an error that carries no socket: the
+    wrapper lets it through untouched, so the sender is not told twice."""
+    sio_all.auth.is_sio_user_in_project.return_value = True
+    utils = sio_helper('sio_utils')
+    reported = utils.SioValidationError(
+        sio=handler.context.sio, sid=None, event='chat_predict', error='Blocked by policy', stream_id='conv-uuid-1',
+    )
+    handler.chat_predict_sio.side_effect = reported
+
+    with pytest.raises(utils.SioValidationError) as raised:
+        sio_all.SIO.predict(handler, 'sid-1', {})
+
+    assert raised.value is reported
+    handler.context.sio.emit.assert_not_called()

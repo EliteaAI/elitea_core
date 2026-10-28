@@ -36,7 +36,7 @@ from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_
 from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
-from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.sio_utils import SioEvents, SioValidationError, emit_refusal
 from ..utils.conversation_access import check_post_access
 from ..utils.application_utils import build_skill_mappings_list
 from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
@@ -1269,9 +1269,6 @@ class RPC:
             )
 
             room = get_chat_room(conversation.uuid)
-            # A socket that reconnected has not rejoined the room yet, so an early refusal sent
-            # to the room never reaches it and its reply placeholder spins forever (#7024)
-            reply_target = {'to': sid} if sid else {'room': room}
 
             # question_id is client-supplied and lands verbatim in the unique
             # ConversationMessageGroup.uuid, so a resend of an already-stored turn
@@ -1284,16 +1281,9 @@ class RPC:
                     "Rejecting resend of question_id %s in conversation %s",
                     parsed.question_id, parsed.conversation_uuid,
                 )
-                self.context.sio.emit(
-                    event=SioEvents.socket_validation_error.value,
-                    data={
-                        'event': SioEvents.chat_predict.value,
-                        'content': 'This message has already been submitted',
-                        'type': 'error',
-                        'stream_id': parsed.conversation_uuid,
-                        'message_id': parsed.question_id,
-                    },
-                    **reply_target,
+                emit_refusal(
+                    self.context.sio, sid, room, SioEvents.chat_predict.value,
+                    'This message has already been submitted', parsed.conversation_uuid, parsed.question_id,
                 )
                 return {"error": "This message has already been submitted"}
 
@@ -1381,30 +1371,17 @@ class RPC:
 
                 if is_conversation_locked:
                     log.error("Conversation is locked while summarization is in progress")
-                    self.context.sio.emit(
-                        event=SioEvents.socket_validation_error.value,
-                        data={
-                            'event': SioEvents.chat_predict.value,
-                            'content': 'Conversation is locked while summarization is in progress',
-                            'type': 'error',
-                            'stream_id': parsed.conversation_uuid,
-                            'message_id': parsed.question_id
-                        },
-                        **reply_target,
+                    emit_refusal(
+                        self.context.sio, sid, room, SioEvents.chat_predict.value,
+                        'Conversation is locked while summarization is in progress',
+                        parsed.conversation_uuid, parsed.question_id,
                     )
                     return {"error": "Conversation is locked while summarization is in progress"}
             except redis.exceptions.ConnectionError:
                 log.error("Redis connection error")
-                self.context.sio.emit(
-                    event=SioEvents.socket_validation_error.value,
-                    data={
-                        'event': SioEvents.chat_predict.value,
-                        'content': "Redis connection error",
-                        'type': 'error',
-                        'stream_id': parsed.conversation_uuid,
-                        'message_id': parsed.question_id
-                    },
-                    **reply_target,
+                emit_refusal(
+                    self.context.sio, sid, room, SioEvents.chat_predict.value,
+                    "Redis connection error", parsed.conversation_uuid, parsed.question_id,
                 )
                 return {"error": "Redis connection error"}
 

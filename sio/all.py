@@ -46,10 +46,8 @@ from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_
 from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room, get_eval_run_room
 from ..utils.toolkit_test_rooms import claim_stream
 from ..utils.exceptions import PoolSaturationError
-from ..utils.sio_utils import (
-    SioEvents, SioValidationError, SOCKET_UNAUTHENTICATED_CODE, SOCKET_UNAUTHENTICATED_MESSAGE,
-    SEND_FAILED_MESSAGE,
-)
+from ..utils.sio_guards import ensure_sio_user_in_project
+from ..utils.sio_utils import SioEvents, SioValidationError, SEND_FAILED_MESSAGE
 from pydantic import ValidationError
 
 
@@ -246,18 +244,10 @@ class SIO:
                 message_id=data.get("payload", {}).get("message_id"),
             )
         #
-        if not auth.is_sio_user_in_project(sid, parsed.project_id):
-            log.warning("Sid %s is not in project %s", sid, parsed.project_id)
-            # Silence here leaves the client's reply placeholder spinning forever (#7024)
-            raise SioValidationError(
-                sio=self.context.sio,
-                sid=sid,
-                event=SioEvents.chat_predict.value,
-                error=SOCKET_UNAUTHENTICATED_MESSAGE,
-                stream_id=str(parsed.conversation_uuid),
-                message_id=parsed.question_id,
-                code=SOCKET_UNAUTHENTICATED_CODE,
-            )
+        ensure_sio_user_in_project(
+            self.context.sio, sid, parsed.project_id,
+            SioEvents.chat_predict.value, str(parsed.conversation_uuid), parsed.question_id,
+        )
         #
         try:
             self.chat_predict_sio(sid=sid, data=parsed.model_dump())
@@ -289,17 +279,10 @@ class SIO:
                 message_id=data.get("message_id"),
             )
         #
-        if not auth.is_sio_user_in_project(sid, parsed.project_id):
-            log.warning("Sid %s is not in project %s", sid, parsed.project_id)
-            raise SioValidationError(
-                sio=self.context.sio,
-                sid=sid,
-                event=SioEvents.chat_continue_predict.value,
-                error=SOCKET_UNAUTHENTICATED_MESSAGE,
-                stream_id=str(parsed.conversation_uuid),
-                message_id=parsed.message_id,
-                code=SOCKET_UNAUTHENTICATED_CODE,
-            )
+        ensure_sio_user_in_project(
+            self.context.sio, sid, parsed.project_id,
+            SioEvents.chat_continue_predict.value, str(parsed.conversation_uuid), parsed.message_id,
+        )
         #
         try:
             self.chat_continue_predict_sio(sid=sid, data=parsed.model_dump())

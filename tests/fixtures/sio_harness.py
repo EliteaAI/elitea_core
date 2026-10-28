@@ -27,6 +27,7 @@ _STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{SIO_PKG}.models.conversa
 _REAL = (
     (f'{SIO_PKG}.utils.exceptions', 'utils/exceptions.py'),
     (f'{SIO_PKG}.utils.sio_utils', 'utils/sio_utils.py'),
+    (f'{SIO_PKG}.utils.sio_guards', 'utils/sio_guards.py'),
     (f'{SIO_PKG}.utils.toolkit_test_rooms', 'utils/toolkit_test_rooms.py'),
     (f'{SIO_PKG}.models.pd.sio', 'models/pd/sio.py'),
     (f'{SIO_PKG}.sio.all', 'sio/all.py'),
@@ -91,6 +92,11 @@ def load_sio_module():
         sys.modules.update(shadowed)
 
     return sys.modules[f'{SIO_PKG}.sio.all']
+
+
+def sio_helper(name):
+    """A helper module loaded by ``load_sio_module`` (``sio_utils``, ``sio_guards``), by its short name."""
+    return sys.modules[f'{SIO_PKG}.utils.{name}']
 
 
 def unload_sio_module():
