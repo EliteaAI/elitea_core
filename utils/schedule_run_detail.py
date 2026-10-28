@@ -7,12 +7,14 @@ read here, at detail time, from the same rows the conversation view shows; the l
 from datetime import UTC, datetime, timedelta
 
 from pylon.core.tools import log
-from sqlalchemy import case, column, func, select, table
+from sqlalchemy import case, column, func, or_, select, table
+from sqlalchemy.orm import aliased
 
 from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_trace_step import MessageTraceStep
+from .run_id import derived_run_id
 from .schedule_claim import EVENT_LIMIT, TEXT_LIMIT
 
 # The owner and a schedules admin read the full tool result (owner decision 2026-10-21); only a huge
@@ -25,7 +27,7 @@ NANO_USD = 10 ** 9
 USAGE_MARGIN = timedelta(minutes=5)
 # The usage plugin's table (central schema); read-only, only the columns used here
 USAGE_EVENT = table(
-    'usage_event', column('project_id'), column('conversation_id'), column('ts'), column('event_type'),
+    'usage_event', column('project_id'), column('conversation_id'), column('run_id'), column('ts'), column('event_type'),
     column('input_tokens'), column('output_tokens'), column('cost_nano_usd'),
 )
 
@@ -70,10 +72,19 @@ def _tool_event(row) -> dict:
     return {key: value for key, value in event.items() if value is not None or key == 'at'}
 
 
-def tool_call_events(session, conversation_id: int | None) -> list[dict]:
-    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`."""
+def tool_call_events(session, conversation_id: int | None, message_group_id: int | None = None) -> list[dict]:
+    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`.
+
+    A run delivered into a shared chat passes its answer group: only that group and the group it replies
+    to count, never the other messages of the chat.
+    """
     if conversation_id is None:
         return []
+    groups = [ConversationMessageGroup.conversation_id == conversation_id]
+    if message_group_id is not None:
+        answer = aliased(ConversationMessageGroup)
+        trigger_id = select(answer.reply_to_id).where(answer.id == message_group_id).scalar_subquery()
+        groups.append(or_(ConversationMessageGroup.id == message_group_id, ConversationMessageGroup.id == trigger_id))
     rows = session.execute(
         select(
             MessageTraceStep.started_at, MessageTraceStep.finished_at, MessageTraceStep.tool_name,
@@ -82,17 +93,29 @@ def tool_call_events(session, conversation_id: int | None) -> list[dict]:
             func.substr(MessageTraceStep.tool_output, 1, RESULT_LIMIT + 1).label('output'),
         )
         .join(ConversationMessageGroup, ConversationMessageGroup.id == MessageTraceStep.message_group_id)
-        .where(ConversationMessageGroup.conversation_id == conversation_id, MessageTraceStep.kind == 'tool_call')
+        .where(*groups, MessageTraceStep.kind == 'tool_call')
         .order_by(MessageTraceStep.started_at, MessageTraceStep.id)
         .limit(EVENT_LIMIT)
     ).all()
     return [_tool_event(row) for row in rows]
 
 
+def _answer_run_id(session, message_group_id: int) -> str | None:
+    """The platform run id the usage rows of an answer group carry; None when the group is gone."""
+    group = session.execute(select(
+        ConversationMessageGroup.uuid, ConversationMessageGroup.meta,
+    ).where(ConversationMessageGroup.id == message_group_id)).one_or_none()
+    if group is None:
+        return None
+    generation = (group.meta or {}).get('execution_generation')
+    return derived_run_id({'message_id': str(group.uuid), 'execution_generation': generation})
+
+
 def usage_summary(session, project_id: int, run) -> tuple[int | None, float | None]:
     """(tokens, cost in USD) of the run conversation from the usage store; (None, None) when it has no row.
 
     Tokens are the input and output tokens of the model calls; the cost sums every priced row.
+    A run delivered into a shared chat counts only the rows of its own answer message, by the platform run id.
     """
     # lean: an unpriced model call counts as 0 USD; mark the cost partial when the panel needs it
     if run.conversation_id is None:
@@ -103,6 +126,11 @@ def usage_summary(session, project_id: int, run) -> tuple[int | None, float | No
     usage = USAGE_EVENT.c
     where = [usage.project_id == project_id, usage.conversation_id == str(conversation_uuid),
              usage.ts >= run.started_at - USAGE_MARGIN]
+    if run.message_group_id is not None:
+        answer_run_id = _answer_run_id(session, run.message_group_id)
+        if answer_run_id is None:
+            return None, None
+        where.append(usage.run_id == answer_run_id)
     if run.finished_at:
         where.append(usage.ts <= run.finished_at + USAGE_MARGIN)
     statement = select(

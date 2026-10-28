@@ -48,6 +48,9 @@ class Session:
     def first(self):
         return self.world.msg_group
 
+    def scalar(self):
+        return self.world.schedule_owner
+
     def count(self):
         return 0
 
@@ -62,38 +65,42 @@ class Session:
 
 
 class World:
-    def __init__(self, meta):
+    schedule_owner = None
+
+    def __init__(self, meta, group_meta=None):
         self.events = []
         self.open_sessions, self.open_at_step = 0, []
         self.msg_group = types.SimpleNamespace(
-            id=1, meta={}, message_items=[], reply_to_id=None, is_streaming=True,
+            id=1, meta=group_meta or {}, message_items=[], reply_to_id=None, is_streaming=True,
             conversation=types.SimpleNamespace(id=CONVERSATION_ID, uuid="c-1", meta=meta, author_id=AUTHOR_ID),
         )
 
     fail_step = False
 
-    def finish(self, *args, author_id=None):
+    def finish(self, *args, author_id=None, message_group_id=None):
         self.open_at_step.append(self.open_sessions)
-        self.events.append(("finish", *args, author_id))
+        self.events.append(("finish", *args, author_id, *([message_group_id] if message_group_id else [])))
         if self.fail_step:
             raise RuntimeError("db down")
 
-    def pause(self, *args):
+    def pause(self, *args, message_group_id=None):
         self.open_at_step.append(self.open_sessions)
-        self.events.append(("pause", *args))
+        self.events.append(("pause", *args, *([message_group_id] if message_group_id else [])))
         if self.fail_step:
             raise RuntimeError("db down")
 
 
 @pytest.fixture
 def make_world(monkeypatch):
-    def make(meta):
-        world = World(meta)
+    def make(meta, group_meta=None, schedule_owner=None):
+        world = World(meta, group_meta)
+        world.schedule_owner = schedule_owner
         same = lambda value, *a, **k: value
         none = lambda *a, **k: None
         stubs = {
             "models.participants": {"Participant": Model},
             "models.message_group": {"ConversationMessageGroup": Model},
+            "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {"id": None, "created_by": None})},
             "models.message_items.text": {"TextMessageItem": Model},
             "models.message_items.base": {"MessageItem": Model},
             "models.pd.message": {"MessageGroupDetail": types.SimpleNamespace(model_validate=same)},

@@ -123,11 +123,13 @@ def run_failure_reason(error) -> str:
     return reason
 
 
-def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
-    """Conditions that tie a chat hook to its own run: the run is linked to this conversation, or has none yet
-    and the chat author owns the schedule. The run id comes from conversation meta, which a client can write.
+def _own_conversation(conversation_id: int | None, author_id: int | None, message_group_id: int | None = None) -> list:
+    """Conditions that tie a chat hook to its own run. The run id comes from meta, which a client can write.
 
-    The linked conversation is the proof, so a change of the schedule owner does not cut off a running run.
+    A delivered run (`message_group_id` set) answers inside a shared chat, so the conversation alone proves
+    nothing: the hook must come from the answer group of that run. Another run of the chat never matches.
+    Any other run matches when it is linked to this conversation, or has none yet and the chat author owns
+    the schedule. A change of the schedule owner does not cut off a linked run.
     No author (a server-side caller such as the stale sweep) adds no condition.
     """
     if author_id is None:
@@ -136,20 +138,27 @@ def _own_conversation(conversation_id: int | None, author_id: int | None) -> lis
         EntityScheduleRun.conversation_id.is_(None),
         EntityScheduleRun.schedule_id.in_(select(EntitySchedule.id).where(EntitySchedule.created_by == author_id)),
     )
+    delivered = EntityScheduleRun.message_group_id.is_not(None)
+    own_group = and_(EntityScheduleRun.conversation_id == conversation_id,
+                     EntityScheduleRun.message_group_id == message_group_id)
     if conversation_id is None:
-        return [unlinked]
-    return [or_(EntityScheduleRun.conversation_id == conversation_id, unlinked)]
+        return [and_(EntityScheduleRun.message_group_id.is_(None), unlinked)]
+    return [or_(and_(delivered, own_group),
+                and_(EntityScheduleRun.message_group_id.is_(None),
+                     or_(EntityScheduleRun.conversation_id == conversation_id, unlinked)))]
 
 
 def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str | None = None,
                         conversation_id: int | None = None, expected_status: str = 'running',
-                        notice: bool = True, author_id: int | None = None) -> bool:
+                        notice: bool = True, author_id: int | None = None,
+                        message_group_id: int | None = None) -> bool:
     """End a run in `expected_status` as `success` or `failed`, copy it to its schedule and tell the owner.
 
-    A chat hook passes `author_id`: the run then ends only for the conversation of its own owner.
+    A chat hook passes `author_id`: the run then ends only for the conversation of its own owner, and a
+    delivered run only for its own answer group (`message_group_id`).
     False, with nothing changed or sent, when the run is not in `expected_status` any more.
     """
-    condition = and_(EntityScheduleRun.id == run_id, *_own_conversation(conversation_id, author_id))
+    condition = and_(EntityScheduleRun.id == run_id, *_own_conversation(conversation_id, author_id, message_group_id))
     with db.get_session(project_id) as session:
         ended = _end_runs(session, condition, status, reason, conversation_id, expected_status)
         session.commit()
@@ -159,17 +168,17 @@ def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str |
 
 
 def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversation_id: int | None = None,
-                       author_id: int | None = None) -> None:
+                       author_id: int | None = None, message_group_id: int | None = None) -> None:
     """A sensitive-tool pause makes a running run wait for the owner; any other pause fails it.
 
-    `conversation_id` and `author_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
+    `conversation_id`, `author_id` and `message_group_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
     """
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
     if sensitive is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
-                            conversation_id, author_id=author_id)
+                            conversation_id, author_id=author_id, message_group_id=message_group_id)
         return
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
@@ -177,7 +186,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
         paused = session.execute(
             update(EntityScheduleRun)
             .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running',
-                   *_own_conversation(conversation_id, author_id))
+                   *_own_conversation(conversation_id, author_id, message_group_id))
             # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
             .values(status='waiting_for_approval', resumed_at=None,
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=approval_wait_hours()))
