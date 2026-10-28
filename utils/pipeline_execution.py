@@ -341,6 +341,7 @@ def execute_pipeline_via_predict_sio(
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_ticket: str | None = None,
     participant_id: int | None = None,
+    chat_history: list[dict] | None = None,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -360,6 +361,7 @@ def execute_pipeline_via_predict_sio(
             a list of (toolkit, tool) pairs approves only those pairs
         mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
         participant_id: chat participant the run answers as; sent only for a run delivered into a chat
+        chat_history: earlier chat messages, oldest first, sent to the model; ``None`` sends none
 
     Returns:
         Dict with task_id from the RPC call, or ``{code, error}`` when a governed admission refused the run
@@ -375,7 +377,7 @@ def execute_pipeline_via_predict_sio(
             "application_id": version.application_id,
             "version_id": version.id,
             "user_input": user_input,
-            "chat_history": [],
+            "chat_history": chat_history or [],
             "message_id": response_message_id,
             "stream_id": conversation_uuid,
             "conversation_id": conversation_uuid,
