@@ -41,6 +41,8 @@ LIST_QUERY_PARAMS = [
      "description": "Only schedules of this agent or pipeline"},
     {"name": "version_id", "in": "query", "schema": {"type": "integer"},
      "description": "Only schedules that run this version"},
+    {"name": "delivery_conversation_uuid", "in": "query", "schema": {"type": "string", "format": "uuid"},
+     "description": "Only schedules that deliver their runs into this chat; combines with the other filters"},
     {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule or entity name"},
     {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
      "description": "Rows per page"},

@@ -43,6 +43,7 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedules_created_by', 'created_by'),
         Index('ix_entity_schedules_application_version', 'application_id', 'version_id'),
         Index('uq_entity_schedules_uuid', 'uuid', unique=True),
+        Index('ix_entity_schedules_delivery_conversation_uuid', 'delivery_conversation_uuid'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 

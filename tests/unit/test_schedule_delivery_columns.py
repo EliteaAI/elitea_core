@@ -97,9 +97,15 @@ def test_migration_adds_the_delivery_columns_to_an_existing_schedule_table(deliv
         ),
         "ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_conversation_uuid UUID NULL",
         "ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_participant_id INTEGER NULL",
+        (
+            "CREATE INDEX IF NOT EXISTS ix_entity_schedules_delivery_conversation_uuid "
+            "ON {pid}.entity_schedules (delivery_conversation_uuid)"
+        ),
     ]
 
 
 def test_migration_statements_are_idempotent(delivery_block):
     for stmt in delivery_block:
-        assert re.match(r"ALTER TABLE \{pid\}\.entity_schedules ADD COLUMN IF NOT EXISTS ", stmt)
+        assert re.match(
+            r"(ALTER TABLE \{pid\}\.entity_schedules ADD COLUMN IF NOT EXISTS |CREATE INDEX IF NOT EXISTS )", stmt
+        )
