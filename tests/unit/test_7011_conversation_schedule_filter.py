@@ -150,7 +150,7 @@ def rpc_module(isolated_sys_modules):
                  'models.message_group', 'models.message_items.text', 'utils.conversation_utils',
                  'utils.participant_utils', 'utils.chat_feature_flags', 'utils.context_analytics',
                  'utils.exceptions', 'utils.model_defaults', 'utils.chat_usage',
-                 'utils.context_window'):
+                 'utils.context_window', 'utils.skill_run_history'):
         _fuzzy(f'{PACKAGE}.{name}')
     _package(f'{PACKAGE}.models.enums')
     _package(f'{PACKAGE}.models.message_items')
