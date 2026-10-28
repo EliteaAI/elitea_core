@@ -205,6 +205,59 @@ def _raise_input_guardrail_blocked(
     raise blocked_error
 
 
+def _delete_application(module, session, project_id: int, application: Application):
+    """Delete one application and commit: True, or an error dict when a version is published or embedded"""
+    blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
+    for ver in application.versions:
+        if ver.status in blocked_statuses:
+            return {
+                'error': 'Cannot delete application with published or '
+                         'embedded versions. Unpublish first.',
+                'blocked_version_id': ver.id,
+                'blocked_status': ver.status,
+            }
+
+    versions = list(application.versions)
+    default_version = application.get_default_version()
+    agent_type = default_version.agent_type if default_version else None
+
+    detach_skills_for_entity_versions(
+        session, [ver.id for ver in versions]
+    )
+
+    application_data = ApplicationDetailModel.from_orm(application)
+    application_data = application_data.model_dump()
+    application_data['project_id'] = project_id
+    if application_data.get('version_details') is None and agent_type:
+        application_data['version_details'] = {'agent_type': agent_type}
+
+    session.delete(application)
+    session.commit()
+
+    module.context.event_manager.fire_event(
+        ApplicationEvents.application_deleted, application_data
+    )
+
+    return True
+
+
+def _application_ids_of_kind(session, kind: str) -> list:
+    is_pipeline = Application.versions.any(ApplicationVersion.agent_type == AgentTypes.pipeline.value)
+    query = session.query(Application.id).filter(
+        is_pipeline if kind == 'pipeline' else ~is_pipeline
+    )
+    return [row[0] for row in query.all()]
+
+
+def _blocked_application_ids(session) -> set:
+    blocked_statuses = (PublishStatus.published, PublishStatus.embedded)
+    return {
+        row[0] for row in session.query(ApplicationVersion.application_id).filter(
+            ApplicationVersion.status.in_(blocked_statuses)
+        ).distinct().all()
+    }
+
+
 class RPC:
     @web.rpc(
         "applications_get_default_publish_validation_rules",
@@ -1181,43 +1234,8 @@ class RPC:
     def application_delete(self, project_id: int, application_id: int) -> bool:
         with db.get_session(project_id) as session:
             if application := session.query(Application).get(application_id):
-                return self._delete_application(session, project_id, application)
+                return _delete_application(self, session, project_id, application)
         return False
-
-    def _delete_application(self, session, project_id: int, application: Application):
-        """Delete one application and commit: True, or an error dict when a version is published or embedded"""
-        blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
-        for ver in application.versions:
-            if ver.status in blocked_statuses:
-                return {
-                    'error': 'Cannot delete application with published or '
-                             'embedded versions. Unpublish first.',
-                    'blocked_version_id': ver.id,
-                    'blocked_status': ver.status,
-                }
-
-        versions = list(application.versions)
-        default_version = application.get_default_version()
-        agent_type = default_version.agent_type if default_version else None
-
-        detach_skills_for_entity_versions(
-            session, [ver.id for ver in versions]
-        )
-
-        application_data = ApplicationDetailModel.from_orm(application)
-        application_data = application_data.model_dump()
-        application_data['project_id'] = project_id
-        if application_data.get('version_details') is None and agent_type:
-            application_data['version_details'] = {'agent_type': agent_type}
-
-        session.delete(application)
-        session.commit()
-
-        self.context.event_manager.fire_event(
-            ApplicationEvents.application_deleted, application_data
-        )
-
-        return True
 
     @web.rpc("applications_delete_by_kind")
     def applications_delete_by_kind(self, project_id: int, kind: str) -> dict:
@@ -1228,12 +1246,12 @@ class RPC:
         """
         deleted, failed, skipped = 0, 0, 0
         with db.get_session(project_id) as session:
-            for application_id in self._application_ids_of_kind(session, kind):
+            for application_id in _application_ids_of_kind(session, kind):
                 try:
                     application = session.query(Application).get(application_id)
                     if application is None:
                         continue
-                    result = self._delete_application(session, project_id, application)
+                    result = _delete_application(self, session, project_id, application)
                     if result is True:
                         deleted += 1
                     else:
@@ -1247,31 +1265,14 @@ class RPC:
                     )
         return {'deleted': deleted, 'failed': failed, 'skipped': skipped}
 
-    @staticmethod
-    def _application_ids_of_kind(session, kind: str) -> list:
-        is_pipeline = Application.versions.any(ApplicationVersion.agent_type == AgentTypes.pipeline.value)
-        query = session.query(Application.id).filter(
-            is_pipeline if kind == 'pipeline' else ~is_pipeline
-        )
-        return [row[0] for row in query.all()]
-
-    @staticmethod
-    def _blocked_application_ids(session) -> set:
-        blocked_statuses = (PublishStatus.published, PublishStatus.embedded)
-        return {
-            row[0] for row in session.query(ApplicationVersion.application_id).filter(
-                ApplicationVersion.status.in_(blocked_statuses)
-            ).distinct().all()
-        }
-
     @web.rpc("elitea_core_project_data_counts")
     def project_data_counts(self, project_id: int) -> dict:
         """Counts for the bulk project data delete (#7242); blocked = published or embedded, to be skipped"""
         with db.get_session(project_id) as session:
-            blocked_apps = self._blocked_application_ids(session)
+            blocked_apps = _blocked_application_ids(session)
             counts = {}
             for type_name, kind in (('agents', 'agent'), ('pipelines', 'pipeline')):
-                ids = self._application_ids_of_kind(session, kind)
+                ids = _application_ids_of_kind(session, kind)
                 counts[type_name] = {
                     'count': len(ids),
                     'blocked': sum(1 for app_id in ids if app_id in blocked_apps),
