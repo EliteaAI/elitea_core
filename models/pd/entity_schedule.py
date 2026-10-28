@@ -122,6 +122,8 @@ class ScheduleDelivery(BaseModel):
                                           'required for `conversation`', examples=['3f1c9a0e-5b7d-4c2a-8e6f-0b1d3c5a7e9f'])
     participant_id: DbId | None = Field(None, description='Participant of that chat that posts; '
                                         'required for `conversation`', examples=[5])
+    include_history: int = Field(0, ge=0, le=20, description='How many recent chat messages each run sends '
+                                 'to the model; 0 sends none', examples=[5])
 
     @model_validator(mode='after')
     def check_targets(self) -> 'ScheduleDelivery':
