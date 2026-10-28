@@ -163,11 +163,12 @@ def check_delivery(session, schedule: EntitySchedule, delivery: ScheduleDelivery
 
 
 def _apply_delivery(session, row: EntitySchedule, delivery: ScheduleDelivery) -> None:
-    """Check the target, then store it on the row; mode `run_history` clears the target columns."""
+    """Check the target, then store it on the row; `run_history` clears the target."""
     check_delivery(session, row, delivery)
     row.delivery_mode = delivery.mode
     row.delivery_conversation_uuid = UUID(delivery.conversation_uuid) if delivery.conversation_uuid else None
     row.delivery_participant_id = delivery.participant_id
+    row.delivery_include_history = delivery.include_history
 
 
 def load_schedule_in_scope(session, schedule_id: int, scope: ScheduleScope) -> EntitySchedule:
