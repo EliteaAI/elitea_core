@@ -4,6 +4,7 @@ Contract under test: rpc/entity_schedules_check.py. The new-schedule steps find 
 lock connection is faked by key, so the test pins which projects the legacy step checks and when.
 """
 import contextlib
+import functools
 import sys
 import threading
 import types
@@ -260,13 +261,14 @@ def test_a_failed_migration_is_not_retried_within_the_retry_time(world):
     assert world.migrated.count((1, False)) == 1
 
 
-def test_both_rpc_names_run_the_tick(world):
+def test_both_rpc_names_run_the_tick_bound_as_pylon_binds_them(world):
+    # Pylon calls each RPC with the plugin Module as `self`, so a sibling method is not on it
     ticks = []
     world.module._run_tick = ticks.append
-    rpc = world.module.RPC()
-    rpc.entity_schedules_check()
-    rpc.pipelines_check_scheduling()
-    assert len(ticks) == 2
+    plugin_module = types.SimpleNamespace()
+    for method in (world.module.RPC.entity_schedules_check, world.module.RPC.pipelines_check_scheduling):
+        functools.partial(method, plugin_module)()
+    assert ticks == [plugin_module, plugin_module]
 
 
 def test_the_switch_off_skips_the_step_always(world):

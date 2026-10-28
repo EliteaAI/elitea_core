@@ -285,6 +285,17 @@ def _run_tick(self) -> None:
     log.info("entity_schedules_check: started=%s duration=%.3fs", dispatched, time.monotonic() - tick_started)
 
 
+def _guarded_tick(module) -> None:
+    """One tick unless the previous one still runs; `module` is the plugin Module pylon binds as `self`."""
+    if not _tick_lock.acquire(blocking=False):
+        log.warning("entity_schedules_check: previous tick still running, skipping this one")
+        return
+    try:
+        _run_tick(module)
+    finally:
+        _tick_lock.release()
+
+
 class RPC:
     """RPC of the schedule tick."""
 
@@ -296,13 +307,7 @@ class RPC:
         Known gap: the map of tracked runs is in memory, so after a Main restart a running mandate run is no longer
         stopped by Main (#6947).
         """
-        if not _tick_lock.acquire(blocking=False):
-            log.warning("entity_schedules_check: previous tick still running, skipping this one")
-            return
-        try:
-            _run_tick(self)
-        finally:
-            _tick_lock.release()
+        _guarded_tick(self)
 
     @web.rpc("schedules_restore_legacy_triggers")
     def schedules_restore_legacy_triggers(self, project_id: int, **kwargs):  # pylint: disable=W0613
@@ -321,8 +326,9 @@ class RPC:
         return report
 
     # The old name stays: scheduler rows stored before the generic tick still call it. A second method,
-    # so each name has its own registration whatever web.rpc stores on a function
+    # so each name has its own registration whatever web.rpc stores on a function. Pylon binds `self` to the
+    # plugin Module, not to this class, so the method calls the module function and never a sibling method
     @web.rpc("pipelines_check_scheduling", "check_pipeline_scheduling")
-    def pipelines_check_scheduling(self, **kwargs):
+    def pipelines_check_scheduling(self, **kwargs):  # pylint: disable=W0613
         """The tick under its old name."""
-        return self.entity_schedules_check(**kwargs)
+        _guarded_tick(self)
