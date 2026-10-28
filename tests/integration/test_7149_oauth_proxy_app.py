@@ -28,7 +28,8 @@ def entra(monkeypatch, proxy):  # noqa: F811
             raise Unavailable('The app is no longer offered for these credentials by your administrator')
         if app_id != 'app-1':
             raise Unavailable('The Microsoft Entra ID app selected for this credential no longer exists')
-        return {'client_id': 'admin-client', 'client_secret': 'admin-secret', 'token_endpoint': TOKEN_ENDPOINT}
+        return {'client_id': 'admin-client', 'client_secret': 'admin-secret', 'token_endpoint': TOKEN_ENDPOINT,
+                'scopes': ['Chat.Read']}
 
     _module(monkeypatch, f'{ROOT}.configurations.oauth_apps', resolve_app_client=resolve_app_client)
     return types.SimpleNamespace(proxy=proxy, calls=calls)
@@ -58,10 +59,11 @@ def test_a_browser_supplied_client_is_ignored(entra):
     assert (form['client_id'], form['client_secret']) == ('admin-client', 'admin-secret')
 
 
-def test_the_secret_never_goes_to_another_endpoint(entra):
+def test_the_secret_only_goes_to_the_app_endpoint_whatever_the_caller_sends(entra):
     result = _exchange(entra.proxy, token_endpoint='https://attacker.example/token', oauth_app_id='app-1')
-    assert result[1] == 403
-    assert entra.proxy.posted == []
+    assert result[1] == 200
+    (url, form), = entra.proxy.posted
+    assert url == TOKEN_ENDPOINT and form['client_secret'] == 'admin-secret'
 
 
 def test_an_unavailable_app_is_reported(entra):
@@ -79,3 +81,17 @@ def test_the_app_must_serve_the_credential_type(entra, credential_type):
     assert body['error'] == 'app_unavailable'
     assert entra.calls[0][2] == credential_type
     assert entra.proxy.posted == []
+
+
+def test_the_caller_scope_is_replaced_by_the_admin_scopes(entra):
+    _exchange(entra.proxy, token_endpoint=TOKEN_ENDPOINT, oauth_app_id='app-1', scope='Mail.ReadWrite Files.ReadWrite.All')
+    form = entra.proxy.posted[0][1]
+    assert form['scope'] == 'offline_access Chat.Read'
+
+
+def test_default_app_sign_in_works_with_mcp_exposure_off(entra, monkeypatch):
+    monkeypatch.setattr(entra.proxy.handler, 'is_mcp_exposure_enabled', lambda: False)
+    assert _exchange(entra.proxy, token_endpoint=TOKEN_ENDPOINT, oauth_app_id='app-1')[1] == 200
+    entra.proxy.posted.clear()
+    _, status = _exchange(entra.proxy, token_endpoint=TOKEN_ENDPOINT)  # a non-app (MCP) exchange
+    assert status == 403 and entra.proxy.posted == []
