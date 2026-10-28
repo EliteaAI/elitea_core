@@ -1,27 +1,37 @@
 import functools
+import inspect
 import os
 import re
-
 from collections import OrderedDict
-from json import dumps
 from pathlib import Path
 from queue import Empty
-from threading import Thread, Event, Lock, Timer
+from threading import Event, Lock, Thread, Timer
 
-from pylon.core.tools import module, log
-
-from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
+from pydantic import ValidationError
+from pylon.core.tools import log, module
+from tools import auth, context, db, this
+from tools import config as c
 
-from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
+from .models.pd.sio import NextInputSuggestionPayload
+from .scripts.tool_icons import download_github_repo_zip, unzip_file
+from .sio.asr import on_whisper_call_done
 from .utils.admission import AdmissionSettings, admit_dispatch, track_context
-from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
+from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS
+from .utils.binding_api import registration as binding_registration
+from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
+from .utils.prompt_eliminate_utils import prompt_2_agent_migration
 from .utils.run_id import stamp_predict_run_id
 from .utils.schedule_access import register_schedule_permissions
 from .utils.schedule_settings import register_schedule_settings_type
+from .utils.scheduler_bindings import (
+    advertised_bindings,
+    build_scheduler_sync_plan,
+)
+from .utils.sio_utils import SioEvents
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
     CAPABILITIES_REQUEST_EVENT,
@@ -30,20 +40,30 @@ from .utils.worker_capabilities import (
     WorkerCapabilityRegistry,
     apply_envelope_gate,
 )
-from .utils.scheduler_bindings import (
-    advertised_bindings,
-    build_scheduler_sync_plan,
-)
-from pydantic import ValidationError
-
-from .models.pd.sio import NextInputSuggestionPayload
-from .utils.sio_utils import SioEvents
-from .scripts.tool_icons import download_github_repo_zip, unzip_file
-from .utils.prompt_eliminate_utils import prompt_2_agent_migration
-from .sio.asr import on_whisper_call_done
-
 
 LEGACY_CONFIG_MODULES = ("elitea_ui", "promptlib_shared", "applications")
+
+
+class _NamedToolRegistry:
+    """Gives the schedule operations their MCP tool names.
+
+    One schedule URL serves several actions, so the names the registry derives from the URL would clash.
+    An older shared plugin has no `tool_name`; it keeps the URL-based names.
+    """
+
+    def __init__(self, registry, tool_names):
+        self._registry = registry
+        self._tool_names = tool_names
+        self._named = 'tool_name' in inspect.signature(registry.register_endpoint).parameters
+
+    def __getattr__(self, name):
+        return getattr(self._registry, name)
+
+    def register_endpoint(self, **endpoint):
+        tool_name = self._tool_names.get((endpoint['method'], endpoint['path']))
+        if tool_name and self._named:
+            endpoint.update(tool_name=tool_name, mcp_tool=True)
+        return self._registry.register_endpoint(**endpoint)
 
 
 class Module(module.ModuleModel):
@@ -52,39 +72,27 @@ class Module(module.ModuleModel):
         self.descriptor = descriptor
         self.thread = None
         self._scheduler_bindings_active = True
-        #
         self.bp = None
-        #
         self.event_node = None
         self._setup_from_old_config()
         event_node_config = self.descriptor.config.get("event_node", None)
-        #
         if event_node_config is not None:
             self.event_node = arbiter.make_event_node(config=event_node_config)
-        #
         if self.event_node is None:
             raise ValueError("No event_node config")
-        #
         self.toolkit_configurations_ready_event = Event()
-        #
         self.task_node = arbiter.TaskNode(
             self.event_node,
-            #
             pool="indexer",
             ident_prefix="indexer_",
             multiprocessing_context="fork",
-            #
             task_limit=0,
-            #
             kill_on_stop=False,
             stop_node_task_wait=3,
-            #
             housekeeping_interval=60,
             task_retention_period=3600,
-            #
             start_attempts=5,
             start_max_wait=12,
-            #
             query_wait=5,
             watcher_max_wait=3,
         )
@@ -106,23 +114,18 @@ class Module(module.ModuleModel):
         # flooding the pool, not a global quota.
         self.eval_task_node = arbiter.TaskNode(
             self.event_node,
-            #
             pool="eval_runs",
             ident_prefix="eval_run_",
             multiprocessing_context="threading",
-            #
             task_limit=self.descriptor.config.get("eval_run_task_limit", 4),
-            #
             result_transport="memory",
             # A run's terminal state is written to the `eval_run` row by the task itself, so the
             # in-memory result is never read and does not need to be retained for long.
             task_retention_period=600,
             housekeeping_interval=60,
             thread_scan_interval=0.1,
-            #
             kill_on_stop=False,
             stop_node_task_wait=3,
-            #
             start_attempts=1,
             start_max_wait=3,
             query_wait=3,
@@ -164,31 +167,25 @@ class Module(module.ModuleModel):
         )
         # logs in-memory cache
         self.task_logs = {}
-        #
         config = self.descriptor.config
         base_path = Path(
             config.get("icons_base_path", "/data/static")
         )
-        #
         self.application_icon_path = base_path.joinpath(
             config.get("application_icon_subpath", "application_icon")
         )
-        #
         self.skill_icon_path = base_path.joinpath(
             config.get("skill_icon_subpath", "skill_icon")
         )
         self.project_icon_path = base_path.joinpath(
             config.get("project_icon_subpath", "project_icon")
         )
-        #
         self.application_tool_icon_path = base_path.joinpath(
             config.get("application_tool_icon_subpath", "elitea_static-main/tool_icons")
         )
-        #
         self.default_entity_icons_path = base_path.joinpath(
             config.get("default_entity_icons_subpath", "elitea_static-main/default_entity_icons")
         )
-        #
         self.platform_logo_path = base_path.joinpath(
             config.get("platform_logo_subpath", "platform_logo")
         )
@@ -206,7 +203,6 @@ class Module(module.ModuleModel):
         self.default_release = None
         self.release_verify = None
         self.auth_token = None
-        #
         self._configure_elitea_ui()
         self._register_openapi()
 
@@ -215,14 +211,11 @@ class Module(module.ModuleModel):
         self.release_owner = self.descriptor.config.get("release_owner", "EliteaAI")
         self.release_repo = self.descriptor.config.get("release_repo", "EliteaUI")
         self.release_verify = self.descriptor.config.get("release_verify", True)
-        #
         self.default_release = self.descriptor.config.get("default_release", "latest")
-        #
         if self.default_release == "main" and \
                 self.release_owner == "EliteaAI" and \
                 self.release_repo == "EliteaUI":
             self.default_release = "latest"
-        #
         self.auth_token = self.descriptor.config.get(
             "auth_token",
             os.environ.get(
@@ -269,7 +262,8 @@ class Module(module.ModuleModel):
 
     def _register_openapi(self):
         """Register API endpoints with OpenAPI registry."""
-        from tools import openapi_registry # pylint: disable=E0401,C0415
+        from tools import openapi_registry  # pylint: disable=E0401,C0415
+
         from .api import v2 as api_v2
         openapi_registry.register_plugin(
             plugin_name="elitea_core",
@@ -330,9 +324,23 @@ class Module(module.ModuleModel):
             return
         # One handler class serves every Schedules URL, so the folder scan cannot list them (BUG-11)
         from .utils.constants import SCHEDULES_OPENAPI_TAG  # pylint: disable=C0415
-        from .utils.schedule_openapi import add_refusal_schema, register_schedule_endpoints  # pylint: disable=C0415
+        from .utils.schedule_openapi import (  # pylint: disable=C0415
+            BASE_URL,
+            ITEM,
+            add_refusal_schema,
+            register_schedule_endpoints,
+        )
         add_refusal_schema(openapi_registry)
-        register_schedule_endpoints(openapi_registry, SCHEDULES_OPENAPI_TAG)
+        item = f"{BASE_URL}/{ITEM}"
+        tool_names = {
+            ("get", BASE_URL): "list_schedules",
+            ("get", item): "get_schedule",
+            ("post", BASE_URL): "create_schedule",
+            ("put", item): "update_schedule",
+            ("delete", item): "delete_schedule",
+            ("post", f"{item}/run"): "run_schedule_now",
+        }
+        register_schedule_endpoints(_NamedToolRegistry(openapi_registry, tool_names), SCHEDULES_OPENAPI_TAG)
 
     def _init_publish_validation_secret(self):
         """Initialize HMAC signing key for publish validation tokens."""
@@ -379,19 +387,15 @@ class Module(module.ModuleModel):
     def preload(self):
         """Preload handler - download UI bundle if needed"""
         log.info("Preloading UI bundle")
-        #
         static_folder = os.path.join(self.descriptor.path, "static")
         idx_test_path = Path(static_folder).joinpath(self.elitea_base_path, "index.html")
-        #
         try:
             from tools import this  # pylint: disable=E0401,C0415
-            #
             def _install_needed(*_args, **_kwargs):
                 try:
                     return not idx_test_path.exists()
                 except:  # pylint: disable=W0702
                     return True
-            #
             this.for_module("bootstrap").module.get_bundle(
                 "EliteAUI.zip",
                 install_needed=_install_needed,
@@ -400,7 +404,6 @@ class Module(module.ModuleModel):
                 extract_cleanup=True,
                 extract_cleanup_skip_files=[".gitkeep"],
             )
-            #
             log.info("Preloaded UI bundle")
         except:  # pylint: disable=W0702
             log.exception("Failed to preload UI bundle")
@@ -605,8 +608,8 @@ class Module(module.ModuleModel):
         def _run():
             try:
                 from .utils.skill_publish_schema import (
-                    project_ids_missing_skill_columns,
                     apply_skill_columns,
+                    project_ids_missing_skill_columns,
                 )
                 pending = project_ids_missing_skill_columns()
                 if not pending:
@@ -740,7 +743,8 @@ class Module(module.ModuleModel):
         def _run():
             try:
                 from .utils.binding_operations_schema import (  # pylint: disable=C0415
-                    apply_operations_column, project_ids_missing_operations_column,
+                    apply_operations_column,
+                    project_ids_missing_operations_column,
                 )
                 pending = project_ids_missing_operations_column()
                 if pending:
@@ -794,9 +798,12 @@ class Module(module.ModuleModel):
         def _run():
             try:
                 from .utils.agent_identity_schema import (
-                    IDENTITY_TABLES, MANDATE_TABLES,
-                    project_ids_missing_tables, project_ids_with_not_null_binding_ref,
-                    apply_tables, apply_nullable_binding_ref,
+                    IDENTITY_TABLES,
+                    MANDATE_TABLES,
+                    apply_nullable_binding_ref,
+                    apply_tables,
+                    project_ids_missing_tables,
+                    project_ids_with_not_null_binding_ref,
                 )
                 tables = IDENTITY_TABLES + MANDATE_TABLES
                 pending = project_ids_missing_tables(tables)
@@ -823,7 +830,6 @@ class Module(module.ModuleModel):
     def init(self):
         # Fail fast on a misconfigured governance ceiling, before anything can consult the switch
         init_governance(self)
-        #
         self.bp = self.descriptor.init_all(url_prefix="/app")
 
         # Expose elitea_core config as a shared tool for cross-plugin access
@@ -907,12 +913,18 @@ class Module(module.ModuleModel):
 
         def _maintenance_gated_start_task(*args, **kwargs):
             admission = kwargs.pop("admission", None)  # built by the entry point from its trusted caller; None when ungoverned
-            from .utils.maintenance_gate import is_maintenance_active
             from .utils.budget_door import (
-                closed_budget_scope, dispatch_may_use_llm, dispatch_owner, dispatch_uses_own_model,
+                closed_budget_scope,
+                dispatch_may_use_llm,
+                dispatch_owner,
+                dispatch_uses_own_model,
             )
-            from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
+            from .utils.exceptions import (
+                BudgetDoorClosedError,
+                MaintenanceInProgressError,
+            )
             from .utils.input_guardrail import apply_input_guardrail
+            from .utils.maintenance_gate import is_maintenance_active
             if is_maintenance_active():
                 task_name = args[0] if args else kwargs.get("task_name") or "?"
                 log.info(
@@ -981,10 +993,13 @@ class Module(module.ModuleModel):
         _original_eval_start_task = self.eval_task_node.start_task
 
         def _maintenance_gated_eval_start_task(*args, **kwargs):
-            from .utils.maintenance_gate import is_maintenance_active
             from .utils.budget_door import closed_budget_scope, dispatch_owner
-            from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
+            from .utils.exceptions import (
+                BudgetDoorClosedError,
+                MaintenanceInProgressError,
+            )
             from .utils.input_guardrail import apply_input_guardrail
+            from .utils.maintenance_gate import is_maintenance_active
             if is_maintenance_active():
                 raise MaintenanceInProgressError(task_name=EVAL_RUN_TASK_NAME)
             project_id, owner_id = dispatch_owner(kwargs)
@@ -1039,38 +1054,31 @@ class Module(module.ModuleModel):
         self.event_node.subscribe(CAPABILITIES_EVENT, self.worker_capabilities.on_capabilities)
         self.event_node.subscribe(WITHHOLD_EVENT, self.worker_capabilities.on_withhold)
         self.event_node.emit(CAPABILITIES_REQUEST_EVENT, dict())
-        #
         self.application_icon_path.mkdir(parents=True, exist_ok=True)
         self.skill_icon_path.mkdir(parents=True, exist_ok=True)
         self.application_tool_icon_path.mkdir(parents=True, exist_ok=True)
         self.default_entity_icons_path.mkdir(parents=True, exist_ok=True)
         self.platform_logo_path.mkdir(parents=True, exist_ok=True)
-        #
         if not os.listdir(self.application_tool_icon_path) or \
                 not os.listdir(self.default_entity_icons_path):
-            #
             log.info("Preloading static icons")
-            #
             zip_path = download_github_repo_zip(
                 repo_owner=self.descriptor.config.get("icons_repo_owner", "EliteaAI"),
                 repo_name=self.descriptor.config.get("icons_repo_name", "elitea_static"),
                 local_dir=self.descriptor.config.get("icons_base_path", "/data/static"),
             )
-            #
             if zip_path.get("ok"):
                 unzip_file(
                     zip_path.get("path"),
                     self.descriptor.config.get("icons_base_path", "/data/static"),
                     self.descriptor.config.get("icons_zip_subfolder", None),
                 )
-        #
         try:
             this.for_module("admin").module.register_admin_task(
                 "download_static_icons", self.download_static_icons
             )
         except:  # pylint: disable=W0702
             log.exception("Failed to register admin tasks")
-        #
         self.create_scheduling()
 
         # MCP SSE initialization
@@ -1107,12 +1115,11 @@ class Module(module.ModuleModel):
         self._init_publishing_guardrail()
         self._init_skill_publishing_guardrail()
 
-        from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget, feature_budget, user_feature_budget
-        from .models import evaluation, eval_platform_dimension
-        from .models.message_items import base, text, canvas, context
+        from .models import (
+            chat_template,  # noqa: F401 — register ChatTemplate with db.Base.metadata
+            entity_schedule,  # noqa: F401 — register the schedule tables with db.Base.metadata
+        )
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
-        from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
-        from .models import entity_schedule  # noqa: F401 — register the schedule tables with db.Base.metadata
 
         self.thread = Thread(
             target=self.listen_in_memory_event
@@ -1239,6 +1246,7 @@ class Module(module.ModuleModel):
         """
         try:
             from tools import this  # pylint: disable=E0401,C0415
+
             from .utils.input_guardrail import redact_value
             this.for_module("tracing").module.register_value_redactor(redact_value)
         except Exception as e:  # pylint: disable=W0703
@@ -1657,8 +1665,8 @@ class Module(module.ModuleModel):
         if not hasattr(self, 'bp') or self.bp is None:
             log.warning("Blueprint not initialized, cannot complete elitea_ui_init")
             return
-        #
         import flask as _flask  # pylint: disable=C0415
+
         #
         # Register "default" mode landing with the framework router
         # so "/" redirects to the EliteA UI at /app/
@@ -1696,8 +1704,8 @@ class Module(module.ModuleModel):
         # (uses app shim → register_app_hook → applies to every Flask app)
         #
         import traceback as _tb  # pylint: disable=C0415
+
         from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
-        #
         _error_pages = {
             400: (
                 "Bad Request",
@@ -1736,7 +1744,6 @@ class Module(module.ModuleModel):
             ),
         }
         _descriptor = self.descriptor
-        #
         def _error_handler(error):
             code = error.code if isinstance(error, HTTPException) else 500
             log.error(
