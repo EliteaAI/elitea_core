@@ -85,6 +85,14 @@ SKILL_SCOPE_INSTRUCTION = (
     "elitea_core/skills). If the user means a general human capability, handle it as a regular "
     "concept and do not invoke ELITEA skills MCP tools unless explicitly requested."
 )
+SCHEDULE_BUILDER_RULES = (
+    "Schedule rules:\n"
+    "- \"This chat\" means the delivery target: set `delivery` to mode `conversation` with the uuid and "
+    "participant id of this chat.\n"
+    "- Confirm the rule, the timezone and the prompt with the user before you create a schedule.\n"
+    "- Take the prompt from the user; never invent a prompt.\n"
+    "- When the user names no timezone, use the user's profile timezone. When the user names one, keep it.\n"
+)
 SKILL_BUILDER_NOT_ENABLED_INSTRUCTION = (
     " ELITEA Skills are a separate entity from agents and pipelines, and the Skill Builder tool "
     "that manages them is not enabled in this conversation. If the user asks to create, edit, "
@@ -958,6 +966,8 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
             "Use elitea_core/project_context MCP tools.\n"
             "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
         )
+    if MCP_SCHEDULE_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        few_shot_blocks.append(SCHEDULE_BUILDER_RULES)
     if few_shot_blocks:
         few_shot_joined = "\n\n".join(few_shot_blocks)
         few_shot_instruction = f"\n\n{few_shot_joined}"

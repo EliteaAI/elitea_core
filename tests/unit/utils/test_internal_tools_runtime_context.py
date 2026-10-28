@@ -136,3 +136,28 @@ class TestCurrentProjectSuffixes:
             'elitea_core/project_context',
             'elitea_core/schedules',
         }
+
+
+class TestScheduleBuilderRules:
+
+    def test_rules_tell_the_model_to_use_the_profile_timezone_when_none_is_named(self, internal_tools):
+        addon = internal_tools.get_mcp_entity_link_instructions(['schedule_builder'])
+        assert 'profile timezone' in addon
+        assert 'names no timezone' in addon
+
+    def test_rules_keep_a_timezone_the_user_names(self, internal_tools):
+        addon = internal_tools.get_mcp_entity_link_instructions(['schedule_builder'])
+        assert 'keep it' in addon
+
+    def test_rules_cover_the_delivery_target_confirmation_and_prompt(self, internal_tools):
+        addon = internal_tools.get_mcp_entity_link_instructions(['schedule_builder'])
+        assert 'this chat' in addon
+        assert 'delivery' in addon
+        assert 'Confirm' in addon
+        assert 'never invent a prompt' in addon
+
+    def test_no_schedule_rules_without_the_module(self, internal_tools):
+        for tools in (['skill_builder'], ['internal_mcp'], ['project_context_builder'], []):
+            addon = internal_tools.get_mcp_entity_link_instructions(tools)
+            assert 'profile timezone' not in addon
+            assert 'schedule' not in addon.lower()
