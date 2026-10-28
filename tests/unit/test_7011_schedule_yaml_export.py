@@ -19,7 +19,7 @@ PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 ALLOWED_KEYS = [
     'key', 'name', 'description', 'entity_type', 'entity_name', 'version_name', 'run_mode', 'cron', 'timezone',
-    'prompt', 'variables', 'expires_at', 'approval_rule',
+    'prompt', 'variables', 'expires_at', 'approval_rule', 'delivery',
 ]
 
 
