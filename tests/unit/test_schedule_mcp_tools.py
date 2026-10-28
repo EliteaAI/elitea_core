@@ -1,6 +1,6 @@
-"""Five schedule operations are MCP tools with unique names; every other schedule operation is not.
+"""Six schedule operations are MCP tools with unique names; every other schedule operation is not.
 
-The tool name is derived by the shared registry from the method and the last two fixed parts of the path.
+The names come from one table, `MCP_TOOL_NAMES`, and reach the shared registry as `tool_name`.
 The real `utils/schedule_openapi.py` and the request models it reads are loaded; the handler modules
 and the platform around them are lenient stubs, and the registry is a recorder.
 
@@ -23,11 +23,12 @@ TAG = 'elitea_core/schedules'
 BASE = '/api/v2/elitea_core/schedules/<string:mode>/<int:project_id>'
 ITEM = BASE + '/<int:schedule_id>'
 TOOLS = {
-    ('get', BASE): 'get_elitea_core_schedules',
-    ('post', BASE): 'post_elitea_core_schedules',
-    ('put', ITEM): 'put_elitea_core_schedules',
-    ('delete', ITEM): 'delete_elitea_core_schedules',
-    ('post', f'{ITEM}/run'): 'post_schedules_run',
+    ('get', BASE): 'list_schedules',
+    ('get', ITEM): 'get_schedule',
+    ('post', BASE): 'create_schedule',
+    ('put', ITEM): 'update_schedule',
+    ('delete', ITEM): 'delete_schedule',
+    ('post', f'{ITEM}/run'): 'run_schedule_now',
 }
 # The run token class of each write tool, the line `ENDPOINT_OPERATIONS` needs in utils/internal_obo.py
 WRITE_OPERATIONS = {
@@ -78,7 +79,28 @@ def openapi(monkeypatch):
 
 
 class Registry:
-    """Records what `register_endpoint` receives; it takes no `operation_name`, like the installed shared plugin."""
+    """Records what `register_endpoint` receives; it takes `tool_name`, like the updated shared plugin."""
+
+    def __init__(self):
+        self.calls = []
+
+    def register_endpoint(
+        self, plugin_name, path, method, name, description='', mcp_description='', summary='', tags=None,
+        parameters=None, request_body=None, mcp_request_body=None, response_model=None, responses=None,
+        security=None, deprecated=False, mcp_tool=False, available_to_users=False, tool_name='',
+    ):
+        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool, 'tool_name': tool_name,
+                           'mcp_request_body': mcp_request_body})
+
+
+class KwargsRegistry(Registry):
+    def register_endpoint(self, **endpoint):
+        self.calls.append({'path': endpoint['path'], 'method': endpoint['method'],
+                           'mcp_tool': endpoint['mcp_tool'], 'tool_name': endpoint.get('tool_name', '')})
+
+
+class OldRegistry:
+    """The installed shared plugin before `tool_name`: it derives the names from the URLs."""
 
     def __init__(self):
         self.calls = []
@@ -88,20 +110,13 @@ class Registry:
         parameters=None, request_body=None, mcp_request_body=None, response_model=None, responses=None,
         security=None, deprecated=False, mcp_tool=False, available_to_users=False,
     ):
-        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool, 'mcp_request_body': mcp_request_body})
+        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool})
 
 
-def _registered(openapi):
-    registry = Registry()
+def _registered(openapi, registry=None):
+    registry = registry or Registry()
     openapi.register_schedule_endpoints(registry, TAG)
     return registry.calls
-
-
-def _derived_name(method, path):
-    """The tool name the installed shared registry gives an endpoint: the method and the last two fixed path parts."""
-    openapi_path = path.replace('<int:', '{').replace('<string:', '{').replace(">", '}')
-    parts = [method] + [part for part in openapi_path.split('/') if part and not part.startswith('{')][-2:]
-    return '_'.join(word.lower() for part in parts for word in part.split('_') if word)
 
 
 def test_only_the_documented_schedule_operations_are_mcp_tools(openapi):
@@ -113,12 +128,27 @@ def test_every_schedule_operation_is_still_registered(openapi):
     assert len(_registered(openapi)) == len(openapi.OPENAPI_ENDPOINTS)
 
 
-def test_derived_tool_names_are_unique_and_match_the_documented_list(openapi):
-    derived = {(c['method'], c['path']): _derived_name(c['method'], c['path'])
-               for c in _registered(openapi) if c['mcp_tool']}
-    assert derived == TOOLS
-    assert len(set(derived.values())) == len(derived)
-    assert sorted(derived.values()) == sorted(openapi.MCP_TOOL_NAMES.values())
+def test_registered_tool_names_are_the_six_story_names(openapi):
+    names = {(c['method'], c['path']): c['tool_name'] for c in _registered(openapi) if c['mcp_tool']}
+    assert names == TOOLS
+    assert len(set(names.values())) == len(names)
+    assert sorted(openapi.MCP_TOOL_NAMES.values()) == sorted(TOOLS.values())
+
+
+def test_operations_that_are_no_tools_get_no_name(openapi):
+    assert all(c['tool_name'] == '' for c in _registered(openapi) if not c['mcp_tool'])
+
+
+def test_a_registry_with_kwargs_receives_the_names(openapi):
+    names = {c['tool_name'] for c in _registered(openapi, KwargsRegistry()) if c['mcp_tool']}
+    assert names == set(TOOLS.values())
+
+
+def test_a_registry_without_tool_name_keeps_five_tools_and_warns(openapi):
+    calls = _registered(openapi, OldRegistry())
+    assert all('tool_name' not in c for c in calls)
+    assert {(c['method'], c['path']) for c in calls if c['mcp_tool']} == set(TOOLS) - {('get', ITEM)}
+    assert len(calls) == len(openapi.OPENAPI_ENDPOINTS)
 
 
 def test_registry_without_operation_name_takes_every_endpoint(openapi):

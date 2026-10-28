@@ -2,11 +2,13 @@
 
 One entry per row of `ROUTES` in `api/v2/schedules.py`, with the same (method, URL tail) key; a test
 checks that both tables match. `Module._register_openapi` registers every entry under the
-`elitea_core/schedules` tag; only the operations of `MCP_TOOL_NAMES` are MCP tools.
+`elitea_core/schedules` tag; only the operations of `MCP_TOOL_NAMES` are MCP tools, each under its name there.
 """
+import inspect
 from typing import get_args
 
 from pydantic import create_model
+from pylon.core.tools import log
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
@@ -547,15 +549,15 @@ OPERATIONS = {
             403: None, 503: "The settings store is unavailable"}),
     },
 }
-# The shared registry names an MCP tool after its method and the last two fixed parts of its path; the id
-# parameters do not count. The list and the read of one schedule would both be `get_elitea_core_schedules`,
-# so the read is no tool and the list serves the chat model.
+# One schedule URL serves several actions, so the names the shared registry derives from the URL (the method and
+# the last two fixed path parts) would clash. The six operations are tools under these names, the single read too.
 MCP_TOOL_NAMES = {
-    ("get", ""): "get_elitea_core_schedules",
-    ("post", ""): "post_elitea_core_schedules",
-    ("put", ITEM): "put_elitea_core_schedules",
-    ("delete", ITEM): "delete_elitea_core_schedules",
-    ("post", f"{ITEM}/run"): "post_schedules_run",
+    ("get", ""): "list_schedules",
+    ("get", ITEM): "get_schedule",
+    ("post", ""): "create_schedule",
+    ("put", ITEM): "update_schedule",
+    ("delete", ITEM): "delete_schedule",
+    ("post", f"{ITEM}/run"): "run_schedule_now",
 }
 MCP_RISK_TEXT = (
     "The risk review runs first. A blocking finding answers 409 `schedule_blocked`: fix the agent or pipeline. "
@@ -595,7 +597,31 @@ OPENAPI_ENDPOINTS = [
 ]
 
 
+class _NamedToolRegistry:
+    """Passes the `MCP_TOOL_NAMES` name of an endpoint to the registry as `tool_name`.
+
+    A shared plugin without `tool_name` derives the names from the URLs. The single read would then clash with
+    the list, so it is not a tool until the shared plugin is deployed.
+    """
+
+    def __init__(self, registry):
+        self._registry = registry
+        parameters = inspect.signature(registry.register_endpoint).parameters.values()
+        self._named = any(p.name == "tool_name" or p.kind is p.VAR_KEYWORD for p in parameters)
+        if not self._named:
+            log.warning("The shared plugin has no tool_name: schedule MCP tools keep their URL-based names")
+
+    def register_endpoint(self, **endpoint):
+        key = (endpoint["method"], endpoint["path"].removeprefix(BASE_URL).lstrip("/"))
+        if self._named and key in MCP_TOOL_NAMES:
+            endpoint["tool_name"] = MCP_TOOL_NAMES[key]
+        elif key == ("get", ITEM):
+            endpoint["mcp_tool"] = False
+        return self._registry.register_endpoint(**endpoint)
+
+
 def register_schedule_endpoints(registry, tag: str) -> None:
     """Register every schedule operation; the ones of `MCP_TOOL_NAMES` also as MCP tools."""
+    registry = _NamedToolRegistry(registry)
     for endpoint in OPENAPI_ENDPOINTS:
         registry.register_endpoint(plugin_name="elitea_core", tags=[tag], available_to_users=True, **endpoint)
