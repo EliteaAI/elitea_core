@@ -1119,6 +1119,15 @@ def record_index_schedule_refusal(module, code, *, project_id, toolkit_id) -> No
     _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", code)
 
 
+def record_schedule_would_deny(module, code, *, project_id, application_id, trigger_ref) -> None:
+    """Audit only: what enforce would say of an owner schedule's run (#7011) for want of a mandate of its owner that
+    can carry it (``code``). The run goes on; ``predict_sio`` does not evaluate it again (an unattended run is a system
+    run, which audit only skips)."""
+    _record_deny(module, code, would_deny=True, project_id=project_id, application_id=application_id,
+                 caller_ref=trigger_ref)
+    _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny", code)
+
+
 def _admit(  # pylint: disable=R0914
     module, request: AdmissionRequest, run_id, payload=None, shadow=False,
 ) -> Union[ExecutionSecurityContextView, list, None]:

@@ -192,9 +192,14 @@ def create_trigger_run_conversation(
         return str(conversation.uuid), pipeline_participant.id, str(response_msg_group.uuid)
 
 
-def finish_trigger_run_with_error(project_id: int, response_message_id: str, error) -> None:
+def run_label(source: str = "pipeline") -> str:
+    """What a triggered run is called in its chat: an agent schedule's run is not a pipeline run."""
+    return "Agent run" if source == "agent" else "Pipeline run"
+
+
+def finish_trigger_run_with_error(project_id: int, response_message_id: str, error, source: str = "pipeline") -> None:
     """End a triggered run's placeholder message with the dispatch error, so History shows why it failed."""
-    message = f"Pipeline run could not start: {error}"
+    message = f"{run_label(source)} could not start: {error}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
@@ -215,9 +220,11 @@ def is_trigger_refusal(result) -> bool:
     return isinstance(result, dict) and isinstance(result.get("code"), str) and "task_id" not in result
 
 
-def finish_trigger_run_refused(project_id: int, response_message_id: str, refusal: dict) -> None:
+def finish_trigger_run_refused(
+    project_id: int, response_message_id: str, refusal: dict, source: str = "pipeline",
+) -> None:
     """End a refused run's placeholder with the readable refusal (fixed text, no ids), so History shows why."""
-    message = f"Pipeline run was not started: {refusal.get('error')}"
+    message = f"{run_label(source)} was not started: {refusal.get('error')}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
@@ -245,6 +252,7 @@ def execute_pipeline_via_predict_sio(
     is_system_user: bool = True,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_ticket: str | None = None,
+    unattended: bool = False,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -263,11 +271,15 @@ def execute_pipeline_via_predict_sio(
         auto_approve_sensitive_actions: True skips the sensitive-action approval pause (schedule rule and secret);
             a list of (toolkit, tool) pairs approves only those pairs
         mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
+        unattended: an owner schedule's run under governance (#7011): admitted on its ticket or refused, never as a
+            person's chat run; sent only when set
 
     Returns:
         Dict with task_id from the RPC call, or ``{code, error}`` when a governed admission refused the run
     """
     extra = {"mandate_ticket": mandate_ticket} if mandate_ticket is not None else {}
+    if unattended:
+        extra["unattended"] = True
     result = rpc_tools.RpcMixin().rpc.timeout(5).applications_predict_sio(
         sid=None,  # No socket connection for triggered runs
         sio_event=SioEvents.chat_predict.value,  # Required for metadata persistence
