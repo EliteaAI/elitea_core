@@ -38,7 +38,7 @@ def build(models_path):
         'PredictPayloadError': Exception,
         'VaultClient': lambda project: NS(get_all_secrets=dict),
         'rpc_tools': NS(RpcMixin=lambda: NS(rpc=NS(call=rpc, timeout=lambda seconds: rpc))),
-        'get_predict_token_and_session': lambda *a: ('token', None),
+        'get_predict_token_and_session': lambda *a, **k: ('token', None),
         'get_system_token': lambda *a: 'token',
         'get_session_cookie_name': lambda: None,
         'get_predict_base_url': lambda *a: 'https://unit.invalid',

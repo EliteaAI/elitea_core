@@ -132,7 +132,8 @@ DESCRIPTIONS = {
         },
         "allow_development_runs": {
             "label": "Allow development runs",
-            "tooltip": "When on, the agent and pipeline editor's test chat, toolkit tests and on-demand indexing "
+            "tooltip": "When on, the agent and pipeline editor's test chat, toolkit tests, on-demand indexing and "
+                       "toolkits with credentials in a chat "
                        "may run what has no identity binding yet. Such a run acts as the signed-in author only and may "
                        "use only the author's own credentials: personal ones, and project credentials already granted "
                        "to that person. Nothing it produces can be shared, published or scheduled. Switching to "

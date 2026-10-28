@@ -25,7 +25,7 @@ from ..models.enums.all import AgentTypes
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.tool import ToolDetails
 from ..utils.application_tools import expand_toolkit_settings
-from ..utils.internal_tools import resolve_internal_mcp_tools, dedupe_internal_mcp_tools
+from ..utils.internal_tools import resolve_internal_mcp_tools, dedupe_internal_mcp_tools, run_identity_applies
 
 
 class PredictPayloadError(Exception):
@@ -162,9 +162,12 @@ def resolve_auth_session(user_id: int, sid: str = None) -> Optional[str]:
 
 
 def get_predict_token_and_session(  # pylint: disable=W0613
-        project_id: int, user_id: int, sid: str = None,
+        project_id: int, user_id: int, sid: str = None, run_identity: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:
-    """ Returns the real user's PAT if they have one, otherwise their auth session reference """
+    """ Returns the real user's PAT if they have one, otherwise their auth session reference. ``run_identity``: the
+    caller dispatches an admitted run, which under enforce carries the run token only (#7229): nothing is looked up """
+    if run_identity and run_identity_applies(sid):
+        return None, None
     token: str = get_user_token(user_id)
     if token:
         return token, None
@@ -352,7 +355,7 @@ def generate_predict_payload(
         token = get_system_token(parsed.project_id)
         auth_session = None
     else:
-        token, auth_session = get_predict_token_and_session(parsed.project_id, user_id, sid)
+        token, auth_session = get_predict_token_and_session(parsed.project_id, user_id, sid, run_identity=True)
         if auth_session:
             session_cookie_name = get_session_cookie_name()
 
@@ -743,7 +746,7 @@ def resolve_test_tool_llm(project_id: int, llm_model: Optional[str], llm_setting
 
 
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
-    token, auth_session = get_predict_token_and_session(project_id, user_id, sid)
+    token, auth_session = get_predict_token_and_session(project_id, user_id, sid, run_identity=True)
     base_url = get_predict_base_url(project_id)
     llm_settings = this.for_module('configurations').module.get_default_model(project_id)
     tool_llm_settings = default_tool_llm_settings(llm_settings.get("model_name"), llm_settings.get("model_project_id"))

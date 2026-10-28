@@ -1041,7 +1041,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         self, child_thread_id, child_payload, child_meta,
         parent_stream_id=None, parent_message_id=None,
     ):
-        """Stash a child's launch payload + linkage for HITL resume."""
+        """Stash a child's launch payload + linkage for HITL resume. The run token Main put on the dispatched payload is
+        never stored (#7229): the resume is admitted again and gets one of its own."""
+        from ..utils.internal_obo import TOKEN_KWARG  # pylint: disable=C0415
+        if isinstance(child_payload, dict) and TOKEN_KWARG in child_payload:
+            child_payload = {key: value for key, value in child_payload.items() if key != TOKEN_KWARG}
         key = f"parallel_child_launch:{child_thread_id}"
         try:
             client = self.get_redis_client()  # pylint: disable=E1101

@@ -48,10 +48,10 @@ from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
     ALLOWED as CREDENTIAL_USE_ALLOWED, DEVELOPMENT_GRANT_REQUIRED, PROFILE_DEVELOPMENT, USE_PERMISSION, WHOLE_TARGET,
     CredentialDecisionContext, CredentialDecisionError, _uuid_text, binding_ref, collect_credential_uses, decide_credential_uses,
-    CREDENTIAL_SECTION, _int_or_none, configurations_in, read_configuration_facts, recheck_credentials,
+    CREDENTIAL_SECTION, _int_or_none, _payload_toolkits, configurations_in, read_configuration_facts, recheck_credentials,
     recheck_development, toolkit_secret_fields, user_may_use_credentials, walk_scope, want_configuration_facts,
 )
-from .credential_slots import FREE_FORM_SECRET_MARK, prefetched_tool_lists, seal_payload
+from .credential_slots import FREE_FORM_SECRET_MARK, has_free_form_secret, prefetched_tool_lists, seal_payload
 from .definition_digest import DIGEST_VERSION, DigestError, definition_digest, digest_for_version, norm_json, toolkit_rows
 from .exceptions import AdmissionDenied
 from .governance import MODE_AUDIT_ONLY, governance_lifecycle_active, is_auditing, is_governed, is_unavailable
@@ -99,6 +99,10 @@ SCHEMA_VERSION = 1
 MAX_TRACKED_CONTEXTS = 10_000
 CREDENTIAL_FACTS_MIN_VERSION = 3   # the secrets plugin's credential_use_facts shape this module reads
 LIVE_STATES = ("admitted", "running")
+# A run's absolute lifetime (#7229): its context's deadline slides while the run is in use (each verdict of the worker,
+# a run route, the internal MCP, a resume decision) by the idle window (``context_ttl_s``), never past ``created_at`` +
+# this. The run token lives to this cap; the context row decides whether the run is still live.
+MAX_RUN_LIFETIME_S = 86400
 # Codes that explain why a context was revoked; the worker is told the same reason, not a generic one
 REVOKE_CODES = frozenset({
     "EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING",
@@ -160,7 +164,8 @@ MESSAGES = {
     "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
                                 "draft started (only the sub-agents the draft calls are checked, each on its own); the "
                                 "run was not started.",
-    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat, toolkit tests and on-demand indexing) are "
+    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat, toolkit tests, on-demand indexing and "
+                                 "toolkits with credentials in a chat) are "
                                  "switched off on this platform; an administrator can switch them on in Admin → "
                                  "Governance. The run was not started.",
     "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
@@ -526,6 +531,41 @@ def _read_toolkit(request: AdmissionRequest):
         except DigestError:
             raise _denied("DEPENDENCY_UNAVAILABLE") from None
     return Draft(None, None, digest), [] if tool is None else [(None, tool)]
+
+
+def _chat_toolkit_ids(payload) -> list:
+    """The ids of a plain LLM chat's own toolkits that carry a configuration (#7229 D15). Dict reads only; a toolkit
+    without a readable id declares nothing, so its credential is refused."""
+    return [tool.get("id") for tool in _payload_toolkits(payload)
+            if isinstance(tool.get("settings"), dict) and configurations_in(tool["settings"])]
+
+
+def _readable_ids(toolkit_ids) -> list:
+    """The ids that can name a stored toolkit: positive integers of the column's range; anything else names nothing."""
+    readable = (int(item) for item in toolkit_ids if (isinstance(item, int) and not isinstance(item, bool))
+                or (isinstance(item, str) and item.isascii() and item.isdecimal() and len(item) <= 10))
+    return sorted({item for item in readable if 0 < item < 2 ** 31})
+
+
+# A chat is not a draft: the grant refusal of a chat toolkit's credential says so (#7229 D15)
+CHAT_GRANT_MESSAGE = "This credential needs a grant before you can use it in a chat."
+
+
+def _read_chat_toolkits(request: AdmissionRequest, toolkit_ids):
+    """Step 4 of a plain LLM chat with configured toolkits (#7229 D15): the stored toolkits it runs, as for a toolkit
+    Test run (``_read_toolkit``), in one read in the chat's project. They are the authority on which credential each
+    selects; one that is not saved there declares nothing. The digest is of the stored toolkits."""
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    ids = _readable_ids(toolkit_ids)
+    with db.get_session(request.binding_project_id) as session:
+        tools = session.query(EliteATool).filter(EliteATool.id.in_(ids)).all() if ids else []
+        try:
+            digest = definition_digest({"v": DIGEST_VERSION, "kind": "llm_chat", "toolkits": [
+                {"id": tool.id, "type": tool.type, "settings": norm_json(tool.settings or {})}
+                for tool in sorted(tools, key=lambda tool: tool.id)]})
+        except DigestError:
+            raise _denied("DEPENDENCY_UNAVAILABLE") from None
+    return Draft(None, None, digest), [(None, tool) for tool in tools]
 
 
 # A sub-agent admitted with its parent (#7227): its context id, the context it was called from, the ancestor contexts
@@ -1110,6 +1150,7 @@ def _admit(  # pylint: disable=R0914
     principal = _verify_identity(request, settings)
     can_use = None
     children_of_drafts = None
+    decide = True
     if request.entry_point in TOOLKIT_ENTRY_POINTS:
         # 4. (a toolkit Test run or on-demand indexing, #7229) a development run of the person, or nothing: a toolkit has
         # no binding of its own to be governed by
@@ -1131,7 +1172,18 @@ def _admit(  # pylint: disable=R0914
         # nothing to decide. It runs under a development context of its own (no binding), with no credential decision:
         # any credential configuration its payload carries is refused at the seal; platform-internal ones are not.
         # A sub-agent it calls is admitted only on a binding of its own, never as a draft
-        binding, rows, children_of_drafts = Draft(None, None, _LLM_CHAT_DIGEST), [], False
+        children_of_drafts = False
+        if settings.allow_development_runs and _uncovered(
+                {"chat": _payload_toolkits(payload or {})}, [], (payload or {}).get("project_id")):
+            # (#7229 D15) its toolkits carry a credential: a development run of the person, decided as a toolkit Test
+            # run is (personal credential, or a project one granted to them), on the stored toolkits. The facts read
+            # here are the ones the seal reads anyway (walk_scope). With development runs off nothing is decided, and
+            # a credential is refused at the seal as switched off
+            binding, rows = _read_chat_toolkits(request, _chat_toolkit_ids(payload))
+            permissions = _author_permissions(request)
+            can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
+        else:
+            binding, rows, decide = Draft(None, None, _LLM_CHAT_DIGEST), [], False
     else:
         # 4. which approved agent definition runs
         try:
@@ -1148,8 +1200,15 @@ def _admit(  # pylint: disable=R0914
     # 5b. which credentials the run uses, and whether the agent may use them for this user. The facts of the
     # sub-agents' configurations are read with the run's own (#7227)
     _want_prefetched_facts(payload)
-    decisions = [] if children_of_drafts is False else _decide_credentials(
-        module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows, can_use=can_use)
+    try:
+        decisions = [] if not decide else _decide_credentials(
+            module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows, can_use=can_use)
+    except AdmissionDenied as denied:
+        if not _is_plain_llm_chat(request):
+            raise
+        if denied.reason_code == DEVELOPMENT_GRANT_REQUIRED:
+            denied = AdmissionDenied(denied.reason_code, CHAT_GRANT_MESSAGE, denied.audit)
+        raise _named_refusal(denied, payload, None, _payload_toolkits(payload)) from None   # names the toolkit (D15)
     # 5c. the sub-agents it runs in its own process, each on its own decision (#7227)
     context_id = uuid.uuid4()
     children = _admit_children(
@@ -1465,8 +1524,8 @@ def admit_dispatch(  # pylint: disable=R0911
             meta["context_ref"] = own_ref
         meta.setdefault("context_ref", own_ref)
         inherited_project = meta.get("project_id") or payload.get("project_id")
-        if not _deliver_run_token(payload, lambda: internal_obo.mint_for_context(
-                inherited_project, own_ref, task_name, view_payload), view_payload):
+        if not _deliver_run_token(payload, lambda internal: internal_obo.mint_for_context(
+                inherited_project, own_ref, task_name, view_payload, internal=internal), view_payload):
             _refuse_dispatch(module, "INTERNAL_TOKEN_UNAVAILABLE", call_kwargs, run_id)
         return None
     if unavailable:
@@ -1488,16 +1547,22 @@ def admit_dispatch(  # pylint: disable=R0911
                            children=view.children or None)
         except AdmissionDenied as denied:
             track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
+            if denied.reason_code == "CREDENTIAL_REFERENCE_REQUIRED" and _is_plain_llm_chat(admission) \
+                    and not module.admission_settings.allow_development_runs \
+                    and _readable_ids(_chat_toolkit_ids(view_payload)):   # a saved chat toolkit: switching on would help
+                denied = _denied("DEVELOPMENT_RUNS_DISABLED")   # a chat toolkit's credential needs them (#7229 D15)
             _record_deny(
                 module, denied.reason_code, project_id=admission.project_id, application_id=admission.application_id,
                 caller_ref=_caller_ref(admission), run_id=run_id if isinstance(run_id, str) else None,
                 traceparent=admission.trace_ref, **denied.audit)
-            raise
+            raise denied from None
     if task_name == TOOLKIT_TASK and isinstance(meta.get("toolkit_config"), dict):
         # the task meta is a tracking surface: it gets the sealed toolkit, never the one expansion left material in
         meta["toolkit_config"] = copy.deepcopy(payload.get("toolkit_config"))
-    if not _deliver_run_token(payload, lambda: internal_obo.mint_for_admission(view, task_name, view_payload),
-                              view_payload):
+    if admission.run_kind == "interactive" and admission.caller_type == "user" and internal_obo.signing_key() is not None:
+        _strip_platform_tokens(payload, meta)   # the run token is its only platform identity (#7229)
+    if not _deliver_run_token(payload, lambda internal: internal_obo.mint_for_admission(
+            view, task_name, view_payload, internal=internal), view_payload):
         track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
         _record_deny(
             module, "INTERNAL_TOKEN_UNAVAILABLE", project_id=admission.project_id,
@@ -1513,21 +1578,54 @@ def admit_dispatch(  # pylint: disable=R0911
     return view.context_ref
 
 
+# The long-lived platform tokens Main puts on a run's payload for the worker's client (#7229): a personal or system token
+# or a session reference, at the top level (toolkit runs) and in the LLM settings (agent and chat runs)
+PLATFORM_TOKEN_FIELDS = ("api_token", "project_auth_token", "auth_session")
+LLM_TOKEN_FIELDS = ("api_key", "auth_session")
+
+
+def _llm_kwargs(payload):
+    llm = payload.get("llm") if isinstance(payload.get("llm"), dict) else None
+    return llm.get("kwargs") if isinstance(llm, dict) and isinstance(llm.get("kwargs"), dict) else None
+
+
+def carries_platform_token(payload) -> bool:
+    """Does the payload give the worker's client a long-lived platform token of its own? Dict reads only."""
+    llm_kwargs = _llm_kwargs(payload) or {}
+    return any(payload.get(name) for name in PLATFORM_TOKEN_FIELDS) or any(llm_kwargs.get(name)
+                                                                           for name in LLM_TOKEN_FIELDS)
+
+
+def _strip_platform_tokens(payload, meta) -> None:
+    """Reference-only identity (#7229): an admitted interactive run of a signed-in person has the run token as its only
+    platform identity; any personal or system token or session the payload builders left is removed from the payload
+    and the task meta (a tracking surface)."""
+    for holder, names in ((payload, PLATFORM_TOKEN_FIELDS), (_llm_kwargs(payload), LLM_TOKEN_FIELDS),
+                          (meta, PLATFORM_TOKEN_FIELDS)):
+        for name in names if isinstance(holder, dict) else ():
+            holder.pop(name, None)
+
+
 def _deliver_run_token(payload, minted, view=None) -> bool:
     """Put the run token (#7214) on the payload of a run that can reach the internal MCP (``needs_run_token``: an
     internal toolkit, or a sub-agent the runtime may fetch itself): one signature, the binding's operations, the user's
-    cached permissions. Any other run mints and reads nothing. False when a token is needed and none could be minted:
-    that run is refused; its toolkits never fall back to a personal or system token. A sub-agent that the runtime would
-    fetch only gets a token when the minting works; without one its internal toolkits are refused at the MCP. ``view``:
-    what the checks read of the payload (a toolkit run's toolkit, ``_dispatched_view``); the token goes on the payload."""
+    cached permissions. A run whose payload carries no platform token of its own (#7229: reference-only identity) gets
+    one too, for its own platform client, minted with nothing read (``minted(False)``). Any other run mints and reads
+    nothing. False when a token is needed and none could be minted: that run is refused; its toolkits never fall back to
+    a personal or system token. A sub-agent that the runtime would fetch only gets a token when the minting works;
+    without one its internal toolkits are refused at the MCP. ``view``: what the checks read of the payload (a toolkit
+    run's toolkit, ``_dispatched_view``); the token goes on the payload."""
     view = payload if view is None else view
-    if not internal_obo.needs_run_token(view):
+    internal = internal_obo.needs_run_token(view)
+    # without a signing key there is no run token: the payload keeps what the builders put on it (as before #7229)
+    client = not carries_platform_token(payload) and internal_obo.signing_key() is not None
+    if not internal and not client:
         return True
     try:
-        payload[internal_obo.TOKEN_KWARG] = minted()
+        payload[internal_obo.TOKEN_KWARG] = minted(internal)
         return True
     except Exception as exc:  # pylint: disable=W0703
-        if internal_obo.has_internal_mcp(view):
+        if client or internal_obo.has_internal_mcp(view):
             log.error("admission: no run token could be minted (%s); the run is refused", type(exc).__name__)
             return False
         log.warning("admission: no run token (%s); fetched sub-agents get no internal tools", type(exc).__name__)
@@ -1632,6 +1730,28 @@ def _seal_inherited(module, payload, context_ref, call_kwargs, run_id) -> str:  
         # author's identity is not lent beyond the decisions of the draft and of its own sub-agents (#7213, #7227)
         code = "DENIED_DEVELOPMENT_CHILD"
     return _refuse_dispatch(module, code, call_kwargs, run_id)
+
+
+def seal_fetched_version(module, claims, project_id, application_id, version_id, details) -> dict:
+    """C9-SEC-30 (#7229): a sub-agent version the runtime fetches itself on its run token (``PATCH version``: one the
+    prefetch did not carry, e.g. a sub-agent of a dispatched fan-out child) is returned as a dispatch of that version
+    under the asking run's context would be sealed (``_seal_inherited``): against the decisions of a sub-agent admitted
+    with the run for that version (#7227), else the context's own; any other credential is refused
+    (``CREDENTIAL_REFERENCE_REQUIRED``, ``DENIED_DEVELOPMENT_CHILD`` under a draft), and so are a ``{{secret.*}}``
+    outside a credential and an internal MCP toolkit on another origin. Credential-free details read nothing. The
+    sealed ``details`` (changed in place), or ``AdmissionDenied``; every refusal is audited."""
+    payload = {"project_id": project_id,
+               "application": {"id": application_id, "version_id": version_id, "version_details": details}}
+    call_kwargs = {"kwargs": payload, "meta": {"project_id": project_id}}
+    try:
+        internal_obo.police_internal_mcp(payload)
+    except internal_obo.ForeignInternalMcp as foreign:
+        _refuse_dispatch(module, foreign.code, call_kwargs, claims["run"])
+    if has_free_form_secret(module, payload):
+        _refuse_dispatch(module, "CREDENTIAL_REFERENCE_REQUIRED", call_kwargs, claims["run"])
+    with walk_scope():
+        _seal_inherited(module, payload, claims["ctx"], call_kwargs, claims["run"])
+    return details
 
 
 # What the release and the dispatch of a sub-agent read of a context admitted with the run (#7227): the checks of
@@ -1974,7 +2094,7 @@ def _mandate_revoke_code(row, stamped) -> Optional[str]:
     return None
 
 
-def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: disable=R0912,R0914,R0915
+def _validate(project_id, context_ref, caller, known, touch=True, ttl=None):  # pylint: disable=R0912,R0913,R0914,R0915
     """Is this run still the one that was admitted? No database connection is held while anything else is asked: the
     context (and, in the same project, its binding) is read in a short session, the identity service and the facts are
     asked with none open, and the state is written in a short session of its own, as a conditional update (a context
@@ -1998,7 +2118,8 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
                    columns.run_id, columns.attempt, columns.project_id, columns.application_id, columns.version_id,
                    columns.agent_binding_ref, columns.binding_project_id, columns.subject, columns.caller,
                    columns.definition_digest, columns.policy_revision, columns.environment, columns.revocation_epochs,
-                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage, columns.entry_point)
+                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage, columns.entry_point,
+                   columns.created_at)
             .where(columns.id == context_id)
         ).one_or_none()
         binding = None
@@ -2027,7 +2148,8 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
         raise _denied(reason if reason in REVOKE_CODES else "STALE_CONTEXT")
     if _now() >= _aware(row.expires_at):
         raise _denied("STALE_CONTEXT")
-    if not root_context_live(project_id, row):   # a fan-out sub-agent of a run that ended (#7227)
+    root = _root_row(project_id, row)
+    if root is _NO_ROOT or (root is not None and root.state not in LIVE_STATES):   # a sub-agent of a run that ended (#7227)
         raise _denied("STALE_CONTEXT")
     #
     def revoke(code):
@@ -2080,10 +2202,25 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
         if code is not None:
             raise revoke(code)
     #
-    if touch or row.state != "running":   # the internal MCP asks per request: no write once the run is running (#7214)
+    # the run is in use: the deadline of all its live contexts slides by the idle window, at most once per half window
+    # (#7229): the run's sub-agents and its parked root stay as live as the run itself
+    now = _now()
+    members = (row, root) if root is not None else (row,)
+    due = False
+    if not is_mandate and ttl:
+        # only a deadline that would actually move: live, inside its last half window and short of the run's cap (an
+        # expired root or a run at its cap would otherwise ask for a write on every verdict that moves nothing)
+        target = min(now + timedelta(seconds=int(ttl)),
+                     _aware(_run_anchor(members)) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+        due = any(now < _aware(member.expires_at) < min(now + timedelta(seconds=int(ttl) / 2), target)
+                  for member in members)
+    if touch or row.state != "running" or due:   # the internal MCP asks per request: no write once running (#7214)
         with db.get_session(project_id) as session:
-            if _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
+            if (touch or row.state != "running") \
+                    and _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
                 raise _denied("STALE_CONTEXT")
+            if due:
+                _slide(session, row.run_id, _run_anchor(members), int(ttl), now)
             session.commit()
     return {
         "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
@@ -2093,21 +2230,85 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
     }
 
 
-def root_context_live(project_id, row) -> bool:
-    """A sub-agent admitted with its run (#7227) holds its admission only while the run's own context (the first of its
-    lineage) is live: a run that ended or was revoked ends its sub-agents with it. A run's own context: True, nothing
-    read; otherwise one read."""
+_NO_ROOT = type("NoRoot", (), {"__repr__": lambda self: "NO_ROOT"})()   # a lineage whose root cannot be read
+_SLIDE_COLUMNS = (ExecutionSecurityContext.id, ExecutionSecurityContext.state, ExecutionSecurityContext.created_at,
+                  ExecutionSecurityContext.expires_at, ExecutionSecurityContext.subject)
+RowRef = namedtuple("RowRef", "id state created_at expires_at subject")
+
+
+def _root_row(project_id, row):
+    """The root (the first of the lineage) of a sub-agent's context: ``None`` for a run's own context (nothing read),
+    ``_NO_ROOT`` when it cannot be read, else its ``RowRef`` (one read)."""
     if getattr(row, "parent_context_ref", None) is None:
-        return True
+        return None
     lineage = row.call_lineage if isinstance(row.call_lineage, list) else []
     try:
         root_id = uuid.UUID(str(lineage[0]))
     except (IndexError, ValueError):
-        return False
+        return _NO_ROOT
     with db.get_session(project_id) as session:
-        state = session.execute(
-            select(ExecutionSecurityContext.state).where(ExecutionSecurityContext.id == root_id)).scalar_one_or_none()
-    return state in LIVE_STATES
+        root = session.execute(select(*_SLIDE_COLUMNS).where(ExecutionSecurityContext.id == root_id)).one_or_none()
+    return _NO_ROOT if root is None else RowRef(*root)
+
+
+def root_context_live(project_id, row) -> bool:
+    """A sub-agent admitted with its run (#7227) holds its admission only while the run's own context (the first of its
+    lineage) is live: a run that ended or was revoked ends its sub-agents with it. A run's own context: True, nothing
+    read; otherwise one read."""
+    root = _root_row(project_id, row)
+    return root is None or (root is not _NO_ROOT and root.state in LIVE_STATES)
+
+
+def _run_anchor(members):
+    """The admission time the run's cap counts from: the earliest ``created_at`` of the context asking and its lineage
+    root. The throttle check and the UPDATE use this one anchor, so a slide that is due always moves a deadline."""
+    return min((member.created_at for member in members if member is not None), key=_aware)   # as stored
+
+
+def _slide(session, run_id, anchor, ttl, now, allow_expired=False) -> int:
+    """Move the deadline of every live context of the run admitted at or after ``anchor`` (its own, its root's, its
+    sub-agents': one admission, one ``created_at``) to ``now + ttl``, never past ``anchor`` + ``MAX_RUN_LIFETIME_S``
+    (so never past any moved row's own cap) and never backwards, in one conditional UPDATE: an ended context is never
+    revived, a mandate's never moves, and, unless ``allow_expired`` (the signed-in person's resume decision), neither
+    does one past its window. The number of rows moved."""
+    if ttl <= 0 or not run_id:
+        return 0
+    deadline = min(now + timedelta(seconds=ttl), _aware(anchor) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+    conditions = [ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.state.in_(LIVE_STATES),
+                  # admitted at or after the anchor (strictly after anchor - 1 µs: the same comparison wherever the
+                  # stored value carries fewer digits than the bound one)
+                  ExecutionSecurityContext.created_at > anchor - timedelta(microseconds=1),
+                  ExecutionSecurityContext.expires_at < deadline,
+                  # defence in depth: a mandate's deadline is the mandate's, whatever context of the run asks
+                  func.coalesce(ExecutionSecurityContext.subject["kind"].as_string(), "") != "mandate"]
+    if not allow_expired:
+        conditions.append(ExecutionSecurityContext.expires_at > now)
+    return session.execute(
+        update(ExecutionSecurityContext).where(*conditions).values(expires_at=deadline)).rowcount or 0
+
+
+def slide_for_resume(module, project_id, context_ref) -> int:
+    """The signed-in person's decision on a paused fan-out child (``_continue_child_resume``, after its requester check)
+    is use of the run: every live context of the run (the child's, its root's, its sub-agents') slides, even past its
+    idle deadline, within the cap. A mandate's never does (its deadline is the mandate's). The number moved (#7229)."""
+    ttl = int(getattr(getattr(module, "admission_settings", None), "context_ttl_s", 0) or 0)
+    try:
+        context_id = uuid.UUID(str(context_ref))
+    except ValueError:
+        return 0
+    with db.get_session(project_id) as session:
+        row = session.execute(select(ExecutionSecurityContext.run_id, ExecutionSecurityContext.created_at,
+                                     ExecutionSecurityContext.subject, ExecutionSecurityContext.parent_context_ref,
+                                     ExecutionSecurityContext.call_lineage)
+                              .where(ExecutionSecurityContext.id == context_id)).one_or_none()
+    if row is None or (row.subject or {}).get("kind") == "mandate":
+        return 0
+    root = _root_row(project_id, row)   # the same anchor as a verdict of this context: it and its lineage root
+    members = (row, root) if root not in (None, _NO_ROOT) else (row,)
+    with db.get_session(project_id) as session:
+        moved = _slide(session, row.run_id, _run_anchor(members), ttl, _now(), allow_expired=True)
+        session.commit()
+    return moved
 
 
 def context_binding_label(row) -> str:
@@ -2135,7 +2336,8 @@ def validate_context(module, project_id, context_ref, caller, touch=True) -> dic
     """
     known = {}
     try:
-        context = _validate(project_id, context_ref, caller, known, touch=touch)
+        context = _validate(project_id, context_ref, caller, known, touch=touch,
+                            ttl=getattr(getattr(module, "admission_settings", None), "context_ttl_s", None))
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703

@@ -1005,3 +1005,15 @@ def test_the_reconcile_run_is_tracked_so_it_closes_the_context_when_it_stops(ns,
     legacy = make_launcher(parallel, ns, env, governed=False)
     legacy._parallel_track_reconcile("other-task", 1, {"envelope": {"context_ref": parent}})
     assert "other-task" not in legacy.module._context_by_task
+
+
+def test_the_child_stash_never_stores_the_run_token(ns, env, parallel):
+    """#7229: the stash outlives the run token's purpose (6 h); a HITL resume is admitted again and minted its own."""
+    written = {}
+    holder = types.SimpleNamespace(get_redis_client=lambda: types.SimpleNamespace(
+        set=lambda key, value, ex=None: written.update({key: json.loads(value)})))
+    payload = {"user_input": "hi", "internal_run_token": {"token": "eio1.not-a-real-token", "origins": [], "identity": "i"}}
+    parallel.Method._parallel_child_stash(holder, "root:B:c", payload, {"context_ref": "ctx"})
+    [stored] = written.values()
+    assert "internal_run_token" not in stored["child_payload"] and "eio1." not in json.dumps(stored)
+    assert stored["child_payload"]["user_input"] == "hi" and "internal_run_token" in payload   # the dispatched one is untouched

@@ -174,12 +174,13 @@ def test_a_context_that_ended_is_refused_with_the_reason_it_ended(ns, env, admit
 
 def test_expiry_is_exclusive_at_the_boundary(ns, env, admitted):
     expires = admitted.view.expires_at
-    ns.adm._now = lambda: expires - timedelta(seconds=1)  # pylint: disable=W0212
-    assert validate(ns, env, admitted.ref)["ok"] is True
     ns.adm._now = lambda: expires  # exactly now is already stale  # pylint: disable=W0212
     assert validate(ns, env, admitted.ref)["reason_code"] == "STALE_CONTEXT"
     ns.adm._now = lambda: expires + timedelta(seconds=1)  # pylint: disable=W0212
     assert validate(ns, env, admitted.ref)["reason_code"] == "STALE_CONTEXT"
+    # a refused verdict moves nothing; a second before the deadline the run is still live (and its deadline slides, #7229)
+    ns.adm._now = lambda: expires - timedelta(seconds=1)  # pylint: disable=W0212
+    assert validate(ns, env, admitted.ref)["ok"] is True
 
 
 # --- identity and binding ----------------------------------------------------------------------

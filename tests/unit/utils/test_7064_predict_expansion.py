@@ -87,7 +87,7 @@ def env(models_path):
         calls.token.append(('system', project_id))
         return 'system-token'
 
-    def get_predict_token_and_session(project_id, user_id, sid):
+    def get_predict_token_and_session(project_id, user_id, sid, run_identity=False):
         calls.token.append(('user', user_id))
         return 'user-token', None
 

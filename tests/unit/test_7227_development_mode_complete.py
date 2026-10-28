@@ -352,7 +352,7 @@ def test_a_fan_out_child_of_a_draft_runs_under_its_own_context_with_its_own_toke
     child_ref = str(contexts(env, ns)[1].id)
     minted = []
     monkeypatch.setattr(ns.adm.internal_obo, "mint_for_context",
-                        lambda project, context, task, payload: minted.append(context) or {"token": "t"})
+                        lambda project, context, task, payload, **_: minted.append(context) or {"token": "t"})
     child = call_kwargs(fan_out_child(call), context_ref=ref)
     assert ns.adm.admit_dispatch(module(env), "indexer_agent", child, None) is None
     assert child["kwargs"]["envelope"]["context_ref"] == child["meta"]["context_ref"] == child_ref
@@ -666,7 +666,8 @@ def test_a_plain_llm_chat_with_a_platform_internal_configuration_runs_and_a_cred
     cred = Credential(env, uuid.uuid4())   # a personal or project credential on a conversation toolkit
     with pytest.raises(ns.exceptions.AdmissionDenied) as err:
         llm_dispatch(env, ns, {"tools": [cred.tool()]})
-    assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"   # no decision covers it (follow-up, not here)
+    # nothing is decided with development runs off: a chat toolkit's credential needs them (#7229 D15)
+    assert err.value.reason_code == "DEVELOPMENT_RUNS_DISABLED"
     assert contexts(env, ns)[-1].revoked_reason == "NOT_DISPATCHED"
 
 

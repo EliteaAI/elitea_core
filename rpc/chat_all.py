@@ -2927,6 +2927,15 @@ class RPC:
             or child_payload.get('ignored_mcp_servers') or [],
         })
 
+        # The person's decision is use of the run: the child's context and its root slide (#7229), within their cap and
+        # only while live, so a long pause resumes; a run that ended stays ended
+        child_context = child_meta.get('context_ref') or (child_payload.get('envelope') or {}).get('context_ref')
+        if child_context:
+            from ..utils.admission import slide_for_resume  # pylint: disable=C0415
+            try:
+                slide_for_resume(self, child_meta.get('project_id') or parsed.project_id, child_context)
+            except Exception as exc:  # pylint: disable=W0703
+                log.warning("[PARALLEL] child resume could not extend its run (%s)", type(exc).__name__)
         try:
             task_id = self.task_node.start_task(
                 "indexer_agent",
