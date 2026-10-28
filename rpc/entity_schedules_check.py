@@ -231,7 +231,7 @@ def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> in
 
 
 def _run_tick(self) -> None:
-    """One tick of the schedule steps; `self` is the RPC object of the plugin."""
+    """One tick of the schedule steps; `self` is the plugin Module, which pylon binds to each RPC method."""
     # Stopping work is never what maintenance mode holds back, so the sweep runs before that check
     # Imported at call time: the tick loads without the governance model graph
     from ..utils.governance import governance_lifecycle_active
