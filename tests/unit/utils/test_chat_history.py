@@ -139,6 +139,16 @@ class TestFormatContextForLLM:
         assert '<model>gpt-4</model>' in result
         assert '<meta>{"key": "value"}</meta>' in result
 
+    def test_schedule_chat_facts(self, chat_history_module):
+        result = chat_history_module.format_context_for_llm({
+            'conversation_uuid': '2f9d1d52-8a3f-4a10-9d0e-0b9d6a1c7e11',
+            'participant_id': 12,
+            'timezone': 'Europe/Warsaw',
+        })
+        assert '<conversation_uuid>2f9d1d52-8a3f-4a10-9d0e-0b9d6a1c7e11</conversation_uuid>' in result
+        assert '<participant_id>12</participant_id>' in result
+        assert '<timezone>Europe/Warsaw</timezone>' in result
+
     def test_entity_type_without_name(self, chat_history_module):
         result = chat_history_module.format_context_for_llm({
             'current_entity_type': 'pipeline'

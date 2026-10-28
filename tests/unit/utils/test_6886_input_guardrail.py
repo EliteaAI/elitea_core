@@ -369,6 +369,16 @@ def test_platform_context_block_is_not_inspected(guardrail):
     assert guardrail.apply_input_guardrail(call) is None
 
 
+def test_platform_context_block_with_schedule_chat_facts_is_not_inspected(guardrail):
+    _enable(guardrail)
+    inner = (
+        '  <conversation_uuid>2f9d1d52-8a3f-4a10-9d0e-0b9d6a1c7e11</conversation_uuid>\n'
+        '  <participant_id>12</participant_id>\n'
+        '  <timezone>Europe/Warsaw</timezone>'
+    )
+    assert guardrail.detector.is_platform_context_block(_context_block(inner))
+
+
 def test_string_starting_with_the_context_tag_is_inspected(guardrail):
     _enable(guardrail)
 

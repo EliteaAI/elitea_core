@@ -8,6 +8,7 @@ into predict payloads based on conversation settings.
 import re
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from pylon.core.tools import log
 from tools import VaultClient, rpc_tools, this, config as c, auth
@@ -72,6 +73,7 @@ MCP_PROJECT_SCOPED_SUFFIXES = MCP_CURRENT_PROJECT_SUFFIXES | {
     "elitea_core/applications",
 }
 MCP_SCOPE_PROJECT_QUERY_ARG = 'scope_project_id'
+_SCHEDULE_CHAT_FACT_KEYS = ('conversation_uuid', 'participant_id', 'timezone')
 MCP_BUILDER_TOOL_KEYS = {
     MCP_INTERNAL_TOOL_KEY,
     MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
@@ -87,11 +89,14 @@ SKILL_SCOPE_INSTRUCTION = (
 )
 SCHEDULE_BUILDER_RULES = (
     "Schedule rules:\n"
-    "- \"This chat\" means the delivery target: set `delivery` to mode `conversation` with the uuid and "
-    "participant id of this chat.\n"
+    "- \"This chat\" means the delivery target: set `delivery` to mode `conversation` with "
+    "<conversation_uuid> and <participant_id> from the <runtime_context> block (the agent of this chat that "
+    "gets this message). Do not guess them. A schedule for another entity can deliver here only if that "
+    "entity is a participant of this chat.\n"
     "- Confirm the rule, the timezone and the prompt with the user before you create a schedule.\n"
     "- Take the prompt from the user; never invent a prompt.\n"
-    "- When the user names no timezone, use the user's profile timezone. When the user names one, keep it.\n"
+    "- When the user names no timezone, use the user's profile timezone, <timezone> of the "
+    "<runtime_context> block; when the block has none, ask the user. When the user names one, keep it.\n"
 )
 SKILL_BUILDER_NOT_ENABLED_INSTRUCTION = (
     " ELITEA Skills are a separate entity from agents and pipelines, and the Skill Builder tool "
@@ -113,6 +118,35 @@ def should_inject_runtime_context(internal_tools: list[str], is_pipeline: bool) 
     if is_pipeline:
         return False
     return bool(set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS))
+
+
+def has_schedule_tools(internal_tools: list[str]) -> bool:
+    """The schedules endpoint is injected by the Schedules module and by the Agent and Pipeline Builder."""
+    return bool({MCP_INTERNAL_TOOL_KEY, MCP_SCHEDULE_BUILDER_INTERNAL_TOOL_KEY}.intersection(internal_tools or []))
+
+
+def add_schedule_chat_facts(
+    runtime_context: dict, internal_tools: list[str], conversation_uuid: str, participant_id: int | None
+) -> dict:
+    """Return the runtime context with the chat facts the schedule rules point the model to.
+
+    The chat and participant come from the server, never from the client. The timezone is a client hint:
+    it is kept only when it is a valid IANA name. Without a schedule tool the client cannot set any of them.
+    """
+    context = {k: v for k, v in runtime_context.items() if k not in _SCHEDULE_CHAT_FACT_KEYS}
+    if not has_schedule_tools(internal_tools):
+        return context
+    context['conversation_uuid'] = str(conversation_uuid)
+    if participant_id is not None:
+        context['participant_id'] = participant_id
+    timezone = runtime_context.get('timezone')
+    if isinstance(timezone, str) and len(timezone) <= 64:
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, OSError, KeyError):  # an unknown key raises KeyError, a path-like key ValueError
+            return context
+        context['timezone'] = timezone
+    return context
 
 
 def resolve_builder_scope_project_id(
@@ -966,13 +1000,17 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
             "Use elitea_core/project_context MCP tools.\n"
             "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
         )
-    if MCP_SCHEDULE_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+    if has_schedule_tools(enabled_tools):
         few_shot_blocks.append(SCHEDULE_BUILDER_RULES)
     if few_shot_blocks:
         few_shot_joined = "\n\n".join(few_shot_blocks)
         few_shot_instruction = f"\n\n{few_shot_joined}"
     else:
         few_shot_instruction = ""
+    scoped_entities = (
+        "Agents, pipelines, skills, project context and schedules" if has_schedule_tools(enabled_tools)
+        else "Agents, pipelines, skills and project context"
+    )
     return (
         f"\n\nYou have access to Elitea MCP tools and may have project context available. "
         f"{skill_scope_instruction}"
@@ -981,7 +1019,7 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
         f"When an Elitea MCP tool requires a `project_id` or `user_id` argument, take the value from the "
         f"<runtime_context> block in the conversation (<project_id>, <user_id>). Do not ask the user for it "
-        f"and do not guess. Agents, pipelines, skills and project context can only be read or changed in "
+        f"and do not guess. {scoped_entities} can only be read or changed in "
         f"that project: never pass a different `project_id`. If the user asks you to work in another "
         f"project, tell them to switch to it instead.\n"
         f"When you use an Elitea MCP tool to create an entity, do not include a URL or link to it in your response. "

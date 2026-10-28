@@ -112,6 +112,12 @@ def format_context_for_llm(context_data: dict) -> str:
         parts.append(f"  <provider>{context_data['selected_provider']}</provider>")
     if context_data.get('selected_model'):
         parts.append(f"  <model>{context_data['selected_model']}</model>")
+    if context_data.get('conversation_uuid'):
+        parts.append(f"  <conversation_uuid>{context_data['conversation_uuid']}</conversation_uuid>")
+    if context_data.get('participant_id'):
+        parts.append(f"  <participant_id>{context_data['participant_id']}</participant_id>")
+    if context_data.get('timezone'):
+        parts.append(f"  <timezone>{context_data['timezone']}</timezone>")
     if context_data.get('meta'):
         parts.append(f"  <meta>{json.dumps(context_data['meta'])}</meta>")
 

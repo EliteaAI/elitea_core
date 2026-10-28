@@ -67,10 +67,14 @@ from ..utils.schedule_runs import (
     apply_schedule_decision, check_schedule_decision,
 )
 from ..utils.internal_tools import (
-    inject_internal_imagegen_tool, ImageGenConfigurationError,
-    inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
-    inject_mcp_toolkits, should_inject_runtime_context,
-    get_mcp_entity_link_instructions, resolve_builder_scope_project_id,
+    ImageGenConfigurationError,
+    add_schedule_chat_facts,
+    get_mcp_entity_link_instructions,
+    inject_internal_attachment_tool,
+    inject_internal_imagegen_tool,
+    inject_mcp_toolkits,
+    resolve_builder_scope_project_id,
+    should_inject_runtime_context,
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context
@@ -1482,6 +1486,12 @@ class RPC:
                 effective_runtime_context['user_id'] = current_user['id']
                 effective_runtime_context['project_id'] = resolve_builder_scope_project_id(
                     parsed.project_id, parsed.runtime_context
+                )
+
+                effective_runtime_context = add_schedule_chat_facts(
+                    effective_runtime_context, turn_internal_tools, parsed.conversation_uuid,
+                    target_participant.id if target_participant is not None and
+                    str(target_participant.entity_name) == ParticipantTypes.application.value else None,
                 )
 
                 from ..models.message_items.context import ContextMessageItem
