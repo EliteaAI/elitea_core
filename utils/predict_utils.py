@@ -325,6 +325,7 @@ def generate_predict_payload(
     chat_skills: Optional[list] = None,
     invoked_skills: Optional[list] = None,
     project_skills: Optional[list] = None,
+    auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
 ) -> dict:
     """
     :param parsed: payload
@@ -522,6 +523,10 @@ def generate_predict_payload(
         for s in payload['invoked_skills']
         if isinstance(s, dict) and s.get('name')
     ]
+
+    # Scheduled run allowed to skip approval (EL-7011): the caller decided, no secret check here.
+    if auto_approve_sensitive_actions:
+        payload['auto_approve_sensitive_actions'] = auto_approve_sensitive_actions
 
     # Auto-approve sensitive actions for API requests when project secret is set.
     # Only honor the explicit server-side argument, never a client-provided model field.

@@ -37,9 +37,11 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
-from ..models.pd.admission import ENTRY_EDITOR_CHAT, admission_request_from
+from ..models.pd.admission import ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, admission_request_from
 from ..utils.mandate_admission import take_trigger_admission
-from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
+from ..utils.admission import CREDENTIAL_FREE, strip_platform_fields
+from ..utils.credential_slots import has_free_form_secret, has_secret_template, mark_free_form_secret
+from ..utils.governance import is_governed
 from ..utils.exceptions import (
     AdmissionDenied, PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
     InputGuardrailBlockedError,
@@ -137,6 +139,19 @@ def _report_budget_door_closed(
     })
 
 
+def _notify_version_schedules_disabled(project_id: int, disabled_schedules: list[dict]) -> None:
+    """Tell each owner that a deleted version switched their schedule off; call it after the commit."""
+    from types import SimpleNamespace
+
+    from ..models.enums.all import NotificationEventTypes
+    from ..utils.schedule_notifications import notify_schedule_event
+    for row in disabled_schedules:
+        notify_schedule_event(
+            project_id, row['created_by'], NotificationEventTypes.schedule_disabled,
+            SimpleNamespace(id=row['id'], name=row['name']), extra={'reason': 'version_deleted'},
+        )
+
+
 def _report_input_guardrail_blocked(
     module, blocked_error, parsed, payload: dict, chat_project_id: Optional[int],
     sio_event, start_event_content: Optional[dict],
@@ -198,6 +213,21 @@ def _raise_input_guardrail_blocked(
             message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
         )
     raise blocked_error
+
+
+def _toolkit_run_refused(module, sid, sio_event, data, message_id, denied):
+    """A toolkit Test run or on-demand indexing that admission refused (#7229): the readable ``{code, error}`` the chat
+    refusal card shows (over the socket), or returned to a caller with no socket."""
+    if sid:
+        raise SioValidationError(
+            sio=module.context.sio,
+            sid=sid,
+            event=sio_event,
+            error={"code": denied.reason_code, "error": denied.message},
+            stream_id=data.get('stream_id'),
+            message_id=message_id,
+        )
+    return {"code": denied.reason_code, "error": denied.message}
 
 
 class RPC:
@@ -268,6 +298,7 @@ class RPC:
                     project_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
+                    auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
                     mandate_ticket: Optional[str] = None,
                     authoring: bool = False,
                     ) -> dict:
@@ -406,7 +437,19 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval, chat_skills=chat_skills, invoked_skills=invoked_skills, project_skills=project_skills)
+            payload: dict = generate_predict_payload(
+                parsed,
+                user_id=user_id,
+                sid=sid,
+                is_system_user=is_system_user,
+                skip_expansion=skip_expansion,
+                return_chat_history=return_chat_history,
+                eligible_for_autoapproval=eligible_for_autoapproval,
+                chat_skills=chat_skills,
+                invoked_skills=invoked_skills,
+                project_skills=project_skills,
+                auto_approve_sensitive_actions=auto_approve_sensitive_actions,
+            )
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
             if isinstance(payload.get('application'), dict) and application_project_id:
@@ -1510,10 +1553,15 @@ class RPC:
                               start_event_content: Optional[dict] = None,
                               await_task_timeout: int = -1,
                               chat_project_id: Optional[int] = None,
+                              platform_read: bool = False,
                               **kwargs
                               ) -> dict:
         """
         Test a single toolkit tool using the indexer_test_toolkit_tool method.
+
+        Under governance the run is admitted as a development run of the caller (#7229): ``toolkit_test``, or
+        ``index_on_demand`` for ``index_data``. ``platform_read``: the platform's own read of chat attachments (a built-in
+        toolkit with no credential), set by ``utils/attachments.py`` only; the socket and REST handlers never pass it.
 
         Args:
             sid: Socket ID for real-time communication
@@ -1534,6 +1582,11 @@ class RPC:
         """
         if start_event_content is None:
             start_event_content = {}
+        # the caller's data never carries what only Main sets on a dispatch (an envelope, its context, a run id, the
+        # run token, the markers): a toolkit run runs only under the admission made for it (C9-SEC-32)
+        removed = strip_platform_fields(data)
+        if removed:
+            log.warning("test_toolkit_tool_sio: platform fields removed from the caller's data: %s", removed)
 
         # Generate unique IDs for tracking
         data['message_id'] = data.get('message_id', str(uuid4()))
@@ -1596,6 +1649,9 @@ class RPC:
                 log.debug(f"No SID provided and no current user session available")
 
         user_id = data.get('user_id')
+        # The saved toolkit the run tests (its stored row is what admission holds the dispatch to), read before the
+        # expansion below rewrites toolkit_config
+        toolkit_id = (data.get('toolkit_config') or {}).get('toolkit_id')
 
         try:
             require_internal_mcp_pat(data.get('toolkit_config', {}), user_id)
@@ -1638,6 +1694,7 @@ class RPC:
             log.warning("Continuing with original toolkit configuration")
 
         try:
+            # admitted under enforce (#7229): an internal MCP toolkit gets the run token, like any admitted run
             resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
@@ -1690,27 +1747,44 @@ class RPC:
         # Log the parameters being passed to indexer for debugging
         log.debug(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
 
+        # Governed (#7229): admitted from the authenticated caller, the entry point from the tool asked for; the
+        # attachment read is not admitted and must carry no credential. None when governance is off
+        admission = CREDENTIAL_FREE if platform_read else admission_request_from(
+            self, sid=sid, project_id=project_id, binding_project_id=project_id, version_row=None,
+            run_kind="interactive", entry_point=ENTRY_INDEX_ON_DEMAND if tool_name == 'index_data' else ENTRY_TOOLKIT_TEST,
+            toolkit_id=toolkit_id,
+        )
+        # a {{secret.*}} outside a credential configuration would be resolved where no slot governs it: admission refuses
+        free_form_secret = has_free_form_secret(self, {'project_id': project_id,
+                                                       'tools': [data.get('toolkit_config') or {}]}) or (
+            is_governed(self) and has_secret_template(data.get('tool_params')))
+
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
 
-        # Unsecret the entire task data once before creating the task
-        try:
-            VaultClient(project_id).unsecret(task_kwargs)
-            log.debug("Unsecreted all task data including toolkit_config and tool_params")
-        except Exception as e:
-            log.warning(f"Failed to unsecret task data: {e}")
+        # Unsecret the entire task data once before creating the task; a governed run is reference-only: its credential
+        # configurations are sealed at dispatch, and nothing else may carry a secret
+        if not is_governed(self):
+            try:
+                VaultClient(project_id).unsecret(task_kwargs)
+                log.debug("Unsecreted all task data including toolkit_config and tool_params")
+            except Exception as e:
+                log.warning(f"Failed to unsecret task data: {e}")
+        mark_free_form_secret(data if tool_name == 'index_data' else task_kwargs, free_form_secret)
 
         # Start the test toolkit tool task
         meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
+        # A chat-hosted participant waits on its own question_id; the response uuid
+        # was never sent to it, so an error addressed to that uuid leaves the entry
+        # spinning (same resolution as predict_sio).
+        client_placeholder_id = (
+            start_event_content.get('question_id') if start_event_content else None
+        ) or data.get('message_id')
         if tool_name == 'index_data':
-            # A chat-hosted participant waits on its own question_id; the response uuid
-            # was never sent to it, so an error addressed to that uuid leaves the entry
-            # spinning (same resolution as predict_sio).
-            client_placeholder_id = (
-                start_event_content.get('question_id') if start_event_content else None
-            ) or data.get('message_id')
             try:
-                task_id = start_index_task(self.task_node, data, sio_event)
+                task_id = start_index_task(self.task_node, data, sio_event, admission=admission)
+            except AdmissionDenied as denied:
+                return _toolkit_run_refused(self, sid, sio_event, data, client_placeholder_id, denied)
             except (IndexRunInProgressError, IndexMetaLockTimeoutError) as e:
                 # Nothing above catches errors on this socket path, so an unplumbed
                 # dispatch refusal would kill the UI Reindex silently.
@@ -1763,34 +1837,38 @@ class RPC:
                     message_id=client_placeholder_id,
                 ) from e
         else:
-            task_id = self.task_node.start_task(
-                "indexer_test_toolkit_tool",
-                args=[data['stream_id'], data['message_id']],
-                kwargs=task_kwargs,
-                pool="agents",
-                meta={
-                    "task_name": "indexer_test_toolkit_tool",
-                    "project_id": project_id,
-                    'chat_project_id': chat_project_id,
-                    "message_id": data['message_id'],
-                    "stream_id": data['stream_id'],
-                    "question_id": start_event_content.get('question_id') if start_event_content else None,
-                    "sio_event": sio_event,
-                    "toolkit_config": meta_toolkit_config,
-                    "tool_name": task_kwargs.get('tool_name', ''),
-                    "tool_params": task_kwargs.get('tool_params', {}),
-                    "user_input_preview": f"test tool {task_kwargs.get('tool_name', '')}: {task_kwargs.get('tool_params', {})}"[:100],
-                    "user_id": task_kwargs.get('user_id', ''),
-                    "deployment_url": task_kwargs.get('deployment_url', ''),
-                    "project_auth_token": task_kwargs.get('project_auth_token', ''),
-                    "auth_session": task_kwargs.get('auth_session'),
-                    "session_cookie_name": task_kwargs.get('session_cookie_name'),
-                    "user_context": {
-                        "user_id": task_kwargs.get("user_id", None),
+            try:
+                task_id = self.task_node.start_task(
+                    "indexer_test_toolkit_tool",
+                    args=[data['stream_id'], data['message_id']],
+                    kwargs=task_kwargs,
+                    pool="agents",
+                    admission=admission,
+                    meta={
+                        "task_name": "indexer_test_toolkit_tool",
                         "project_id": project_id,
+                        'chat_project_id': chat_project_id,
+                        "message_id": data['message_id'],
+                        "stream_id": data['stream_id'],
+                        "question_id": start_event_content.get('question_id') if start_event_content else None,
+                        "sio_event": sio_event,
+                        "toolkit_config": meta_toolkit_config,
+                        "tool_name": task_kwargs.get('tool_name', ''),
+                        "tool_params": task_kwargs.get('tool_params', {}),
+                        "user_input_preview": f"test tool {task_kwargs.get('tool_name', '')}: {task_kwargs.get('tool_params', {})}"[:100],
+                        "user_id": task_kwargs.get('user_id', ''),
+                        "deployment_url": task_kwargs.get('deployment_url', ''),
+                        "project_auth_token": task_kwargs.get('project_auth_token', ''),
+                        "auth_session": task_kwargs.get('auth_session'),
+                        "session_cookie_name": task_kwargs.get('session_cookie_name'),
+                        "user_context": {
+                            "user_id": task_kwargs.get("user_id", None),
+                            "project_id": project_id,
+                        },
                     },
-                },
-            )
+                )
+            except AdmissionDenied as denied:
+                return _toolkit_run_refused(self, sid, sio_event, data, client_placeholder_id, denied)
 
         # Handle pool saturation: start_task returns None when no workers available
         if task_id is None:
@@ -1939,7 +2017,7 @@ class RPC:
             log.warning("Continuing with original toolkit configuration")
 
         try:
-            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id, admitted_run=False)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
 
@@ -2403,8 +2481,13 @@ class RPC:
             # Delete the version
             detach_skills_for_entity_versions(session, [version_id])
 
+            # Before the delete: the version foreign key sets schedule.version_id to NULL once the row is gone
+            from ..utils.schedule_lifecycle import disable_version_schedules
+            disabled_schedules = disable_version_schedules(session, [version_id])
+
             session.delete(version)
             session.commit()
+            _notify_version_schedules_disabled(project_id, disabled_schedules)
 
             self.context.event_manager.fire_event(
                 ApplicationEvents.application_version_deleted, version_data
@@ -2455,10 +2538,14 @@ class RPC:
             session.flush()
 
             # Optionally delete the old version
+            disabled_schedules = []
             if delete_old_version:
+                from ..utils.schedule_lifecycle import disable_version_schedules
+                disabled_schedules = disable_version_schedules(session, [old_version_id])
                 session.delete(old_version)
 
             session.commit()
+            _notify_version_schedules_disabled(project_id, disabled_schedules)
 
             return {
                 'ok': True,
@@ -2484,6 +2571,14 @@ class RPC:
             )
         except (ApplicationVersionNonFoundError, ApplicationToolExpandedError) as e:
             return {'error': str(e)}
+        except ValidationError as e:
+            # Credential type and name only (EL-7011 US-09 R2.4); the input values may hold secrets
+            from ..utils.schedule_prerun import credential_errors_of
+            credential_errors = credential_errors_of(e)
+            log.warning("Expansion of application version details failed: %s", credential_errors or e.error_count())
+            if credential_errors:
+                return {'error': 'A credential of the version cannot be used', 'credential_errors': credential_errors}
+            return {'error': f'Can not get application details for {version_id=}'}
         except Exception as e:
             log.error("Expanssion of application version details failed")
             log.error(e)

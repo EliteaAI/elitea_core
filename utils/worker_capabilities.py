@@ -42,6 +42,7 @@ CAPABILITY_GOVERNED_OPS_POOL_V1 = "governed_ops_pool.v1"
 GOVERNED_TASK_CAPABILITIES = {
     "indexer_agent": (CAPABILITY_CREDENTIAL_SLOTS_V1,),
     "indexer_predict_agent": (CAPABILITY_CREDENTIAL_SLOTS_V1,),
+    "indexer_test_toolkit_tool": (CAPABILITY_CREDENTIAL_SLOTS_V1,),   # admitted since #7229: its toolkit carries slots
     "indexer_governed_check_connection": (CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1),
 }
 # A worker that announces this asks for all the slots of a run in one release (``restricted_release_credentials``). It
@@ -51,6 +52,7 @@ CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1 = "credential_slots_batch.v1"
 GOVERNED_TASK_PREFERRED_CAPABILITIES = {
     "indexer_agent": (CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1,),
     "indexer_predict_agent": (CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1,),
+    "indexer_test_toolkit_tool": (CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1,),
 }
 
 

@@ -162,10 +162,13 @@ def test_the_same_unbound_version_from_any_other_entry_point_is_refused_as_befor
     assert [event["reason_code"] for event in env.denied] == ["DENIED_BINDING", "DENIED_BINDING"]
 
 
-def test_with_the_setting_off_the_editor_is_refused_as_before(ns, env):
+def test_with_the_setting_off_the_editor_is_refused_with_the_readable_reason(ns, env):
     unbound_version(env)
     error = refusal(env, ns, module_=module(env, allow_development_runs=False))
-    assert (error.reason_code, error.message) == ("DENIED_BINDING", ns.adm.MESSAGES["DENIED_BINDING"])
+    # the same card as a toolkit test or a reindex with the setting off (#7227 D10), not "no active binding"
+    assert (error.reason_code, error.message) == (
+        "DEVELOPMENT_RUNS_DISABLED", ns.adm.MESSAGES["DEVELOPMENT_RUNS_DISABLED"])
+    assert "Admin \u2192 Governance" in error.message
     assert contexts(env, ns) == []
 
 
@@ -340,12 +343,12 @@ def test_audit_only_rehearses_the_editor_as_a_development_run_and_records_a_woul
     assert "credential_slot" not in str(call)   # the real payload is not sealed in audit only
 
 
-def test_audit_only_with_the_setting_off_records_the_would_deny_as_before(ns, env):
+def test_audit_only_with_the_setting_off_records_the_readable_would_deny(ns, env):
     unbound_version(env)
     ns.adm.admit_dispatch(env.module(governed=False, audit=True, allow_development_runs=False), "indexer_agent",
                           call_kwargs({}), env.request(entry_point="editor_chat"))
     [event] = env.denied
-    assert (event["reason_code"], event["would_deny"]) == ("DENIED_BINDING", True)
+    assert (event["reason_code"], event["would_deny"]) == ("DEVELOPMENT_RUNS_DISABLED", True)
 
 
 # --- the worker: validation and release against a development context ------------------------------------------------------
@@ -489,9 +492,12 @@ def test_the_setting_defaults_on_under_audit_only_and_off_under_enforce_until_ch
     def effective(mode, chosen=None, ceiling="enforce"):
         return gs.resolve(stored(mode, chosen), ceiling=ceiling, env_environment=None, preflight=[], read="ok")
 
+    # on under audit only, off under enforce and off: an enforce deployment keeps what it has (#7227 D14)
     assert gs.development_runs_default("audit_only") and not gs.development_runs_default("enforce")
+    assert not gs.development_runs_default("off")
     assert effective("audit_only").allow_development_runs is True
     assert effective("enforce").allow_development_runs is False
+    assert effective("enforce", chosen=True).allow_development_runs is True
     assert effective("off").allow_development_runs is False
     assert effective("enforce", chosen=True).allow_development_runs is True
     assert effective("audit_only", chosen=False).allow_development_runs is False
@@ -544,7 +550,8 @@ def test_the_context_table_accepts_a_null_binding_reference_and_older_schemas_ar
     assert column.nullable is True
     schema = (PLUGIN_ROOT / "utils" / "agent_identity_schema.py").read_text()
     assert "is_nullable = 'NO'" in schema and "DROP NOT NULL" in schema
-    assert 'ALTER TABLE "p_{int(pid)}".{CONTEXT_TABLE} ALTER COLUMN {BINDING_REF_COLUMN} DROP NOT NULL' in schema
+    assert 'ALTER TABLE "p_{int(pid)}".{CONTEXT_TABLE} ALTER COLUMN {column} DROP NOT NULL' in schema
+    assert 'NULLABLE_COLUMNS = (BINDING_REF_COLUMN, "application_id", "version_id")' in schema   # #7229: toolkit runs
     module_text = (PLUGIN_ROOT / "module.py").read_text()
     guard = module_text[module_text.index("def _ensure_agent_identity_schema"):module_text.index("    def init(self):")]
     assert "project_ids_with_not_null_binding_ref()" in guard and "apply_nullable_binding_ref(strict)" in guard

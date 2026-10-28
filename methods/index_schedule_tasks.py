@@ -22,11 +22,13 @@ import time
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
-from tools import db  # pylint: disable=E0611,E0401
+from tools import db, rpc_tools  # pylint: disable=E0611,E0401
 
 from .category_tasks import _parse_kv_params
 from ..models.elitea_tools import EliteATool
+from ..utils.application_tools import _get_pgvector_engine
 from ..utils.index_scheduling import override_schedule_expiration
+from ..utils import orphaned_index_schedules as orphans
 
 _REQUIRED_PARAMS = ("project_id", "toolkit_id", "index", "minutes")
 
@@ -113,3 +115,82 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         end_ts = time.time()
         log.info("Exiting set_index_schedule_expiration (duration = %s)", end_ts - start_ts)
+
+    @web.method()
+    def prune_orphaned_index_schedules(self, *args, **kwargs):
+        """Admin task: remove index schedules whose index no longer exists (#7169).
+
+        DISCLAIMER: removal is not reversible from the platform. There is no backup table:
+        every removed ``indexes_meta.<index>`` entry is logged in full by this task, and that
+        log line is the only way to restore it. Run the dry run first and keep the task log.
+
+        An index's schedules are orphaned when the toolkit's own pgvector store has no
+        ``index_meta`` row for it, e.g. after EL-7023 / EL-6356 deleted the index but left the
+        schedules, which the scheduler then reports as "not found in database". Enabled and
+        disabled schedules alike. Only the ``indexes_meta.<index>`` key is removed: the toolkit,
+        its other indexes and any vector data are left as they are. A toolkit whose store
+        cannot be checked is skipped, never pruned.
+
+        Param format: ``project_id=<all|N>;toolkit_id=<N>;dry_run=false``
+
+        Dry run by default. ``toolkit_id`` needs ``project_id``.
+
+        Examples::
+
+            ""                                      - dry run, all projects
+            "project_id=12"                         - dry run, project 12
+            "project_id=12;dry_run=false"           - remove orphans in project 12
+            "project_id=12;toolkit_id=345;dry_run=false"
+            "dry_run=false"                         - remove orphans in every project
+        """
+        log.info("Starting prune_orphaned_index_schedules")
+        start_ts = time.time()
+        #
+        try:
+            try:
+                project_id, toolkit_id, dry_run = orphans.parse_prune_params(kwargs.get("param", ""))
+            except ValueError as exc:
+                log.error("Invalid params %r: %s. Expected "
+                          "'project_id=<all|N>;toolkit_id=<N>;dry_run=false'",
+                          kwargs.get("param", ""), exc)
+                return
+            #
+            if project_id is None:
+                project_ids = [
+                    p["id"] for p in self.context.rpc_manager.call.project_list(
+                        filter_={"create_success": True}
+                    )
+                ]
+            else:
+                project_ids = [project_id]
+            #
+            def list_toolkits(session, only_toolkit_id):
+                query = session.query(EliteATool).filter(EliteATool.meta["indexes_meta"].isnot(None))
+                if only_toolkit_id is not None:
+                    query = query.filter(EliteATool.id == only_toolkit_id)
+                return query.all()
+            #
+            def resolve_connection_string(pid, toolkit):
+                # Per-schedule credentials only fill the toolkit's own slot, never
+                # pgvector_configuration, so the toolkit's own settings point at the store.
+                expanded = rpc_tools.RpcMixin().rpc.timeout(5).configurations_expand(
+                    project_id=pid, settings=orphans.pgvector_settings(toolkit.settings),
+                    user_id=toolkit.author_id, unsecret=True,
+                )
+                return (expanded.get("pgvector_configuration") or {}).get("connection_string")
+            #
+            orphans.prune_orphaned_index_schedules(
+                project_ids=project_ids,
+                open_project_session=db.get_session,
+                list_toolkits=list_toolkits,
+                resolve_connection_string=resolve_connection_string,
+                present_index_names=lambda conn, schema: orphans.present_index_names(
+                    _get_pgvector_engine(conn), schema),
+                toolkit_id=toolkit_id,
+                dry_run=dry_run,
+            )
+        except:  # pylint: disable=W0702
+            log.exception("Got exception during prune_orphaned_index_schedules")
+        #
+        end_ts = time.time()
+        log.info("Exiting prune_orphaned_index_schedules (duration = %s)", end_ts - start_ts)

@@ -467,9 +467,9 @@ def test_the_seal_check_is_run_on_a_copy_and_never_changes_the_payload_it_was_gi
     sealed = []
     original = ns.adm._seal_dispatch   # pylint: disable=W0212
 
-    def spy(target, entries_of, decided=False, shadow=False):
+    def spy(target, entries_of, decided=False, shadow=False, children=None):
         sealed.append((target is payload, decided, shadow))
-        return original(target, entries_of, decided=decided, shadow=shadow)
+        return original(target, entries_of, decided=decided, shadow=shadow, children=children)
     ns.adm._seal_dispatch = spy   # pylint: disable=W0212
     try:
         env.reset()
@@ -590,7 +590,7 @@ def test_audit_only_runs_the_same_admission_code_inline_on_the_dispatch_path():
     assert "Thread" not in text and "spawn" not in text and "apply_async" not in text   # the same greenlet, no pool
     dispatch_part = text[text.index("def admit_dispatch("):text.index("def _parent_entries(")]
     assert dispatch_part.index("task_name not in ADMITTED_TASKS") < dispatch_part.index(
-        "_shadow_admit(module, call_kwargs, admission, unavailable, deferred)")
+        "_shadow_admit(module, call_kwargs, admission, unavailable, deferred, task_name)")
 
 
 def test_runs_admitted_under_enforce_are_looked_after_after_a_switch_to_off(ns, env):
