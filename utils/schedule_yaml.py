@@ -133,6 +133,12 @@ def parse_schedules_file(text: str):
 def _reason(error) -> str:
     """The first broken field of a pydantic error and its plain message."""
     first = error.errors()[0]
+    loc = first['loc']
+    if loc[:1] == ('delivery',) and len(loc) == 2:
+        if first['type'] == 'extra_forbidden':
+            return f'delivery.{loc[1]} is not allowed'
+        if loc[1] == 'mode' and first['type'] in ('enum', 'literal_error'):
+            return f"delivery.mode {first['input']!r} is not allowed"
     message = first['msg'].removeprefix('Value error, ')
     return f'{first["loc"][0]}: {message}' if first['loc'] else message
 

@@ -130,3 +130,13 @@ def test_import_rejects_a_malformed_delivery_object_with_a_reason(env, delivery)
     assert failed['name'] == 'Daily digest'
     assert failed['reason'].startswith('delivery')
     assert [row.name for row in env.rows()] == ['Good']
+
+
+def test_import_names_an_unknown_delivery_key_in_the_reason(env):
+    report = env.import_items(item(delivery={'mode': 'run_history', 'foo': 'x'}))
+    assert report['failed'][0]['reason'] == 'delivery.foo is not allowed'
+
+
+def test_import_names_an_unknown_delivery_mode_in_the_reason(env):
+    report = env.import_items(item(delivery={'mode': 'xyz'}))
+    assert report['failed'][0]['reason'] == "delivery.mode 'xyz' is not allowed"
