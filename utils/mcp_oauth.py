@@ -30,6 +30,7 @@ OAUTH_CONFIGURATION_KEYS = (
     'openapi_configuration',
     'teams_configuration',
     'outlook_configuration',
+    'ms_graph_configuration',
 )
 
 
