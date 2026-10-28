@@ -163,12 +163,19 @@ def check_delivery(session, schedule: EntitySchedule, delivery: ScheduleDelivery
 
 
 def _apply_delivery(session, row: EntitySchedule, delivery: ScheduleDelivery) -> None:
-    """Check the target, then store it on the row; `run_history` clears the target."""
+    """Check the target, then store it on the row; `run_history` clears the target and the history count.
+
+    A chat target without `include_history` keeps the stored count, so a client that does not know the key
+    cannot switch the history off.
+    """
     check_delivery(session, row, delivery)
     row.delivery_mode = delivery.mode
     row.delivery_conversation_uuid = UUID(delivery.conversation_uuid) if delivery.conversation_uuid else None
     row.delivery_participant_id = delivery.participant_id
-    row.delivery_include_history = delivery.include_history
+    if delivery.mode == 'run_history':
+        row.delivery_include_history = 0
+    elif 'include_history' in delivery.model_fields_set:
+        row.delivery_include_history = delivery.include_history
 
 
 def load_schedule_in_scope(session, schedule_id: int, scope: ScheduleScope) -> EntitySchedule:

@@ -47,6 +47,20 @@ def test_edit_without_delivery_keeps_include_history(svc):
     assert row.delivery_include_history == 7
 
 
+def test_edit_delivery_without_include_history_keeps_the_stored_value(svc):
+    row = base.create(svc, delivery=chat_target(include_history=7))
+    update = svc.pd.ScheduleUpdate(delivery=chat_target())
+    svc.service.update_schedule(svc.session, base.PROJECT_ID, row, update, svc.scope(base.OWNER_ID))
+    assert row.delivery_include_history == 7
+
+
+def test_edit_delivery_with_zero_clears_the_stored_value(svc):
+    row = base.create(svc, delivery=chat_target(include_history=7))
+    update = svc.pd.ScheduleUpdate(delivery=chat_target(include_history=0))
+    svc.service.update_schedule(svc.session, base.PROJECT_ID, row, update, svc.scope(base.OWNER_ID))
+    assert row.delivery_include_history == 0
+
+
 def test_edit_to_run_history_resets_include_history(svc):
     row = base.create(svc, delivery=chat_target(include_history=7))
     update = svc.pd.ScheduleUpdate(delivery={'mode': 'run_history'})

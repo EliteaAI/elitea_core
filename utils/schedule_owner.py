@@ -48,6 +48,7 @@ def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | 
     # The chat target was checked against the old owner's membership: the new owner starts with Run History only
     row.delivery_mode = 'run_history'
     row.delivery_conversation_uuid = row.delivery_participant_id = None
+    row.delivery_include_history = 0
     session.commit()
     return {'old_owner_id': old_owner_id, 'new_owner_id': owner_id}
 
