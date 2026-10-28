@@ -87,3 +87,13 @@ def test_owner_change_resets_chat_delivery_to_run_history(harness, owner):
     row = harness.row(schedule_id)
     assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
         'run_history', None, None)
+
+
+def test_owner_change_resets_history_count_with_chat_delivery(harness, owner):
+    """The history count belongs to the chat target: it goes back to 0 with Run History."""
+    schedule_id = harness.seed(
+        created_by=OWNER_ID, delivery_mode='conversation', delivery_include_history=7,
+        delivery_conversation_uuid=uuid.UUID('11111111-1111-4111-8111-111111111111'), delivery_participant_id=5)
+    change(harness, owner, schedule_id, OTHER_ID)
+    row = harness.row(schedule_id)
+    assert (row.delivery_include_history, row.delivery_mode) == (0, 'run_history')
