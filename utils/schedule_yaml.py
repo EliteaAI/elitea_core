@@ -30,9 +30,21 @@ REPEATED_KEY = 'The key is used by an earlier schedule of this file'
 OTHER_ENTITY = 'The key belongs to a schedule of another agent or pipeline'
 UNCONFIRMED_NOTE = ('Sensitive tools need a confirmation in the schedule form, or some tools could not be '
                     'checked; saved as Pause and ask me')
+CHAT_NOT_IMPORTED = 'The target chat is not imported; the schedule '
 UPDATE_FIELDS = (
     'description', 'run_mode', 'prompt', 'variables', 'cron', 'timezone', 'expires_at', 'approval_rule',
 )  # never enabled or name: an update keeps them (R5.1)
+
+
+def _delivery(row: EntitySchedule) -> dict:
+    """The delivery object in the shape of the API body; run_history leaves the target fields empty."""
+    in_chat = row.delivery_mode == 'conversation'
+    return {
+        'mode': row.delivery_mode,
+        'conversation_uuid': str(row.delivery_conversation_uuid) if in_chat else None,
+        'participant_id': row.delivery_participant_id if in_chat else None,
+        'include_history': False,  # no stored column yet; the key keeps the file shape fixed
+    }
 
 
 def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> dict:
@@ -53,6 +65,7 @@ def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> di
         # Stored as the end of the local stop day in UTC; the local date makes the import keep the day
         'expires_at': row.expires_at and row.expires_at.astimezone(ZoneInfo(row.timezone)).date(),
         'approval_rule': row.approval_rule,
+        'delivery': _delivery(row),
     }
 
 
@@ -120,6 +133,12 @@ def parse_schedules_file(text: str):
 def _reason(error) -> str:
     """The first broken field of a pydantic error and its plain message."""
     first = error.errors()[0]
+    loc = first['loc']
+    if loc[:1] == ('delivery',) and len(loc) == 2:
+        if first['type'] == 'extra_forbidden':
+            return f'delivery.{loc[1]} is not allowed'
+        if loc[1] == 'mode' and first['type'] in ('enum', 'literal_error'):
+            return f"delivery.mode {first['input']!r} is not allowed"
     message = first['msg'].removeprefix('Value error, ')
     return f'{first["loc"][0]}: {message}' if first['loc'] else message
 
@@ -275,7 +294,9 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
 
     Returns:
         `{created, updated, skipped, failed}`; every entry has the item name, a created or updated one the
-        `schedule_id` and a `note` when the approval rule changed, a skipped or failed one the `reason`.
+        `schedule_id` and a `note` when the approval rule changed, a chat delivery was not imported or the
+        file's delivery mode differs from the stored mode of an updated row, a
+        skipped or failed one the `reason`.
     """
     # late: the export loads without these modules
     from ..models.pd.schedule_yaml import ScheduleFileItem
@@ -294,13 +315,21 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
             try:
                 item = ScheduleFileItem.model_validate(raw)
                 ids = _resolve(index, item)
-                values = item.model_dump(exclude={'key', 'entity_name', 'version_name'})
+                values = item.model_dump(exclude={'key', 'entity_name', 'version_name', 'delivery'})
                 if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
                     values['approval_rule'] = 'pause_and_ask'
                     entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
                 group, row, note = _save(session, project_id, scope, indexes, item, values, ids, reviews)
                 if note:
                     entry['note'] = note
+                if item.delivery and item.delivery.mode == 'conversation':
+                    where = 'delivers to the run history' if row.delivery_mode == 'run_history' else (
+                        'keeps its stored delivery')
+                    entry['note'] = '; '.join(filter(None, (entry.get('note'), CHAT_NOT_IMPORTED + where)))
+                elif item.delivery and group == 'updated' and item.delivery.mode != row.delivery_mode:
+                    mode_note = (f'The file says delivery mode {item.delivery.mode}; '
+                                 f'the schedule keeps its stored mode {row.delivery_mode}')
+                    entry['note'] = '; '.join(filter(None, (entry.get('note'), mode_note)))
                 entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name
                 report[group].append(entry)
             except _Skipped as e:
