@@ -250,6 +250,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.secret_field_calls = []
         self.secret_fields_raises = None
         self.material = {}              # credential ref id -> {field path: value}
+        self.delegations = {}           # credential ref id -> descriptor of an Entra-delegated reference (#6756)
         self.release_calls = []         # (project_id, ref_id, generation, release_id, actor_ref, allow_validated)
         self.release_reply = None       # a fixed answer of `release_credential_material`
         self.batch_store = False        # does the secrets plugin offer `release_credential_materials` (perf PR 2)
@@ -280,6 +281,12 @@ class Env:  # pylint: disable=R0902,R0904
         self.ns.credential_decision.forget_secret_fields()
         if hasattr(self.ns, "install_fakes"):
             self.ns.install_fakes(self)
+
+    def delegated_value(self, row, generation):
+        """What the secrets release answers for an Entra-delegated reference: its descriptor, never a value (#6756)."""
+        return types.SimpleNamespace(generation=generation, delegation={
+            **self.delegations[row["ref_id"]], "ownership_class": row["ownership_class"],
+            "custodian_subject_ref": row.get("custodian_subject_ref")})
 
     def poison(self):
         """Any use of the runtime dependencies from now on fails the test."""
@@ -543,6 +550,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     load("utils", "mcp_versioning")
     ns.internal_obo = load("utils", "internal_obo")   # the run token admission mints (#7214)
     ns.adm = load("utils", "admission")
+    ns.entra_obo = load("utils", "entra_obo")   # the on-behalf-of exchange of Entra-delegated credentials (#6756)
     ns.credential_release = load("utils", "credential_release")
     ns.credential_probe = load("utils", "credential_probe")
     ns.binding_admin = load("utils", "binding_admin")
@@ -720,6 +728,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                                                       "store_kind", "ownership_class", "revocation_epoch")}
                         references[row["configuration_id"]]["custodian_user_id"] = row.get("custodian_user_id")
                         references[row["configuration_id"]]["custodian_subject_ref"] = row.get("custodian_subject_ref")
+                        if "auth_mode" in row:   # secrets facts with the reference's kind (#6756 step 4)
+                            references[row["configuration_id"]]["auth_mode"] = row["auth_mode"]
             asked = ["|".join(item) for item in grant_keys]
             for binding, toolkit, config_id, target, subject in (grants_for or ()):   # facts v4: the grant of the reference found
                 found = references.get(config_id)
@@ -773,6 +783,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                 return {"ok": False, "reason_code": "CREDENTIAL_REFERENCE_INACTIVE"}
             if row["generation"] != generation:
                 return {"ok": False, "reason_code": "CREDENTIAL_GENERATION_MISMATCH"}
+            if row.get("auth_mode") == "entra_delegated":
+                return {"ok": True, "value": env.delegated_value(row, generation)}
             from pydantic import SecretStr
             fields = {path: SecretStr(value) for path, value in env.material.get(str(ref_id), {}).items()}
             return {"ok": True, "value": types.SimpleNamespace(fields=fields, generation=generation)}
@@ -794,6 +806,9 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                     return {"ok": False, "reason_code": "CREDENTIAL_REFERENCE_INACTIVE", "ref_id": item["ref_id"]}
                 if row["generation"] != item["generation"]:
                     return {"ok": False, "reason_code": "CREDENTIAL_GENERATION_MISMATCH", "ref_id": item["ref_id"]}
+                if row.get("auth_mode") == "entra_delegated":   # a container: its descriptor, no store read
+                    values[item["ref_id"]] = env.delegated_value(row, item["generation"])
+                    continue
                 fields = {path: SecretStr(value) for path, value in env.material.get(str(item["ref_id"]), {}).items()}
                 values[item["ref_id"]] = types.SimpleNamespace(fields=fields, generation=item["generation"])
             return {"ok": True, "values": values}

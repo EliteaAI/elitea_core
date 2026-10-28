@@ -93,3 +93,13 @@ cost_budgets:
 # Deliberately NOT declared in admin_schema.json, so the admin config editor cannot change it.
 enterprise_credential_governance:
   context_ttl_s: 3600                   # how long an admitted run may stay idle before it can no longer start, restart or call the platform (60..86400); a run in use slides it, up to MAX_RUN_LIFETIME_S
+
+# Entra-delegated credentials (C-1009 #6756 step 4): the interim app client of the on-behalf-of exchange, used by a
+# credential whose descriptor says oauth_app_id "platform" (an admin-managed OAuth app, #7149, replaces it). The client
+# id of the platform's API app registration; its secret is read from the environment variable named here, never from
+# this file. Unset: such credentials are refused (DENIED_OAUTH_APP_UNAVAILABLE).
+entra_obo_client_id: null
+entra_obo_client_secret_env: ELITEA_API_CLIENT_SECRET
+# The environment variable holding the key (32+ characters) that signs Main's requests for a person's Microsoft
+# sign-in to auth_oidc; pylon_auth's auth_oidc reads the same variable. Unset: delegated credentials are unavailable.
+entra_obo_custody_key_env: ELITEA_OBO_CUSTODY_KEY

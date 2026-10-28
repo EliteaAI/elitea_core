@@ -120,7 +120,9 @@ RunDeadline = namedtuple("RunDeadline", "at code")
 PREDICT_PERMISSION = "models.applications.predict.post"
 # The mandate operation each trigger entry point needs (the scheduler and both webhook kinds, #6947)
 MANDATE_OPERATION_OF = {"schedule": OPERATION_OF["pipeline_schedule"], "webhook": OPERATION_OF["pipeline_webhook"]}
-SUBJECT_COLUMNS = ("kind", "ref", "delegation_ref", "owner", "evidence")   # what a context row remembers of its subject
+# What a context row remembers of its subject. ``issuer`` and ``oid`` are the verified person's own fields (the tenant is
+# the row's ``tenant``): an Entra-delegated release binds to them and never parses ``ref`` (#6756 step 4)
+SUBJECT_COLUMNS = ("kind", "ref", "delegation_ref", "owner", "evidence", "issuer", "oid")
 MANDATE_COLUMNS = (
     AutonomousMandate.id, AutonomousMandate.project_id, AutonomousMandate.application_id,
     AutonomousMandate.agent_version, AutonomousMandate.agent_binding_ref, AutonomousMandate.owner_user_id,
@@ -178,6 +180,22 @@ MESSAGES = {
     "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
     "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
     "WORKER_CAPABILITY_UNAVAILABLE": "No worker can apply governed credentials right now; the run was not started.",
+    # Entra-delegated credentials (#6756 step 4): a token minted at release on behalf of the person running the agent
+    "DENIED_SUBJECT_MISMATCH": "This Microsoft credential belongs to another identity than the person running the agent; "
+                               "the run was not started.",
+    "DENIED_MANDATE_DELEGATION_UNSUPPORTED": "Scheduled and webhook runs cannot act with a person's Microsoft sign-in "
+                                             "yet; the run was not started.",
+    "DENIED_DELEGATION_UNSUPPORTED_CALLER": "This credential acts with your Microsoft sign-in, which only works in runs "
+                                            "you start yourself from Elitea; the run was not started.",
+    "DENIED_ASSERTION_UNAVAILABLE": "Your Microsoft sign-in is not available to this run. Sign in with Microsoft again, "
+                                    "then retry.",
+    "DENIED_ASSERTION_SOURCE_UNSUPPORTED": "You signed in through your organisation's login page; acting with your "
+                                           "Microsoft account needs a connected Microsoft account, which is not "
+                                           "available yet. The run was not started.",
+    "DENIED_OAUTH_APP_UNAVAILABLE": "The Microsoft app this credential uses is not available; ask an administrator. "
+                                    "The run was not started.",
+    "DELEGATION_EXCHANGE_FAILED": "Microsoft refused to issue a token for this credential (consent or site access "
+                                  "missing); ask an administrator. The run was not started.",
     # the run token of the internal Elitea MCP (#7214)
     "INTERNAL_TOKEN_UNAVAILABLE": "The built-in Elitea tools of this agent cannot get the run's own identity right now; "
                                   "the run was not started. Try again later.",
@@ -760,6 +778,7 @@ def _subject_of(principal: dict) -> dict:
     return {
         "kind": "delegation", "ref": f"idp:{evidence.get('tid')}:{evidence.get('oid')}",
         "delegation_ref": evidence.get("delegation_ref"), "tid": evidence.get("tid"),
+        "issuer": evidence.get("issuer"), "oid": evidence.get("oid"),
     }
 
 

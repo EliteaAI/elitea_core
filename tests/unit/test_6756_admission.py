@@ -229,7 +229,8 @@ def test_all_steps_pass_one_row_and_one_allow_event_in_the_same_session(ns, env)
     assert (row.state, row.attempt, row.run_id, row.schema_version, row.profile) == ("admitted", 1, RUN, 1, "governed")
     assert (row.project_id, row.binding_project_id, row.application_id, row.version_id) == (1, 1, 7, 70)
     assert row.caller == {"kind": "user", "ref": "user:42", "user_id": 42}
-    assert row.subject == {"kind": "delegation", "ref": "idp:tid-1:oid-42", "delegation_ref": "uti-42"}
+    assert row.subject == {"kind": "delegation", "ref": "idp:tid-1:oid-42", "delegation_ref": "uti-42",
+                           "issuer": "https://issuer", "oid": "oid-42"}   # #6756 step 4: explicit fields
     assert row.revocation_epochs == {"user": 3, "token": 0, "binding": 0, "project": None, "credential": None}
     assert (row.tenant, row.policy_revision, row.entry_point) == ("tid-1", "rev-1", "chat_sio")
     assert row.definition_digest == env.digests[70] and str(row.agent_binding_ref) == view.agent_binding_ref

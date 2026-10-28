@@ -32,7 +32,8 @@ from typing import Callable, Mapping, Optional
 from tools import this
 
 from .credential_decision import (
-    CREDENTIAL_SECTION, CredentialDecisionError, _int_or_none, _payload_toolkits, _uuid_text, configurations_in,
+    CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, CredentialDecisionError, _int_or_none, _payload_toolkits, _uuid_text,
+    configurations_in,
 )
 
 SLOT_KEY = "credential_slot"
@@ -51,6 +52,11 @@ MAX_SLOT_FIELDS = 32   # what one slot may ask for; the release refuses more
 # Dict-valued fields that carry secrets whether or not the schema walker says so (HTTP header maps)
 DICT_SECRET_FIELDS = ("headers", "extra_headers", "auth_headers")
 _KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # a concrete key under a wildcard path: what a release request can name
+# An Entra-delegated credential (#6756 step 4) holds no value: its slot asks for the one token release mints, written
+# at this path of the configuration; the configuration is marked with the kind so the toolkit takes nothing else
+AUTH_MODE_KEY = "auth_mode"
+DELEGATED_FIELD = "access_token"
+DELEGATED_TYPES = frozenset({"sharepoint"})
 
 
 def prefetched_tool_lists(payload) -> dict:
@@ -387,12 +393,32 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
         existing = data.get(SLOT_KEY)
         if existing is not None and not _slot_matches(existing, entry):
             raise CredentialDecisionError(REQUIRED)
+        if entry.get(AUTH_MODE_KEY) == DELEGATED_AUTH_MODE:
+            _seal_delegated(data, paths[data[CONFIGURATION_TYPE]], entry, existing)
+            continue
+        if data.get(AUTH_MODE_KEY) == DELEGATED_AUTH_MODE:
+            raise CredentialDecisionError(REQUIRED)   # says it is delegated, but its reference holds a stored value
         held = strip_secret_fields(data, paths[data[CONFIGURATION_TYPE]])
         if existing is None:
             if not held:
                 raise CredentialDecisionError(REQUIRED)   # nothing to ask for: a slot would let the toolkit run without it
             data[SLOT_KEY] = slot_of(entry, held)
     return len(to_seal)
+
+
+def _seal_delegated(data: dict, paths, entry: Mapping, existing) -> None:
+    """The seal of an Entra-delegated credential: a container with no value. Every secret field is removed, and so is
+    the token's own path; any of them holding a value (a token or secret carried inline) is a refusal. The slot asks
+    for the token only, and the configuration is marked delegated (from the reference, not from the payload)."""
+    if data.get(CONFIGURATION_TYPE) not in DELEGATED_TYPES:
+        raise CredentialDecisionError(REQUIRED)
+    if strip_secret_fields(data, list(dict.fromkeys([*paths, DELEGATED_FIELD]))):
+        raise CredentialDecisionError(REQUIRED)
+    data[AUTH_MODE_KEY] = DELEGATED_AUTH_MODE
+    if existing is None:
+        data[SLOT_KEY] = slot_of(entry, [DELEGATED_FIELD])
+    elif existing.get("fields") != [DELEGATED_FIELD]:
+        raise CredentialDecisionError(REQUIRED)
 
 
 def _refuse_credentials(stray, classify, payload) -> None:

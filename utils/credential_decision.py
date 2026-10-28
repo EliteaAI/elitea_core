@@ -53,6 +53,8 @@ STORE_KINDS = frozenset({"database", "corporate_vault"})
 ALLOWED = "CREDENTIAL_USE_ALLOWED"
 DEVELOPMENT_GRANT_REQUIRED = "DENIED_DEVELOPMENT_CREDENTIAL"
 PROFILE_GOVERNED, PROFILE_DEVELOPMENT = "governed", "development"
+DELEGATED_AUTH_MODE = "entra_delegated"   # a reference with no value: a token is minted at release (#6756 step 4)
+MANDATE_DELEGATION_UNSUPPORTED = "DENIED_MANDATE_DELEGATION_UNSUPPORTED"
 WHOLE_TARGET = "*"
 MANDATE_SUBJECT_PREFIX = "mandate:"
 NESTED_FIELD = "<nested>"
@@ -125,17 +127,22 @@ class Decision(BaseModel):
     reference_epoch: Optional[int] = None
     grant_id: Optional[str] = None
     grant_epoch: Optional[int] = None
+    auth_mode: Optional[str] = None   # set for an Entra-delegated reference only (#6756 step 4)
 
 
 def binding_ref(decision: Decision) -> dict:
-    """What an admitted context remembers of an allowed use (the re-check at the worker reads exactly this)."""
-    return {
+    """What an admitted context remembers of an allowed use (the re-check at the worker reads exactly this). The kind
+    of the reference is remembered only when it is not a stored secret, so other entries keep their shape."""
+    entry = {
         "toolkit_instance_id": decision.toolkit_instance_id, "field": decision.field,
         "configuration_uuid": decision.configuration_uuid, "credential_ref": decision.credential_ref,
         "credential_generation": decision.credential_generation, "reference_epoch": decision.reference_epoch,
         "grant_id": decision.grant_id, "grant_epoch": decision.grant_epoch,
         "configuration_generation": decision.configuration_generation, "decision_id": decision.decision_id,
     }
+    if decision.auth_mode == DELEGATED_AUTH_MODE:
+        entry["auth_mode"] = DELEGATED_AUTH_MODE
+    return entry
 
 
 def subject_kind_of(subject_ref) -> str:
@@ -453,8 +460,12 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
         return verdict(False, "CREDENTIAL_REFERENCE_REQUIRED")
     known.update(configuration_generation=config.get("generation"), credential_ref=reference.get("ref_id"),
                  credential_generation=reference.get("generation"))
+    if reference.get("auth_mode") == DELEGATED_AUTH_MODE:
+        known.update(auth_mode=DELEGATED_AUTH_MODE)
     if reference.get("state") != "active" or reference.get("store_kind") not in STORE_KINDS:   # 4. in force
         return verdict(False, "CREDENTIAL_REFERENCE_INACTIVE")
+    if known.get("auth_mode") and ctx.subject_kind == "mandate":                   # 4b. a person's sign-in, not a
+        return verdict(False, MANDATE_DELEGATION_UNSUPPORTED)                      #     mandate's owner (#7131)
     if reference.get("ownership_class") == "personal" and not holds_personal(ctx, reference):   # 5. a personal one
         return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")                  #    only its custodian may use
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval
