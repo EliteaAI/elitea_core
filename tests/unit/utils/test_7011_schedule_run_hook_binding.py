@@ -90,3 +90,34 @@ def test_a_human_step_pause_from_another_author_does_not_fail_the_run(runs, sess
     runs.pause_schedule_run(1, run.id, {"hitl_interrupt": {"node_name": "Review"}}, CONVERSATION + 1, STRANGER)
     session.refresh(run)
     assert run.status == "running"
+
+
+def _delivered_run(runs, session, group_id, schedule=None):
+    schedule = schedule or _schedule(runs, session, created_by=OWNER)
+    run = _run(runs, session, schedule)
+    run.conversation_id, run.message_group_id = CONVERSATION, group_id
+    session.flush()
+    return run
+
+
+def test_two_delivered_runs_of_one_chat_end_only_by_their_own_group(runs, session, sent):
+    first = _delivered_run(runs, session, 10)
+    second = _delivered_run(runs, session, 11)
+    assert runs.finish_schedule_run(1, first.id, "success", None, CONVERSATION, author_id=OWNER,
+                                    message_group_id=11) is False
+    assert runs.finish_schedule_run(1, first.id, "success", None, CONVERSATION, author_id=OWNER) is False
+    assert runs.finish_schedule_run(1, first.id, "success", None, CONVERSATION, author_id=OWNER,
+                                    message_group_id=10) is True
+    session.refresh(first)
+    session.refresh(second)
+    assert (first.status, second.status) == ("success", "running")
+
+
+def test_a_pause_from_another_group_of_the_chat_leaves_a_delivered_run_running(runs, session, sent):
+    run = _delivered_run(runs, session, 10)
+    runs.pause_schedule_run(1, run.id, SENSITIVE, CONVERSATION, OWNER, 11)
+    session.refresh(run)
+    assert (run.status, sent.notices) == ("running", [])
+    runs.pause_schedule_run(1, run.id, SENSITIVE, CONVERSATION, OWNER, 10)
+    session.refresh(run)
+    assert run.status == "waiting_for_approval"

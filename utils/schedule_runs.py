@@ -12,6 +12,9 @@ from .schedule_timing import at_least_one
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
+# The fixed (text, code) a shared chat shows for a delivered run's answer group that ends without an answer
+STALE_CHAT = ('The run did not finish in time', 'run_stale')
+EXPIRED_CHAT = ('The approval wait ended before an answer came', 'approval_expired')
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 PAUSE_REASON = 'the run needs a human answer'
@@ -37,7 +40,10 @@ class ScheduleRunNotWaiting(Exception):
 
 
 def approval_wait_hours() -> int:
-    """The configured wait of a paused run; a missing, 0, negative or over-720 value is bounded here, as config.yml skips the admin schema."""
+    """The configured wait of a paused run.
+
+    A missing, 0, negative or over-720 value is bounded here, as config.yml skips the admin schema.
+    """
     from tools import this  # late: the writers load without the plugin handle
     section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
     return at_least_one(section, 'approval_wait_hours', DEFAULT_APPROVAL_WAIT_HOURS, MAX_APPROVAL_WAIT_HOURS)
@@ -51,10 +57,12 @@ def has_waiting_runs(project_id: int) -> bool:
         ) is not None
 
 
-def delete_run_checkpoints(project_id: int, conversation_id: int | None) -> None:
-    """Drop the checkpoints of the conversation of a run that ended while it waited; a failure is logged.
+def delete_run_checkpoints(project_id: int, conversation_id: int | None, message_group_id: int | None = None) -> None:
+    """Drop the checkpoints of a run that ended while it waited; a failure is logged.
 
     A rejected or expired run is never resumed, so its paused state would stay until the age cleanup.
+    A delivered run (`message_group_id` set) shares its chat with other members and other runs: only the
+    thread of its own answer group goes, never the chat uuid or the threads of other groups.
     """
     if not conversation_id:
         return
@@ -66,14 +74,18 @@ def delete_run_checkpoints(project_id: int, conversation_id: int | None) -> None
         from ..models.message_group import ConversationMessageGroup
         from .vectorstore import get_pgvector_connection_string
         with db.get_session(project_id) as session:
-            thread_ids = {str(uuid) for (uuid,) in session.query(Conversation.uuid).filter(
-                Conversation.id == conversation_id)}
+            groups = session.query(ConversationMessageGroup.meta).filter(ConversationMessageGroup.meta.isnot(None))
+            if message_group_id is None:
+                thread_ids = {str(uuid) for (uuid,) in session.query(Conversation.uuid).filter(
+                    Conversation.id == conversation_id)}
+                groups = groups.filter(ConversationMessageGroup.conversation_id == conversation_id)
+            else:
+                thread_ids = set()
+                groups = groups.filter(ConversationMessageGroup.id == message_group_id)
             thread_ids.update(
-                meta['thread_id'] for (meta,) in session.query(ConversationMessageGroup.meta).filter(
-                    ConversationMessageGroup.conversation_id == conversation_id,
-                    ConversationMessageGroup.meta.isnot(None))
-                if isinstance(meta, dict) and meta.get('thread_id')
-            )
+                meta['thread_id'] for (meta,) in groups if isinstance(meta, dict) and meta.get('thread_id'))
+        if not thread_ids:
+            return
         this.module.event_node.emit('indexer_delete_checkpoint', {
             'thread_ids': list(thread_ids), 'pgvector_connstr': get_pgvector_connection_string(project_id),
         })
@@ -123,33 +135,42 @@ def run_failure_reason(error) -> str:
     return reason
 
 
-def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
-    """Conditions that tie a chat hook to its own run: the run is linked to this conversation, or has none yet
-    and the chat author owns the schedule. The run id comes from conversation meta, which a client can write.
+def _own_conversation(conversation_id: int | None, author_id: int | None, message_group_id: int | None = None) -> list:
+    """Conditions that tie a chat hook to its own run. The run id comes from meta, which a client can write.
 
-    The linked conversation is the proof, so a change of the schedule owner does not cut off a running run.
+    A hook with a `message_group_id` comes from a run delivered into a shared chat, where the conversation
+    alone proves nothing: only the run with that answer group and that conversation matches. It never
+    matches a private run, linked or not. A hook without one matches a private run that is linked to this
+    conversation, or has none yet and the chat author owns the schedule. A change of the schedule owner
+    does not cut off a linked run.
     No author (a server-side caller such as the stale sweep) adds no condition.
     """
     if author_id is None:
         return []
+    if message_group_id is not None:
+        return [and_(EntityScheduleRun.conversation_id == conversation_id,
+                     EntityScheduleRun.message_group_id == message_group_id)]
     unlinked = and_(
         EntityScheduleRun.conversation_id.is_(None),
         EntityScheduleRun.schedule_id.in_(select(EntitySchedule.id).where(EntitySchedule.created_by == author_id)),
     )
+    private = EntityScheduleRun.message_group_id.is_(None)
     if conversation_id is None:
-        return [unlinked]
-    return [or_(EntityScheduleRun.conversation_id == conversation_id, unlinked)]
+        return [and_(private, unlinked)]
+    return [and_(private, or_(EntityScheduleRun.conversation_id == conversation_id, unlinked))]
 
 
 def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str | None = None,
                         conversation_id: int | None = None, expected_status: str = 'running',
-                        notice: bool = True, author_id: int | None = None) -> bool:
+                        notice: bool = True, author_id: int | None = None,
+                        message_group_id: int | None = None) -> bool:
     """End a run in `expected_status` as `success` or `failed`, copy it to its schedule and tell the owner.
 
-    A chat hook passes `author_id`: the run then ends only for the conversation of its own owner.
+    A chat hook passes `author_id`: the run then ends only for the conversation of its own owner, and a
+    delivered run only for its own answer group (`message_group_id`).
     False, with nothing changed or sent, when the run is not in `expected_status` any more.
     """
-    condition = and_(EntityScheduleRun.id == run_id, *_own_conversation(conversation_id, author_id))
+    condition = and_(EntityScheduleRun.id == run_id, *_own_conversation(conversation_id, author_id, message_group_id))
     with db.get_session(project_id) as session:
         ended = _end_runs(session, condition, status, reason, conversation_id, expected_status)
         session.commit()
@@ -159,17 +180,18 @@ def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str |
 
 
 def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversation_id: int | None = None,
-                       author_id: int | None = None) -> None:
+                       author_id: int | None = None, message_group_id: int | None = None) -> None:
     """A sensitive-tool pause makes a running run wait for the owner; any other pause fails it.
 
-    `conversation_id` and `author_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
+    `conversation_id`, `author_id` and `message_group_id` of the paused chat tie the pause to its own run
+    (see `_own_conversation`).
     """
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
     if sensitive is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
-                            conversation_id, author_id=author_id)
+                            conversation_id, author_id=author_id, message_group_id=message_group_id)
         return
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
@@ -177,7 +199,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
         paused = session.execute(
             update(EntityScheduleRun)
             .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running',
-                   *_own_conversation(conversation_id, author_id))
+                   *_own_conversation(conversation_id, author_id, message_group_id))
             # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
             .values(status='waiting_for_approval', resumed_at=None,
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=approval_wait_hours()))
@@ -211,7 +233,10 @@ def _paused_event(item: dict, more: int = 0) -> dict:
 
 
 def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
-    """`PAUSE_REASON` plus the toolkit or step the pause names; the toolkit first, as an MCP sign-in node says little (R2.4)."""
+    """`PAUSE_REASON` plus the toolkit or step the pause names.
+
+    The toolkit comes first, as an MCP sign-in node says little.
+    """
     for key, label in (('toolkit_name', 'toolkit'), ('node_name', 'step')):
         name = next((item[key] for item in (interrupt, *interrupts) if item.get(key)), None)
         if name:
@@ -250,7 +275,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
     The run log gets the decision; only the owner decides (the check), so the owner is who decided.
     """
-    conversation_id = None
+    chat = None  # (conversation id, answer group id) of a rejected run
     with db.get_session(project_id) as session:
         # The lock holds the run in waiting_for_approval until the commit, so the writes below always apply
         run = session.scalar(
@@ -271,12 +296,13 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
             _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
-        else:  # no notice: the owner made this end (R2.2)
+        else:  # no notice: the owner made this end; the resume that follows ends the answer group
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
-            conversation_id = run.conversation_id
+            chat = (run.conversation_id, run.message_group_id)
         session.commit()
-    delete_run_checkpoints(project_id, conversation_id)
+    if chat:
+        delete_run_checkpoints(project_id, *chat)
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
@@ -311,6 +337,8 @@ def fail_stale_runs(project_id: int, now: datetime, stale_minutes: int) -> int:
         ended = _end_runs(session, quiet_since < now - timedelta(minutes=stale_minutes), 'failed', STALE_REASON)
         session.commit()
         _announce(project_id, session, ended)
+        groups = _answer_groups(session, ended, streaming_only=True)
+    _end_answer_groups(project_id, groups, STALE_REASON, STALE_CHAT)
     return len(ended)
 
 
@@ -330,10 +358,45 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
         session.commit()
         # Only the expiry notice: a plain failure notice would be a second one (R1.3)
         _announce(project_id, session, ended, {'failed': 'schedule_approval_expired'})
-        conversation_ids = [session.get(EntityScheduleRun, run_id).conversation_id for run_id in ended]
-    for conversation_id in conversation_ids:
-        delete_run_checkpoints(project_id, conversation_id)
+        chats = session.execute(select(EntityScheduleRun.conversation_id, EntityScheduleRun.message_group_id)
+                                .where(EntityScheduleRun.id.in_(ended))).all()
+        groups = _answer_groups(session, ended)  # a paused group no longer streams
+    for chat in chats:
+        delete_run_checkpoints(project_id, *chat)
+    _end_answer_groups(project_id, groups, EXPIRED_REASON, EXPIRED_CHAT)
     return len(ended)
+
+
+def _answer_groups(session, run_ids: list[int], streaming_only: bool = False) -> list[str]:
+    """The uuids of the answer groups of delivered runs in `run_ids`; a private run has none.
+
+    `streaming_only` keeps the groups that still stream. A run paused for approval has a group that does not.
+    """
+    group_ids = session.scalars(select(EntityScheduleRun.message_group_id).where(
+        EntityScheduleRun.id.in_(run_ids), EntityScheduleRun.message_group_id.is_not(None))).all()
+    if not group_ids:
+        return []
+    # Late import: only a delivered run reads the message models
+    from ..models.message_group import ConversationMessageGroup
+    query = select(ConversationMessageGroup.uuid).where(ConversationMessageGroup.id.in_(group_ids))
+    if streaming_only:
+        query = query.where(ConversationMessageGroup.is_streaming.is_(True))
+    return [str(uuid) for uuid in session.scalars(query)]
+
+
+def _end_answer_groups(project_id: int, group_uuids: list[str], reason: str, chat: tuple[str, str]) -> None:
+    """End each answer group with the fixed (text, code) `chat`, so a shared chat shows no endless stream.
+
+    `reason` goes to the log only. The run is already ended, so the stream end that follows changes nothing
+    on the run row.
+    """
+    if not group_uuids:
+        return
+    # Late import: the chat run stack is needed only here, so the writers above load without it
+    from .pipeline_execution import finish_trigger_run_with_error
+    text, code = chat
+    for group_uuid in group_uuids:
+        finish_trigger_run_with_error(project_id, group_uuid, reason, message=f'{text} (code: {code})', code=code)
 
 
 def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,

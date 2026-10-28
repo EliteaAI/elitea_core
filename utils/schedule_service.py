@@ -10,8 +10,13 @@ from sqlalchemy import select
 
 from ..models.all import Application, ApplicationVersion
 from ..models.entity_schedule import EntitySchedule
-from ..models.enums.all import AgentTypes, NotificationEventTypes
-from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
+from ..models.enums.all import AgentTypes, NotificationEventTypes, ParticipantTypes
+from ..models.pd.entity_schedule import (
+    ScheduleCreate,
+    ScheduleDelivery,
+    ScheduleTiming,
+    ScheduleUpdate,
+)
 from .folder_access import entity_access_error
 from .schedule_access import ScheduleScope
 from .schedule_notifications import notify_schedule_event
@@ -124,6 +129,47 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
         raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
 
 
+def check_delivery(session, schedule: EntitySchedule, delivery: ScheduleDelivery) -> None:
+    """Raise unless the chat target exists, holds the schedule's entity and has the schedule owner as a member.
+
+    The owner is `schedule.created_by`, never the caller, so an admin edit checks the owner.
+
+    Raises:
+        ScheduleError: A 400 on `delivery.conversation_uuid` or `delivery.participant_id`.
+    """
+    if delivery.mode != 'conversation':
+        return
+    # Loaded here: the chat models pull in the plugin database layer, which the service tests of other stories stub out
+    from ..models.conversation import Conversation
+    from ..models.participants import Participant, ParticipantMapping
+    from .conversation_access import is_conversation_participant
+
+    try:
+        chat_uuid = UUID(delivery.conversation_uuid)
+    except ValueError:
+        chat_uuid = None
+    chat = chat_uuid and session.scalars(select(Conversation).where(Conversation.uuid == chat_uuid)).one_or_none()
+    if chat is None:
+        raise _field_error('delivery.conversation_uuid', 'delivery.conversation_uuid not found')
+    participant = session.get(Participant, delivery.participant_id)
+    in_chat = participant is not None and session.scalars(select(ParticipantMapping.id).where(
+        ParticipantMapping.conversation_id == chat.id, ParticipantMapping.participant_id == participant.id,
+    )).first() is not None
+    if not in_chat or participant.entity_name != ParticipantTypes.application.value or str(
+            (participant.entity_meta or {}).get('id')) != str(schedule.application_id):
+        raise _field_error('delivery.participant_id', 'entity is not a participant of the conversation')
+    if not is_conversation_participant(session, chat.id, schedule.created_by):
+        raise _field_error('delivery.conversation_uuid', 'owner is not a member of the conversation')
+
+
+def _apply_delivery(session, row: EntitySchedule, delivery: ScheduleDelivery) -> None:
+    """Check the target, then store it on the row; mode `run_history` clears the target columns."""
+    check_delivery(session, row, delivery)
+    row.delivery_mode = delivery.mode
+    row.delivery_conversation_uuid = UUID(delivery.conversation_uuid) if delivery.conversation_uuid else None
+    row.delivery_participant_id = delivery.participant_id
+
+
 def load_schedule_in_scope(session, schedule_id: int, scope: ScheduleScope) -> EntitySchedule:
     """Return the schedule when the caller owns it or holds `schedules.admin`.
 
@@ -192,7 +238,7 @@ def create_schedule(
         ScheduleLimitError: When an enabled schedule passes the project cap.
     """
     check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
-    values = body.model_dump(exclude={'risk_ack'})
+    values = body.model_dump(exclude={'risk_ack', 'delivery'})
     check_run_input(body.entity_type, body.run_mode, body.prompt, values['variables'])
     if body.enabled:
         check_enabled_cap(session)
@@ -206,6 +252,8 @@ def create_schedule(
     )
     if key is not None:
         row.uuid = key
+    if body.delivery:
+        _apply_delivery(session, row, body.delivery)
     _apply_confirmation(row, confirmed, scope.user_id)
     session.add(row)
     session.commit()
@@ -229,7 +277,7 @@ def update_schedule(
         pydantic.ValidationError: When the stop date does not fit the resulting cron and time zone.
     """
     changes = {
-        key: value for key, value in body.model_dump(exclude_unset=True, exclude={'risk_ack'}).items()
+        key: value for key, value in body.model_dump(exclude_unset=True, exclude={'risk_ack', 'delivery'}).items()
         if value is not None or key in CLEARABLE
     }
     resuming = changes.get('enabled') is True and not row.enabled
@@ -251,6 +299,8 @@ def update_schedule(
     if resuming:
         check_enabled_cap(session)
         row.disabled_reason = None
+    if body.delivery:
+        _apply_delivery(session, row, body.delivery)
     for key, value in changes.items():
         setattr(row, key, value)
     row.updated_by = scope.user_id

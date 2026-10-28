@@ -248,7 +248,7 @@ def _execute_pipeline(
             mandate_ticket=mandate_ticket,
         )
     except Exception as exc:
-        finish_trigger_run_with_error(project_id, response_message_id, exc)
+        finish_trigger_run_with_error(project_id, response_message_id, exc, private_run=True)
         raise
 
     if is_trigger_refusal(result):
