@@ -1334,12 +1334,14 @@ class RPC:
 
             target = session.get(Participant, parsed.participant_id) if parsed.participant_id else None
             try:
-                validate_turn_skill_limit(
-                    session, conversation.id, target, parsed.user_input, parsed.project_id,
-                    lambda: read_target_version_skills(session, conversation.id, target, parsed.project_id),
-                    conversation=conversation, sender_id=(author_participant.entity_meta or {}).get('id'),
-                )
+                with session.no_autoflush:
+                    validate_turn_skill_limit(
+                        session, conversation.id, target, parsed.user_input, parsed.project_id,
+                        lambda: read_target_version_skills(session, conversation.id, target, parsed.project_id),
+                        conversation=conversation, sender_id=(author_participant.entity_meta or {}).get('id'),
+                    )
             except SkillInvocationLimitError as limit:
+                self.check_and_generate_conversation_name(parsed.project_id, 'New Chat', room, conversation)
                 if sid:
                     raise SioValidationError(
                         sio=self.context.sio,

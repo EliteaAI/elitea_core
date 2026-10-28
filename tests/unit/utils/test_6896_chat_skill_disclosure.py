@@ -443,6 +443,31 @@ def test_the_over_limit_rejection_sends_the_refusal_and_writes_nothing():
     assert not _calls(body, 'commit') and not _calls(body, 'emit') and not _calls(body, 'add')
 
 
+def test_the_skill_limit_check_cannot_flush_the_conversation_row_that_naming_updates_from_its_own_session():
+    predict = _predict_sio_source()
+    [guard] = [
+        n for n in ast.walk(predict)
+        if isinstance(n, ast.With)
+        and any(isinstance(stmt, ast.Expr) and _calls(stmt, 'validate_turn_skill_limit') for stmt in n.body)
+    ]
+    [item] = guard.items
+
+    assert ast.unparse(item.context_expr) == 'session.no_autoflush'
+
+
+def test_a_rejected_first_message_ends_the_naming_spinner_without_naming_from_it():
+    predict = _predict_sio_source()
+    guard = next(
+        n for n in ast.walk(predict)
+        if isinstance(n, ast.Try) and any(_calls(stmt, 'validate_turn_skill_limit') for stmt in n.body)
+    )
+    [handler] = [h for h in guard.handlers if getattr(h.type, 'id', None) == 'SkillInvocationLimitError']
+    [naming] = _calls(ast.Module(handler.body, []), 'check_and_generate_conversation_name')
+
+    assert isinstance(naming.args[1], ast.Constant) and naming.args[1].value == 'New Chat'
+    assert naming.lineno < min(c.lineno for c in _calls(ast.Module(handler.body, []), 'SioValidationError'))
+
+
 def test_the_chat_payload_error_handlers_send_the_coded_content():
     tree = ast.parse((PLUGIN_ROOT / 'rpc/chat_all.py').read_text())
     handlers = [
