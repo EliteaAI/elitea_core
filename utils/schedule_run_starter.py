@@ -15,14 +15,18 @@ from .pipeline_execution import (
     TriggerType,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
+    finish_trigger_run_refused,
     finish_trigger_run_with_error,
+    is_trigger_refusal,
 )
 from .schedule_prerun import run_prerun_check
 from .schedule_runs import (
     block_schedule_run,
     fail_schedule_run,
+    finish_schedule_run,
     record_run_events,
     run_event,
+    run_failure_reason,
 )
 
 NOT_FOUND = 'schedule or version not found'
@@ -143,6 +147,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
 
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
     closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
+    Under governance (C-1009) the run is admitted on its owner's mandate or refused; a refusal ends it at once.
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
@@ -199,11 +204,21 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     record_run_events(project_id, run_id, run_event(
         'agent_started', f"{'Pipeline' if source == 'pipeline' else 'Agent'} started: {loaded.entity_name}"))
     try:
-        execute_pipeline_via_predict_sio(
+        # late: only a governed run reads its mandate; its single-use ticket is minted right before the run is sent
+        from .mandate_admission import prepare_schedule_run
+        governance = prepare_schedule_run(project_id=project_id, version=loaded.version, schedule_id=schedule_id,
+                                          owner_id=check.owner_id)
+    except Exception:  # noqa: BLE001 -- a run left running would block the schedule; the text stays fixed
+        log.exception('Schedule %s run %s: cannot prepare the governed run', schedule_id, run_id)
+        finish_trigger_run_with_error(project_id, response_id, START_FAILED)
+        fail_schedule_run(project_id, run_id, START_FAILED)
+        return
+    try:
+        result = execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source=trigger_type, is_system_user=False,
-            auto_approve_sensitive_actions=approved,
+            auto_approve_sensitive_actions=approved, **governance,
         )
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
         log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)
@@ -213,3 +228,9 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     except Exception as error:  # noqa: BLE001 -- the run message ends with the reason (R2.5)
         finish_trigger_run_with_error(project_id, response_id, error)
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)
+    else:
+        if is_trigger_refusal(result):  # governance refused it (C-1009): it ends now, readably, and the owner is told
+            try:  # ended first, so the chat stream-end hook finds it ended and sends no second notice
+                finish_schedule_run(project_id, run_id, 'failed', run_failure_reason(result.get('error')))
+            finally:
+                finish_trigger_run_refused(project_id, response_id, result)
