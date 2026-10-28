@@ -34,12 +34,12 @@ def delivery_of(**overrides):
 
 # --- export
 
-def test_export_writes_the_conversation_mode_without_the_private_chat_target(env):
+def test_export_writes_the_delivery_target_of_a_conversation_schedule(env):
     seed(env, delivery_mode='conversation', delivery_conversation_uuid=CHAT, delivery_participant_id=5)
     delivery = exported_items(env)[0]['delivery']
     assert list(delivery) == DELIVERY_KEYS
     assert delivery == {
-        'mode': 'conversation', 'conversation_uuid': None, 'participant_id': None, 'include_history': False,
+        'mode': 'conversation', 'conversation_uuid': str(CHAT), 'participant_id': 5, 'include_history': False,
     }
 
 
@@ -88,6 +88,18 @@ def test_import_keeps_the_stored_chat_delivery_of_an_updated_schedule_and_says_s
     report = env.import_items(item(key=str(key), delivery=delivery_of()))
     (row,) = env.rows()
     (entry,) = report['updated']
+    assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
+        'conversation', CHAT, 5,
+    )
+    assert entry['note'] == 'The target chat is not imported; the schedule keeps its stored delivery'
+
+
+def test_import_of_an_unchanged_export_keeps_the_stored_chat_delivery_and_says_so(env):
+    seed(env, delivery_mode='conversation', delivery_conversation_uuid=CHAT, delivery_participant_id=5)
+    report = env.import_text(env.module.export_schedules_yaml(PROJECT_ID, None))
+    (row,) = env.rows()
+    (entry,) = report['updated']
+    assert report['failed'] == []
     assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
         'conversation', CHAT, 5,
     )
