@@ -2,6 +2,19 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.9 — Schedule delivery columns
+# Run for every existing project schema {pid} (e.g. p_1, p_2, …), after the R-2.0.8 block below.
+# New projects get the columns via create_all() on project creation.
+# Idempotent: every statement is ADD COLUMN IF NOT EXISTS. Existing rows read as run_history with no target chat.
+# Revert by hand: ALTER TABLE {pid}.entity_schedules DROP COLUMN IF EXISTS delivery_mode, DROP COLUMN IF EXISTS
+# delivery_conversation_uuid, DROP COLUMN IF EXISTS delivery_participant_id
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(16) NOT NULL DEFAULT 'run_history';
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_conversation_uuid UUID NULL;
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_participant_id INTEGER NULL;
+# Index for the list filter by delivery chat: the chat badge request runs on every chat open.
+# Revert by hand: DROP INDEX IF EXISTS {pid}.ix_entity_schedules_delivery_conversation_uuid
+CREATE INDEX IF NOT EXISTS ix_entity_schedules_delivery_conversation_uuid ON {pid}.entity_schedules (delivery_conversation_uuid);
+
 # R-2.0.8 — Schedules (EL-7011)
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
 # New projects get the tables via create_all() on project creation.

@@ -1,6 +1,7 @@
 """Pydantic models for the schedule list query arguments and rows."""
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -24,6 +25,9 @@ class ScheduleListFilters(BaseModel):
     entity_id: DbId | None = Field(None, description='Only schedules of this agent or pipeline', examples=[12])
     version_id: DbId | None = Field(None, description='Only schedules that run this version', examples=[31])
     search: str | None = Field(None, description='Match on schedule or entity name', examples=['daily report'])
+    delivery_conversation_uuid: UUID | None = Field(
+        None, description='Only schedules that deliver runs into this chat',
+        examples=['3f1c9a0e-5b7d-4c2a-8e6f-0b1d3c5a7e9f'])
     limit: int = Field(default=20, ge=1, le=100, description='Rows per page', examples=[20])
     offset: int = Field(default=0, ge=0, le=2**31 - 1, description='Rows to skip',  # the database integer range
                         examples=[0])
