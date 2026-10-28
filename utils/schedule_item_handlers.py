@@ -11,9 +11,9 @@ from tools import auth, db
 from ..models.entity_schedule import EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
+    DbId,
     ScheduleCreate,
     ScheduleDetails,
-    ScheduleEdit,
     ScheduleRiskCheck,
     ScheduleUpdate,
 )
@@ -48,10 +48,7 @@ RUN_FIELDS = (
     "version_id",
 )
 RUN_NOT_FOUND = refusal("run_not_found", "Run not found", 404)
-ENABLED_NOT_EDITABLE = refusal(
-    INVALID_INPUT, "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
-    field="enabled",
-)
+ENABLED_NOT_BOOLEAN = refusal(INVALID_INPUT, "enabled must be true or false", field="enabled")
 LIMIT_REACHED = "schedule_limit_reached"
 RUN_WITHOUT_ASKING = "run_without_asking"
 # The human texts of the save refusals (owner CR 2026-10-21, risk review)
@@ -212,14 +209,13 @@ def _validation_response(error: ValidationError) -> tuple[dict, int]:
     return refusal(INVALID_INPUT, first["msg"].removeprefix("Value error, "), field=field)
 
 
-def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | ScheduleEdit, reviewed: bool = False,
-                  module=None):
-    """Save an edit, a pause or a resume through the service and answer the details.
+def _apply_update(project_id: int, schedule_id: DbId, body: ScheduleUpdate, reviewed: bool = False, module=None):
+    """Save an edit, a pause or a resume through the service in one commit and answer the details.
 
     `reviewed` runs the risk review of an edit first and adds the governance notice; a pause or a resume
-    skips both. The service checks
-    a resume (a version is needed, the project cap), computes the next run, and marks the audit span
-    and tells the owner when an admin changes another owner's schedule.
+    alone skips both. The service checks a resume (a version is needed, the project cap) before it
+    changes anything, computes the next run, and marks the audit span and tells the owner when an
+    admin changes another owner's schedule.
     """
     scope = schedule_scope(project_id)
     with db.get_session(project_id) as session:
@@ -350,24 +346,28 @@ class ScheduleItemHandlers:
 
     @auth.decorators.check_api(schedule_check_spec("update"))
     def _edit(self, project_id: int, schedule_id: int):
-        """Change the fields of a schedule; the owner never changes. Pause and resume have their own actions.
+        """Change the fields of a schedule; the owner never changes.
 
-        The risk review runs on the resulting version, name and rule, as for a create.
+        `enabled` false or true pauses or resumes the schedule in the same save: when the resume fails,
+        no other field is saved. The risk review runs on the resulting version, name and rule, as for a
+        create, unless the body holds only `enabled`.
         Who may call: the owner with `schedules.update`, or a schedules admin (the owner gets a notice).
-        Errors: 400 invalid field, `enabled` in the body, "run without asking" not allowed or a wrong
-        confirmed name (`field: risk_ack`); 403; 404; 409 `schedule_blocked`,
-        `risk_confirmation_required` or `risk_changed`.
+        Errors: 400 invalid field, `enabled` that is not a boolean, a resume without a version, "run
+        without asking" not allowed or a wrong confirmed name (`field: risk_ack`); 403; 404; 409
+        `schedule_blocked`, `risk_confirmation_required`, `risk_changed` or the project limit of active
+        schedules.
         """
         raw = request.get_json(silent=True)
-        if isinstance(raw, dict) and "enabled" in raw:
-            return ENABLED_NOT_EDITABLE
-        body, error = _parse_body(ScheduleEdit)
+        if isinstance(raw, dict) and "enabled" in raw and not isinstance(raw["enabled"], bool):
+            return ENABLED_NOT_BOOLEAN
+        body, error = _parse_body(ScheduleUpdate)
         if error:
             return error
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
-        return _apply_update(project_id, schedule_id, body, reviewed=True, module=self.module)
+        return _apply_update(
+            project_id, schedule_id, body, reviewed=body.model_fields_set != {"enabled"}, module=self.module)
 
     @auth.decorators.check_api(schedule_check_spec("delete"))
     def _delete(self, project_id: int, schedule_id: int):

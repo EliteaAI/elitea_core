@@ -104,7 +104,9 @@ def test_enforce_injects_the_toolkits_with_no_token_and_looks_none_up(loaded):
     tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp"])
     assert len(tools) == len(loaded.it.MCP_ENDPOINT_CONFIGS)
     assert all(tool["settings"]["headers"] == {} for tool in tools)
-    assert all("/app/5/mcp/" in tool["settings"]["url"] for tool in tools)
+    # the schedule group follows the active project (1); every other group is served from the private project (5)
+    assert all(("/app/1/mcp/elitea_core/schedules" if "schedules" in tool["settings"]["url"] else "/app/5/mcp/")
+               in tool["settings"]["url"] for tool in tools)
     assert loaded.auth.calls == []
 
 

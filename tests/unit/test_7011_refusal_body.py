@@ -91,7 +91,7 @@ def test_7011_r8_1_resume_past_the_project_cap_is_409_with_code_and_error(harnes
     ('post', agent_body(entity_type='pipeline'), 'entity_type'),
     ('post', agent_body(prompt='Say {% if x %}a{% endif %}'), 'prompt'),
     ('post', agent_body(approval_rule='always'), 'approval_rule'),
-    ('put', {'name': 'x', 'enabled': True}, 'enabled'),
+    ('put', {'name': 'x', 'enabled': 'yes'}, 'enabled'),
 ])
 def test_7011_r8_2_one_wrong_input_is_400_with_code_error_and_field(harness, verb, body, field):
     schedule_id = harness.seed() if verb == 'put' else None

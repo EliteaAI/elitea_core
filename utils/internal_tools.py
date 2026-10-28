@@ -46,6 +46,7 @@ MCP_ENDPOINT_CONFIGS = [
     {"suffix": "elitea_core/chat", "name": "Elitea Chat"},
     {"suffix": "elitea_core/toolkits", "name": "Elitea Toolkits"},
     {"suffix": "elitea_core/analytics", "name": "Elitea Analytics"},
+    {"suffix": "elitea_core/schedules", "name": "Elitea Schedules"},
     {"suffix": "secrets", "name": "Secrets"},
     {"suffix": "configurations", "name": "Configurations"},
     {"suffix": "artifacts", "name": "Artifacts"},
@@ -59,8 +60,9 @@ MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS = [
 MCP_CURRENT_PROJECT_SUFFIXES = {
     "elitea_core/project_context",
     "elitea_core/skills",
+    "elitea_core/schedules",
 }
-# The builder entity groups a conversation may act on: agents/pipelines, skills, project context.
+# The entity groups a conversation may act on: agents/pipelines, skills, project context, schedules.
 # Their `project_id` tool argument is clamped to the scope project carried on the MCP session.
 MCP_PROJECT_SCOPED_SUFFIXES = MCP_CURRENT_PROJECT_SUFFIXES | {
     "elitea_core/applications",

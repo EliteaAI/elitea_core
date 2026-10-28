@@ -109,7 +109,7 @@ class ScheduleRiskCheck(BaseModel):
     entity_type: EntityType
     application_id: ApplicationId
     version_id: VersionId
-    schedule_id: int | None = Field(
+    schedule_id: DbId | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
 
@@ -133,6 +133,8 @@ class ScheduleDelivery(BaseModel):
 
 
 DELIVERY_TEXT = 'Where each run posts its answer; on an edit, absent keeps the stored delivery'
+DELIVERY_EXAMPLE = {'mode': 'conversation', 'conversation_uuid': '3f1c9a0e-5b7d-4c2a-8e6f-0b1d3c5a7e9f',
+                    'participant_id': 5}
 
 
 class ScheduleVariable(BaseModel):
@@ -159,14 +161,18 @@ class ScheduleCreate(ScheduleTiming):
     variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
     enabled: bool = Field(True, description='False saves the schedule paused', examples=[True])
     approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
-    delivery: ScheduleDelivery | None = Field(None, description=DELIVERY_TEXT)
+    delivery: ScheduleDelivery | None = Field(None, description=DELIVERY_TEXT, examples=[DELIVERY_EXAMPLE])
     risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
                                      examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
 
 
 class ScheduleEdit(BaseModel):
-    """The PUT body: no owner, entity or `enabled` field; extra `created_by` and `principal` are dropped (R2.2)."""
-    model_config = ConfigDict(json_schema_extra={'examples': [{'cron': '30 8 * * *'}, {'name': NAME_EXAMPLE}]})
+    """The PUT body: no owner or entity field; extra `created_by` and `principal` are dropped.
+
+    `enabled` pauses (false) or resumes (true) the schedule in the same save as the other fields.
+    """
+    model_config = ConfigDict(json_schema_extra={
+        'examples': [{'cron': '30 8 * * *'}, {'name': NAME_EXAMPLE}, {'enabled': False}]})
 
     name: str | None = Field(None, min_length=1, max_length=NAME_MAX, description=NAME_TEXT, examples=[NAME_EXAMPLE])
     description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
@@ -179,7 +185,8 @@ class ScheduleEdit(BaseModel):
     timezone: str | None = Field(None, description=TIMEZONE_TEXT, examples=['Europe/Warsaw'])
     expires_at: date | None = Field(None, description=EXPIRES_TEXT, examples=['2026-12-31'])
     approval_rule: ApprovalRule | None = Field(None, description=APPROVAL_TEXT, examples=['run_without_asking'])
-    delivery: ScheduleDelivery | None = Field(None, description=DELIVERY_TEXT)
+    delivery: ScheduleDelivery | None = Field(None, description=DELIVERY_TEXT, examples=[DELIVERY_EXAMPLE])
+    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
     risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
                                      examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
 
@@ -195,10 +202,7 @@ class ScheduleEdit(BaseModel):
 
 
 class ScheduleUpdate(ScheduleEdit):
-    """What the service applies: an edit, or `enabled` from the pause and resume actions and the file import."""
-    model_config = ConfigDict(json_schema_extra={'examples': [{'enabled': False}, {'cron': '30 8 * * *'}]})
-
-    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
+    """What the service applies: an edit, or `enabled` alone from the pause and resume actions and the file import."""
 
 
 class ScheduleOwner(BaseModel):
