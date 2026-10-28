@@ -144,6 +144,7 @@ def harness(isolated_sys_modules):
     _module(f"{PACKAGE}.utils.pipeline_utils", from_str_to_yaml=lambda s: s)
     _module(
         f"{PACKAGE}.utils.application_tools",
+        delete_toolkit=None,
         toolkit_change_relation=None,
         ToolkitChangeRelationError=type("ToolkitChangeRelationError", (Exception,), {}),
         expand_toolkit_settings=expand_toolkit_settings,
