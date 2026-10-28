@@ -210,7 +210,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
                                           owner_id=check.owner_id)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule; the text stays fixed
         log.exception('Schedule %s run %s: cannot prepare the governed run', schedule_id, run_id)
-        finish_trigger_run_with_error(project_id, response_id, START_FAILED)
+        finish_trigger_run_with_error(project_id, response_id, START_FAILED, source)
         fail_schedule_run(project_id, run_id, START_FAILED)
         return
     try:
@@ -223,14 +223,14 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
         log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
-        finish_trigger_run_with_error(project_id, response_id, error)
+        finish_trigger_run_with_error(project_id, response_id, error, source)
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(error.scope))
     except Exception as error:  # noqa: BLE001 -- the run message ends with the reason (R2.5)
-        finish_trigger_run_with_error(project_id, response_id, error)
+        finish_trigger_run_with_error(project_id, response_id, error, source)
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)
     else:
         if is_trigger_refusal(result):  # governance refused it (C-1009): it ends now, readably, and the owner is told
             try:  # ended first, so the chat stream-end hook finds it ended and sends no second notice
                 finish_schedule_run(project_id, run_id, 'failed', run_failure_reason(result.get('error')))
             finally:
-                finish_trigger_run_refused(project_id, response_id, result)
+                finish_trigger_run_refused(project_id, response_id, result, source)

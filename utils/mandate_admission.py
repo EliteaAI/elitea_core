@@ -17,6 +17,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Optional
 
 from pylon.core.tools import log
@@ -24,7 +25,9 @@ from tools import db, this
 
 from ..models.pd.admission import AdmissionRequest
 from .governance import is_auditing, is_governed
-from .trigger_principal import TriggerPrincipal, resolve_trigger_principal
+from .trigger_principal import (
+    OPERATION_OF, TriggerPrincipal, latest_mandates, principal_of, resolve_trigger_principal,
+)
 
 # Refusals that say "try again", not "no": a webhook sender retries a 5xx and never a 403
 UNAVAILABLE_CODES = frozenset({"DEPENDENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE"})
@@ -144,26 +147,38 @@ def schedule_trigger_ref(schedule_id) -> str:
     return f"schedule:entity:{schedule_id}"
 
 
-def _covering_mandate(project_id, version, owner_id) -> Optional[TriggerPrincipal]:
-    """The mandate principal that covers an owner schedule's run, or ``None``: the version's latest mandate, made for
-    the schedule's own owner. A schedule is its owner's, so another person's mandate never lends its authority to it.
-    One indexed read, the one the legacy scheduler does."""
+def _covering_mandate(project_id, version, owner_id):
+    """The latest mandate row of the version when it was made for the schedule's own owner, else ``None``. A schedule
+    is its owner's, so another person's mandate never lends its authority to it. One indexed read, the one the legacy
+    scheduler does."""
     with db.get_session(project_id) as session:
-        principal = resolve_trigger_principal(
-            session, trigger_kind="pipeline_schedule", project_id=project_id, version_id=version.id)
-    if principal.kind != "mandate" or principal.owner_user_id is None or principal.owner_user_id != owner_id:
+        mandate = latest_mandates(session, project_id, [version.id]).get(version.id)
+    if mandate is None or mandate.owner_user_id is None or mandate.owner_user_id != owner_id:
         return None
-    return principal
+    return mandate
 
 
-def _audit_only_refusal(principal: Optional[TriggerPrincipal]) -> Optional[str]:
-    """What enforce would refuse a run for, as far as the covering mandate's latest revision row says (its state):
-    no mandate, or one that is expired, suspended or revoked. ``None``: the mandate is active."""
-    if principal is None:
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _audit_only_refusal(mandate) -> Optional[str]:
+    """What enforce would refuse a run for, as far as the covering mandate's row says, in the order ``_admit_mandate``
+    checks it: no mandate, past its end date or expired, suspended or revoked, or not allowed for schedules. ``None``:
+    the row would let the run on (the rest of a mandate admission is not rehearsed)."""
+    if mandate is None:
         return "MANDATE_REQUIRED"
-    if principal.mandate_state == "expired":
+    valid_until = mandate.valid_until
+    if valid_until is not None and valid_until.tzinfo is None:
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    overdue = mandate.state in ("active", "suspended") and valid_until is not None and valid_until <= _now()
+    if overdue or mandate.state == "expired":
         return "MANDATE_EXPIRED"
-    return None if principal.mandate_state == "active" else "MANDATE_INACTIVE"
+    if mandate.state != "active":
+        return "MANDATE_INACTIVE"
+    if OPERATION_OF["pipeline_schedule"] not in (mandate.allowed_operations or []):
+        return "DENIED_OPERATION"
+    return None
 
 
 def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
@@ -178,9 +193,10 @@ def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
     """
     module = this.module
     if is_governed(module):
-        principal = _covering_mandate(project_id, version, owner_id)
-        if principal is None:
+        mandate = _covering_mandate(project_id, version, owner_id)
+        if mandate is None:
             return {"unattended": True}
+        principal = principal_of("pipeline_schedule", mandate)
         request = mandate_admission_request(
             project_id=project_id, version_row=version, principal=principal, entry_point="schedule",
             trigger_ref=schedule_trigger_ref(schedule_id))

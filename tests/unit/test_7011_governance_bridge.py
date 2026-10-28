@@ -7,6 +7,7 @@ admits the dispatch as the real one does), and the real ``predict_sio`` is lifte
 """
 import sys
 import types
+from datetime import timedelta
 from unittest import mock
 
 import pytest
@@ -16,7 +17,7 @@ from unit.test_6947_mandate_triggers import (  # noqa: F401  pylint: disable=W06
     source_of, tick, wire,
 )
 from fixtures.helpers import load_module_with_stubs  # noqa: E402  pylint: disable=C0413
-from fixtures.mandate_env import OWNER  # noqa: E402  pylint: disable=C0413
+from fixtures.mandate_env import NOW, OWNER  # noqa: E402  pylint: disable=C0413
 
 PROJECT_ID, SCHEDULE_ID, RUN_ID = 1, 41, 900
 TRIGGER_REF = f"schedule:entity:{SCHEDULE_ID}"
@@ -111,8 +112,8 @@ def run(ns, env, starter, monkeypatch):
 
 def counted(ns, monkeypatch):
     calls = []
-    real = ns.mandate_admission.resolve_trigger_principal
-    monkeypatch.setattr(ns.mandate_admission, "resolve_trigger_principal",
+    real = ns.mandate_admission.latest_mandates
+    monkeypatch.setattr(ns.mandate_admission, "latest_mandates",
                         lambda *args, **kwargs: (calls.append(kwargs), real(*args, **kwargs))[1])
     return calls
 
@@ -168,6 +169,14 @@ def test_enforce_a_run_no_mandate_of_its_owner_covers_is_refused_mandate_require
     assert denied["reason_code"] == "MANDATE_REQUIRED" and denied["decision"] == "deny"
 
 
+@pytest.mark.parametrize("entity_type, label", [("agent", "Agent run"), ("pipeline", "Pipeline run")])
+def test_a_refused_run_says_agent_or_pipeline_in_its_chat(ns, env, run, entity_type, label):
+    arm(ns, env)
+    run(entity_type=entity_type)
+    [(_, payload)] = ns.state.events
+    assert payload["content"] == f"{label} was not started: {ns.adm.MESSAGES['MANDATE_REQUIRED']}"
+
+
 @pytest.mark.parametrize("change, code", [
     (lambda ns, env, agent: set_mandate(env, ns, agent.mandate, state="revoked"), "MANDATE_INACTIVE"),
     (lambda ns, env, agent: set_mandate(env, ns, agent.mandate, allowed_operations=["run:webhook"]),
@@ -210,7 +219,7 @@ def test_a_failing_run_writer_still_ends_the_chat_message(ns, env, run, starter,
 
 def test_enforce_a_failed_principal_read_fails_the_run_with_fixed_text_and_sends_nothing(ns, env, run, monkeypatch):
     arm(ns, env)
-    monkeypatch.setattr(ns.mandate_admission, "resolve_trigger_principal",
+    monkeypatch.setattr(ns.mandate_admission, "latest_mandates",
                         mock.Mock(side_effect=RuntimeError("SELECT secret FROM mandates")))
     writes = run()
     assert writes == [("fail", PROJECT_ID, RUN_ID, "the run could not start")] and ns.state.predicts == []
@@ -271,6 +280,19 @@ def test_audit_only_a_mandate_enforce_would_refuse_by_its_state_leaves_its_would
         (code, True, TRIGGER_REF)]
 
 
+@pytest.mark.parametrize("values, code", [
+    ({"valid_until": NOW - timedelta(seconds=1)}, "MANDATE_EXPIRED"),   # past its end date, still marked active
+    ({"allowed_operations": ["run:webhook"]}, "DENIED_OPERATION"),       # not allowed for schedules
+])
+def test_audit_only_a_mandate_enforce_would_refuse_by_date_or_operation_leaves_its_row(ns, env, agent, run, values,
+                                                                                         code):
+    arm(ns, env, governed=False, audit=True)
+    set_mandate(env, ns, agent.mandate, **values)
+    run()
+    assert [(row["reason_code"], row["would_deny"], row["caller_ref"]) for row in env.denied] == [
+        (code, True, TRIGGER_REF)]
+
+
 def test_audit_only_another_persons_mandate_does_not_cover_the_run(ns, env, agent, run):
     arm(ns, env, governed=False, audit=True)
     run(owner=CREATOR)
@@ -279,7 +301,7 @@ def test_audit_only_another_persons_mandate_does_not_cover_the_run(ns, env, agen
 
 def test_audit_only_a_failure_of_the_evaluation_never_stops_the_run(ns, env, run, monkeypatch):
     arm(ns, env, governed=False, audit=True)
-    monkeypatch.setattr(ns.mandate_admission, "resolve_trigger_principal", mock.Mock(side_effect=RuntimeError("db")))
+    monkeypatch.setattr(ns.mandate_admission, "latest_mandates", mock.Mock(side_effect=RuntimeError("db")))
     writes = run()
     assert writes == [] and len(ns.state.predicts) == 1 and env.denied == []
 

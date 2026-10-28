@@ -192,9 +192,14 @@ def create_trigger_run_conversation(
         return str(conversation.uuid), pipeline_participant.id, str(response_msg_group.uuid)
 
 
-def finish_trigger_run_with_error(project_id: int, response_message_id: str, error) -> None:
+def run_label(source: str = "pipeline") -> str:
+    """What a triggered run is called in its chat: an agent schedule's run is not a pipeline run."""
+    return "Agent run" if source == "agent" else "Pipeline run"
+
+
+def finish_trigger_run_with_error(project_id: int, response_message_id: str, error, source: str = "pipeline") -> None:
     """End a triggered run's placeholder message with the dispatch error, so History shows why it failed."""
-    message = f"Pipeline run could not start: {error}"
+    message = f"{run_label(source)} could not start: {error}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
@@ -215,9 +220,11 @@ def is_trigger_refusal(result) -> bool:
     return isinstance(result, dict) and isinstance(result.get("code"), str) and "task_id" not in result
 
 
-def finish_trigger_run_refused(project_id: int, response_message_id: str, refusal: dict) -> None:
+def finish_trigger_run_refused(
+    project_id: int, response_message_id: str, refusal: dict, source: str = "pipeline",
+) -> None:
     """End a refused run's placeholder with the readable refusal (fixed text, no ids), so History shows why."""
-    message = f"Pipeline run was not started: {refusal.get('error')}"
+    message = f"{run_label(source)} was not started: {refusal.get('error')}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
