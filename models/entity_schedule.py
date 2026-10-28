@@ -91,6 +91,10 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     )
     delivery_conversation_uuid: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     delivery_participant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # How many earlier chat messages a delivered run sends to the model; 0 sends none
+    delivery_include_history: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text('0')
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

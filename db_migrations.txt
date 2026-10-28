@@ -2,6 +2,13 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.11 — Schedule chat history column
+# Run for every existing project schema {pid} (e.g. p_1, p_2, …), after the R-2.0.10 block below.
+# New projects get the column via create_all() on project creation.
+# Idempotent: ADD COLUMN IF NOT EXISTS. Existing schedules read 0 and send no earlier chat messages.
+# Revert by hand: ALTER TABLE {pid}.entity_schedules DROP COLUMN IF EXISTS delivery_include_history
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS delivery_include_history INTEGER NOT NULL DEFAULT 0;
+
 # R-2.0.10 — Schedule run chat link columns
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …), after the R-2.0.9 block below.
 # New projects get the columns via create_all() on project creation.
