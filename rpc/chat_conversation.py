@@ -5,6 +5,7 @@ from sqlalchemy import desc, asc, Integer, or_, func
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
+from ..models.folder import ConversationFolder
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails
@@ -626,6 +627,72 @@ class RPC:
             session.commit()
 
             return {'success': True}
+
+    @web.rpc("chat_delete_conversations_rpc", "delete_conversations_rpc")
+    def delete_conversations_rpc(
+        self,
+        project_id: int,
+        conversation_ids: list,
+        folder_owner_id: int = None,
+    ) -> dict:
+        """
+        Bulk delete of the given conversations (project data delete, #7242).
+
+        The caller resolves which conversations it may delete. Each one is committed
+        on its own so a failure does not abort the rest. Folders left empty that held
+        a deleted conversation or belong to folder_owner_id are removed afterwards.
+        """
+        deleted, failed = 0, 0
+        folder_ids = set()
+        mc = None
+        try:
+            mc = MinioClient.from_project_id(project_id)
+        except Exception:
+            log.exception("delete_conversations_rpc: no storage client for project %s", project_id)
+
+        with db.get_session(project_id) as session:
+            for conversation_id in conversation_ids:
+                try:
+                    conversation = session.query(Conversation).filter(
+                        Conversation.id == conversation_id,
+                    ).first()
+                    if not conversation:
+                        continue
+                    if conversation.folder_id:
+                        folder_ids.add(conversation.folder_id)
+                    if mc is not None:
+                        try:
+                            mc.remove_bucket(f'conversation_{conversation.uuid}')
+                        except Exception:
+                            pass
+                    session.delete(conversation)
+                    session.commit()
+                    deleted += 1
+                except Exception:
+                    session.rollback()
+                    failed += 1
+                    log.exception(
+                        "delete_conversations_rpc: failed to delete conversation %s of project %s",
+                        conversation_id, project_id,
+                    )
+
+            folders_deleted = 0
+            try:
+                folder_filter = ConversationFolder.id.in_(folder_ids)
+                if folder_owner_id:
+                    folder_filter = or_(folder_filter, ConversationFolder.owner_id == folder_owner_id)
+                has_chats = session.query(Conversation.id).filter(
+                    Conversation.folder_id == ConversationFolder.id,
+                ).exists()
+                folders_deleted = session.query(ConversationFolder).filter(
+                    folder_filter, ~has_chats,
+                ).delete(synchronize_session=False)
+                session.commit()
+            except Exception:
+                session.rollback()
+                log.exception("delete_conversations_rpc: failed to delete empty folders of project %s", project_id)
+
+        return {'deleted': deleted, 'failed': failed, 'folders_deleted': folders_deleted}
 
     @web.rpc("chat_list_messages_rpc", "list_messages_rpc")
     def list_messages_rpc(

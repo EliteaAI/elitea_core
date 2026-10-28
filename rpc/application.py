@@ -22,6 +22,8 @@ from ..models.pd.search import MultipleApplicationSearchModel
 from ..models.pd.tool import ToolDetails, ToolImportModel, ToolValidatedDetails
 from ..models.pd.version import ApplicationVersionDetailModel, ApplicationVersionCloneModel
 from ..utils.application_tools import (
+    delete_toolkit,
+    toolkit_kind,
     IndexMetaLockTimeoutError,
     IndexRunInProgressError,
     toolkits_listing,
@@ -48,7 +50,10 @@ from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
-from ..utils.skill_utils import detach_skills_for_entity_versions
+from ..utils.skill_utils import (
+    detach_skills_for_entity_versions, delete_skill, SkillNotFoundError, SkillPublishedError,
+)
+from ..models.skill import Skill, SkillVersion
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
     get_public_base_url, get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
     load_context_settings_from_conversation, user_input_preview
@@ -1176,40 +1181,172 @@ class RPC:
     def application_delete(self, project_id: int, application_id: int) -> bool:
         with db.get_session(project_id) as session:
             if application := session.query(Application).get(application_id):
-                # Block deletion if any version is published or embedded
-                blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
-                for ver in application.versions:
-                    if ver.status in blocked_statuses:
-                        return {
-                            'error': 'Cannot delete application with published or '
-                                     'embedded versions. Unpublish first.',
-                            'blocked_version_id': ver.id,
-                            'blocked_status': ver.status,
-                        }
-
-                versions = list(application.versions)
-                default_version = application.get_default_version()
-                agent_type = default_version.agent_type if default_version else None
-
-                detach_skills_for_entity_versions(
-                    session, [ver.id for ver in versions]
-                )
-
-                application_data = ApplicationDetailModel.from_orm(application)
-                application_data = application_data.model_dump()
-                application_data['project_id'] = project_id
-                if application_data.get('version_details') is None and agent_type:
-                    application_data['version_details'] = {'agent_type': agent_type}
-
-                session.delete(application)
-                session.commit()
-
-                self.context.event_manager.fire_event(
-                    ApplicationEvents.application_deleted, application_data
-                )
-
-                return True
+                return self._delete_application(session, project_id, application)
         return False
+
+    def _delete_application(self, session, project_id: int, application: Application):
+        """Delete one application and commit: True, or an error dict when a version is published or embedded"""
+        blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
+        for ver in application.versions:
+            if ver.status in blocked_statuses:
+                return {
+                    'error': 'Cannot delete application with published or '
+                             'embedded versions. Unpublish first.',
+                    'blocked_version_id': ver.id,
+                    'blocked_status': ver.status,
+                }
+
+        versions = list(application.versions)
+        default_version = application.get_default_version()
+        agent_type = default_version.agent_type if default_version else None
+
+        detach_skills_for_entity_versions(
+            session, [ver.id for ver in versions]
+        )
+
+        application_data = ApplicationDetailModel.from_orm(application)
+        application_data = application_data.model_dump()
+        application_data['project_id'] = project_id
+        if application_data.get('version_details') is None and agent_type:
+            application_data['version_details'] = {'agent_type': agent_type}
+
+        session.delete(application)
+        session.commit()
+
+        self.context.event_manager.fire_event(
+            ApplicationEvents.application_deleted, application_data
+        )
+
+        return True
+
+    @web.rpc("applications_delete_by_kind")
+    def applications_delete_by_kind(self, project_id: int, kind: str) -> dict:
+        """Bulk project data delete (#7242): every agent or every pipeline of the project.
+
+        kind is 'agent' or 'pipeline'; an application with any pipeline version is a pipeline
+        (the agents_type rule of the application list). Published or embedded ones are skipped.
+        """
+        deleted, failed, skipped = 0, 0, 0
+        with db.get_session(project_id) as session:
+            for application_id in self._application_ids_of_kind(session, kind):
+                try:
+                    application = session.query(Application).get(application_id)
+                    if application is None:
+                        continue
+                    result = self._delete_application(session, project_id, application)
+                    if result is True:
+                        deleted += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    session.rollback()
+                    failed += 1
+                    log.exception(
+                        "applications_delete_by_kind: failed to delete application %s of project %s",
+                        application_id, project_id,
+                    )
+        return {'deleted': deleted, 'failed': failed, 'skipped': skipped}
+
+    @staticmethod
+    def _application_ids_of_kind(session, kind: str) -> list:
+        is_pipeline = Application.versions.any(ApplicationVersion.agent_type == AgentTypes.pipeline.value)
+        query = session.query(Application.id).filter(
+            is_pipeline if kind == 'pipeline' else ~is_pipeline
+        )
+        return [row[0] for row in query.all()]
+
+    @staticmethod
+    def _blocked_application_ids(session) -> set:
+        blocked_statuses = (PublishStatus.published, PublishStatus.embedded)
+        return {
+            row[0] for row in session.query(ApplicationVersion.application_id).filter(
+                ApplicationVersion.status.in_(blocked_statuses)
+            ).distinct().all()
+        }
+
+    @web.rpc("elitea_core_project_data_counts")
+    def project_data_counts(self, project_id: int) -> dict:
+        """Counts for the bulk project data delete (#7242); blocked = published or embedded, to be skipped"""
+        with db.get_session(project_id) as session:
+            blocked_apps = self._blocked_application_ids(session)
+            counts = {}
+            for type_name, kind in (('agents', 'agent'), ('pipelines', 'pipeline')):
+                ids = self._application_ids_of_kind(session, kind)
+                counts[type_name] = {
+                    'count': len(ids),
+                    'blocked': sum(1 for app_id in ids if app_id in blocked_apps),
+                }
+
+            skill_ids = [row[0] for row in session.query(Skill.id).all()]
+            blocked_skills = {
+                row[0] for row in session.query(SkillVersion.skill_id).filter(
+                    SkillVersion.status.in_((PublishStatus.published, PublishStatus.embedded))
+                ).distinct().all()
+            }
+            counts['skills'] = {
+                'count': len(skill_ids),
+                'blocked': sum(1 for skill_id in skill_ids if skill_id in blocked_skills),
+            }
+
+            toolkits, mcps = 0, 0
+            for tool_type, meta in session.query(EliteATool.type, EliteATool.meta).all():
+                kind = toolkit_kind(tool_type, meta)
+                if kind == 'mcp':
+                    mcps += 1
+                elif kind == 'toolkit':
+                    toolkits += 1
+            counts['toolkits'] = {'count': toolkits, 'blocked': 0}
+            counts['mcps'] = {'count': mcps, 'blocked': 0}
+        return counts
+
+    @web.rpc("skills_delete_all")
+    def skills_delete_all(self, project_id: int) -> dict:
+        """Bulk project data delete (#7242): every skill of the project; published or embedded ones are skipped"""
+        deleted, failed, skipped = 0, 0, 0
+        with db.get_session(project_id) as session:
+            skill_ids = [row[0] for row in session.query(Skill.id).all()]
+        for skill_id in skill_ids:
+            try:
+                delete_skill(project_id, skill_id)
+                deleted += 1
+            except SkillPublishedError:
+                skipped += 1
+            except SkillNotFoundError:
+                continue
+            except Exception:
+                failed += 1
+                log.exception("skills_delete_all: failed to delete skill %s of project %s", skill_id, project_id)
+        return {'deleted': deleted, 'failed': failed, 'skipped': skipped}
+
+    @web.rpc("toolkits_delete_by_kind")
+    def toolkits_delete_by_kind(self, project_id: int, kind: str) -> dict:
+        """Bulk project data delete (#7242): every toolkit ('toolkit') or MCP server ('mcp') of the project.
+
+        Agent-as-tool entries are left to their agent. Copies from other projects are deleted too.
+        """
+        deleted, failed = 0, 0
+        with db.get_session(project_id) as session:
+            tool_ids = [
+                tool_id for tool_id, tool_type, meta in
+                session.query(EliteATool.id, EliteATool.type, EliteATool.meta).all()
+                if toolkit_kind(tool_type, meta) == kind
+            ]
+            for tool_id in tool_ids:
+                try:
+                    tool = session.query(EliteATool).get(tool_id)
+                    if tool is None:
+                        continue
+                    toolkit_data = delete_toolkit(session, project_id, tool)
+                    deleted += 1
+                except Exception:
+                    session.rollback()
+                    failed += 1
+                    log.exception(
+                        "toolkits_delete_by_kind: failed to delete toolkit %s of project %s", tool_id, project_id,
+                    )
+                    continue
+                self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted, toolkit_data)
+        return {'deleted': deleted, 'failed': failed, 'skipped': 0}
 
     @web.rpc("applications_find_existing_fork", "find_existing_fork")
     def applications_find_existing_fork(
