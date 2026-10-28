@@ -43,6 +43,8 @@ class FakeQuery:
         return SimpleNamespace(id=TARGET_CHAT_ID if self.model == "Conversation" else GROUP_ID)
 
     def one_or_none(self):
+        if self.model == "Conversation" and not self.world.chat_exists:
+            return None
         return self.one()
 
     def first(self):
@@ -73,6 +75,8 @@ class World:
     def __init__(self, include_history):
         self.calls = []
         self.groups = []
+        self.chat_exists = True
+        self.owner_in_chat = True
         schedule = SimpleNamespace(
             id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
             created_by=OWNER, prompt="Daily summary", variables=[], entity_type="agent", run_mode=None,
@@ -128,7 +132,8 @@ def make_world(monkeypatch):
             "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
                                        "EntityScheduleRun": type("EntityScheduleRun", (), {})},
             "utils.chat_history": {"generate_chat_history": history},
-            "utils.conversation_access": {"is_conversation_participant": lambda session, chat_id, user_id: True},
+            "utils.conversation_access": {
+                "is_conversation_participant": lambda session, chat_id, user_id: state.owner_in_chat},
             "utils.schedule_prerun": {"run_prerun_check": lambda *args: SimpleNamespace(ok=True, owner_id=OWNER)},
             "utils.schedule_runs": {
                 "fail_schedule_run": lambda *args: None, "block_schedule_run": lambda *args: None,
@@ -187,3 +192,25 @@ def test_history_is_read_before_the_trigger_message_is_written(make_world):
     _run(world)
     names = [call[0] for call in world.calls]
     assert names.index("read_groups") < names.index("create")
+
+
+def _chat_is_gone(world):
+    world.chat_exists = False
+
+
+def _owner_left_the_chat(world):
+    world.owner_in_chat = False
+
+
+def _participant_is_another_agent(world):
+    world.rows[("Participant", PARTICIPANT_ID)].entity_meta = {"id": AGENT_ID + 1, "project_id": PROJECT_ID}
+
+
+@pytest.mark.parametrize("break_target", [_chat_is_gone, _owner_left_the_chat, _participant_is_another_agent])
+def test_no_history_is_read_when_the_delivery_target_does_not_fit(make_world, break_target):
+    world = make_world(3)
+    world.groups = ["m1", "m2"]
+    break_target(world)
+    _run(world)
+    assert "read_groups" not in [call[0] for call in world.calls]
+    assert world.predicted()["chat_history"] == []
