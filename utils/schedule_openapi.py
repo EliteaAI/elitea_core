@@ -4,7 +4,6 @@ One entry per row of `ROUTES` in `api/v2/schedules.py`, with the same (method, U
 checks that both tables match. `Module._register_openapi` registers every entry under the
 `elitea_core/schedules` tag; only the operations of `MCP_TOOL_NAMES` are MCP tools.
 """
-import inspect
 from typing import get_args
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
@@ -12,7 +11,7 @@ from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
-from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
+from .schedule_item_handlers import ENABLED_NOT_BOOLEAN, MAX_RUNS_LIMIT, RUN_NOT_FOUND
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
 from .schedule_settings import ScheduleProjectSettings
 
@@ -252,6 +251,7 @@ def _text(what: str, who: str, errors: str) -> str:
     """A description for people: what the operation does, who may call it, the main errors."""
     return f"{what}\n\nWho may call: {who}.\n\nErrors: {errors}."
 
+
 DELIVERY_TEXT = (
     "Optional `delivery` object: `mode` is `run_history` (default) or `conversation`. Mode `conversation` "
     "needs `conversation_uuid` and `participant_id`, and each run then posts into that chat. Mode "
@@ -329,20 +329,25 @@ OPERATIONS = {
         "summary": "Edit a schedule",
         "description": _text(
             "Change the fields of a schedule; send only the fields to change. The owner never changes. "
-            "This call does not pause or resume: a body with `enabled` answers 400, use the pause and "
-            "resume actions. When an admin edits another owner's schedule, the owner gets a notice. "
+            "Send `enabled` false to pause the schedule or true to resume it, alone or with other fields, "
+            "in one save: when the resume is refused, nothing is saved. "
+            "When an admin edits another owner's schedule, the owner gets a notice. "
             "The risk review checks the resulting version, name and rule. " + RISK_REVIEW_TEXT
             + " A change back to \"Pause and ask me\" clears the recorded confirmation. "
             + DELIVERY_TEXT + " A body without `delivery` keeps the stored delivery.",
             OWNER_OR_ADMIN.format(permission="schedules.update"),
-            "400 an invalid field, `enabled` in the body, `approval_rule_not_allowed` or `risk_name_mismatch` "
-            "(`risk_ack`); 403 no permission; 404 not found; 409 `schedule_blocked`, "
-            "`risk_confirmation_required` or `risk_changed`"),
+            "400 an invalid field, `enabled` that is not true or false, a resume of a schedule without a "
+            "version, `approval_rule_not_allowed` or `risk_name_mismatch` (`risk_ack`); 403 no permission; "
+            "404 not found; 409 `schedule_blocked`, `risk_confirmation_required`, `risk_changed` or the "
+            "project limit of active schedules on a resume"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleEdit,
-        "responses": _responses(200, "The schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE[0]), 403: None, 404: None,
-            409: ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`; the body has the findings",
+        "responses": _responses(200, "The schedule details and `warnings`; `enabled` shows the new state",
+                                SAVED_EXAMPLE, {
+            400: (SAVE_BAD_INPUT[0] + "; `enabled` that is not true or false; or a resume without a version",
+                  ENABLED_NOT_BOOLEAN[0]), 403: None, 404: None,
+            409: (("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`, the body has the findings; "
+                   "or the project limit of active schedules on a resume"),
                   {**SAVE_CONFLICTS[1], "code": "schedule_blocked", "sensitive": [], "blocking": [SIGNIN_FINDING],
                    "error": "You can't save this schedule: a scheduled run cannot do what the blocking findings need"})}),
     },
@@ -540,28 +545,24 @@ OPERATIONS = {
             403: None, 503: "The settings store is unavailable"}),
     },
 }
-# The chat model reads these names; the default name (method plus the last two path segments) is the same
-# for several actions on one path.
+# The shared registry names an MCP tool after its method and the last two fixed parts of its path; the id
+# parameters do not count. The list and the read of one schedule would both be `get_elitea_core_schedules`,
+# so the read is no tool and the list serves the chat model.
 MCP_TOOL_NAMES = {
-    ("get", ""): "list_schedules",
-    ("get", ITEM): "get_schedule",
-    ("post", ""): "create_schedule",
-    ("put", ITEM): "update_schedule",
-    ("delete", ITEM): "delete_schedule",
-    ("post", f"{ITEM}/run"): "run_schedule_now",
+    ("get", ""): "get_elitea_core_schedules",
+    ("post", ""): "post_elitea_core_schedules",
+    ("put", ITEM): "put_elitea_core_schedules",
+    ("delete", ITEM): "delete_elitea_core_schedules",
+    ("post", f"{ITEM}/run"): "post_schedules_run",
 }
 OPENAPI_ENDPOINTS = [
     {"method": method, "path": f"{BASE_URL}/{tail}".rstrip("/"), **operation,
-     **({"operation_name": MCP_TOOL_NAMES[method, tail]} if (method, tail) in MCP_TOOL_NAMES else {})}
+     "mcp_tool": (method, tail) in MCP_TOOL_NAMES}
     for (method, tail), operation in OPERATIONS.items()
 ]
 
 
 def register_schedule_endpoints(registry, tag: str) -> None:
     """Register every schedule operation; the ones of `MCP_TOOL_NAMES` also as MCP tools."""
-    names_tools = "operation_name" in inspect.signature(registry.register_endpoint).parameters
     for endpoint in OPENAPI_ENDPOINTS:
-        fields = {key: value for key, value in endpoint.items() if names_tools or key != "operation_name"}
-        registry.register_endpoint(
-            plugin_name="elitea_core", tags=[tag], available_to_users=True,
-            mcp_tool="operation_name" in endpoint, **fields)
+        registry.register_endpoint(plugin_name="elitea_core", tags=[tag], available_to_users=True, **endpoint)

@@ -1,5 +1,6 @@
-"""The six schedule operations are registered as named MCP tools; every other schedule operation is not.
+"""Five schedule operations are MCP tools with unique names; every other schedule operation is not.
 
+The tool name is derived by the shared registry from the method and the last two fixed parts of the path.
 The real `utils/schedule_openapi.py` and the request models it reads are loaded; the handler modules
 and the platform around them are lenient stubs, and the registry is a recorder.
 
@@ -8,6 +9,7 @@ Run via:
 """
 import importlib.util
 import pathlib
+import re
 import sys
 import types
 
@@ -20,12 +22,11 @@ TAG = 'elitea_core/schedules'
 BASE = '/api/v2/elitea_core/schedules/<string:mode>/<int:project_id>'
 ITEM = BASE + '/<int:schedule_id>'
 TOOLS = {
-    ('get', BASE): 'list_schedules',
-    ('get', ITEM): 'get_schedule',
-    ('post', BASE): 'create_schedule',
-    ('put', ITEM): 'update_schedule',
-    ('delete', ITEM): 'delete_schedule',
-    ('post', f'{ITEM}/run'): 'run_schedule_now',
+    ('get', BASE): 'get_elitea_core_schedules',
+    ('post', BASE): 'post_elitea_core_schedules',
+    ('put', ITEM): 'put_elitea_core_schedules',
+    ('delete', ITEM): 'delete_elitea_core_schedules',
+    ('post', f'{ITEM}/run'): 'post_schedules_run',
 }
 REAL_MODULES = (
     'utils/constants.py', 'models/pd/entity_schedule.py', 'models/pd/schedule_run.py',
@@ -69,45 +70,71 @@ def openapi(monkeypatch):
 
 
 class Registry:
-    """Records what `register_endpoint` receives; `named` makes it accept `operation_name` like a newer shared plugin."""
+    """Records what `register_endpoint` receives; it takes no `operation_name`, like the installed shared plugin."""
 
-    def __init__(self, named):
+    def __init__(self):
         self.calls = []
-        if named:
-            self.register_endpoint = self._register_named
 
-    def register_endpoint(self, plugin_name, path, method, name, mcp_tool=False, **rest):
-        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool, 'rest': rest})
-
-    def _register_named(self, plugin_name, path, method, name, mcp_tool=False, operation_name=None, **rest):
-        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool, 'operation_name': operation_name,
-                           'rest': rest})
+    def register_endpoint(
+        self, plugin_name, path, method, name, description='', mcp_description='', summary='', tags=None,
+        parameters=None, request_body=None, mcp_request_body=None, response_model=None, responses=None,
+        security=None, deprecated=False, mcp_tool=False, available_to_users=False,
+    ):
+        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool})
 
 
-def _registered(openapi, named):
-    registry = Registry(named)
+def _registered(openapi):
+    registry = Registry()
     openapi.register_schedule_endpoints(registry, TAG)
     return registry.calls
 
 
-def test_only_the_six_schedule_operations_are_mcp_tools(openapi):
-    tools = {(c['method'], c['path']) for c in _registered(openapi, named=False) if c['mcp_tool']}
+def _derived_name(method, path):
+    """The tool name the installed shared registry gives an endpoint: the method and the last two fixed path parts."""
+    openapi_path = path.replace('<int:', '{').replace('<string:', '{').replace(">", '}')
+    parts = [method] + [part for part in openapi_path.split('/') if part and not part.startswith('{')][-2:]
+    return '_'.join(word.lower() for part in parts for word in part.split('_') if word)
+
+
+def test_only_the_documented_schedule_operations_are_mcp_tools(openapi):
+    tools = {(c['method'], c['path']) for c in _registered(openapi) if c['mcp_tool']}
     assert tools == set(TOOLS)
 
 
 def test_every_schedule_operation_is_still_registered(openapi):
-    assert len(_registered(openapi, named=False)) == len(openapi.OPENAPI_ENDPOINTS)
+    assert len(_registered(openapi)) == len(openapi.OPENAPI_ENDPOINTS)
 
 
-def test_tools_carry_the_issue_names_when_the_registry_takes_them(openapi):
-    names = {(c['method'], c['path']): c['operation_name'] for c in _registered(openapi, named=True) if c['mcp_tool']}
-    assert names == TOOLS
+def test_derived_tool_names_are_unique_and_match_the_documented_list(openapi):
+    derived = {(c['method'], c['path']): _derived_name(c['method'], c['path'])
+               for c in _registered(openapi) if c['mcp_tool']}
+    assert derived == TOOLS
+    assert len(set(derived.values())) == len(derived)
+    assert sorted(derived.values()) == sorted(openapi.MCP_TOOL_NAMES.values())
 
 
-def test_other_operations_carry_no_tool_name(openapi):
-    assert all(c['operation_name'] is None for c in _registered(openapi, named=True) if not c['mcp_tool'])
+def test_registry_without_operation_name_takes_every_endpoint(openapi):
+    assert all('operation_name' not in endpoint for endpoint in openapi.OPENAPI_ENDPOINTS)
+    assert len(_registered(openapi)) == len(openapi.OPENAPI_ENDPOINTS)
 
 
-def test_tool_names_are_unique(openapi):
-    names = [endpoint['operation_name'] for endpoint in openapi.OPENAPI_ENDPOINTS if endpoint.get('operation_name')]
-    assert len(names) == len(set(names)) == 6
+def _edit_endpoint(openapi):
+    return next(c for c in openapi.OPENAPI_ENDPOINTS if (c['method'], c['path']) == ('put', ITEM))
+
+
+def test_the_edit_tool_schema_lists_the_enabled_field(openapi):
+    properties = _edit_endpoint(openapi)['request_body'].model_json_schema()['properties']
+    assert properties['enabled']['anyOf'][0]['type'] == 'boolean'
+    assert {'name', 'cron', 'risk_ack'} <= set(properties)
+
+
+def test_the_edit_text_says_enabled_pauses_or_resumes(openapi):
+    description = _edit_endpoint(openapi)['description']
+    assert re.search(r'`enabled` false to pause[^.]*true to resume', description)
+    assert 'answers 400' not in description
+
+
+def test_the_edit_answers_400_for_an_enabled_value_that_is_not_a_boolean(openapi):
+    bad_input = _edit_endpoint(openapi)['responses']['400']['description']
+    assert '`enabled` that is not true or false' in bad_input
+    assert not hasattr(openapi, 'ENABLED_NOT_EDITABLE')
