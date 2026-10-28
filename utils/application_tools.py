@@ -555,7 +555,7 @@ def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
 def toolkit_kind(tool_type: str, meta: Optional[dict]) -> Optional[str]:
     """'mcp' / 'toolkit', or None for an agent-as-tool entry (it belongs to its agent).
 
-    Same split as toolkits_listing; mirrored in admin utils/project_data_delete.py (#7242).
+    Same split as toolkits_listing (#7242).
     """
     if tool_type == 'application':
         return None

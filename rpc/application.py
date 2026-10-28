@@ -241,7 +241,13 @@ def _delete_application(module, session, project_id: int, application: Applicati
     return True
 
 
+APPLICATION_KINDS = ('agent', 'pipeline')
+
+
 def _application_ids_of_kind(session, kind: str) -> list:
+    # An unknown kind must never fall through to "every agent"
+    if kind not in APPLICATION_KINDS:
+        raise ValueError(f'unsupported application kind: {kind!r}')
     is_pipeline = Application.versions.any(ApplicationVersion.agent_type == AgentTypes.pipeline.value)
     query = session.query(Application.id).filter(
         is_pipeline if kind == 'pipeline' else ~is_pipeline
