@@ -115,7 +115,7 @@ def test_the_predict_call_omits_the_participant_by_default(world):  # noqa: F811
 SECRET = "rpc to 10.0.0.5 failed at /srv/plugins/x.py"
 
 
-def _failed_run(world, group_meta):  # noqa: F811
+def _failed_run(world, group_meta, **fixed):  # noqa: F811
     events, logged = [], []
     group = types.SimpleNamespace(meta=group_meta)
 
@@ -132,7 +132,7 @@ def _failed_run(world, group_meta):  # noqa: F811
         error=lambda *args: logged.append(args), exception=lambda *args: logged.append(args))
     world.execution.this = types.SimpleNamespace(module=types.SimpleNamespace(context=types.SimpleNamespace(
         event_manager=types.SimpleNamespace(fire_event=lambda name, payload: events.append(payload)))))
-    world.execution.finish_trigger_run_with_error(1, "answer-uuid", RuntimeError(SECRET))
+    world.execution.finish_trigger_run_with_error(1, "answer-uuid", RuntimeError(SECRET), **fixed)
     return events[0], logged
 
 
@@ -156,3 +156,16 @@ def test_a_failed_run_in_a_private_run_chat_keeps_the_error_text(world):  # noqa
 
     assert event["content"] == f"Pipeline run could not start: {SECRET}"
     assert "code" not in event["response_metadata"]
+
+
+def test_a_fixed_message_and_code_end_the_run_message_without_the_error_text(world):  # noqa: F811
+    event, logged = _failed_run(world, {}, message="The run did not finish in time (code: run_stale)",
+                                code="run_stale")
+
+    assert event["message_id"] == "answer-uuid"
+    assert event["content"] == "The run did not finish in time (code: run_stale)"
+    assert event["response_metadata"]["error"] == event["content"]
+    assert event["response_metadata"]["code"] == "run_stale"
+    assert event["response_metadata"]["is_error"] is True
+    assert SECRET not in repr(event)
+    assert any(SECRET in repr(args) for args in logged)

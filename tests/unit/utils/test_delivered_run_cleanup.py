@@ -50,8 +50,9 @@ def chat(runs, session, monkeypatch):
         "models.message_group": {"ConversationMessageGroup": types.SimpleNamespace(
             **{column.name: column for column in group.c})},
         "utils.vectorstore": {"get_pgvector_connection_string": lambda project_id: "connection"},
-        "utils.pipeline_execution": {"finish_trigger_run_with_error": lambda project_id, group_uuid, error: (
-            ended_groups.append((project_id, group_uuid, error)))},
+        "utils.pipeline_execution": {"finish_trigger_run_with_error": (
+            lambda project_id, group_uuid, error, message=None, code=None: (
+                ended_groups.append((project_id, group_uuid, error, message, code))))},
     }
     for dotted, names in stand_ins.items():
         module = types.ModuleType(PACKAGE + dotted)
@@ -90,6 +91,32 @@ def test_an_expiry_of_a_delivered_run_drops_only_the_thread_of_its_own_answer(ru
     assert _deleted_threads(runs) == [{"own-thread"}]
 
 
+def test_an_expiry_of_a_delivered_run_ends_its_answer_group_with_a_fixed_text(runs, session, sent, chat):
+    _waiting(runs, session, delivered=True, approval_expires_at=NOW - timedelta(minutes=1))
+
+    assert runs.expire_waiting_runs(1, NOW) == 1
+
+    assert chat.ended_groups == [(
+        1, "own-uuid", runs.EXPIRED_REASON,
+        "The approval wait ended before an answer came (code: approval_expired)", "approval_expired")]
+
+
+def test_an_expiry_of_a_private_run_ends_no_answer_group(runs, session, sent, chat):
+    _waiting(runs, session, delivered=False, approval_expires_at=NOW - timedelta(minutes=1))
+
+    assert runs.expire_waiting_runs(1, NOW) == 1
+
+    assert chat.ended_groups == []
+
+
+def test_a_reject_leaves_the_answer_group_to_the_resume_that_follows(runs, session, sent, chat):
+    run = _waiting(runs, session, delivered=True)
+
+    runs.apply_schedule_decision(1, run.id, "reject")
+
+    assert chat.ended_groups == []
+
+
 def test_a_reject_of_a_private_run_drops_every_thread_of_its_chat(runs, session, sent, chat):
     run = _waiting(runs, session, delivered=False)
 
@@ -123,7 +150,8 @@ def test_the_stale_sweep_ends_the_answer_group_of_a_delivered_run(runs, session,
 
     session.refresh(run)
     assert run.status == "failed"
-    assert chat.ended_groups == [(1, "own-uuid", runs.STALE_REASON)]
+    assert chat.ended_groups == [(
+        1, "own-uuid", runs.STALE_REASON, "The run did not finish in time (code: run_stale)", "run_stale")]
 
 
 def test_the_stale_sweep_leaves_a_group_that_no_longer_streams(runs, session, sent, chat):

@@ -12,6 +12,9 @@ from .schedule_timing import at_least_one
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
+# The fixed (text, code) a shared chat shows for a delivered run's answer group that ends without an answer
+STALE_CHAT = ('The run did not finish in time', 'run_stale')
+EXPIRED_CHAT = ('The approval wait ended before an answer came', 'approval_expired')
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 PAUSE_REASON = 'the run needs a human answer'
@@ -293,7 +296,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
             _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
-        else:  # no notice: the owner made this end (R2.2)
+        else:  # no notice: the owner made this end; the resume that follows ends the answer group
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
             chat = (run.conversation_id, run.message_group_id)
@@ -335,7 +338,7 @@ def fail_stale_runs(project_id: int, now: datetime, stale_minutes: int) -> int:
         session.commit()
         _announce(project_id, session, ended)
         groups = _streaming_answer_groups(session, ended)
-    _end_answer_groups(project_id, groups)
+    _end_answer_groups(project_id, groups, STALE_REASON, STALE_CHAT)
     return len(ended)
 
 
@@ -357,8 +360,10 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
         _announce(project_id, session, ended, {'failed': 'schedule_approval_expired'})
         chats = session.execute(select(EntityScheduleRun.conversation_id, EntityScheduleRun.message_group_id)
                                 .where(EntityScheduleRun.id.in_(ended))).all()
+        groups = _streaming_answer_groups(session, ended)
     for chat in chats:
         delete_run_checkpoints(project_id, *chat)
+    _end_answer_groups(project_id, groups, EXPIRED_REASON, EXPIRED_CHAT)
     return len(ended)
 
 
@@ -374,17 +379,19 @@ def _streaming_answer_groups(session, run_ids: list[int]) -> list[str]:
         ConversationMessageGroup.id.in_(group_ids), ConversationMessageGroup.is_streaming.is_(True)))]
 
 
-def _end_answer_groups(project_id: int, group_uuids: list[str]) -> None:
-    """End each answer group with the fixed error text, so a shared chat shows no endless stream.
+def _end_answer_groups(project_id: int, group_uuids: list[str], reason: str, chat: tuple[str, str]) -> None:
+    """End each answer group with the fixed (text, code) `chat`, so a shared chat shows no endless stream.
 
-    The run is already ended, so the stream end that follows changes nothing on the run row.
+    `reason` goes to the log only. The run is already ended, so the stream end that follows changes nothing
+    on the run row.
     """
     if not group_uuids:
         return
     # Late import: the chat run stack is needed only here, so the writers above load without it
     from .pipeline_execution import finish_trigger_run_with_error
+    text, code = chat
     for group_uuid in group_uuids:
-        finish_trigger_run_with_error(project_id, group_uuid, STALE_REASON)
+        finish_trigger_run_with_error(project_id, group_uuid, reason, message=f'{text} (code: {code})', code=code)
 
 
 def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,
