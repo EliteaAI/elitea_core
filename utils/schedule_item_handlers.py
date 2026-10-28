@@ -97,12 +97,13 @@ def _owner_name(owner_id: int) -> str | None:
 
 
 def _delivery(row) -> dict:
-    """The delivery object of a row; the table keeps it as three flat columns."""
+    """The delivery object of a row; the table keeps it as flat columns."""
     target = row.delivery_conversation_uuid
     return {
         "mode": row.delivery_mode,
         "conversation_uuid": str(target) if target is not None else None,
         "participant_id": row.delivery_participant_id,
+        "include_history": row.delivery_include_history,
     }
 
 

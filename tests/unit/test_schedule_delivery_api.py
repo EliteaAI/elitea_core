@@ -33,7 +33,8 @@ NOT_MEMBER = 'owner is not a member of the conversation'
 NOT_ENTITY = 'entity is not a participant of the conversation'
 PREFIX = 'models.applications.schedules.'
 EDITOR = {PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
-NO_DELIVERY = {'mode': 'run_history', 'conversation_uuid': None, 'participant_id': None}
+NO_DELIVERY = {'mode': 'run_history', 'conversation_uuid': None, 'participant_id': None,
+               'include_history': 0}
 
 
 class Harness:
@@ -195,7 +196,8 @@ def to_chat(participant_id=PARTICIPANT_OF_AGENT, chat=CHAT):
 
 
 def chat_delivery():
-    return {'mode': 'conversation', 'conversation_uuid': str(CHAT), 'participant_id': PARTICIPANT_OF_AGENT}
+    return {'mode': 'conversation', 'conversation_uuid': str(CHAT), 'participant_id': PARTICIPANT_OF_AGENT,
+            'include_history': 0}
 
 
 def assert_400(response, text=None, field=None):
