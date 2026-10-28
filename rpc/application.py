@@ -140,6 +140,19 @@ def _report_budget_door_closed(
     })
 
 
+def _notify_version_schedules_disabled(project_id: int, disabled_schedules: list[dict]) -> None:
+    """Tell each owner that a deleted version switched their schedule off; call it after the commit."""
+    from types import SimpleNamespace
+
+    from ..models.enums.all import NotificationEventTypes
+    from ..utils.schedule_notifications import notify_schedule_event
+    for row in disabled_schedules:
+        notify_schedule_event(
+            project_id, row['created_by'], NotificationEventTypes.schedule_disabled,
+            SimpleNamespace(id=row['id'], name=row['name']), extra={'reason': 'version_deleted'},
+        )
+
+
 def _report_input_guardrail_blocked(
     module, blocked_error, parsed, payload: dict, chat_project_id: Optional[int],
     sio_event, start_event_content: Optional[dict],
@@ -283,8 +296,10 @@ class RPC:
                     trigger_source: Optional[str] = None,
                     chat_skills: Optional[list] = None,
                     invoked_skills: Optional[list] = None,
+                    project_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
+                    auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
                     mandate_ticket: Optional[str] = None,
                     authoring: bool = False,
                     ) -> dict:
@@ -423,7 +438,19 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval, chat_skills=chat_skills, invoked_skills=invoked_skills)
+            payload: dict = generate_predict_payload(
+                parsed,
+                user_id=user_id,
+                sid=sid,
+                is_system_user=is_system_user,
+                skip_expansion=skip_expansion,
+                return_chat_history=return_chat_history,
+                eligible_for_autoapproval=eligible_for_autoapproval,
+                chat_skills=chat_skills,
+                invoked_skills=invoked_skills,
+                project_skills=project_skills,
+                auto_approve_sensitive_actions=auto_approve_sensitive_actions,
+            )
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
             if isinstance(payload.get('application'), dict) and application_project_id:
@@ -631,6 +658,7 @@ class RPC:
                         routing_projection: Optional[dict] = None,
                         chat_skills: Optional[list] = None,
                         invoked_skills: Optional[list] = None,
+                        project_skills: Optional[list] = None,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -731,7 +759,7 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, chat_skills=chat_skills, invoked_skills=invoked_skills)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, chat_skills=chat_skills, invoked_skills=invoked_skills, project_skills=project_skills)
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
         except PredictPayloadError as e:
@@ -2456,8 +2484,13 @@ class RPC:
             # Delete the version
             detach_skills_for_entity_versions(session, [version_id])
 
+            # Before the delete: the version foreign key sets schedule.version_id to NULL once the row is gone
+            from ..utils.schedule_lifecycle import disable_version_schedules
+            disabled_schedules = disable_version_schedules(session, [version_id])
+
             session.delete(version)
             session.commit()
+            _notify_version_schedules_disabled(project_id, disabled_schedules)
 
             self.context.event_manager.fire_event(
                 ApplicationEvents.application_version_deleted, version_data
@@ -2508,10 +2541,14 @@ class RPC:
             session.flush()
 
             # Optionally delete the old version
+            disabled_schedules = []
             if delete_old_version:
+                from ..utils.schedule_lifecycle import disable_version_schedules
+                disabled_schedules = disable_version_schedules(session, [old_version_id])
                 session.delete(old_version)
 
             session.commit()
+            _notify_version_schedules_disabled(project_id, disabled_schedules)
 
             return {
                 'ok': True,
@@ -2537,6 +2574,14 @@ class RPC:
             )
         except (ApplicationVersionNonFoundError, ApplicationToolExpandedError) as e:
             return {'error': str(e)}
+        except ValidationError as e:
+            # Credential type and name only (EL-7011 US-09 R2.4); the input values may hold secrets
+            from ..utils.schedule_prerun import credential_errors_of
+            credential_errors = credential_errors_of(e)
+            log.warning("Expansion of application version details failed: %s", credential_errors or e.error_count())
+            if credential_errors:
+                return {'error': 'A credential of the version cannot be used', 'credential_errors': credential_errors}
+            return {'error': f'Can not get application details for {version_id=}'}
         except Exception as e:
             log.error("Expanssion of application version details failed")
             log.error(e)

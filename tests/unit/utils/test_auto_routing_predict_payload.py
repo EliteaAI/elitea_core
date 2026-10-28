@@ -49,7 +49,7 @@ def builder(models_path):
         'serialize': lambda value: value,
         'AgentTypes': NS(pipeline=NS(value='pipeline')), 'resolve_application_name': lambda p: 'fixture',
         'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []),
-        'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
+        'merge_mention_candidates': lambda attached, chat, project=None: [*attached, *chat, *(project or [])],
         'merge_disclosable_skills': lambda own, chat: [*own, *chat],
         'get_expansion_user_id': lambda project_id, user_id, is_system_user: user_id,
         'expand_top_level_version': lambda parsed, user_id: None,
@@ -327,3 +327,13 @@ def test_predict_llm_routing_surface_survives_the_chat_request(builder, applicat
                                        'scope_mode': 'task_episode', 'reasoning': {'mode': 'auto'}}},
     })
     assert build(request, 2, skip_expansion=True)['llm']['kwargs']['routing_surface'] == 'agent'
+
+
+@pytest.mark.parametrize('given,expected', [
+    (True, True),
+    (False, None),
+])
+def test_auto_approve_flag_reaches_the_payload(builder, given, expected):
+    build, llm, _ = builder
+    result = build(parsed(llm, True), 2, skip_expansion=True, auto_approve_sensitive_actions=given)
+    assert result.get('auto_approve_sensitive_actions') == expected

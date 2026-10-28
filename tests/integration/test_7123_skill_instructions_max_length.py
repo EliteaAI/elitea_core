@@ -110,11 +110,11 @@ class TestConfiguredLimit:
 
         assert skill_utils_module.get_max_instructions_length() == DEFAULT_LIMIT
 
-    def test_the_admin_schema_offers_it_in_runtime_with_the_same_default(self):
+    def test_the_admin_schema_offers_it_in_skills_with_the_same_default(self):
         schema = json.loads((PLUGIN_ROOT / 'admin_schema.json').read_text())
         setting = next(field for field in schema['properties'].values() if field.get('path') == 'skills.max_instructions_length')
 
-        assert setting['section'] == 'runtime'
+        assert setting['section'] == 'skills'
         assert setting['default'] == DEFAULT_LIMIT
         assert setting['requires_restart'] is False
 

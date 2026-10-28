@@ -496,7 +496,7 @@ def test_flag_off_the_tick_sends_exactly_the_old_call_and_reads_nothing_new(ns, 
         "data": {"project_id": 1, "application_id": 7, "version_id": 70, "user_input": "",
                  "chat_history": [], "message_id": "response-1", "stream_id": "conv-uuid", "conversation_id": "conv-uuid"},
         "await_task_timeout": -1, "user_id": CREATOR, "is_system_user": True, "non_interactive": True,
-        "trigger_source": "scheduled"}
+        "trigger_source": "scheduled", "auto_approve_sensitive_actions": False}
     assert calls == [1] and resolved.call_count == 0   # only the application-name read of today's tick
     assert ns.state.conversations[0]["user_id"] == CREATOR and ns.state.events == [] and session.commits == 1
 
@@ -513,65 +513,7 @@ def test_flag_off_the_pipeline_helper_adds_the_ticket_only_when_there_is_one(ns,
     assert ticketed == {**plain, "mandate_ticket": "ticket"}
 
 
-def test_flag_off_the_deadline_sweep_is_not_called_by_the_tick_rpc(ns, env):
-    text = source_of("rpc/pipeline_scheduling.py")
-    rpc_part = text[text.index("class RPC"):]
-    assert rpc_part.index("if governance_lifecycle_active(self):") < rpc_part.index("enforce_run_deadlines(self)") < rpc_part.index(
-        "is_maintenance_active()") < rpc_part.index("_check_pipeline_scheduling_lock.acquire")
-    assert "Main restart" in rpc_part[:rpc_part.index("if governance_lifecycle_active(self):")]   # the accepted gap is documented
-
-
-def test_the_tick_rpc_sweeps_once_when_governed_and_not_at_all_when_not(ns, env, monkeypatch):
-    rpc = ns.scheduling.RPC()
-    swept = []
-    monkeypatch.setattr(ns.scheduling, "enforce_run_deadlines", lambda module: swept.append(module))
-    monkeypatch.setattr(ns.scheduling, "make_yield_to_hub", lambda runtime: (lambda: None))
-    rpc.context = types.SimpleNamespace(web_runtime=None)
-    ns.tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
-        timeout=lambda seconds: types.SimpleNamespace(project_list=lambda filter_=None: []))))
-    monkeypatch.setattr(ns.scheduling, "rpc_tools", ns.tools.rpc_tools)
-    for governed, expected in ((False, 0), (True, 1)):
-        rpc.governance_profile = types.SimpleNamespace(enabled=governed)
-        swept.clear()
-        ns.scheduling.RPC.check_pipeline_scheduling(rpc)
-        assert len(swept) == expected
-
-
-def test_the_sweep_runs_in_maintenance_mode_too_and_the_tick_itself_does_not(ns, env, monkeypatch):
-    rpc = ns.scheduling.RPC()
-    rpc.governance_profile = types.SimpleNamespace(enabled=True)
-    swept = []
-    monkeypatch.setattr(ns.scheduling, "enforce_run_deadlines", lambda module: swept.append(module))
-    monkeypatch.setattr(ns.scheduling, "is_maintenance_active", lambda: True)
-    monkeypatch.setattr(ns.scheduling, "make_yield_to_hub", mock.Mock(side_effect=AssertionError("the tick ran")))
-    assert ns.scheduling.RPC.check_pipeline_scheduling(rpc) is None and swept == [rpc]
-    rpc.governance_profile = types.SimpleNamespace(enabled=False)
-    swept.clear()
-    ns.scheduling.RPC.check_pipeline_scheduling(rpc)
-    assert swept == []
-
-
-def test_the_sweep_runs_even_when_the_previous_tick_is_still_running(ns, env, monkeypatch):
-    rpc = ns.scheduling.RPC()
-    rpc.governance_profile = types.SimpleNamespace(enabled=True)
-    swept = []
-    monkeypatch.setattr(ns.scheduling, "enforce_run_deadlines", lambda module: swept.append(module))
-    assert ns.scheduling._check_pipeline_scheduling_lock.acquire(blocking=False)   # pylint: disable=W0212
-    try:
-        assert ns.scheduling.RPC.check_pipeline_scheduling(rpc) is None and swept == [rpc]
-    finally:
-        ns.scheduling._check_pipeline_scheduling_lock.release()   # pylint: disable=W0212
-
-
-def test_a_sweep_that_fails_never_stops_the_tick(ns, env, monkeypatch):
-    rpc = ns.scheduling.RPC()
-    rpc.governance_profile = types.SimpleNamespace(enabled=True)
-    rpc.context = types.SimpleNamespace(web_runtime=None)
-    monkeypatch.setattr(ns.scheduling, "enforce_run_deadlines", mock.Mock(side_effect=RuntimeError("db down")))
-    monkeypatch.setattr(ns.scheduling, "make_yield_to_hub", lambda runtime: (lambda: None))
-    monkeypatch.setattr(ns.scheduling, "rpc_tools", types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(
-        rpc=types.SimpleNamespace(timeout=lambda seconds: types.SimpleNamespace(project_list=lambda filter_=None: [])))))
-    assert ns.scheduling.RPC.check_pipeline_scheduling(rpc) is None
+# The governed deadline sweep runs in the schedule tick: tests/unit/rpc/test_7011_entity_schedules_check.py
 
 
 # --- the webhook API ----------------------------------------------------------------------------
