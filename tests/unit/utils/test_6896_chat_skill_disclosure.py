@@ -60,6 +60,9 @@ class TestMergeDisclosableSkills:
         assert mentions.merge_disclosable_skills([], [_skill('', 4)]) == []
 
 
+SENDER = {'author_participant': types.SimpleNamespace(entity_meta={'id': 5}), 'conversation': None}
+
+
 def _recipient(entity_name):
     return types.SimpleNamespace(id=55, entity_name=entity_name)
 
@@ -77,7 +80,7 @@ class CountingRowsSession(ParticipantRowsSession):
 
 def _apply(env, entity_name, user_input='analyze this screenshot', version_details=None):
     session = ParticipantRowsSession([participant_row(56, CHAT_PROJECT_ID, 101), participant_row(57, PUBLIC_PROJECT_ID, 200)])
-    msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient(entity_name))
+    msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient(entity_name), **SENDER)
     result = {'user_input': user_input}
     if version_details is not None:
         result['version_details'] = version_details
@@ -113,7 +116,7 @@ class TestAgentMessageSkillLimit:
 
     def test_an_agent_without_chat_skills_is_still_checked(self, env, checked):
         session = ParticipantRowsSession([])
-        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient('application'))
+        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient('application'), **SENDER)
         own = _agent_skills(6)
         result = {'user_input': '~agent-skill-1', 'version_details': {'agent_type': 'openai', 'skills': own}}
         env.mod.apply_participant_skill_mentions(session, msg_group, result, CHAT_PROJECT_ID)
@@ -235,14 +238,14 @@ class TestChatSkillsReachTheResponder:
 
     def test_a_chat_without_usable_skill_participants_changes_nothing(self, env):
         session = ParticipantRowsSession([participant_row(56, PUBLIC_PROJECT_ID, 201)])
-        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient('dummy'))
+        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient('dummy'), **SENDER)
         result = {'user_input': 'hi'}
         env.mod.apply_participant_skill_mentions(session, msg_group, result, CHAT_PROJECT_ID)
         assert result == {'user_input': 'hi'}
 
     def test_the_internal_keys_leave_the_payload_for_the_rpc_kwargs(self, env):
         payload = {'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked']}
-        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'invoked_skills': ['invoked']}
+        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'project_skills': None, 'invoked_skills': ['invoked']}
         assert payload == {'user_input': 'hi'}
 
 

@@ -711,6 +711,26 @@
         "maximum": 200000
       }
     },
+    "project_skills_in_chat_available": {
+      "type": "boolean",
+      "title": "Allow project skills in chat",
+      "description": "Master switch for offering every project skill to model and agent chats without adding it as a participant. While it is off, no project can turn the feature on.",
+      "path": "skills.project_skills_in_chat.available",
+      "section": "skills",
+      "strict_type": true,
+      "default": false,
+      "requires_restart": false
+    },
+    "project_skills_in_chat_project_default": {
+      "type": "boolean",
+      "title": "On by default for projects",
+      "description": "Whether project skills in chat are on in projects whose admins have not chosen On or Off for their own project. Applies only while the master switch is on.",
+      "path": "skills.project_skills_in_chat.project_default",
+      "section": "skills",
+      "strict_type": true,
+      "default": false,
+      "requires_restart": false
+    },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
       "title": "Pipeline Scheduling Enabled",

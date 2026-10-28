@@ -40,6 +40,7 @@ from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
 from ..utils.application_utils import build_skill_mappings_list
 from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
+from ..utils.project_skills import UnknownSkillMentionError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
     apply_participant_skill_mentions, validate_turn_skill_limit, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
@@ -818,7 +819,8 @@ def _resolve_application_llm_settings(
     return llm_settings
 
 
-def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel) -> dict:
+def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel,
+                     strict_skill_mentions: bool = False) -> dict:
     participant_chat_settings: ParticipantMapping = session.query(
         ParticipantMapping.entity_settings
     ).where(
@@ -1039,9 +1041,13 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
 
     try:
-        apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
+        apply_participant_skill_mentions(
+            session, msg_group, result, predict_payload.project_id, strict_mentions=strict_skill_mentions,
+        )
     except SkillInvocationLimitError as e:
         raise PayloadGenerationError(str(e), code=e.code) from e
+    except UnknownSkillMentionError as e:
+        raise PayloadGenerationError(str(e)) from e
 
     return result
 
@@ -1331,6 +1337,7 @@ class RPC:
                 validate_turn_skill_limit(
                     session, conversation.id, target, parsed.user_input, parsed.project_id,
                     lambda: read_target_version_skills(session, conversation.id, target, parsed.project_id),
+                    conversation=conversation, sender_id=(author_participant.entity_meta or {}).get('id'),
                 )
             except SkillInvocationLimitError as limit:
                 if sid:
@@ -1605,7 +1612,9 @@ class RPC:
                 # here we need to generate payload
                 if rpc_func := CHAT_PREDICT_MAPPER.get(msg_group.sent_to.entity_name):
                     try:
-                        payload: dict = generate_payload(session, msg_group=msg_group, predict_payload=parsed)
+                        payload: dict = generate_payload(
+                            session, msg_group=msg_group, predict_payload=parsed, strict_skill_mentions=True,
+                        )
                     except PayloadGenerationError as e:
                         # raise SioValidationError(
                         #     sio=self.context.sio,

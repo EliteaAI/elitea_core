@@ -16,7 +16,7 @@ from .context_window import (
 from .llm_settings import normalize_runtime_max_tokens
 from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
-from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
+from .skill_mentions import merge_disclosable_skills, merge_mention_candidates, strip_skill_bodies
 from .skill_utils import SkillInvocationLimitError, consume_message_skills, resolve_runtime_skills
 from .stored_oauth_tokens import inject_stored_oauth_tokens
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
@@ -324,6 +324,7 @@ def generate_predict_payload(
     skip_expansion: bool = False,
     chat_skills: Optional[list] = None,
     invoked_skills: Optional[list] = None,
+    project_skills: Optional[list] = None,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
 ) -> dict:
     """
@@ -508,6 +509,8 @@ def generate_predict_payload(
 
     if chat_skills and not isinstance(parsed, ApplicationChatRequest):
         payload['attached_skills'] = merge_disclosable_skills([], chat_skills)
+    if project_skills and not isinstance(parsed, ApplicationChatRequest):
+        payload['project_skills'] = strip_skill_bodies(project_skills)
 
     # Only the raw LLM chat shape stops here; every agent-backed shape reaches
     # the branch below, which recomputes this.
@@ -561,12 +564,13 @@ def generate_predict_payload(
 
         attached_skills = version_details.get('skills') or []
         chat_skills = chat_skills or []
+        project_skills = project_skills or []
         is_pipeline = version_details.get('agent_type') == AgentTypes.pipeline.value
 
         own_disclosable_skills = resolve_runtime_skills(version_details)
         disclosable_skills = merge_disclosable_skills(own_disclosable_skills, chat_skills)
 
-        mention_candidates = merge_mention_candidates(attached_skills, chat_skills)
+        mention_candidates = merge_mention_candidates(attached_skills, chat_skills, project_skills)
         try:
             payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
         except SkillInvocationLimitError as e:
@@ -596,6 +600,8 @@ def generate_predict_payload(
                     '(blank-instructions/missing-name)',
                     dropped, len(attached_skills),
                 )
+        if project_skills and not is_pipeline:
+            payload['project_skills'] = strip_skill_bodies(project_skills)
 
         # Merge version_details tools (including nested agents) with request-level tools
         if parsed.version_details and parsed.version_details.get('tools'):
