@@ -33,7 +33,6 @@ from .utils.worker_capabilities import (
 from .utils.scheduler_bindings import (
     advertised_bindings,
     build_scheduler_sync_plan,
-    rebind_legacy_rows,
 )
 from pydantic import ValidationError
 
@@ -584,6 +583,10 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "create_governance_settings_tables", self.create_governance_settings_tables,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "fix_platform_tick_row", self.fix_platform_tick_row,
                 group="R-2.0.8",
             )
         except Exception as e:
@@ -1410,17 +1413,9 @@ class Module(module.ModuleModel):
         log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
         self._init_publishing_guardrail()
 
-    def _rebind_legacy_schedule_rows(self):
-        try:
-            with db.get_session(None) as session:
-                rebind_legacy_rows(session)
-        except Exception:  # pylint: disable=W0703  # noqa: BLE001 - a failed rebind must not stop the bootstrap
-            log.exception('Failed to rebind legacy platform schedule rows')
-
     def _bootstrap_platform_schedules(self):
         """Create the platform schedule rows and reconcile them with config."""
         payloads = []
-        self._rebind_legacy_schedule_rows()
         try:
             scheduler_cfg = self.descriptor.config.get('scheduler')
             managed = {
