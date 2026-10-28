@@ -471,6 +471,7 @@ class ScheduleItemHandlers:
         """Answer one run of a schedule for the Test schedule panel, with its usage summary and event log.
 
         The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
+        A run delivered into a chat reads only the tool calls and the usage of its own answer message.
         A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
         Tokens and cost are null while the usage store has no row for the conversation.
         Who may call: the owner with `schedules.details`, or a schedules admin.
@@ -490,9 +491,11 @@ class ScheduleItemHandlers:
                 return RUN_NOT_FOUND
             row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
             tokens, cost_usd = usage_summary(session, project_id, run)
-            events = merge_events(run.events, tool_call_events(session, run.conversation_id))
+            events = merge_events(run.events, tool_call_events(session, run.conversation_id, run.message_group_id))
             return {
                 **row,
+                "conversation_uuid": str(run.conversation_uuid) if run.conversation_uuid else None,
+                "message_group_id": run.message_group_id,
                 "version_label": version_label(session, run.version_id),
                 "principal_label": run.principal_label,
                 "risk_outcome": run.risk_outcome,

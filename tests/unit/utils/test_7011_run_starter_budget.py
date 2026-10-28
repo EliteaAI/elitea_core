@@ -33,7 +33,7 @@ def world(monkeypatch):
         create=lambda **kw: state.calls.append(("create",)) or ("uuid-1", 7, "resp-1"),
         predict=predict,
         prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
-        finish_error=lambda *a: state.calls.append(("finish_error", *a)),
+        finish_error=lambda *a, **kw: state.calls.append(("finish_error", *a)),
         fail=lambda *a: state.calls.append(("fail", *a)),
         block=lambda *a: state.calls.append(("block", *a)),
         budget_scope=budget_scope,
