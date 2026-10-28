@@ -14,7 +14,7 @@ from uuid import uuid4
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))  # the shared harness lives beside this file
-from test_7011_schedule_crud_api import (  # noqa: F401 -- `harness` is a fixture
+from test_7011_schedule_crud_api import (
     ADMIN,
     ADMIN_ID,
     OWNER_ID,

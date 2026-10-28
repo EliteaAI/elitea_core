@@ -248,9 +248,34 @@ def _write_groups_into_chat(
     return str(conversation.uuid), participant_id, str(answer_group.uuid)
 
 
+CHAT_RUN_START_FAILED = "run_start_failed"
+
+
+def _answers_into_shared_chat(project_id: int, response_message_id: str) -> bool:
+    """Is the placeholder an answer group written into a target chat? A failed lookup counts as yes, so no detail leaks."""
+    try:
+        with db.get_session(project_id) as session:
+            group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == response_message_id).first()
+            return group is None or bool((group.meta or {}).get("scheduled_run"))
+    except Exception:  # pylint: disable=W0703  # noqa: BLE001
+        log.exception("Could not look up the trigger run message: message_id=%s", response_message_id)
+        return True
+
+
 def finish_trigger_run_with_error(project_id: int, response_message_id: str, error) -> None:
-    """End a triggered run's placeholder message with the dispatch error, so History shows why it failed."""
-    message = f"Pipeline run could not start: {error}"
+    """End a triggered run's placeholder message with the dispatch error, so History shows why it failed.
+
+    Every member of a target chat reads the message, so there it is a fixed text with a code and the
+    exception only goes to the log.
+    """
+    code = None
+    if _answers_into_shared_chat(project_id, response_message_id):
+        code = CHAT_RUN_START_FAILED
+        log.error("Pipeline run could not start: message_id=%s error=%r", response_message_id, error)
+        message = f"Pipeline run could not start (code: {code})"
+    else:
+        message = f"Pipeline run could not start: {error}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
@@ -260,6 +285,7 @@ def finish_trigger_run_with_error(project_id: int, response_message_id: str, err
                 'chat_project_id': project_id,
                 'is_error': True,
                 'error': message,
+                **({'code': code} if code else {}),
             },
         })
     except Exception:  # pylint: disable=W0703  # noqa: BLE001

@@ -110,3 +110,49 @@ def test_the_predict_call_forwards_the_participant_when_given(world):  # noqa: F
 
 def test_the_predict_call_omits_the_participant_by_default(world):  # noqa: F811
     assert "participant_id" not in _predict(world)["data"]
+
+
+SECRET = "rpc to 10.0.0.5 failed at /srv/plugins/x.py"
+
+
+def _failed_run(world, group_meta):  # noqa: F811
+    events, logged = [], []
+    group = types.SimpleNamespace(meta=group_meta)
+
+    class Groups:
+        uuid = "answer-uuid"
+
+    class GroupSession(type(world.execution.db.get_session(1))):
+        def query(self, _model):
+            return types.SimpleNamespace(filter=lambda *_: types.SimpleNamespace(first=lambda: group))
+
+    world.execution.db = types.SimpleNamespace(get_session=lambda _project_id: GroupSession(world))
+    world.execution.ConversationMessageGroup = Groups
+    world.execution.log = types.SimpleNamespace(
+        error=lambda *args: logged.append(args), exception=lambda *args: logged.append(args))
+    world.execution.this = types.SimpleNamespace(module=types.SimpleNamespace(context=types.SimpleNamespace(
+        event_manager=types.SimpleNamespace(fire_event=lambda name, payload: events.append(payload)))))
+    world.execution.finish_trigger_run_with_error(1, "answer-uuid", RuntimeError(SECRET))
+    return events[0], logged
+
+
+def test_a_failed_run_in_a_target_chat_shows_a_fixed_message_with_a_code(world):  # noqa: F811
+    event, _ = _failed_run(world, {"scheduled_run": True, **SCHEDULE_META})
+
+    assert SECRET not in event["content"]
+    assert SECRET not in event["response_metadata"]["error"]
+    assert event["response_metadata"]["code"] == "run_start_failed"
+    assert event["response_metadata"]["is_error"] is True
+
+
+def test_a_failed_run_in_a_target_chat_logs_the_exception(world):  # noqa: F811
+    _, logged = _failed_run(world, {"scheduled_run": True})
+
+    assert any(SECRET in repr(args) for args in logged)
+
+
+def test_a_failed_run_in_a_private_run_chat_keeps_the_error_text(world):  # noqa: F811
+    event, _ = _failed_run(world, {})
+
+    assert event["content"] == f"Pipeline run could not start: {SECRET}"
+    assert "code" not in event["response_metadata"]
