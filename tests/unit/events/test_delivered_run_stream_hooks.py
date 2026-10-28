@@ -89,3 +89,11 @@ def test_a_forged_group_meta_binds_the_end_to_the_real_group_id_the_writer_check
     finish = next(event for event in world.events if isinstance(event, tuple) and event[0] == "finish")
     # The run named in the meta ends only when its stored group id equals this group, whatever the meta says
     assert finish[-1] == GROUP_ID
+
+
+def test_the_owner_comes_from_the_schedule_of_the_run_not_from_the_schedule_id_in_the_meta(make_world):
+    world = make_world({}, {**GROUP_META, "schedule_id": 99}, schedule_owner=OWNER)
+    world.end({})
+    assert ("run.id", RUN_ID) in world.filters
+    assert ("schedule.id", 99) not in world.filters
+    assert any(event[0] == "finish" and event[6] == OWNER for event in world.events if isinstance(event, tuple))

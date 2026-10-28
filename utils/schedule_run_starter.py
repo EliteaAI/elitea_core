@@ -264,11 +264,13 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
         finish_trigger_run_with_error(
-            project_id, response_id, BUDGET_CLOSED.format(error.scope) if target else error)
+            project_id, response_id, BUDGET_CLOSED.format(error.scope) if target else error,
+            private_run=target is None)
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(error.scope))
     except Exception as error:  # noqa: BLE001 -- the run message ends with the reason (R2.5)
         # a shared chat shows other members a fixed text; the error text stays in the log
         if target:
             log.exception('Schedule %s run %s: the predict call failed', schedule_id, run_id)
-        finish_trigger_run_with_error(project_id, response_id, PREDICT_FAILED if target else error)
+        finish_trigger_run_with_error(project_id, response_id, PREDICT_FAILED if target else error,
+                                       private_run=target is None)
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)

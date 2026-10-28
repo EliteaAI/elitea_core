@@ -138,26 +138,26 @@ def run_failure_reason(error) -> str:
 def _own_conversation(conversation_id: int | None, author_id: int | None, message_group_id: int | None = None) -> list:
     """Conditions that tie a chat hook to its own run. The run id comes from meta, which a client can write.
 
-    A delivered run (`message_group_id` set) answers inside a shared chat, so the conversation alone proves
-    nothing: the hook must come from the answer group of that run. Another run of the chat never matches.
-    Any other run matches when it is linked to this conversation, or has none yet and the chat author owns
-    the schedule. A change of the schedule owner does not cut off a linked run.
+    A hook with a `message_group_id` comes from a run delivered into a shared chat, where the conversation
+    alone proves nothing: only the run with that answer group and that conversation matches. It never
+    matches a private run, linked or not. A hook without one matches a private run that is linked to this
+    conversation, or has none yet and the chat author owns the schedule. A change of the schedule owner
+    does not cut off a linked run.
     No author (a server-side caller such as the stale sweep) adds no condition.
     """
     if author_id is None:
         return []
+    if message_group_id is not None:
+        return [and_(EntityScheduleRun.conversation_id == conversation_id,
+                     EntityScheduleRun.message_group_id == message_group_id)]
     unlinked = and_(
         EntityScheduleRun.conversation_id.is_(None),
         EntityScheduleRun.schedule_id.in_(select(EntitySchedule.id).where(EntitySchedule.created_by == author_id)),
     )
-    delivered = EntityScheduleRun.message_group_id.is_not(None)
-    own_group = and_(EntityScheduleRun.conversation_id == conversation_id,
-                     EntityScheduleRun.message_group_id == message_group_id)
+    private = EntityScheduleRun.message_group_id.is_(None)
     if conversation_id is None:
-        return [and_(EntityScheduleRun.message_group_id.is_(None), unlinked)]
-    return [or_(and_(delivered, own_group),
-                and_(EntityScheduleRun.message_group_id.is_(None),
-                     or_(EntityScheduleRun.conversation_id == conversation_id, unlinked)))]
+        return [and_(private, unlinked)]
+    return [and_(private, or_(EntityScheduleRun.conversation_id == conversation_id, unlinked))]
 
 
 def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str | None = None,

@@ -117,7 +117,7 @@ def world(monkeypatch):
             "TriggerType": SimpleNamespace(SCHEDULED="scheduled"),
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
-            "finish_trigger_run_with_error": lambda *args: state.calls.append(("finish_error", *args)),
+            "finish_trigger_run_with_error": lambda *args, **kw: state.calls.append(("finish_error", *args)),
         },
     }
     for dotted, attrs in stubs.items():

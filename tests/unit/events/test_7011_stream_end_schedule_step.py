@@ -19,6 +19,18 @@ def _module(name, **attrs):
     return module
 
 
+class Column:
+    """A column whose comparison with a value is the pair (name, value), so a test reads the filters."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return self.name, other
+
+    __hash__ = object.__hash__
+
+
 class Model:
     uuid = id = message_group_id = None
 
@@ -43,7 +55,11 @@ class Session:
     def query(self, *_):
         return self
 
-    filter = with_for_update = lambda self, *a, **k: self
+    join = with_for_update = lambda self, *a, **k: self
+
+    def filter(self, *conditions):
+        self.world.filters.extend(conditions)
+        return self
 
     def first(self):
         return self.world.msg_group
@@ -68,7 +84,7 @@ class World:
     schedule_owner = None
 
     def __init__(self, meta, group_meta=None):
-        self.events = []
+        self.events, self.filters = [], []
         self.open_sessions, self.open_at_step = 0, []
         self.msg_group = types.SimpleNamespace(
             id=1, meta=group_meta or {}, message_items=[], reply_to_id=None, is_streaming=True,
@@ -100,7 +116,11 @@ def make_world(monkeypatch):
         stubs = {
             "models.participants": {"Participant": Model},
             "models.message_group": {"ConversationMessageGroup": Model},
-            "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {"id": None, "created_by": None})},
+            "models.entity_schedule": {
+                "EntitySchedule": type("EntitySchedule", (), {
+                    "id": Column("schedule.id"), "created_by": Column("schedule.created_by")}),
+                "EntityScheduleRun": type("EntityScheduleRun", (), {
+                    "id": Column("run.id"), "schedule_id": Column("run.schedule_id")})},
             "models.message_items.text": {"TextMessageItem": Model},
             "models.message_items.base": {"MessageItem": Model},
             "models.pd.message": {"MessageGroupDetail": types.SimpleNamespace(model_validate=same)},

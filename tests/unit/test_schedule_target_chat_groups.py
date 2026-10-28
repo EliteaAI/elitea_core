@@ -187,7 +187,6 @@ def test_a_lookup_that_finds_no_answer_group_is_treated_as_a_shared_chat(world, 
     assert any(SECRET in repr(args) for args in logged)
 
 
-
 def test_a_run_without_a_delivery_target_keeps_the_error_text_without_a_lookup(world):  # noqa: F811
     event, _ = _failed_run(world, LOOKUP_FAILS, private_run=True)
 

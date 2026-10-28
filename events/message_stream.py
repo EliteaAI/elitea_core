@@ -3,7 +3,7 @@ from pylon.core.tools import web, log
 from tools import db, serialize, rpc_tools
 from sqlalchemy.orm.attributes import flag_modified
 
-from ..models.entity_schedule import EntitySchedule
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from ..models.participants import Participant
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
@@ -49,7 +49,9 @@ def _schedule_run(session, msg_group):
 
     A private run chat holds the run id in its meta and the chat author is the owner. A run delivered into a
     shared chat holds it in the meta of its answer group, and the schedule owner is the author: the chat
-    author is any member. A schedule that is gone leaves no author, so the stale sweep ends that run and its answer group.
+    author is any member. The owner comes from the schedule of the run itself, never from the schedule id in
+    the group meta, which a chat member can write. A run or schedule that is gone leaves no author, so the
+    stale sweep ends that run and its answer group.
     """
     conversation = msg_group.conversation
     run_id = _schedule_run_id(conversation)
@@ -58,7 +60,9 @@ def _schedule_run(session, msg_group):
     meta = msg_group.meta or {}
     if not (meta.get('scheduled_run') and meta.get('schedule_run_id')):
         return None
-    owner_id = session.query(EntitySchedule.created_by).filter(EntitySchedule.id == meta.get('schedule_id')).scalar()
+    owner_id = (session.query(EntitySchedule.created_by)
+                .join(EntityScheduleRun, EntityScheduleRun.schedule_id == EntitySchedule.id)
+                .filter(EntityScheduleRun.id == meta['schedule_run_id']).scalar())
     return (meta['schedule_run_id'], owner_id, msg_group.id) if owner_id else None
 
 

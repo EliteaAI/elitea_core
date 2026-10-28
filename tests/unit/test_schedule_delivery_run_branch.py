@@ -151,7 +151,8 @@ def world(monkeypatch):
             "TriggerType": SimpleNamespace(SCHEDULED="scheduled", SCHEDULE_MANUAL="schedule_manual"),
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
-            "finish_trigger_run_with_error": lambda *args: state.calls.append(("finish_error", *args)),
+            "finish_trigger_run_with_error": lambda *args, **kwargs: state.calls.append(
+                ("finish_error", *args, *kwargs.values())),
         },
     }
     for dotted, attrs in stubs.items():
@@ -227,7 +228,7 @@ def test_failed_predict_posts_a_fixed_message_and_closes_the_run(world):
     world.predict_error = RuntimeError("rpc down at 10.0.0.5")
     _run(world)
     assert world.names().count("create") == 1
-    assert world.call("finish_error") == ("finish_error", PROJECT_ID, GROUP_UUID, "the run call failed")
+    assert world.call("finish_error") == ("finish_error", PROJECT_ID, GROUP_UUID, "the run call failed", False)
     assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run call failed")
     assert (world.run.conversation_id, world.run.conversation_uuid) == (TARGET_CHAT_ID, TARGET_CHAT_UUID)
 
@@ -237,7 +238,8 @@ def test_closed_budget_door_after_the_write_posts_a_fixed_message(world):
     error.scope = "daily"
     world.predict_error = error
     _run(world)
-    assert world.call("finish_error") == ("finish_error", PROJECT_ID, GROUP_UUID, "the daily budget is used up")
+    assert world.call("finish_error") == (
+        "finish_error", PROJECT_ID, GROUP_UUID, "the daily budget is used up", False)
     assert world.call("block") == ("block", PROJECT_ID, RUN_ID, "the daily budget is used up")
 
 
@@ -246,7 +248,7 @@ def test_run_history_failed_predict_keeps_the_error_text_in_its_private_chat(wor
     error = RuntimeError("rpc down")
     world.predict_error = error
     _run(world)
-    assert world.call("finish_error") == ("finish_error", PROJECT_ID, "response-1", error)
+    assert world.call("finish_error") == ("finish_error", PROJECT_ID, "response-1", error, True)
 
 
 def test_failed_chat_write_leaves_no_group_to_end(world):

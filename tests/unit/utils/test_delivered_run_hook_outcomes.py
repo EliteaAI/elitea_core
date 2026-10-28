@@ -69,3 +69,16 @@ def test_a_forged_run_id_cannot_end_a_delivered_run_from_a_group_that_is_not_its
                                         message_group_id=ANSWER_GROUP + 2) is False
         session.refresh(run)
         assert run.status == "running"
+
+
+@pytest.mark.parametrize("linked", [False, True], ids=["unlinked", "linked to the chat"])
+def test_a_hook_with_an_answer_group_leaves_a_private_run_of_the_same_owner_alone(runs, session, sent, linked):
+    private = _run(runs, session, _schedule(runs, session, created_by=OWNER))
+    private.conversation_id = CHAT if linked else None
+    session.flush()
+
+    assert runs.finish_schedule_run(1, private.id, "success", None, CHAT, author_id=OWNER,
+                                    message_group_id=ANSWER_GROUP) is False
+    runs.pause_schedule_run(1, private.id, SENSITIVE, CHAT, OWNER, ANSWER_GROUP)
+    session.refresh(private)
+    assert private.status == "running"
