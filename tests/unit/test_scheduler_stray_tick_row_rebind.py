@@ -69,6 +69,18 @@ def test_a_stray_row_beside_the_managed_row_is_switched_off(bindings):
     ]
 
 
+def test_of_two_stray_rows_only_the_oldest_is_bound_and_the_other_is_switched_off(bindings):
+    session = _session([
+        ("pipeline_scheduling", None, OLD, True),
+        ("pipeline_scheduling", None, OLD, True),
+    ])
+    bindings.rebind_legacy_rows(session)
+    assert _rows(session) == [
+        ("pipeline_scheduling", NEW, True),
+        ("pipeline_scheduling", OLD, False),
+    ]
+
+
 def test_other_rows_are_not_touched(bindings):
     session = _session([
         ("pipeline_scheduling", 7, OLD, True),
@@ -146,3 +158,20 @@ def test_a_failed_rebind_does_not_stop_the_bootstrap():
     exec(compile("class _M:\n" + body, "module.py", "exec"), namespace)  # noqa: S102 - runs one method of module.py without the pylon plugin
     namespace["_M"]()._rebind_legacy_schedule_rows()
     assert logged == ["Failed to rebind legacy platform schedule rows"]
+
+
+def test_the_statements_follow_the_session_schema_map(bindings):
+    # Only platform.schedule exists, so an unqualified raw UPDATE would fail with "no such table"
+    engine = sa.create_engine("sqlite://").execution_options(schema_translate_map={None: "platform"})
+    with engine.begin() as conn:
+        conn.execute(sa.text("ATTACH DATABASE ':memory:' AS platform"))
+        conn.execute(sa.text(
+            "CREATE TABLE platform.schedule (id INTEGER PRIMARY KEY, name TEXT, "
+            "project_id INTEGER, rpc_func TEXT, active BOOLEAN)"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO platform.schedule (name, project_id, rpc_func, active) "
+            "VALUES ('pipeline_scheduling', NULL, :r, 1)"
+        ), {"r": OLD})
+        bindings.rebind_legacy_rows(sa.orm.Session(bind=conn))
+        assert conn.execute(sa.text("SELECT rpc_func FROM platform.schedule")).scalar() == NEW
