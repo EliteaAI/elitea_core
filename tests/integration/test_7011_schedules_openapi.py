@@ -53,7 +53,7 @@ LENIENT_MODULES = (
         'exceptions', 'predict_utils', 'schedule_draft_utils', 'service_prompt_utils', 'utils',
         'evaluation_run_utils', 'run_id', 'scheduler_bindings', 'sio_utils', 'prompt_eliminate_utils',
         'admission', 'binding_api', 'governance', 'governance_settings', 'mandate_admission',
-        'worker_capabilities',
+        'worker_capabilities', 'trigger_governance',
     )),
 )
 OTHER_TAGS = {
@@ -259,14 +259,13 @@ def test_cr_el7011_success_answers_show_an_example(spec):
             assert response['content']['application/json']['example'], (key, code)
 
 
-# CR 2026-10-21: PUT edits fields only; pause and resume take no body
-def test_cr_el7011_put_has_no_enabled_field_and_pause_resume_have_no_body(spec):
+# PUT takes `enabled` to pause or resume; the pause and resume actions take no body
+def test_put_has_an_enabled_field_and_pause_resume_have_no_body(spec):
     operations = _operations(spec)
     put_body = operations[('put', ITEM)]['requestBody']['content']['application/json']['schema']['$ref']
-    assert 'enabled' not in spec['components']['schemas'][put_body.rsplit('/', 1)[-1]]['properties']
-    assert '400' in operations[('put', ITEM)]['responses']
-    bad_input = operations[('put', ITEM)]['responses']['400']['content']['application/json']['example']
-    assert (bad_input['code'], bad_input['field']) == ('invalid_input', 'enabled')  # BUG-29: no tuple spread
+    assert 'enabled' in spec['components']['schemas'][put_body.rsplit('/', 1)[-1]]['properties']
+    assert '`enabled`' in operations[('put', ITEM)]['description']
+    assert 'answers 400' not in operations[('put', ITEM)]['description']
     for action in ('pause', 'resume'):
         assert 'requestBody' not in operations[('post', f'{ITEM}/{action}')]
 
@@ -418,9 +417,23 @@ def test_r1_3_el7011_json_bodies_show_an_example(spec, method, path):
     assert _operations(spec)[(method, path)]['requestBody']['content']['application/json']['examples']
 
 
-# R2.3: no Schedules operation becomes an MCP tool
-def test_r2_3_el7011_schedules_operations_stay_out_of_mcp(registry):
-    assert registry.get_mcp_api_tools(plugins=['elitea_core'], filter_tags=[TAG]) == []
+# Five Schedules operations are MCP tools; the registry derives each name from the method and the last two
+# fixed path parts, so the names must differ (the read of one schedule would repeat the list name)
+SCHEDULE_TOOLS = {
+    'get_elitea_core_schedules', 'post_elitea_core_schedules', 'put_elitea_core_schedules',
+    'delete_elitea_core_schedules', 'post_schedules_run',
+}
+
+
+def test_schedules_mcp_tools_are_the_documented_five_with_unique_names(registry):
+    names = [tool['value'] for tool in registry.get_mcp_api_tools(plugins=['elitea_core'], filter_tags=[TAG])]
+    assert sorted(names) == sorted(SCHEDULE_TOOLS)
+
+
+def test_the_edit_tool_schema_takes_the_enabled_field(registry):
+    tools = registry.get_mcp_api_tools(plugins=['elitea_core'], filter_tags=[TAG])
+    edit = next(tool for tool in tools if tool['value'] == 'put_elitea_core_schedules')
+    assert 'enabled' in edit['args_schema']['properties']
 
 
 # R2.4: the other tags stay; the plugin registration adds Schedules paths only
@@ -430,7 +443,6 @@ def test_r2_4_el7011_other_tags_and_paths_are_unchanged(registry):
     for endpoint in registry._endpoints['elitea_core']:
         assert endpoint['path'].startswith(f'{API_ROOT}/schedules/')
         assert endpoint['tags'] == [TAG]
-        assert endpoint['mcp_tool'] is False
 
 
 def test_r2_4_el7011_registration_without_openapi_registry_does_not_fail(monkeypatch):

@@ -46,6 +46,7 @@ MCP_ENDPOINT_CONFIGS = [
     {"suffix": "elitea_core/chat", "name": "Elitea Chat"},
     {"suffix": "elitea_core/toolkits", "name": "Elitea Toolkits"},
     {"suffix": "elitea_core/analytics", "name": "Elitea Analytics"},
+    {"suffix": "elitea_core/schedules", "name": "Elitea Schedules"},
     {"suffix": "secrets", "name": "Secrets"},
     {"suffix": "configurations", "name": "Configurations"},
     {"suffix": "artifacts", "name": "Artifacts"},

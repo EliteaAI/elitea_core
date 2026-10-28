@@ -21,6 +21,10 @@ SESSION_PROJECT = 2
 FOREIGN_PROJECT = 7
 
 
+class ScopeError(Exception):
+    pass
+
+
 @pytest.fixture(scope='module')
 def internal_tools():
     import tools
@@ -66,13 +70,15 @@ def session_path_params(internal_tools):
     namespace = {
         'MCP_CURRENT_PROJECT_SUFFIXES': internal_tools.MCP_CURRENT_PROJECT_SUFFIXES,
         'MCP_PROJECT_SCOPED_SUFFIXES': internal_tools.MCP_PROJECT_SCOPED_SUFFIXES,
+        '_SCHEDULES_SUFFIX': SCHEDULES,
+        'McpProjectScopeError': ScopeError,
     }
     # The resolvers are private methods of a class that needs the pylon runtime; running only their source keeps the test offline.
     exec(compile(ast.Module(body=methods, type_ignores=[]), '<resolvers>', 'exec'), namespace)  # noqa: S102
 
-    def _resolve(scope_project_id):
+    def _resolve(scope_project_id, project_id=SESSION_PROJECT):
         session = types.SimpleNamespace(
-            entity_category=SCHEDULES, project_id=SESSION_PROJECT, scope_project_id=scope_project_id,
+            entity_category=SCHEDULES, project_id=project_id, scope_project_id=scope_project_id,
         )
         return (
             namespace['__session_default_path_params'](types.SimpleNamespace(session=session)),
@@ -83,6 +89,10 @@ def session_path_params(internal_tools):
 
 def test_schedule_group_follows_the_active_project(internal_tools):
     assert SCHEDULES in internal_tools.MCP_CURRENT_PROJECT_SUFFIXES
+
+
+def test_schedule_group_is_an_injected_endpoint(internal_tools):
+    assert SCHEDULES in {ep['suffix'] for ep in internal_tools.MCP_ENDPOINT_CONFIGS}
 
 
 def test_schedule_group_is_confined_to_the_scope_project(internal_tools):
@@ -100,6 +110,16 @@ def test_scoped_session_pins_the_project_the_call_may_use(session_path_params):
     assert scoped['project_id'] != FOREIGN_PROJECT
 
 
+def test_unscoped_session_pins_the_session_project(session_path_params):
+    _, scoped = session_path_params(None)
+    assert scoped == {'project_id': SESSION_PROJECT}
+
+
+def test_session_without_a_project_is_refused(session_path_params):
+    with pytest.raises(ScopeError):
+        session_path_params(None, project_id=None)
+
+
 def test_injected_schedule_url_targets_the_current_project_with_the_scope(internal_tools, monkeypatch):
     monkeypatch.setattr(internal_tools, 'run_token_applies', lambda: False)
     monkeypatch.setattr(internal_tools, '_get_user_token', lambda user_id: 'pat-token')
@@ -115,15 +135,14 @@ def test_injected_schedule_url_targets_the_current_project_with_the_scope(intern
         ),
         raising=False,
     )
-    monkeypatch.setattr(
-        internal_tools, 'MCP_ENDPOINT_CONFIGS', [{'suffix': SCHEDULES, 'name': 'Elitea Schedules'}]
-    )
     tools = internal_tools.inject_mcp_toolkits(
         user_id=10,
         current_project_id=SESSION_PROJECT,
         internal_tools=[internal_tools.MCP_INTERNAL_TOOL_KEY],
         scope_project_id=SESSION_PROJECT,
     )
-    assert [t['settings']['url'] for t in tools] == [
+    urls = [t['settings']['url'] for t in tools]
+    assert (
         f'http://localhost/app/{SESSION_PROJECT}/mcp/{SCHEDULES}?scope_project_id={SESSION_PROJECT}'
-    ]
+        in urls
+    )

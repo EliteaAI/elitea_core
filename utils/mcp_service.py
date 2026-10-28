@@ -41,6 +41,9 @@ class _RunTokenRefusal(Exception):
     """A tool call the run token's scope does not allow (#7214); its text is the readable refusal."""
 
 
+_SCHEDULES_SUFFIX = "elitea_core/schedules"
+
+
 class McpProjectScopeError(Exception):
     """Raised when a tool argument names a project the session is not confined to."""
 
@@ -429,10 +432,16 @@ class McpService:
                     response_content = json.dumps(result["result"])
             elif api_tool := self.__get_api_tool_by_name(request.params.name):
                 log.debug("Starting API tool call: %s", request.params.name)
-                result = McpApiToolExecutor.execute(
-                    api_tool, request.params.arguments, self.__session_default_path_params(),
-                    self.__session_scoped_path_params()
-                )
+                try:
+                    default_path_params = self.__session_default_path_params()
+                    scoped_path_params = self.__session_scoped_path_params()
+                except McpProjectScopeError as exc:
+                    log.warning("Refused API tool call %s: %s", request.params.name, exc)
+                    result = {"error": f"Access denied: {exc}"}
+                else:
+                    result = McpApiToolExecutor.execute(
+                        api_tool, request.params.arguments, default_path_params, scoped_path_params
+                    )
                 if "error" not in result:
                     response_content = json.dumps(result["result"])
             else:
@@ -795,6 +804,12 @@ class McpService:
 
     def __session_scoped_path_params(self) -> dict:
         scope_project_id = getattr(self.session, 'scope_project_id', None)
+        if self.session.entity_category == _SCHEDULES_SUFFIX:
+            # The schedule tools act on one project only: the scope project, else the session project.
+            pinned = scope_project_id if scope_project_id is not None else self.session.project_id
+            if pinned is None:
+                raise McpProjectScopeError("schedule tools need a session with a project")
+            return {'project_id': pinned}
         if scope_project_id is not None and self.session.entity_category in MCP_PROJECT_SCOPED_SUFFIXES:
             return {'project_id': scope_project_id}
         return {}
