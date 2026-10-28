@@ -302,6 +302,7 @@ class RPC:
                     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
                     mandate_ticket: Optional[str] = None,
                     authoring: bool = False,
+                    unattended: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -524,13 +525,15 @@ class RPC:
         # never from user_id / user_context / ids in the payload; None when governance is off (#6756)
         # An autonomous run (scheduler tick, webhook API) brings a single-use ticket for the request its trusted caller
         # built; anything else (no ticket, a forged, spent or foreign one) is the ordinary request, which for a
-        # system user is refused as MANDATE_REQUIRED (#6947)
+        # system user is refused as MANDATE_REQUIRED (#6947). An owner schedule's run (#7011) is ``unattended``:
+        # without a ticket its request is a system run too, though its payload is its owner's: refused under enforce,
+        # and under audit only not rehearsed here, as a legacy scheduled run (its starter records what enforce says)
         admission = take_trigger_admission(
             self, mandate_ticket, project_id=parsed.project_id, binding_project_id=application_project_id,
             version_id=getattr(admission_version_row, "id", None),
         ) or admission_request_from(
             self, sid=sid, project_id=parsed.project_id, binding_project_id=application_project_id,
-            version_row=admission_version_row, run_kind="system" if is_system_user else "interactive",
+            version_row=admission_version_row, run_kind="system" if is_system_user or unattended else "interactive",
             # the editor's test chat (#7213): said by chat_all from the conversation row it loaded, only over a live
             # socket of the author; the RPC argument is not reachable from a client payload
             entry_point=ENTRY_EDITOR_CHAT if authoring and sid else "chat_sio",
