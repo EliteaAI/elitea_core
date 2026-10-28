@@ -39,6 +39,7 @@ ATTACHMENT_DEFAULT_SELECTED_TOOLS = [
 MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
 MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY = 'skill_builder'
 MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY = 'project_context_builder'
+MCP_SCHEDULE_BUILDER_INTERNAL_TOOL_KEY = 'schedule_builder'
 MCP_PROJECT_ID_MARKER = '{project_id}'
 
 MCP_ENDPOINT_CONFIGS = [
@@ -57,6 +58,9 @@ MCP_SKILL_BUILDER_ENDPOINT_CONFIGS = [
 MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS = [
     {"suffix": "elitea_core/project_context", "name": "Elitea Project Context"},
 ]
+MCP_SCHEDULE_BUILDER_ENDPOINT_CONFIGS = [
+    {"suffix": "elitea_core/schedules", "name": "Elitea Schedules"},
+]
 MCP_CURRENT_PROJECT_SUFFIXES = {
     "elitea_core/project_context",
     "elitea_core/skills",
@@ -72,6 +76,7 @@ MCP_BUILDER_TOOL_KEYS = {
     MCP_INTERNAL_TOOL_KEY,
     MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
     MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY,
+    MCP_SCHEDULE_BUILDER_INTERNAL_TOOL_KEY,
 }
 SKILL_SCOPE_INSTRUCTION = (
     " Disambiguate 'skill' from the full conversation context: treat it as an ELITEA platform "
@@ -702,6 +707,8 @@ def inject_mcp_toolkits(
         endpoint_configs.extend(MCP_SKILL_BUILDER_ENDPOINT_CONFIGS)
     if MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
         endpoint_configs.extend(MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS)
+    if MCP_SCHEDULE_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        endpoint_configs.extend(MCP_SCHEDULE_BUILDER_ENDPOINT_CONFIGS)
 
     # Keep insertion stable while avoiding duplicate endpoint registrations.
     seen_suffixes = set()
