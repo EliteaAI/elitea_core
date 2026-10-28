@@ -570,3 +570,20 @@ def test_the_onboarding_can_ask_whether_an_app_resolves_without_seeing_its_secre
 def test_every_new_code_has_a_readable_message(ns):
     for code in ns.entra_obo.CODES:
         assert ns.adm.MESSAGES[code] != ns.adm.GENERIC_MESSAGE
+
+
+def test_a_real_mandate_admission_with_a_delegated_credential_is_refused(ns, env):
+    """Keyed on the mandate admission itself (its subject), whatever the schedule starter or the owner token do."""
+    binding = env.seed_agent()
+    mandate = mandate_env.add_mandate(env, ns, state="active", binding_ref=binding, operations=("run:schedule",))
+    cred = Delegated(env, binding)
+    env.grants[(1, cred.key(f"mandate:{mandate}"))] = {
+        "grant_id": str(uuid.uuid4()), "state": "active", "revocation_epoch": 4, "valid_from": None,
+        "valid_until": None, "operations": ["*"]}
+    request = ns.AdmissionRequest(
+        project_id=1, binding_project_id=1, application_id=7, version_id=70, run_kind="mandate",
+        entry_point="schedule", caller_type="trigger", mandate_ref=str(mandate), trigger_ref="schedule:version:70")
+    with pytest.raises(ns.exceptions.AdmissionDenied) as refused:
+        ns.adm.admit_dispatch(env.module(), "indexer_agent", call_kwargs(payload_of(cred)), request)
+    assert refused.value.reason_code == "DENIED_MANDATE_DELEGATION_UNSUPPORTED"
+    assert env.custody.calls == [] and env.entra.posts == []
