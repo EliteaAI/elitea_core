@@ -141,3 +141,27 @@ def test_refusal_frame_and_validation_error_build_the_same_frame(utils):
     utils.SioValidationError(sio=sio, sid=SID, event='e', error='x', stream_id='s', message_id='m', code='c')
 
     assert _frames(sio)[0]['data'] == utils.refusal_frame('e', 'x', 's', 'm', 'c')
+
+
+# ---- the refusals that reach the sender through emit_refusal ---------------------------------------------------
+
+def test_an_error_while_preparing_attachments_reaches_the_sender_not_the_room(utils):
+    """Both preparation errors in chat predict are sent with ``emit_refusal``: a socket that reconnected has not
+    rejoined the chat room, so a frame addressed to the room would never reach the sender (#7024)."""
+    sio = MagicMock()
+
+    utils.emit_refusal(sio, SID, ROOM, 'chat_predict', 'could not process the attachment', 'conv-1', 'q-1')
+
+    (frame,) = _frames(sio)
+    assert frame['to'] == SID
+    assert 'room' not in frame
+
+
+def test_the_content_of_a_payload_error_is_sent_as_it_is(utils):
+    """The text of a PayloadGenerationError is already written for the user and must not be reworded."""
+    sio = MagicMock()
+    message = 'You can mention at most 3 skills in a message.'
+
+    utils.emit_refusal(sio, SID, ROOM, 'chat_predict', message, 'conv-1', 'q-1')
+
+    assert _frames(sio)[0]['data']['content'] == message

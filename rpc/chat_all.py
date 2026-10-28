@@ -1526,16 +1526,9 @@ class RPC:
                 except Exception as e:
                     log.error(e)
                     room = get_chat_room(parsed.conversation_uuid)
-                    self.context.sio.emit(
-                        event=SioEvents.socket_validation_error.value,
-                        data={
-                            'event': SioEvents.chat_predict.value,
-                            'content': str(e),
-                            'type': 'error',
-                            'stream_id': parsed.conversation_uuid,
-                            'message_id': parsed.question_id
-                        },
-                        room=room
+                    emit_refusal(
+                        self.context.sio, sid, room, SioEvents.chat_predict.value, str(e),
+                        parsed.conversation_uuid, parsed.question_id,
                     )
                     return {"error": str(e)}
 
@@ -1609,16 +1602,9 @@ class RPC:
                         log.error(e)
                         response_msg.is_streaming = False
                         session.commit()
-                        self.context.sio.emit(
-                            event=SioEvents.socket_validation_error.value,
-                            data={
-                                'event': SioEvents.chat_predict.value,
-                                'content': e.content,
-                                'type': 'error',
-                                'stream_id': parsed.conversation_uuid,
-                                'message_id': parsed.question_id
-                            },
-                            room=room
+                        emit_refusal(
+                            self.context.sio, sid, room, SioEvents.chat_predict.value, e.content,
+                            parsed.conversation_uuid, parsed.question_id,
                         )
                         return {"error": str(e)}
 
