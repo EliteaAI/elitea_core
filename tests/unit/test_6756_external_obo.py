@@ -700,9 +700,11 @@ def test_two_delegated_slots_share_one_budget_within_the_workers_wait(ns, env, m
 def test_the_authority_path_is_built_from_the_checked_tenant(ns, env):
     person = {"issuer": ENTRA, "tid": "../evil", "oid": OID}
     delegation = {**descriptor(tenant_id="../evil"), "ownership_class": "project_shared", "custodian_subject_ref": None}
+    # custody would vouch for that tenant, so only the GUID check in acquire stands between it and the authority path
+    env.custody.answer = {"ok": True, "assertion": jwt(tid="../evil", oid=OID, aud="api-client")}
     with pytest.raises(ns.entra_obo.DelegationRefused) as refused:
         ns.entra_obo.acquire(env.module(), {**person, "issuer": None}, delegation, 1)
-    assert refused.value.code == "DENIED_SUBJECT_MISMATCH" and env.entra.posts == []
+    assert refused.value.code == "DENIED_SUBJECT_MISMATCH" and env.entra.posts == [] and env.custody.calls == []
 
 
 def test_signing_out_drops_the_persons_cached_tokens_only(ns, env):
