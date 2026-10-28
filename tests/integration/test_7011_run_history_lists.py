@@ -82,6 +82,8 @@ def history(world, monkeypatch):
         "utils.constants": {"PROMPT_LIB_MODE": "prompt_lib", "SCHEDULES_OPENAPI_TAG": "elitea_core/schedules",
                             "SCHEDULES_PROJECT_PATH": "<string:mode>/<int:project_id>"},
         "utils.skill_participant_utils": {"SkillParticipantError": Exception, "validate_skill_participants": None},
+        "utils.skill_run_history": {"chat_skill_runs": None, "openable_skill_chat_ids": None,
+                                    "skill_run_started_at": None},
     }
     for dotted, attrs in sibling_stubs.items():
         known = vars(sys.modules.get(f"{PKG}.{dotted}") or types.ModuleType(dotted))  # keep what the world stubbed
