@@ -43,6 +43,9 @@ class ConversationListExtended(ConversationList):
     message_groups_count: int
     users_count: int
     duration: float = 0.0
+    is_chat_run: bool = False
+    skill_version_id: Optional[int] = None
+    run_started_at: Optional[datetime] = None
     execution_type: str = 'chat'  # no stored value: a plain chat (owner decision 2026-10-21, US-50 R3.1)
     schedule_run: ScheduleRunRef | None = None  # the run record of a run row (CR-22, US-16 R2.4)
 
