@@ -36,6 +36,7 @@ from .publish_utils import (
     verify_validation_token,
 )
 from .constants import DEFAULT_FALLBACK_CATEGORY
+from .skill_frontmatter import FRONTMATTER_META_KEY
 from .skill_run_settings import SHARED_MODEL_REQUIRED, unshared_model_issue
 from .utils import get_public_project_id
 from .skill_category_utils import (
@@ -730,7 +731,10 @@ def create_skill_publish_snapshot(
                 'name': version.name,
                 'instructions': version.instructions or '',
                 'tags': [t.name for t in (version.tags or [])],
-                'meta': {'icon_meta': meta.get('icon_meta')},
+                'meta': {
+                    'icon_meta': meta.get('icon_meta'),
+                    FRONTMATTER_META_KEY: meta.get(FRONTMATTER_META_KEY),
+                },
                 'run_settings': version.run_settings,
             },
             'source': {
@@ -778,6 +782,7 @@ def _build_published_skill_meta(
         'source_author_id': src['author_id'],
         'published_by': user_id,
         'icon_meta': ver_meta.get('icon_meta'),
+        FRONTMATTER_META_KEY: ver_meta.get(FRONTMATTER_META_KEY),
     }
 
 

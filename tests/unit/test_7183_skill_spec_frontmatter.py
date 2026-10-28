@@ -393,3 +393,102 @@ class TestCreatingASkill:
         skill = new_skill(meta={'frontmatter': {'license': 'MIT', 'description': 'echoed'}})
         skill_utils.enforce_new_skill_spec(skill)
         assert skill.versions[0].meta == {'frontmatter': {'license': 'MIT'}}
+
+
+class RecordingSession:
+    def __init__(self, version=None, skill=None):
+        self.version = version
+        self.skill = skill
+        self.added = []
+
+    def query(self, model):
+        return self
+
+    def filter(self, *args):
+        return self
+
+    def first(self):
+        return self.version
+
+    def get(self, entity_id):
+        return self.skill
+
+    def add(self, entity):
+        entity.id = 100 + len(self.added)
+        self.added.append(entity)
+
+    def flush(self):
+        pass
+
+    def commit(self):
+        pass
+
+
+class RecordedEntity(types.SimpleNamespace):
+    id = None
+    skill_id = None
+
+
+@pytest.fixture
+def publish(monkeypatch):
+    _install_packages(monkeypatch)
+    for name in (
+        'tools', 'pylon', 'pylon.core', 'pylon.core.tools', 'sqlalchemy', 'sqlalchemy.exc',
+        f'{PKG}.models.all', f'{PKG}.models.enums.all', f'{PKG}.models.enums.events',
+        f'{PKG}.models.pd.collection_base', f'{PKG}.models.pd.skill_publish',
+        f'{PKG}.models.pd.skill_version', f'{PKG}.models.skill', f'{PKG}.utils.publish_utils',
+        f'{PKG}.utils.constants', f'{PKG}.utils.skill_run_settings', f'{PKG}.utils.utils',
+        f'{PKG}.utils.skill_category_utils', f'{PKG}.utils.skill_utils',
+    ):
+        monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    publish_models = types.ModuleType(f'{PKG}.models.pd.publish')
+    publish_models.VERSION_NAME_PATTERN = r'.+'
+    monkeypatch.setitem(sys.modules, publish_models.__name__, publish_models)
+    _load(monkeypatch, 'utils/skill_frontmatter.py', f'{PKG}.utils.skill_frontmatter')
+    module = _load(monkeypatch, 'utils/skill_publish_utils.py', f'{PKG}.utils.skill_publish_utils')
+    monkeypatch.setattr(module, 'Skill', RecordedEntity)
+    monkeypatch.setattr(module, 'SkillVersion', RecordedEntity)
+    monkeypatch.setattr(module, '_apply_snapshot_tags', lambda *args: None)
+    return module
+
+
+def use_session(publish, monkeypatch, session):
+    @contextlib.contextmanager
+    def get_session(project_id):
+        yield session
+
+    monkeypatch.setattr(publish, 'db', types.SimpleNamespace(get_session=get_session))
+
+
+class TestPublishingKeepsFrontmatter:
+    FRONTMATTER = {'license': 'Proprietary. LICENSE.txt has complete terms', 'allowed-tools': 'Read'}
+
+    def snapshot(self, publish, monkeypatch):
+        source = types.SimpleNamespace(
+            name='v1', instructions='Body', tags=[], run_settings=None,
+            meta={'icon_meta': {'url': 'i'}, 'frontmatter': self.FRONTMATTER},
+        )
+        use_session(publish, monkeypatch, RecordingSession(
+            version=source, skill=types.SimpleNamespace(name='docx', description='Word documents'),
+        ))
+        return publish.create_skill_publish_snapshot(project_id=2, skill_id=7, version_id=70, user_id=3)
+
+    def test_the_first_published_version_keeps_the_frontmatter(self, publish, monkeypatch):
+        snapshot = self.snapshot(publish, monkeypatch)
+        public = RecordingSession()
+        use_session(publish, monkeypatch, public)
+
+        publish.publish_skill_first_version(1, snapshot, 'v1', 3, snapshot['source'])
+
+        published_version = public.added[1]
+        assert published_version.meta['frontmatter'] == self.FRONTMATTER
+        assert published_version.meta['icon_meta'] == {'url': 'i'}
+
+    def test_a_later_published_version_keeps_the_frontmatter(self, publish, monkeypatch):
+        snapshot = self.snapshot(publish, monkeypatch)
+        public = RecordingSession(skill=types.SimpleNamespace(id=50))
+        use_session(publish, monkeypatch, public)
+
+        publish.publish_skill_additional_version(1, 50, snapshot, 'v2', 3, snapshot['source'])
+
+        assert public.added[0].meta['frontmatter'] == self.FRONTMATTER
