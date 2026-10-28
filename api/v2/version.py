@@ -124,6 +124,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if 'error' in version_details:
             return {'error': version_details['error']}, 404
 
+        from ...utils import internal_obo  # pylint: disable=C0415
+        claims = internal_obo.current_claims()
+        if claims is not None:
+            # a governed run's own fetch (#7229, C9-SEC-30): sealed as a dispatch of this version under the run would be
+            from ...utils.admission import seal_fetched_version  # pylint: disable=C0415
+            from ...utils.exceptions import AdmissionDenied  # pylint: disable=C0415
+            try:
+                seal_fetched_version(self.module, claims, project_id, application_id, version_id, version_details)
+            except AdmissionDenied as denied:
+                return {'code': denied.reason_code, 'message': denied.message}, 403
+
         return version_details, 200
 
     @register_openapi(

@@ -119,6 +119,14 @@ class FakePredictPayload:
         self.llm_settings = types.SimpleNamespace(model_dump=lambda **kwargs: llm_settings) if llm_settings else None
 
 
+class SkillInvocationLimitError(Exception):
+    code = 'SKILL_INVOCATION_LIMIT'
+
+    def __init__(self, count, max_allowed):
+        super().__init__(f'This message references {count} skills with ~skill-name. Maximum allowed is {max_allowed} per message.')
+        self.count, self.max_allowed = count, max_allowed
+
+
 @pytest.fixture
 def env(isolated_sys_modules):
     for name in ('plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.pd',
@@ -149,14 +157,20 @@ def env(isolated_sys_modules):
         def configurations_get_auto_routing_settings(self, project_id):
             return {'enabled': True}
 
+        def configurations_get_first_filtered_project(self, project_id, filter_fields=None):
+            return None
+
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(with_project_schema_session=with_project_schema_session)
     tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=FakeRpc()))
+    tools.context = types.SimpleNamespace(module_manager=types.SimpleNamespace(modules={'social': object()}))
+    tools.this = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={}))
     tools.auth = types.SimpleNamespace(sio_users={}, current_user=lambda auth_data: {}, is_sio_user_in_project=None)
     sys.modules['tools'] = tools
 
     sqlalchemy = _package('sqlalchemy')
     sqlalchemy.desc = lambda column: column
+    sqlalchemy.func = types.SimpleNamespace()
     sqlalchemy_orm = types.ModuleType('sqlalchemy.orm')
     sqlalchemy_orm.selectinload = lambda *a: None
     sqlalchemy.orm = sqlalchemy_orm
@@ -166,9 +180,16 @@ def env(isolated_sys_modules):
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
     _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)),
-          validate_message_skill_limit=lambda content, candidates: None)
-    _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None),
-          SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column()))
+          get_max_invoked_skills_per_turn=lambda: 5,
+          validate_message_skill_limit=lambda content, candidates: None,
+          SkillInvocationLimitError=SkillInvocationLimitError)
+    _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
+          build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)
+    _stub('utils.support_utils', get_support_config=lambda: {'enabled': False, 'project_id': None})
+    _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None, name=Column(),
+                                                      description=Column(), meta=Column()),
+          SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column(), name=Column(), meta=Column(),
+                                             instructions=Column()))
     _stub('models.message_group', ConversationMessageGroup=types.SimpleNamespace(
         author_participant_id=Column(), conversation_id=Column(), created_at=Column(),
     ))
@@ -180,7 +201,8 @@ def env(isolated_sys_modules):
     for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant'):
         _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
-                 'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override'):
+                 'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override',
+                 'project_skills'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
     module = _load('utils/skill_participant_utils.py', f'{PACKAGE}.utils.skill_participant_utils')
 

@@ -12,7 +12,7 @@ Both scheduled and webhook pipeline triggers use identical patterns for:
 
 This module consolidates that shared logic to eliminate duplication.
 """
-from typing import Optional
+from typing import Literal
 
 from pylon.core.tools import log
 from tools import db, rpc_tools, this
@@ -28,9 +28,22 @@ from ..utils.sio_utils import SioEvents
 
 
 class TriggerType:
-    """Trigger type constants for conversation metadata."""
-    SCHEDULED = "scheduled"
+    """The shared run trigger enum: conversation meta.execution_type and the predict trigger_source (BUG-12)."""
+    CHAT = "chat"
+    API = "api"
+    MCP = "mcp"
     WEBHOOK = "webhook"
+    SCHEDULED = "scheduled"
+    SCHEDULE_MANUAL = "schedule_manual"
+    MANUAL = "manual"  # legacy: stored by Run now and Test run before BUG-12, still listed
+    VALUES = (CHAT, API, MCP, WEBHOOK, SCHEDULED, SCHEDULE_MANUAL, MANUAL)
+
+
+def with_execution_type(meta: dict | None, trigger_source: str) -> dict:
+    """Conversation meta with the entry point's execution_type; a stored value is kept (BUG-12, US-16 R1.5)."""
+    if (meta or {}).get('execution_type'):
+        return meta
+    return {**(meta or {}), 'execution_type': trigger_source}
 
 
 def create_trigger_run_conversation(
@@ -40,7 +53,8 @@ def create_trigger_run_conversation(
     trigger_type: str,
     trigger_message: str,
     conversation_name: str,
-    extra_meta: Optional[dict] = None,
+    extra_meta: dict | None = None,
+    source: Literal["pipeline", "agent"] = "pipeline",
 ) -> tuple[str, int, str]:
     """
     Create a conversation for a triggered pipeline run (scheduled or webhook).
@@ -56,6 +70,7 @@ def create_trigger_run_conversation(
         trigger_message: Initial message content showing trigger info
         conversation_name: Name for the conversation (e.g., "Scheduled run: Pipeline Name")
         extra_meta: Additional metadata to include in conversation.meta
+        source: Conversation source, "pipeline" or "agent"
 
     Returns:
         Tuple of (conversation UUID string, pipeline participant ID, response message UUID)
@@ -88,11 +103,12 @@ def create_trigger_run_conversation(
 
         if extra_meta:
             conversation_meta.update(extra_meta)
+        conversation_meta = with_execution_type(conversation_meta, trigger_type)
 
         # Create conversation with proper metadata for History tab
         conversation = Conversation(
             name=conversation_name or f"{trigger_type.capitalize()} run: {pipeline_name}",
-            source="pipeline",
+            source=source,
             author_id=user_id,
             is_private=True,
             meta=conversation_meta,
@@ -176,9 +192,14 @@ def create_trigger_run_conversation(
         return str(conversation.uuid), pipeline_participant.id, str(response_msg_group.uuid)
 
 
-def finish_trigger_run_with_error(project_id: int, response_message_id: str, error) -> None:
+def run_label(source: str = "pipeline") -> str:
+    """What a triggered run is called in its chat: an agent schedule's run is not a pipeline run."""
+    return "Agent run" if source == "agent" else "Pipeline run"
+
+
+def finish_trigger_run_with_error(project_id: int, response_message_id: str, error, source: str = "pipeline") -> None:
     """End a triggered run's placeholder message with the dispatch error, so History shows why it failed."""
-    message = f"Pipeline run could not start: {error}"
+    message = f"{run_label(source)} could not start: {error}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
@@ -190,7 +211,7 @@ def finish_trigger_run_with_error(project_id: int, response_message_id: str, err
                 'error': message,
             },
         })
-    except Exception:  # pylint: disable=W0703
+    except Exception:  # pylint: disable=W0703  # noqa: BLE001
         log.exception("Could not record trigger run failure: message_id=%s", response_message_id)
 
 
@@ -199,9 +220,11 @@ def is_trigger_refusal(result) -> bool:
     return isinstance(result, dict) and isinstance(result.get("code"), str) and "task_id" not in result
 
 
-def finish_trigger_run_refused(project_id: int, response_message_id: str, refusal: dict) -> None:
+def finish_trigger_run_refused(
+    project_id: int, response_message_id: str, refusal: dict, source: str = "pipeline",
+) -> None:
     """End a refused run's placeholder with the readable refusal (fixed text, no ids), so History shows why."""
-    message = f"Pipeline run was not started: {refusal.get('error')}"
+    message = f"{run_label(source)} was not started: {refusal.get('error')}"
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {
             'message_id': response_message_id,
@@ -226,7 +249,10 @@ def execute_pipeline_via_predict_sio(
     response_message_id: str,
     user_input: str = "",
     trigger_source: str | None = None,
+    is_system_user: bool = True,
+    auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_ticket: str | None = None,
+    unattended: bool = False,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -241,12 +267,19 @@ def execute_pipeline_via_predict_sio(
         conversation_uuid: UUID of the conversation (used as stream_id)
         response_message_id: UUID of the response message group
         user_input: Input to send to the pipeline (empty for scheduled, payload for webhook)
+        is_system_user: False runs as ``user_id`` itself, for owner-bound schedule runs
+        auto_approve_sensitive_actions: True skips the sensitive-action approval pause (schedule rule and secret);
+            a list of (toolkit, tool) pairs approves only those pairs
         mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
+        unattended: an owner schedule's run under governance (#7011): admitted on its ticket or refused, never as a
+            person's chat run; sent only when set
 
     Returns:
         Dict with task_id from the RPC call, or ``{code, error}`` when a governed admission refused the run
     """
     extra = {"mandate_ticket": mandate_ticket} if mandate_ticket is not None else {}
+    if unattended:
+        extra["unattended"] = True
     result = rpc_tools.RpcMixin().rpc.timeout(5).applications_predict_sio(
         sid=None,  # No socket connection for triggered runs
         sio_event=SioEvents.chat_predict.value,  # Required for metadata persistence
@@ -263,13 +296,14 @@ def execute_pipeline_via_predict_sio(
         },
         await_task_timeout=-1,  # Don't wait for completion
         user_id=user_id,
-        is_system_user=True,
+        is_system_user=is_system_user,
         # Scheduled & webhook-triggered runs have no live UI consumer; suppress
         # streaming/UI-only events. DB persistence (full/partial_message) and
         # index/HITL/error state events are preserved. Redundant with the
         # sid-is-None auto-derive (sid=None here), but kept to document intent.
         non_interactive=True,
         trigger_source=trigger_source,
+        auto_approve_sensitive_actions=auto_approve_sensitive_actions,
         **extra,
     )
 

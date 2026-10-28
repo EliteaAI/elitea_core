@@ -464,7 +464,7 @@ def called(node):
     return node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
 
 
-@pytest.mark.parametrize("path, count", [("rpc/application.py", 2), ("methods/predict.py", 1)])
+@pytest.mark.parametrize("path, count", [("rpc/application.py", 3), ("methods/predict.py", 1)])   # 3: the toolkit test (#7229)
 def test_every_predict_entry_point_checks_before_it_unsecrets_and_marks_after(path, count):
     """The entry points need the Pylon runtime and cannot run here; their order is read from the syntax tree."""
     sites = [lines for lines in calls_in(path, called).values() if any(name == "has_free_form_secret" for _, name in lines)]
@@ -546,8 +546,13 @@ def test_the_probe_also_needs_the_governed_ops_pool(ns):
 
 def test_other_enveloped_tasks_and_the_legacy_profile_are_not_asked_for_credential_slots(ns):
     call = {"kwargs": {}}
-    ns.caps.apply_envelope_gate("indexer_test_toolkit_tool", call, GOVERNED, registry(ns, "task_envelope.v1"))
+    ns.caps.apply_envelope_gate("indexer_test_mcp_connection", call, GOVERNED, registry(ns, "task_envelope.v1"))
     assert call["kwargs"]["envelope"]["required_capabilities"] == ["task_envelope.v1"]
+    # a toolkit Test run or on-demand indexing is admitted since #7229: its toolkit carries slots
+    call = {"kwargs": {}}
+    ns.caps.apply_envelope_gate("indexer_test_toolkit_tool", call, GOVERNED, registry(ns, "task_envelope.v1",
+                                                                                      "credential_slots.v1"))
+    assert call["kwargs"]["envelope"]["required_capabilities"] == ["credential_slots.v1", "task_envelope.v1"]
     legacy = types.SimpleNamespace(enabled=False, policy_revision=None, profile="legacy")
     call = {"kwargs": {}}
     ns.caps.apply_envelope_gate("indexer_agent", call, legacy, registry(ns))
@@ -1000,3 +1005,15 @@ def test_the_reconcile_run_is_tracked_so_it_closes_the_context_when_it_stops(ns,
     legacy = make_launcher(parallel, ns, env, governed=False)
     legacy._parallel_track_reconcile("other-task", 1, {"envelope": {"context_ref": parent}})
     assert "other-task" not in legacy.module._context_by_task
+
+
+def test_the_child_stash_never_stores_the_run_token(ns, env, parallel):
+    """#7229: the stash outlives the run token's purpose (6 h); a HITL resume is admitted again and minted its own."""
+    written = {}
+    holder = types.SimpleNamespace(get_redis_client=lambda: types.SimpleNamespace(
+        set=lambda key, value, ex=None: written.update({key: json.loads(value)})))
+    payload = {"user_input": "hi", "internal_run_token": {"token": "eio1.not-a-real-token", "origins": [], "identity": "i"}}
+    parallel.Method._parallel_child_stash(holder, "root:B:c", payload, {"context_ref": "ctx"})
+    [stored] = written.values()
+    assert "internal_run_token" not in stored["child_payload"] and "eio1." not in json.dumps(stored)
+    assert stored["child_payload"]["user_input"] == "hi" and "internal_run_token" in payload   # the dispatched one is untouched

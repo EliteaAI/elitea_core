@@ -4,6 +4,8 @@ decision for a mandate subject, the re-check at the worker, the time limit and t
 Real models and statements on SQLite files (see ``fixtures/admission_env.py`` and ``fixtures/mandate_env.py``);
 only the Pylon runtime, the identity service and the audit methods are fakes.
 """
+import base64
+import json
 import re
 import sys
 import threading
@@ -1017,3 +1019,78 @@ def test_the_preflight_fails_for_a_platform_that_cannot_decide_a_mandate_run(ns,
         assert failed == [expected]   # exactly this check, nothing else
     finally:
         ns.install_fakes(env)
+
+
+# --- #7227: a mandate admits no sub-agent yet ---------------------------------------------------------------------------
+
+def with_sub_agent(payload, tool):
+    payload["application"]["subagent_version_details"] = {
+        "8:80": {"name": "child", "description": "", "version_details": {"tools": [tool]}}}
+    return payload
+
+
+def sub_agent_tool(env, section):
+    cfg_uuid = str(uuid.uuid4())
+    env.configurations[(1, cfg_uuid)] = {"id": 8, "project_id": 1, "type": "github", "section": section, "generation": 1}
+    return {"id": 2, "type": "github", "settings": {"credentials": {
+        "elitea_title": "child", "configuration_uuid": cfg_uuid, "configuration_project_id": 1,
+        "configuration_type": "github", "token": "child-token-value"}}}
+
+
+def test_a_sub_agent_with_a_credential_refuses_a_mandate_run_readably(ns, env, agent):
+    credential = MandateCredential(env, agent)
+    error = refusal(ns, env, agent, payload=with_sub_agent(credential.payload, sub_agent_tool(env, "credentials")))
+    assert (error.reason_code, error.message) == (
+        "SUB_AGENT_CREDENTIAL_NOT_ADMITTED", ns.adm.MESSAGES["SUB_AGENT_CREDENTIAL_NOT_ADMITTED"])
+    assert "scheduled or webhook" in error.message
+    assert contexts(env, ns) == [] and env.denied[-1]["reason_code"] == "SUB_AGENT_CREDENTIAL_NOT_ADMITTED"
+
+
+def test_a_mandate_run_whose_sub_agents_carry_no_credential_of_their_own_is_admitted(ns, env, agent):
+    credential = MandateCredential(env, agent)
+    admit(ns, env, agent, payload=with_sub_agent(credential.payload, sub_agent_tool(env, "vectorstore")))
+    shared = credential.payload["application"]["version_details"]["tools"][0]   # the mandate's own toolkit
+    admit(ns, env, agent, run_id="run-2", payload=with_sub_agent(credential.payload, shared))
+    assert len(contexts(env, ns)) == 2
+
+
+TOKEN_FIELDS = ("api_token", "project_auth_token", "auth_session")
+
+
+def mandate_call(**top):
+    """A mandate dispatch as the payload builders leave it without the skip: the owner's token everywhere."""
+    return {"args": [], "pool": "agents", "meta": {"project_id": 1, "project_auth_token": "owner-token-value"}, "kwargs": {
+        "project_id": 1, "_elitea_predict_run_id": RUN, **top,
+        "llm": {"kwargs": {"api_key": "owner-token-value", "auth_session": "owner-session-value"}},
+        "application": {"version_details": {"tools": []}},
+        "envelope": {"schema_version": 1, "security_profile": "governed",
+                     "required_capabilities": ["task_envelope.v1"], "context_ref": None}}}
+
+
+def test_a_mandate_dispatch_carries_no_token_shaped_field_and_runs_on_its_run_token(ns, env, agent):
+    """C9-SEC-47: a scheduled or webhook run admitted under a mandate has the run token as its only platform identity,
+    like an interactive run (#7229): no owner token in the payload or the task meta; its token keeps the mandate run's
+    own deadline (it never slides)."""
+    ns.tools.config.SECRETS_MASTER_KEY = "test-master-key-not-a-secret"
+    try:
+        call = mandate_call(api_token="owner-token-value", auth_session="owner-session-value")
+        ref = ns.adm.admit_dispatch(env.module(), "indexer_agent", call, request(ns, agent.mandate))
+        assert ref
+        text = json.dumps({"kwargs": {k: v for k, v in call["kwargs"].items() if k != "internal_run_token"},
+                           "meta": call["meta"]}, default=str)
+        assert "owner-token-value" not in text and "owner-session-value" not in text
+        assert not any(call["kwargs"].get(name) or call["meta"].get(name) for name in TOKEN_FIELDS)
+        token = call["kwargs"]["internal_run_token"]["token"]
+        body = token[len("eio1."):].split(".")[0]
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        row = next(row for row in contexts(env, ns) if str(row.id) == ref)
+        assert claims["exp"] == pytest.approx(ns.adm._aware(row.expires_at).timestamp(), abs=1)  # pylint: disable=W0212
+    finally:
+        vars(ns.tools.config).pop("SECRETS_MASTER_KEY", None)
+
+
+def test_without_a_signing_key_a_mandate_dispatch_keeps_what_its_builder_gave_it(ns, env, agent):
+    call = mandate_call()
+    assert ns.adm.admit_dispatch(env.module(), "indexer_agent", call, request(ns, agent.mandate))
+    assert call["kwargs"]["llm"]["kwargs"]["api_key"] == "owner-token-value"
+    assert "internal_run_token" not in call["kwargs"]

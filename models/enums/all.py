@@ -59,6 +59,14 @@ class NotificationEventTypes(StrEnum):
     tool_spend_limit_reached = 'tool_spend_limit_reached'
     member_tool_spend_threshold_reached = 'member_tool_spend_threshold_reached'
     member_tool_spend_limit_reached = 'member_tool_spend_limit_reached'
+    schedule_run_failed = 'schedule_run_failed'
+    schedule_run_succeeded = 'schedule_run_succeeded'
+    schedule_approval_needed = 'schedule_approval_needed'
+    schedule_approval_expired = 'schedule_approval_expired'
+    schedule_expired = 'schedule_expired'
+    schedule_disabled = 'schedule_disabled'
+    schedule_edited_by_admin = 'schedule_edited_by_admin'
+    schedule_owner_changed = 'schedule_owner_changed'
 
 
 class IndexDataStatus(StrEnum):

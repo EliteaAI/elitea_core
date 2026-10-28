@@ -572,6 +572,24 @@ def run_token_applies() -> bool:
         return False
 
 
+def run_identity_applies(sid=None, mandate=False) -> bool:
+    """Enforce (#7229): an interactive run of a signed-in person (a session, the holder admission reads) has the run token
+    as its only platform identity: no personal or system token is looked up, created or put on its payload. So does a
+    run admitted under an autonomous mandate (``mandate``: its trusted caller's ticket was taken for this run): its
+    owner's token is never looked up or created. ``admit_dispatch`` strips any that is left; this only spares the
+    lookup."""
+    from . import internal_obo  # pylint: disable=C0415
+    if not run_token_applies() or internal_obo.signing_key() is None:   # no key: no run token, the token stays
+        return False
+    if mandate:
+        return True
+    from ..models.pd.admission import _holder  # pylint: disable=C0415
+    try:
+        return getattr(_holder(sid), "type", None) == "user"
+    except Exception:  # pylint: disable=W0703
+        return False
+
+
 def _get_user_token(user_id: int) -> str | None:
     """Get the first non-expired access token for the user, or None if missing/expired."""
     state, token = resolve_user_token_state(user_id)
@@ -863,9 +881,9 @@ def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
 def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int,
                                admitted_run: bool = True) -> None:
     """``admitted_run``: the payload is for an admitted run, which under enforce authenticates its internal
-    toolkits with the run token minted at admission, so no personal token is filled in (#7214). The toolkit
-    test and the MCP connection test are dispatched without admission and get no run token; they pass
-    ``admitted_run=False`` and keep the user's own token, as the discovery path does (follow-up: #7229)."""
+    toolkits with the run token minted at admission, so no personal token is filled in (#7214). The toolkit test
+    run is admitted too (#7229). The MCP connection test is dispatched without admission and gets no run token; it
+    passes ``admitted_run=False`` and keeps the user's own token, as the discovery path does."""
     token = None if admitted_run and run_token_applies() else _TOKEN_UNSET
     for tool in tools or []:
         try:

@@ -2,8 +2,11 @@ import json
 from pylon.core.tools import log, web
 from sqlalchemy.orm import joinedload
 
+from ..models.pd.admission import ENTRY_TOOLKIT_TEST, admission_request_from
+from ..utils.admission import strip_platform_fields
+from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
 from ..utils.predict_utils import generate_test_tool_payload
-from ..utils.exceptions import PoolSaturationError
+from ..utils.exceptions import AdmissionDenied, PoolSaturationError
 
 
 class Method:
@@ -21,20 +24,34 @@ class Method:
         predict_timeout=float(60*60),  # 1 hour
     ):
         payload = generate_test_tool_payload(project_id, user_id=user_id, toolkit_id=toolkit_id, tool_name=tool_name, tool_params=tool_params)
-        #
-        task_id = self.task_node.start_task(
-            "indexer_test_toolkit_tool",
-            args=[None, None],
-            kwargs=payload,
-            pool="agents",
-            meta={
-                "task_name": "indexer_test_toolkit_tool",
-                "toolkit_id": toolkit_id,
-                "tool_name": tool_name,
-                "project_id": project_id,
-                "user_input_preview": f"test tool {tool_name} (toolkit {toolkit_id}): {tool_params}"[:100],
-            },
+        strip_platform_fields(payload)   # only the admission made here decides the run (C9-SEC-32)
+        # Governed (#7229): a development run of the authenticated HTTP caller (never the user_id argument); a webhook has
+        # no person behind it. None when governance is off
+        admission = admission_request_from(
+            self, sid=None, project_id=project_id, binding_project_id=project_id, version_row=None,
+            run_kind="system" if webhook_signature is not None else "interactive", entry_point=ENTRY_TOOLKIT_TEST,
+            toolkit_id=toolkit_id,
         )
+        mark_free_form_secret(payload, has_free_form_secret(
+            self, {"project_id": project_id, "tools": [payload.get("toolkit_config") or {}]}))
+        #
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_test_toolkit_tool",
+                args=[None, None],
+                kwargs=payload,
+                pool="agents",
+                admission=admission,
+                meta={
+                    "task_name": "indexer_test_toolkit_tool",
+                    "toolkit_id": toolkit_id,
+                    "tool_name": tool_name,
+                    "project_id": project_id,
+                    "user_input_preview": f"test tool {tool_name} (toolkit {toolkit_id}): {tool_params}"[:100],
+                },
+            )
+        except AdmissionDenied as denied:
+            return {"error": denied.message, "code": denied.reason_code}
 
         # Handle pool saturation: start_task returns None when no workers available
         if task_id is None:

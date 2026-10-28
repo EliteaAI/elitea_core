@@ -1958,7 +1958,7 @@ def get_session_for_schema(connection_string: str, schema: str):
     return Session(engine)
 
 
-def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
+def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user, admission=None):
     """
     Start an index task with proper metadata
 
@@ -1967,6 +1967,8 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         data: Task data including toolkit_config, project_id, etc.
         sio_event: Socket.IO event name
         initiator: Initiator type ('user', 'llm', 'schedule'). If None, will be inferred.
+        admission: the governed admission request of the caller (#7229, ``index_on_demand``); None when governance is
+            off. A dispatch without one is refused under enforce.
     """
 
     toolkit_config = data.get('toolkit_config', {})
@@ -2006,6 +2008,7 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         args=[stream_id, message_id],
         kwargs=task_kwargs,
         pool="agents",
+        admission=admission,
         meta={
             "task_name": "indexer_test_toolkit_tool",
             "project_id": project_id,

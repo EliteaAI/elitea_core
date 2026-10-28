@@ -97,11 +97,14 @@ class ExecutionSecurityContext(db_tools.AbstractBaseMixin, db.Base):
     subject: Mapped[dict] = mapped_column(JSONB, nullable=False)
     agent_binding_ref: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     agent_session_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    application_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    version_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # None for a toolkit run (#7229): it tests or indexes one toolkit, no agent version
+    application_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    version_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     definition_digest: Mapped[str] = mapped_column(String(80), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    # A sub-agent admitted with its parent run (#7227): the context of its caller, and every ancestor context (the run's
+    # first). Unset for a run
     parent_context_ref: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     call_lineage: Mapped[list] = mapped_column(JSONB, nullable=False, default=list,
                                                server_default=text("'[]'::jsonb"))

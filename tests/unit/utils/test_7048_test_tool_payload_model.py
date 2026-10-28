@@ -28,7 +28,7 @@ def build(models_path):
     configurations = NS(get_default_model=lambda project_id: dict(default_model))
     namespace = {
         'VaultClient': lambda project: NS(get_all_secrets=lambda: {}),
-        'get_predict_token_and_session': lambda *a: ('token', None),
+        'get_predict_token_and_session': lambda *a, **k: ('token', None),
         'get_predict_base_url': lambda *a: 'https://unit.invalid',
         'get_public_base_url': lambda: 'https://public.unit.invalid',
         'this': NS(for_module=lambda name: NS(module=configurations)),

@@ -733,7 +733,7 @@ def test_predict_sio_builds_the_request_from_the_loaded_row_and_translates_a_den
     assert 'entry_point=ENTRY_EDITOR_CHAT if authoring and sid else "chat_sio"' in chat
     assert "version_row=admission_version_row" in chat
     assert "binding_project_id=application_project_id" in chat
-    assert 'run_kind="system" if is_system_user else "interactive"' in chat
+    assert 'run_kind="system" if is_system_user or unattended else "interactive"' in chat   # an owner schedule (#7011)
     assert "admission=admission," in chat
     assert chat.index("except AdmissionDenied as denied:") < chat.index("except MaintenanceInProgressError:")
     assert 'error={"code": denied.reason_code, "error": denied.message}' in chat

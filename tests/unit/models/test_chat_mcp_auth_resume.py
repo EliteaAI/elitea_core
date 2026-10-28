@@ -94,14 +94,16 @@ _module(
 )
 _module(
     'utils.skill_mentions',
-    merge_mention_candidates=lambda attached, chat: [*attached, *chat],
+    merge_mention_candidates=lambda attached, chat, project=None: [*attached, *chat, *(project or [])],
     merge_disclosable_skills=lambda own, chat: [*own, *chat],
+    strip_skill_bodies=lambda skills: [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []],
 )
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
 _module(
     'utils.internal_tools',
     resolve_internal_mcp_tools=lambda *_args: None,
     dedupe_internal_mcp_tools=lambda *_args: None,
+    run_identity_applies=lambda *_args: False,
     MCP_CURRENT_PROJECT_SUFFIXES={'elitea_core/project_context', 'elitea_core/skills'},
 )
 _package('plugins', PLUGIN_ROOT.parent)

@@ -130,7 +130,7 @@ def test_admission_mints_one_token_with_the_claims_of_the_run(ns, env):
     assert claims["aud"] == "elitea:internal" and claims["iss"] == "elitea:main"
     assert claims["scope"] == ["read", "build"]
     assert claims["tgt"] == [1, 5]   # the URL's project and its scope_project_id
-    assert claims["exp"] == int(ns.adm._aware(row.expires_at).timestamp())   # the context's own expiry
+    assert abs(claims["exp"] - claims["iat"] - ns.adm.MAX_RUN_LIFETIME_S) <= 1   # the run cap (#7229); the row decides
     assert delivered["origins"] == ["http://localhost", "http://pylon_main:8080"]
     assert obo(ns).TOKEN_KWARG not in call["meta"] and "eio1." not in json.dumps(call["kwargs"]["envelope"])
 
@@ -195,7 +195,8 @@ def test_the_token_costs_one_select_and_one_permission_lookup_on_the_real_dispat
     assert not [statement for statement in plain if "allowed_platform_operations" in statement]
 
 
-def test_a_run_without_an_internal_toolkit_gets_no_token_and_mints_nothing(ns, env):
+def test_a_run_without_an_internal_toolkit_gets_only_a_client_token_with_no_scope_and_no_targets(ns, env):
+    """#7229: the run token is the run's own platform identity; without an internal toolkit it reaches no MCP route."""
     seed(env, ["read", "build"])
     signed = []
     real = obo(ns).mint
@@ -205,7 +206,8 @@ def test_a_run_without_an_internal_toolkit_gets_no_token_and_mints_nothing(ns, e
         assert ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
     finally:
         obo(ns).mint = real
-    assert obo(ns).TOKEN_KWARG not in call["kwargs"] and signed == []
+    assert [(kw["scope"], kw["tgt"]) for kw in signed] == [([], [])]
+    assert claims_of(token_of(ns, call))["scope"] == []
 
 
 def test_a_sub_agent_the_runtime_may_fetch_itself_still_gets_a_token_with_the_private_project(ns, env, monkeypatch):
@@ -220,7 +222,7 @@ def test_a_sub_agent_the_runtime_may_fetch_itself_still_gets_a_token_with_the_pr
     covered = call_kwargs(run_id="run-2", tools=[child],
                           application={"subagent_version_details": {"3:30": {"tools": []}}})
     ns.adm.admit_dispatch(env.module(), "indexer_agent", covered, env.request())
-    assert obo(ns).TOKEN_KWARG not in covered["kwargs"]
+    assert claims_of(token_of(ns, covered))["tgt"] == []   # its client token only (#7229): no private project read
 
 
 def test_without_a_key_a_run_with_internal_tools_is_refused_and_its_context_ended(ns, env):
@@ -239,7 +241,8 @@ def test_a_token_the_caller_put_on_the_payload_is_dropped(ns, env):
     seed(env)
     call = call_kwargs(**{"internal_run_token": {"token": "eio1.forged.x", "origins": ["https://evil.example"]}})
     ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
-    assert "internal_run_token" not in call["kwargs"]
+    delivered = call["kwargs"]["internal_run_token"]   # Main's own (#7229), never the caller's
+    assert delivered["token"] != "eio1.forged.x" and "https://evil.example" not in delivered["origins"]
 
 
 def test_a_child_dispatch_gets_a_token_of_its_parents_context(ns, env):
@@ -338,8 +341,7 @@ def test_a_token_issued_in_the_future_or_living_longer_than_a_context_is_invalid
     _, claims = mint(ns)
     future = _signed(ns, {**claims, "iat": now + 120, "exp": now + 600})
     assert verify(ns, env, future)["code"] == "INTERNAL_TOKEN_INVALID"
-    ttl = env.module().admission_settings.context_ttl_s
-    long_lived = _signed(ns, {**claims, "iat": now, "exp": now + ttl + 3600})
+    long_lived = _signed(ns, {**claims, "iat": now, "exp": now + ns.adm.MAX_RUN_LIFETIME_S + 3600})   # past the run cap
     assert verify(ns, env, long_lived)["code"] == "INTERNAL_TOKEN_INVALID"
     assert [e["reason_code"] for e in env.denied] == ["INTERNAL_TOKEN_INVALID", "INTERNAL_TOKEN_INVALID"]
 
@@ -671,10 +673,11 @@ def test_the_column_is_deferred_so_an_old_schema_is_still_read(ns):
     assert column.deferred is True
 
 
-def test_the_context_ttl_bounds_the_token(ns, env):
+def test_the_run_cap_bounds_the_token_and_the_context_decides_liveness(ns, env):
+    """#7229: the token lives to the run cap; the context's sliding idle deadline decides whether its run is live."""
     _, _, call = admitted(ns, env, operations=["read"])
     claims = claims_of(token_of(ns, call))
-    assert claims["exp"] - claims["iat"] <= env.module().admission_settings.context_ttl_s + 1
+    assert claims["exp"] - claims["iat"] <= ns.adm.MAX_RUN_LIFETIME_S + 1
 
 
 # --- development runs (#7213): runs once both are on the same tree --------------------------------------------------

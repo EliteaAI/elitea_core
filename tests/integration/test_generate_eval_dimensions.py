@@ -274,7 +274,7 @@ def _install_package():
 
     # Loaded for real (no relative imports of their own) — draft_llm_utils owns this endpoint's
     # failure reporting, eval_draft_target_utils what the caller gets back as a target
-    for util_name in ('draft_llm_utils', 'eval_draft_target_utils'):
+    for util_name in ('error_text', 'draft_llm_utils', 'eval_draft_target_utils'):
         full_util = f'{PKG}.utils.{util_name}'
         util_spec = importlib.util.spec_from_file_location(
             full_util, PLUGIN_ROOT / 'utils' / f'{util_name}.py')
