@@ -37,12 +37,11 @@ UPDATE_FIELDS = (
 
 
 def _delivery(row: EntitySchedule) -> dict:
-    """The delivery object in the shape of the API body; run_history leaves the target fields empty."""
-    in_chat = row.delivery_mode == 'conversation'
+    """The delivery object in the shape of the API body; the chat target is private, so its fields stay empty."""
     return {
         'mode': row.delivery_mode,
-        'conversation_uuid': str(row.delivery_conversation_uuid) if in_chat else None,
-        'participant_id': row.delivery_participant_id if in_chat else None,
+        'conversation_uuid': None,
+        'participant_id': None,
         'include_history': False,  # no stored column yet; the key keeps the file shape fixed
     }
 

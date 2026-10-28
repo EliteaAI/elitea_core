@@ -34,12 +34,12 @@ def delivery_of(**overrides):
 
 # --- export
 
-def test_export_writes_the_delivery_target_of_a_conversation_schedule(env):
+def test_export_writes_the_conversation_mode_without_the_private_chat_target(env):
     seed(env, delivery_mode='conversation', delivery_conversation_uuid=CHAT, delivery_participant_id=5)
     delivery = exported_items(env)[0]['delivery']
     assert list(delivery) == DELIVERY_KEYS
     assert delivery == {
-        'mode': 'conversation', 'conversation_uuid': str(CHAT), 'participant_id': 5, 'include_history': False,
+        'mode': 'conversation', 'conversation_uuid': None, 'participant_id': None, 'include_history': False,
     }
 
 
