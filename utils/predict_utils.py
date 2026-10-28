@@ -162,11 +162,14 @@ def resolve_auth_session(user_id: int, sid: str = None) -> Optional[str]:
 
 
 def get_predict_token_and_session(  # pylint: disable=W0613
-        project_id: int, user_id: int, sid: str = None, run_identity: bool = False,
+        project_id: int, user_id: int, sid: str = None, run_identity: bool = False, mandate_run: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:
     """ Returns the real user's PAT if they have one, otherwise their auth session reference. ``run_identity``: the
-    caller dispatches an admitted run, which under enforce carries the run token only (#7229): nothing is looked up """
-    if run_identity and run_identity_applies(sid):
+    caller dispatches an admitted run, which under enforce carries the run token only (#7229): nothing is looked up.
+    ``mandate_run``: that run is admitted under an autonomous mandate (scheduled or webhook): not even its owner's
+    token is looked up or created """
+    # (called without the keyword when it does not apply: the callers that stub it predate it)
+    if run_identity and (run_identity_applies(sid, mandate=True) if mandate_run else run_identity_applies(sid)):
         return None, None
     token: str = get_user_token(user_id)
     if token:
@@ -329,8 +332,11 @@ def generate_predict_payload(
     invoked_skills: Optional[list] = None,
     project_skills: Optional[list] = None,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
+    mandate_run: bool = False,
 ) -> dict:
     """
+    :param mandate_run: the run is admitted under an autonomous mandate (its ticket was taken): under enforce no token
+        of its owner is looked up or put on the payload; the run token is its identity
     :param parsed: payload
     :param user_id: User ID
     :param sid: Socket.IO session id
@@ -352,10 +358,13 @@ def generate_predict_payload(
 
     session_cookie_name = None
     if is_system_user:
-        token = get_system_token(parsed.project_id)
+        # a trigger run admitted under an autonomous mandate (C9-SEC-47): under enforce the run token minted at its
+        # admission is its only platform identity, so the project's system token is neither read nor created for it
+        token = None if mandate_run and run_identity_applies(None, mandate=True) else get_system_token(parsed.project_id)
         auth_session = None
     else:
-        token, auth_session = get_predict_token_and_session(parsed.project_id, user_id, sid, run_identity=True)
+        token, auth_session = get_predict_token_and_session(parsed.project_id, user_id, sid, run_identity=True,
+                                                            mandate_run=mandate_run)
         if auth_session:
             session_cookie_name = get_session_cookie_name()
 

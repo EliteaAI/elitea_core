@@ -437,12 +437,21 @@ class RPC:
         if user_id is None and not is_system_user:
             user_id = resolve_request_user_id()
 
+        # An autonomous run (scheduler tick, webhook API) brings a single-use ticket for the request its trusted caller
+        # built; taken here, before the payload is built, so a run admitted under a mandate never has its owner's token
+        # looked up or created (C9-SEC-47): under enforce the run token is its only platform identity
+        trigger_admission = take_trigger_admission(
+            self, mandate_ticket, project_id=parsed.project_id, binding_project_id=application_project_id,
+            version_id=getattr(admission_version_row, "id", None),
+        )
+
         try:
             payload: dict = generate_predict_payload(
                 parsed,
                 user_id=user_id,
                 sid=sid,
                 is_system_user=is_system_user,
+                mandate_run=trigger_admission is not None,
                 skip_expansion=skip_expansion,
                 return_chat_history=return_chat_history,
                 eligible_for_autoapproval=eligible_for_autoapproval,
@@ -522,13 +531,9 @@ class RPC:
 
         # Governed runs are admitted from the authenticated connection and the version row loaded above,
         # never from user_id / user_context / ids in the payload; None when governance is off (#6756)
-        # An autonomous run (scheduler tick, webhook API) brings a single-use ticket for the request its trusted caller
-        # built; anything else (no ticket, a forged, spent or foreign one) is the ordinary request, which for a
-        # system user is refused as MANDATE_REQUIRED (#6947)
-        admission = take_trigger_admission(
-            self, mandate_ticket, project_id=parsed.project_id, binding_project_id=application_project_id,
-            version_id=getattr(admission_version_row, "id", None),
-        ) or admission_request_from(
+        # The ticket taken above; anything else (no ticket, a forged, spent or foreign one) is the ordinary request,
+        # which for a system user is refused as MANDATE_REQUIRED (#6947)
+        admission = trigger_admission or admission_request_from(
             self, sid=sid, project_id=parsed.project_id, binding_project_id=application_project_id,
             version_row=admission_version_row, run_kind="system" if is_system_user else "interactive",
             # the editor's test chat (#7213): said by chat_all from the conversation row it loaded, only over a live
