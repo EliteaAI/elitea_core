@@ -94,3 +94,24 @@ def test_edit_to_run_history_resets_the_stored_count(harness):
     _, status = harness.call('put', {'delivery': base.NO_DELIVERY}, saved['id'])
     assert status == 200
     assert stored_history(harness, saved['id']) == 0
+
+
+def test_details_return_the_stored_count(harness):
+    saved, _ = create(harness, include_history=7)
+    body, status = harness.call('get', schedule_id=saved['id'])
+    assert status == 200
+    assert body['delivery']['include_history'] == 7
+
+
+def test_details_of_a_chat_target_without_the_count_return_zero(harness):
+    saved, _ = create(harness)
+    body, status = harness.call('get', schedule_id=saved['id'])
+    assert status == 200
+    assert body['delivery']['include_history'] == 0
+
+
+def test_details_return_the_count_after_an_edit(harness):
+    saved, _ = create(harness, include_history=7)
+    harness.call('put', {'delivery': chat_target(include_history=3)}, saved['id'])
+    body, _ = harness.call('get', schedule_id=saved['id'])
+    assert body['delivery']['include_history'] == 3
