@@ -27,8 +27,8 @@ NANO_USD = 10 ** 9
 USAGE_MARGIN = timedelta(minutes=5)
 # The usage plugin's table (central schema); read-only, only the columns used here
 USAGE_EVENT = table(
-    'usage_event', column('project_id'), column('conversation_id'), column('run_id'), column('ts'), column('event_type'),
-    column('input_tokens'), column('output_tokens'), column('cost_nano_usd'),
+    'usage_event', column('project_id'), column('conversation_id'), column('run_id'), column('ts'),
+    column('event_type'), column('input_tokens'), column('output_tokens'), column('cost_nano_usd'),
 )
 
 

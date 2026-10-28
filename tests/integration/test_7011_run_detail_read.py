@@ -138,8 +138,9 @@ def detail(monkeypatch):
                 "event_type": "llm", "input_tokens": 0, "output_tokens": 0, "cost_nano_usd": 0, **columns}))
 
     def run(**columns):
-        return types.SimpleNamespace(**{"id": 77, "conversation_id": CONVERSATION_ID, "message_group_id": None, "started_at": START,
-                                        "finished_at": START + timedelta(seconds=38), **columns})
+        return types.SimpleNamespace(**{
+            "id": 77, "conversation_id": CONVERSATION_ID, "message_group_id": None, "started_at": START,
+            "finished_at": START + timedelta(seconds=38), **columns})
 
     yield types.SimpleNamespace(module=module, session=session, tool=tool, usage=usage, run=run, engine=engine)
     session.close()

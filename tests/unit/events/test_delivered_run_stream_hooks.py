@@ -76,3 +76,16 @@ def test_a_pause_that_keeps_a_delivered_run_streaming_leaves_the_run_open(make_w
     world = _delivered(make_world)
     world.pause_event({"hitl_interrupt": {"resume_strategy": "aggregate_child"}})
     assert world.events == ["commit"]
+
+
+@pytest.mark.parametrize("forged", [
+    {"schedule_run_id": RUN_ID + 1},
+    {"schedule_id": 99},
+    {"schedule_run_id": RUN_ID + 1, "schedule_id": 99},
+], ids=["other-run-id", "other-schedule-id", "both"])
+def test_a_forged_group_meta_binds_the_end_to_the_real_group_id_the_writer_checks(make_world, forged):
+    world = make_world({}, {**GROUP_META, **forged}, schedule_owner=OWNER)
+    world.end({})
+    finish = next(event for event in world.events if isinstance(event, tuple) and event[0] == "finish")
+    # The run named in the meta ends only when its stored group id equals this group, whatever the meta says
+    assert finish[-1] == GROUP_ID

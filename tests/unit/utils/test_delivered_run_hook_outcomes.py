@@ -56,3 +56,16 @@ def test_another_member_of_the_chat_cannot_end_a_delivered_run_from_a_foreign_gr
                                     message_group_id=ANSWER_GROUP + 1) is False
     session.refresh(delivered)
     assert delivered.status == "running"
+
+
+def test_a_forged_run_id_cannot_end_a_delivered_run_from_a_group_that_is_not_its_own(runs, session, sent, delivered):
+    other = _run(runs, session, _schedule(runs, session, created_by=MEMBER))
+    other.conversation_id, other.message_group_id = CHAT, ANSWER_GROUP + 1
+    session.flush()
+
+    # The hook of the group ANSWER_GROUP + 2 reads the id of a foreign run from its forged meta
+    for run in (delivered, other):
+        assert runs.finish_schedule_run(1, run.id, "success", None, CHAT, author_id=MEMBER,
+                                        message_group_id=ANSWER_GROUP + 2) is False
+        session.refresh(run)
+        assert run.status == "running"

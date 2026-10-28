@@ -49,7 +49,7 @@ def _schedule_run(session, msg_group):
 
     A private run chat holds the run id in its meta and the chat author is the owner. A run delivered into a
     shared chat holds it in the meta of its answer group, and the schedule owner is the author: the chat
-    author is any member. A schedule that is gone leaves no author, so that run is left to the stale sweep.
+    author is any member. A schedule that is gone leaves no author, so the stale sweep ends that run and its answer group.
     """
     conversation = msg_group.conversation
     run_id = _schedule_run_id(conversation)
