@@ -337,7 +337,7 @@ def fail_stale_runs(project_id: int, now: datetime, stale_minutes: int) -> int:
         ended = _end_runs(session, quiet_since < now - timedelta(minutes=stale_minutes), 'failed', STALE_REASON)
         session.commit()
         _announce(project_id, session, ended)
-        groups = _streaming_answer_groups(session, ended)
+        groups = _answer_groups(session, ended, streaming_only=True)
     _end_answer_groups(project_id, groups, STALE_REASON, STALE_CHAT)
     return len(ended)
 
@@ -360,23 +360,28 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
         _announce(project_id, session, ended, {'failed': 'schedule_approval_expired'})
         chats = session.execute(select(EntityScheduleRun.conversation_id, EntityScheduleRun.message_group_id)
                                 .where(EntityScheduleRun.id.in_(ended))).all()
-        groups = _streaming_answer_groups(session, ended)
+        groups = _answer_groups(session, ended)  # a paused group no longer streams
     for chat in chats:
         delete_run_checkpoints(project_id, *chat)
     _end_answer_groups(project_id, groups, EXPIRED_REASON, EXPIRED_CHAT)
     return len(ended)
 
 
-def _streaming_answer_groups(session, run_ids: list[int]) -> list[str]:
-    """The uuids of the answer groups of delivered runs in `run_ids` that still stream; a private run has none."""
+def _answer_groups(session, run_ids: list[int], streaming_only: bool = False) -> list[str]:
+    """The uuids of the answer groups of delivered runs in `run_ids`; a private run has none.
+
+    `streaming_only` keeps the groups that still stream. A run paused for approval has a group that does not.
+    """
     group_ids = session.scalars(select(EntityScheduleRun.message_group_id).where(
         EntityScheduleRun.id.in_(run_ids), EntityScheduleRun.message_group_id.is_not(None))).all()
     if not group_ids:
         return []
     # Late import: only a delivered run reads the message models
     from ..models.message_group import ConversationMessageGroup
-    return [str(uuid) for uuid in session.scalars(select(ConversationMessageGroup.uuid).where(
-        ConversationMessageGroup.id.in_(group_ids), ConversationMessageGroup.is_streaming.is_(True)))]
+    query = select(ConversationMessageGroup.uuid).where(ConversationMessageGroup.id.in_(group_ids))
+    if streaming_only:
+        query = query.where(ConversationMessageGroup.is_streaming.is_(True))
+    return [str(uuid) for uuid in session.scalars(query)]
 
 
 def _end_answer_groups(project_id: int, group_uuids: list[str], reason: str, chat: tuple[str, str]) -> None:
