@@ -57,7 +57,8 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 approval_confirmed_by=schedule.approval_confirmed_by,
                 delivery_mode=getattr(schedule, 'delivery_mode', None),
                 delivery_conversation_uuid=getattr(schedule, 'delivery_conversation_uuid', None),
-                delivery_participant_id=getattr(schedule, 'delivery_participant_id', None)),
+                delivery_participant_id=getattr(schedule, 'delivery_participant_id', None),
+                delivery_include_history=getattr(schedule, 'delivery_include_history', None) or 0),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
@@ -108,6 +109,25 @@ def _delivery_target(project_id: int, schedule, owner_id: int) -> SimpleNamespac
             return SimpleNamespace(conversation_id=chat.id, participant_id=schedule.delivery_participant_id)
     log.warning('Schedule %s: the delivery chat is gone, so the run goes to Run History', schedule.id)
     return None
+
+
+def _recent_history(project_id: int, target, count: int) -> list[dict]:
+    """The last `count` message groups of the target chat, oldest first, in the shape of a normal chat turn.
+
+    Call it before the trigger group is written, so the trigger is the user input and not history.
+    A count of 0 reads nothing: it is the default and must cost no query.
+    """
+    if not target or count < 1:
+        return []
+    # late: the chat models pull in the plugin database layer
+    from ..models.message_group import ConversationMessageGroup
+    from .chat_history import generate_chat_history
+    with db.get_session(project_id) as session:
+        newest_first = session.query(ConversationMessageGroup).filter(
+            ConversationMessageGroup.conversation_id == target.conversation_id,
+        ).order_by(ConversationMessageGroup.created_at.desc(), ConversationMessageGroup.id.desc()).limit(count).all()
+        # built inside the session: the message items load lazily
+        return generate_chat_history(newest_first[::-1])
 
 
 def _end_delivered_group(project_id: int, target, response_id: str | None, reason: str) -> None:
@@ -228,9 +248,11 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     manual = trigger in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     response_id = target = None
+    history: list[dict] = []
     try:
         # lean: a private run chat stays when the link fails after it; a delivered group is ended below
         target = _delivery_target(project_id, loaded.schedule, check.owner_id)
+        history = _recent_history(project_id, target, loaded.schedule.delivery_include_history)
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             trigger_type=trigger_type, trigger_message=message,
@@ -257,7 +279,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source=trigger_type, is_system_user=False,
-            auto_approve_sensitive_actions=approved,
+            auto_approve_sensitive_actions=approved, chat_history=history,
             **({'participant_id': target.participant_id} if target else {}),
         )
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
