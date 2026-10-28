@@ -593,6 +593,7 @@ class Module(module.ModuleModel):
         self._ensure_agent_identity_schema()
         self._start_governance()
         self._start_internal_obo()
+        self._check_entra_obo()
 
         self.handle_pylon_modules_initialized()
 
@@ -725,6 +726,12 @@ class Module(module.ModuleModel):
                     log.exception("Failed to unregister %s", name)
                 self._governed_handlers[key] = False
             self.governed_handlers_registered = False
+
+    def _check_entra_obo(self):
+        """Entra-delegated credentials (#6756): their platform client needs the custody request key (logged as an
+        error otherwise; such credentials are then refused at release)."""
+        from .utils import entra_obo  # pylint: disable=C0415
+        entra_obo.check_config(self)
 
     def _start_internal_obo(self):
         """The run token of governed runs (#7214): the auth plugin hands its bearers to ``verify_request``, and the

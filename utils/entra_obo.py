@@ -36,10 +36,14 @@ DEFAULT_SECRET_ENV = "ELITEA_API_CLIENT_SECRET"
 CREDENTIAL_TYPE = "sharepoint"             # the credential type an admin app must serve (#7149)
 OBO_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 ASSERTION_RPC = "auth_oidc_obo_assertion"
-HTTP_TIMEOUT_S = 5
+HTTP_TIMEOUT_S = 5                         # read timeout of one POST, never more than the time left
+CONNECT_TIMEOUT_S = 3
 RPC_TIMEOUT_S = 5
-# The whole exchange of one slot, refresh included, fits in this (the worker waits about 15 s for a release reply)
-BUDGET_S = 12
+# One deadline per release request, every delegated slot of it included: the worker waits WORKER_WAIT_S plus
+# WORKER_WAIT_PER_SLOT_S per slot for the reply (indexer_worker credential_resolver), Main keeps MARGIN_S of it
+WORKER_WAIT_S, WORKER_WAIT_PER_SLOT_S, MARGIN_S = 15, 0.5, 3
+BUDGET_S = WORKER_WAIT_S - MARGIN_S        # the budget of a request of one slot
+MIN_CALL_S = 2                             # a call is started only with this much left
 RETRY_NEEDS_S = 4                          # the refresh and second exchange are tried only with this much left
 MIN_REMAINING_S = 900                      # a cached token is served only with at least this much life left
 DEFAULT_CUSTODY_KEY_ENV = "ELITEA_OBO_CUSTODY_KEY"   # shared with auth_oidc only: signs each assertion request
@@ -50,6 +54,17 @@ PROBE_TTL_S = 60
 MAX_TOKEN_CHARS = 16_384
 ENTRA_ISSUER = re.compile(r"^https://(login\.microsoftonline\.com|sts\.windows\.net)/[0-9a-fA-F-]{36}(/v2\.0)?/?$")
 ASSERTION_SOURCES = frozenset({"login", "connected_account"})
+_GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def request_budget(slots) -> float:
+    """Seconds one release request of ``slots`` slots may spend on its exchanges, together."""
+    return WORKER_WAIT_S + WORKER_WAIT_PER_SLOT_S * max(1, int(slots)) - MARGIN_S
+
+
+def deadline_for(slots) -> float:
+    """The ``time.monotonic()`` by which every exchange of a release request of ``slots`` slots must be done."""
+    return time.monotonic() + request_budget(slots)
 
 # codes (the messages live in admission.MESSAGES)
 SUBJECT_MISMATCH = "DENIED_SUBJECT_MISMATCH"
@@ -184,7 +199,9 @@ def fetch_assertion(module, tid, oid, refresh=False, timeout=RPC_TIMEOUT_S) -> d
         raise DelegationRefused(UNAVAILABLE) from None
 
 
-def _assertion(module, person, refresh, left) -> str:
+def _assertion(module, person, refresh, left, client_id) -> str:
+    if left() < MIN_CALL_S:
+        raise DelegationRefused(UNAVAILABLE)
     answer = fetch_assertion(module, person["tid"], person["oid"], refresh, timeout=min(RPC_TIMEOUT_S, left()))
     if not isinstance(answer, dict):
         raise DelegationRefused(UNAVAILABLE)
@@ -197,6 +214,8 @@ def _assertion(module, person, refresh, left) -> str:
         raise DelegationRefused(ASSERTION_UNAVAILABLE)
     if (str(claims.get("tid", "")).lower(), claims.get("oid")) != (person["tid"].lower(), person["oid"]):
         raise DelegationRefused(SUBJECT_MISMATCH)   # custody under the wrong person is never exchanged
+    if claims.get("aud") not in (client_id, f"api://{client_id}"):
+        raise DelegationRefused(APP_UNAVAILABLE)    # a login token for another app cannot be exchanged by this one
     return token
 
 
@@ -219,12 +238,13 @@ def _post(url, data, timeout=HTTP_TIMEOUT_S) -> requests.Response:
         return session.post(url, data=data, timeout=timeout, allow_redirects=False, verify=True)
 
 
-def _exchange(url, client, assertion, scopes, timeout) -> tuple:
+def _exchange(url, client, assertion, scopes, left) -> tuple:
     """``("ok", token, expires_at)``, ``("invalid_grant", None, None)`` or raises ``DelegationRefused``."""
     try:
         response = _post(url, {
             "grant_type": OBO_GRANT, "client_id": client[0], "client_secret": client[1], "assertion": assertion,
-            "scope": " ".join(scopes), "requested_token_use": "on_behalf_of"}, timeout=timeout)
+            "scope": " ".join(scopes), "requested_token_use": "on_behalf_of"},
+            timeout=(min(CONNECT_TIMEOUT_S, left), min(HTTP_TIMEOUT_S, left)))
     except DelegationRefused:
         raise
     except Exception as exc:  # pylint: disable=W0703
@@ -270,6 +290,35 @@ def forget() -> None:
         _PROBES.clear()
 
 
+def forget_subject(tid, oid) -> int:
+    """Drop the cached tokens and probe outcomes of one person (they signed out: auth_oidc's logout event). The number
+    of cached tokens dropped."""
+    if not (isinstance(tid, str) and isinstance(oid, str)):
+        return 0
+    tid = tid.lower()
+    with _LOCK:
+        mine = [key for key in _CACHE if key[0] == tid and key[1] == oid]
+        for key in mine:
+            del _CACHE[key]
+        for key in [key for key in _PROBES if key[1] == tid and key[2] == oid]:
+            del _PROBES[key]
+    return len(mine)
+
+
+def check_config(module) -> bool:
+    """At startup: with the platform client configured, the custody request key must be there too (``ERROR``
+    otherwise; every delegated release then refuses). ``True`` when nothing is configured or both are."""
+    config = _plugin_config(module)
+    if not config.get("entra_obo_client_id"):
+        return True
+    key = os.environ.get(config.get("entra_obo_custody_key_env") or DEFAULT_CUSTODY_KEY_ENV) or ""
+    if len(key) < MIN_CUSTODY_KEY_CHARS:
+        log.error("entra obo: entra_obo_client_id is set but the custody request key is missing or shorter than %s "
+                  "characters; Entra-delegated credentials are refused", MIN_CUSTODY_KEY_CHARS)
+        return False
+    return True
+
+
 def _cached(key, now) -> Optional[tuple]:
     with _LOCK:
         hit = _CACHE.get(key)
@@ -289,16 +338,21 @@ def _keep(key, token, expires_at, now) -> None:
         _CACHE[key] = (token, expires_at)
 
 
-def acquire(module, person: dict, delegation: dict, project_id) -> tuple:
+def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -> tuple:  # pylint: disable=R0914
     """``(token, expires_at epoch seconds)`` of the descriptor's resource on behalf of ``person`` (``run_subject``),
     for the reference ``delegation`` (descriptor + ``ownership_class`` + ``custodian_subject_ref``) of project
     ``project_id``. From the cache when it has one with life left, else one assertion RPC and one exchange; an
-    ``invalid_grant`` refreshes the assertion once and exchanges once more. Raises ``DelegationRefused``."""
+    ``invalid_grant`` refreshes the assertion once and exchanges once more. ``deadline``: the ``time.monotonic()`` the
+    whole release request must be done by (``deadline_for``); one request of one slot when absent. Raises
+    ``DelegationRefused``."""
     if delegation.get("assertion_source") != "login":
         raise DelegationRefused(SOURCE_UNSUPPORTED)   # a connected Microsoft account is the next slice (4b)
     if person.get("issuer") is not None and not ENTRA_ISSUER.match(person["issuer"]):
         raise DelegationRefused(SOURCE_UNSUPPORTED)   # a Keycloak (or other) login holds no Entra token to exchange
     bind_subject(person, delegation)
+    tenant = str(delegation.get("tenant_id", "")).lower()
+    if not _GUID.match(tenant):   # the authority path is built from it: checked here, not only at the descriptor's create
+        raise DelegationRefused(SUBJECT_MISMATCH)
     scopes = sorted(delegation.get("scopes") or ())
     client = app_client(module, delegation, project_id)
     key = (person["tid"].lower(), person["oid"], client[0], delegation.get("resource"), tuple(scopes))
@@ -306,17 +360,22 @@ def acquire(module, person: dict, delegation: dict, project_id) -> tuple:
     hit = _cached(key, now)
     if hit is not None:
         return hit
-    url = f"https://{AUTHORITY_HOST}/{person['tid']}/oauth2/v2.0/token"
-    deadline = time.monotonic() + BUDGET_S
+    url = f"https://{AUTHORITY_HOST}/{tenant}/oauth2/v2.0/token"
+    deadline = deadline if deadline is not None else time.monotonic() + BUDGET_S
     left = lambda: max(0.0, deadline - time.monotonic())  # noqa: E731
-    outcome, token, expires_at = _exchange(url, client, _assertion(module, person, False, left), scopes,
-                                           min(HTTP_TIMEOUT_S, max(1.0, left())))
+
+    def exchange(refresh):
+        assertion = _assertion(module, person, refresh, left, client[0])
+        if left() < MIN_CALL_S:
+            raise DelegationRefused(UNAVAILABLE)   # not started: it would end after the worker stopped waiting
+        return _exchange(url, client, assertion, scopes, left())
+
+    outcome, token, expires_at = exchange(False)
     if outcome == "invalid_grant":   # the assertion expired (or was revoked): renew it once, try once more
         if left() < RETRY_NEEDS_S:
             raise DelegationRefused(UNAVAILABLE)   # no time left for it within the worker's wait
         log.info("entra obo: the assertion was refreshed once")
-        outcome, token, expires_at = _exchange(url, client, _assertion(module, person, True, left), scopes,
-                                               min(HTTP_TIMEOUT_S, max(1.0, left())))
+        outcome, token, expires_at = exchange(True)
         if outcome != "ok":
             raise DelegationRefused(EXCHANGE_FAILED)
     _keep(key, token, expires_at, now)

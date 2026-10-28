@@ -728,8 +728,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                                                       "store_kind", "ownership_class", "revocation_epoch")}
                         references[row["configuration_id"]]["custodian_user_id"] = row.get("custodian_user_id")
                         references[row["configuration_id"]]["custodian_subject_ref"] = row.get("custodian_subject_ref")
-                        if "auth_mode" in row:   # secrets facts with the reference's kind (#6756 step 4)
-                            references[row["configuration_id"]]["auth_mode"] = row["auth_mode"]
+                        # as the secrets plugin: every reference names its kind (#6756 step 4)
+                        references[row["configuration_id"]]["auth_mode"] = row.get("auth_mode", "static_secret")
             asked = ["|".join(item) for item in grant_keys]
             for binding, toolkit, config_id, target, subject in (grants_for or ()):   # facts v4: the grant of the reference found
                 found = references.get(config_id)

@@ -102,4 +102,6 @@ entra_obo_client_id: null
 entra_obo_client_secret_env: ELITEA_API_CLIENT_SECRET
 # The environment variable holding the key (32+ characters) that signs Main's requests for a person's Microsoft
 # sign-in to auth_oidc; pylon_auth's auth_oidc reads the same variable. Unset: delegated credentials are unavailable.
+# Both secrets are service-scoped: the client secret is given to pylon_main only, the request key to pylon_main and
+# pylon_auth only, never through an env file every pylon loads (pylon_indexer runs toolkit code).
 entra_obo_custody_key_env: ELITEA_OBO_CUSTODY_KEY

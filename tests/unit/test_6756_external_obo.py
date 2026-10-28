@@ -43,6 +43,14 @@ def jwt(**claims):
 ASSERTION = jwt(tid=TID, oid=OID, aud="api-client")
 
 
+def _claims(token):
+    try:
+        body = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except Exception:  # pylint: disable=W0703
+        return None
+
+
 @pytest.fixture(scope="module")
 def ns(tmp_path_factory):
     saved = dict(sys.modules)
@@ -60,8 +68,10 @@ class Entra:
     def __call__(self, url, data, timeout=None):
         self.posts.append((url, dict(data)))
         self.timeouts.append(timeout)
+        oid = (_claims(data.get("assertion")) or {}).get("oid")   # each person gets a token of their own
         status, body = self.answers.pop(0) if self.answers else (
-            200, {"access_token": GRAPH_TOKEN, "expires_in": 3600, "token_type": "Bearer"})
+            200, {"access_token": GRAPH_TOKEN if oid in (None, OID) else f"graph-token-of-{oid}", "expires_in": 3600,
+                  "token_type": "Bearer"})
         return types.SimpleNamespace(status_code=status, content=b"x", json=lambda: body)
 
 
@@ -80,6 +90,8 @@ class Custody:
         assert abs(iat - time.time()) < 5 and nonce not in self.nonces
         self.nonces.add(nonce)
         self.calls.append((tid, oid, refresh))
+        if self.answer.get("assertion") == ASSERTION and oid != OID:   # custody holds each person's own sign-in
+            return {"ok": True, "assertion": jwt(tid=tid, oid=oid, aud="api-client")}
         return self.answer
 
 
@@ -541,7 +553,7 @@ def test_the_exchange_fits_within_the_workers_wait(ns, env, monkeypatch):
     assert run.release()["reason_code"] == "DEPENDENCY_UNAVAILABLE"
     assert len(env.entra.posts) == 1 and env.custody.calls == [(TID, OID, False)]   # no refresh round started
     assert all(seconds <= ns.entra_obo.RPC_TIMEOUT_S for seconds in env.custody.timeouts)
-    assert all(seconds <= ns.entra_obo.HTTP_TIMEOUT_S for seconds in env.entra.timeouts)
+    assert all(read <= ns.entra_obo.HTTP_TIMEOUT_S for _connect, read in env.entra.timeouts)
     assert ns.entra_obo.BUDGET_S < 15   # the worker's release wait (credential_resolver DEFAULT_TIMEOUT_S)
 
 
@@ -587,3 +599,141 @@ def test_a_real_mandate_admission_with_a_delegated_credential_is_refused(ns, env
         ns.adm.admit_dispatch(env.module(), "indexer_agent", call_kwargs(payload_of(cred)), request)
     assert refused.value.reason_code == "DENIED_MANDATE_DELEGATION_UNSUPPORTED"
     assert env.custody.calls == [] and env.entra.posts == []
+
+
+
+# --- delta round (independent review, 2026-10-28) -----------------------------------------------------------------
+
+def test_another_persons_personal_credential_is_refused_at_release_on_its_own(ns, env, monkeypatch):
+    """Admission refuses it earlier; the release layer refuses it too, without asking for any assertion."""
+    run = admitted(ns, env, Delegated(env, env.seed_agent(), personal=True))
+    real = env.delegated_value
+
+    def someone_elses(row, generation):
+        value = real(row, generation)
+        value.delegation["custodian_subject_ref"] = f"idp:{TID}:oid-someone-else"
+        return value
+
+    monkeypatch.setattr(env, "delegated_value", someone_elses)
+    assert run.release()["reason_code"] == "DENIED_SUBJECT_MISMATCH"
+    assert env.custody.calls == [] and env.entra.posts == []
+
+
+def test_a_person_is_never_served_another_persons_cached_token(ns, env):
+    ns.need_transport()
+    binding = env.seed_agent()
+    cred = Delegated(env, binding)
+    first = admitted(ns, env, cred)
+    assert first.opened(first.release()["releases"][0])["fields"] == {"access_token": GRAPH_TOKEN}
+    other = admission_env.principal(user_id=43, tid=TID, oid="oid-43", epochs=dict(env.epochs[43]))
+    other["evidence"]["issuer"] = ENTRA
+    env.verify_result = {"ok": True, "principal": other}
+    env.grants[(1, cred.key(f"idp:{TID}:oid-43"))] = dict(env.grants[(1, cred.key(PERSON_REF))])
+    call, ref = dispatch(env, ns, cred, caller_id=43)
+    run_to_running(env, ns, ref)
+    private, public = ns.keypair()
+    slot = sealed_tool_settings(call)["credential_slot"]
+    reply = ns.credential_release.release_credentials(env.module(), project_id=1, context_ref=ref, probe_ref=None,
+                                                      caller=dict(CALLER), recipient_key=public, slots=[
+        {"toolkit_instance_id": str(cred.tool_id), "field": "credentials", "slot": dict(slot)}])
+    [item] = reply["releases"]
+    aad = "|".join(("v1", "1", ref, item["toolkit_instance_id"], item["field"], slot["decision_id"],
+                    item["release_id"])).encode()
+    assert json.loads(ns.transport.open_sealed(item["sealed"], private, aad))["fields"] == {
+        "access_token": "graph-token-of-oid-43"}
+    assert env.custody.calls == [(TID, OID, False), (TID, "oid-43", False)] and len(env.entra.posts) == 2
+
+
+def test_another_exchanging_client_misses_the_cache(ns, env, monkeypatch):
+    person = {"issuer": ENTRA, "tid": TID, "oid": OID}
+    delegation = {**descriptor(), "ownership_class": "project_shared", "custodian_subject_ref": None}
+    module = env.module()
+    ns.entra_obo.acquire(module, person, delegation, 1)
+    module.descriptor.config["entra_obo_client_id"] = "another-client"
+    env.custody.answer = {"ok": True, "assertion": jwt(tid=TID, oid=OID, aud="another-client")}
+    ns.entra_obo.acquire(module, person, delegation, 1)
+    assert len(env.entra.posts) == 2 and [form["client_id"] for _, form in env.entra.posts] == ["api-client",
+                                                                                               "another-client"]
+
+
+@pytest.mark.parametrize("aud", ["https://graph.microsoft.com", "another-client", None])
+def test_an_assertion_for_another_app_is_never_exchanged(ns, env, aud):
+    env.custody.answer = {"ok": True, "assertion": jwt(tid=TID, oid=OID, aud=aud)}
+    reply = admitted(ns, env, Delegated(env, env.seed_agent())).release()
+    assert reply["reason_code"] == "DENIED_OAUTH_APP_UNAVAILABLE" and env.entra.posts == []
+
+
+def test_a_v1_audience_of_the_exchanging_app_is_accepted(ns, env):
+    ns.need_transport()
+    env.custody.answer = {"ok": True, "assertion": jwt(tid=TID, oid=OID, aud="api://api-client")}
+    assert admitted(ns, env, Delegated(env, env.seed_agent())).release()["ok"] is True
+
+
+def test_two_delegated_slots_share_one_budget_within_the_workers_wait(ns, env, monkeypatch):
+    binding = env.seed_agent()
+    first = Delegated(env, binding)
+    second = Delegated(env, binding, tool_id=2, config_id=6)
+    env.delegations[second.ref_id] = descriptor(scopes=[f"{GRAPH}/Files.Read.All"])
+    run = admitted(ns, env, first, second)
+    clock = [1000.0]
+    monkeypatch.setattr(ns.entra_obo.time, "monotonic", lambda: clock[0])
+    real = env.entra.__call__
+
+    def slow(url, data, timeout=None):   # Entra answers in 8 s; a read timeout below that times out
+        connect, read = timeout
+        if read < 8:
+            clock[0] += read
+            raise ns.entra_obo.requests.exceptions.Timeout()
+        clock[0] += 8
+        return real(url, data, timeout)
+
+    monkeypatch.setattr(ns.entra_obo, "_post", slow)
+    monkeypatch.setattr(ns.entra_obo, "HTTP_TIMEOUT_S", 10)
+    started = clock[0]
+    reply = run.release()
+    assert reply["reason_code"] == "DEPENDENCY_UNAVAILABLE" and (reply["toolkit_instance_id"], reply["field"]) == (
+        "2", "credentials")
+    assert clock[0] - started <= ns.entra_obo.request_budget(2) < 15 + 0.5 * 2   # the worker still waits for the reply
+    assert ns.entra_obo.request_budget(2) == 13
+
+
+def test_the_authority_path_is_built_from_the_checked_tenant(ns, env):
+    person = {"issuer": ENTRA, "tid": "../evil", "oid": OID}
+    delegation = {**descriptor(tenant_id="../evil"), "ownership_class": "project_shared", "custodian_subject_ref": None}
+    with pytest.raises(ns.entra_obo.DelegationRefused) as refused:
+        ns.entra_obo.acquire(env.module(), {**person, "issuer": None}, delegation, 1)
+    assert refused.value.code == "DENIED_SUBJECT_MISMATCH" and env.entra.posts == []
+
+
+def test_signing_out_drops_the_persons_cached_tokens_only(ns, env):
+    delegation = {**descriptor(), "ownership_class": "project_shared", "custodian_subject_ref": None}
+    module = env.module()
+    ns.entra_obo.acquire(module, {"issuer": ENTRA, "tid": TID, "oid": OID}, delegation, 1)
+    ns.entra_obo.acquire(module, {"issuer": ENTRA, "tid": TID, "oid": "oid-43"}, delegation, 1)
+    assert ns.entra_obo.forget_subject(TID.upper(), OID) == 1
+    assert [key[1] for key in ns.entra_obo._CACHE] == ["oid-43"]   # pylint: disable=W0212
+    ns.entra_obo.acquire(module, {"issuer": ENTRA, "tid": TID, "oid": OID}, delegation, 1)
+    assert len(env.entra.posts) == 3   # signed out: the next release asks custody again
+
+
+def test_the_logout_event_drops_the_persons_tokens(ns, env, monkeypatch):
+    from fixtures.helpers import load_module_with_stubs  # pylint: disable=C0415
+    monkeypatch.setattr(sys.modules["pylon.core.tools"], "web",
+                        types.SimpleNamespace(event=lambda name: (lambda func: func)), raising=False)
+    events = load_module_with_stubs(PLUGIN_ROOT / "events" / "obo_custody.py", f"{admission_env.PKG}.events.obo_custody")
+    dropped = []
+    monkeypatch.setattr(ns.entra_obo, "forget_subject", lambda tid, oid: dropped.append((tid, oid)))
+    events.Event().entra_obo_custody_dropped(None, "auth_oidc_obo_custody_dropped", {"tid": TID, "oid": OID})
+    events.Event().entra_obo_custody_dropped(None, "auth_oidc_obo_custody_dropped", "not-a-dict")
+    assert dropped == [(TID, OID), (None, None)]
+
+
+def test_startup_says_so_when_the_platform_client_has_no_custody_key(ns, env, monkeypatch):
+    module = env.module()
+    assert ns.entra_obo.check_config(module) is True
+    monkeypatch.delenv("ELITEA_OBO_CUSTODY_KEY")
+    env.log.lines.clear()
+    assert ns.entra_obo.check_config(module) is False
+    assert any("custody request key" in line for line in env.log.lines)
+    module.descriptor.config.pop("entra_obo_client_id")
+    assert ns.entra_obo.check_config(module) is True   # nothing configured, nothing to say

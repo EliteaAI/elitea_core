@@ -642,6 +642,7 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
     release_ids = [str(uuid.uuid4()) for _ in requests]
     values = _read_store(module, requests, scope, release_ids)
     releases, kinds = [], []
+    deadline = entra_obo.deadline_for(len(requests))   # one budget for every delegated slot of this request
     for request, release_id in zip(requests, release_ids):
         slot = request.slot
         value = values.get(slot["credential_ref"])
@@ -651,7 +652,7 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
             raise _denied_at(request, "CREDENTIAL_GENERATION_MISMATCH")
         delegation = getattr(value, "delegation", None)
         if delegation is not None:   # no stored value: a token minted now, on behalf of the run's person
-            fields, expires_at = _delegated(module, request, scope, delegation)
+            fields, expires_at = _delegated(module, request, scope, delegation, deadline)
             kinds.append(delegation.get("resource"))
         else:
             if not set(slot["fields"]) <= set(value.fields):
@@ -698,7 +699,7 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
     return releases
 
 
-def _delegated(module, request: _Request, scope: _Scope, delegation: dict) -> tuple:
+def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadline=None) -> tuple:
     """The value of an Entra-delegated slot: ``({"access_token": token}, expires_at)``. The slot asks for the token
     only; the run must be a signed-in person's, bound to the reference's tenant and custodian (``entra_obo``). The
     token lives in this reply (sealed) and in ``entra_obo``'s in-memory cache, nowhere else. No read, no write here."""
@@ -708,7 +709,7 @@ def _delegated(module, request: _Request, scope: _Scope, delegation: dict) -> tu
         if scope.person is None:
             raise entra_obo.DelegationRefused(entra_obo.CALLER_UNSUPPORTED)
         person = entra_obo.run_subject(*scope.person)
-        token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id)
+        token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id, deadline)
     except entra_obo.DelegationRefused as refused:
         raise _denied_at(request, refused.code) from None
     expires_at = min(scope.expires_at, adm._now() + timedelta(seconds=max(0, expires - time.time()
