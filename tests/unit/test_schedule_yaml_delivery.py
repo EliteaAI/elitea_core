@@ -38,18 +38,17 @@ def test_export_writes_the_delivery_target_of_a_conversation_schedule(env):
     seed(env, delivery_mode='conversation', delivery_conversation_uuid=CHAT, delivery_participant_id=5)
     delivery = exported_items(env)[0]['delivery']
     assert list(delivery) == DELIVERY_KEYS
-    assert (delivery['mode'], delivery['conversation_uuid'], delivery['participant_id']) == (
-        'conversation', str(CHAT), 5,
-    )
+    assert delivery == {
+        'mode': 'conversation', 'conversation_uuid': str(CHAT), 'participant_id': 5, 'include_history': False,
+    }
 
 
 def test_export_writes_run_history_with_empty_target_fields(env):
     seed(env)
     delivery = exported_items(env)[0]['delivery']
     assert list(delivery) == DELIVERY_KEYS
-    assert delivery['mode'] == 'run_history'
-    assert (delivery['conversation_uuid'], delivery['participant_id']) == (None, None)
-    assert not delivery['include_history']
+    assert delivery == {'mode': 'run_history', 'conversation_uuid': None, 'participant_id': None,
+                        'include_history': False}
 
 
 def test_export_writes_delivery_after_the_other_item_keys(env):
@@ -66,15 +65,33 @@ def test_import_saves_a_conversation_delivery_as_run_history_without_a_target(en
     assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
         'run_history', None, None,
     )
-    assert getattr(row, 'delivery_status', 'ok') == 'ok'
+    assert report['failed'] == []
 
 
-def test_import_keeps_the_stored_target_off_an_updated_schedule(env):
-    key = str(uuid.UUID(int=7))
-    env.import_items(item(key=key))
-    env.import_items(item(key=key, delivery=delivery_of()))
+def test_import_report_says_the_target_chat_is_not_imported(env):
+    report = env.import_items(item(delivery=delivery_of()))
+    (entry,) = report['created']
+    assert entry['note'] == 'The target chat is not imported; the schedule delivers to the run history'
+
+
+def test_import_report_has_no_delivery_note_for_a_run_history_item(env):
+    report = env.import_items(item(delivery=delivery_of(
+        mode='run_history', conversation_uuid=None, participant_id=None, include_history=False,
+    )))
+    (entry,) = report['created']
+    assert 'note' not in entry
+
+
+def test_import_keeps_the_stored_chat_delivery_of_an_updated_schedule_and_says_so(env):
+    key = uuid.UUID(int=7)
+    seed(env, uuid=key, delivery_mode='conversation', delivery_conversation_uuid=CHAT, delivery_participant_id=5)
+    report = env.import_items(item(key=str(key), delivery=delivery_of()))
     (row,) = env.rows()
-    assert (row.delivery_mode, row.delivery_conversation_uuid) == ('run_history', None)
+    (entry,) = report['updated']
+    assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
+        'conversation', CHAT, 5,
+    )
+    assert entry['note'] == 'The target chat is not imported; the schedule keeps its stored delivery'
 
 
 def test_import_without_a_delivery_object_creates_and_updates_as_before(env):
