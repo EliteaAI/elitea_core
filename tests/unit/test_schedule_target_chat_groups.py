@@ -115,15 +115,21 @@ def test_the_predict_call_omits_the_participant_by_default(world):  # noqa: F811
 SECRET = "rpc to 10.0.0.5 failed at /srv/plugins/x.py"
 
 
+LOOKUP_FAILS = object()
+
+
 def _failed_run(world, group_meta, **fixed):  # noqa: F811
+    """Run the error ending with a group of `group_meta`; None means no group, LOOKUP_FAILS a raising lookup."""
     events, logged = [], []
-    group = types.SimpleNamespace(meta=group_meta)
+    group = None if group_meta is None else types.SimpleNamespace(meta=group_meta)
 
     class Groups:
         uuid = "answer-uuid"
 
     class GroupSession(type(world.execution.db.get_session(1))):
         def query(self, _model):
+            if group_meta is LOOKUP_FAILS:
+                raise RuntimeError(SECRET)
             return types.SimpleNamespace(filter=lambda *_: types.SimpleNamespace(first=lambda: group))
 
     world.execution.db = types.SimpleNamespace(get_session=lambda _project_id: GroupSession(world))
@@ -169,3 +175,21 @@ def test_a_fixed_message_and_code_end_the_run_message_without_the_error_text(wor
     assert event["response_metadata"]["is_error"] is True
     assert SECRET not in repr(event)
     assert any(SECRET in repr(args) for args in logged)
+
+
+@pytest.mark.parametrize("group_meta", [LOOKUP_FAILS, None], ids=["lookup raises", "group missing"])
+def test_a_lookup_that_finds_no_answer_group_is_treated_as_a_shared_chat(world, group_meta):  # noqa: F811
+    event, logged = _failed_run(world, group_meta)
+
+    assert event["content"] == "Pipeline run could not start (code: run_start_failed)"
+    assert event["response_metadata"]["code"] == "run_start_failed"
+    assert SECRET not in repr(event)
+    assert any(SECRET in repr(args) for args in logged)
+
+
+
+def test_a_run_without_a_delivery_target_keeps_the_error_text_without_a_lookup(world):  # noqa: F811
+    event, _ = _failed_run(world, LOOKUP_FAILS, private_run=True)
+
+    assert event["content"] == f"Pipeline run could not start: {SECRET}"
+    assert "code" not in event["response_metadata"]

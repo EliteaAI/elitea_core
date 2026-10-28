@@ -252,37 +252,42 @@ CHAT_RUN_START_FAILED = "run_start_failed"
 
 
 def _answers_into_shared_chat(project_id: int, response_message_id: str) -> bool:
-    """Is the placeholder an answer group written into a target chat? A failed lookup counts as no.
+    """Is the placeholder an answer group written into a target chat? A failed lookup counts as yes.
 
-    A caller that knows its run is delivered passes its own fixed text, so a failed lookup never shows
-    an error text to a shared chat.
+    Fail closed: a shared chat must never read an error text, so only a found group without the
+    scheduled_run mark counts as a private run chat.
     """
     try:
         with db.get_session(project_id) as session:
             group = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == response_message_id).first()
-            return bool(group and (group.meta or {}).get("scheduled_run"))
+            return group is None or bool((group.meta or {}).get("scheduled_run"))
     except Exception:  # pylint: disable=W0703  # noqa: BLE001
         log.exception("Could not look up the trigger run message: message_id=%s", response_message_id)
-        return False
+        return True
 
 
 def finish_trigger_run_with_error(
     project_id: int, response_message_id: str, error, message: str | None = None, code: str | None = None,
+    private_run: bool = False,
 ) -> None:
     """End a triggered run's placeholder message with the dispatch error, so History shows why it failed.
 
     Every member of a target chat reads the message, so there it is a fixed text with a code and the
-    exception only goes to the log. A caller that knows the run is delivered passes its own fixed
-    `message` and `code`; the chat lookup is then skipped.
+    exception only goes to the log, and a failed lookup counts as a target chat. A caller that knows
+    the run is delivered passes its own fixed `message` and `code`; the chat lookup is then skipped.
+    A caller whose run has no delivery target (a webhook, a private schedule run) passes `private_run`
+    and keeps the error text without the lookup.
     """
-    if message is None:
-        if _answers_into_shared_chat(project_id, response_message_id):
+    fixed = message is not None
+    if not fixed:
+        if not private_run and _answers_into_shared_chat(project_id, response_message_id):
             code = CHAT_RUN_START_FAILED
             message = f"Pipeline run could not start (code: {code})"
+            fixed = True
         else:
             message = f"Pipeline run could not start: {error}"
-    if code:
+    if fixed:
         log.error("Run message ended with an error: message_id=%s code=%s error=%r", response_message_id, code, error)
     try:
         this.module.context.event_manager.fire_event('chat_message_stream_end', {

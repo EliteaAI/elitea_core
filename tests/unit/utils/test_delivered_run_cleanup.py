@@ -91,7 +91,10 @@ def test_an_expiry_of_a_delivered_run_drops_only_the_thread_of_its_own_answer(ru
     assert _deleted_threads(runs) == [{"own-thread"}]
 
 
-def test_an_expiry_of_a_delivered_run_ends_its_answer_group_with_a_fixed_text(runs, session, sent, chat):
+@pytest.mark.parametrize("streaming", [False, True], ids=["paused_group", "streaming_group"])
+def test_an_expiry_of_a_delivered_run_ends_its_answer_group_with_a_fixed_text(runs, session, sent, chat, streaming):
+    # A pause for approval leaves is_streaming False on the group: the expiry still ends it
+    session.execute(chat.group.update().where(chat.group.c.id == OWN_GROUP).values(is_streaming=streaming))
     _waiting(runs, session, delivered=True, approval_expires_at=NOW - timedelta(minutes=1))
 
     assert runs.expire_waiting_runs(1, NOW) == 1
