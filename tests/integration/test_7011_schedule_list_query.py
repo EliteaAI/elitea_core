@@ -55,7 +55,7 @@ DAY = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
 
 def _filters(**overrides):
     values = {"entity_type": None, "status": None, "enabled": None, "owner_ids": None, "entity_id": None,
-              "version_id": None, "search": None, "sort_by": "next_run", "sort_order": "asc"}
+              "version_id": None, "delivery_conversation_uuid": None, "search": None, "sort_by": "next_run", "sort_order": "asc"}
     return types.SimpleNamespace(**{**values, **overrides})
 
 

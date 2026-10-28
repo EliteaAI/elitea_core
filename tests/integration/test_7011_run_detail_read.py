@@ -21,6 +21,10 @@ PKG = "plugins.elitea_core"
 PROJECT_ID, CONVERSATION_ID, OTHER_CONVERSATION_ID = 34, 901, 902
 START = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
 CONVERSATION_UUID = str(uuid.uuid4())
+# Groups of one shared chat: the run's trigger (4) and answer (5), another member's message (3) and the
+# answer to it (6)
+TRIGGER_GROUP, ANSWER_GROUP, MEMBER_GROUP, MEMBER_ANSWER_GROUP = 4, 5, 3, 6
+ANSWER_GROUP_UUID = str(uuid.uuid4())
 
 _sa, _orm = REAL_SQLALCHEMY["sqlalchemy"], REAL_SQLALCHEMY["sqlalchemy.orm"]
 
@@ -58,6 +62,9 @@ def detail(monkeypatch):
         locals().update(tenant("chat_message_groups"))
         id = _sa.Column(_sa.Integer, primary_key=True)
         conversation_id = _sa.Column(_sa.Integer)
+        uuid = _sa.Column(_sa.String)
+        meta = _sa.Column(_sa.JSON)
+        reply_to_id = _sa.Column(_sa.Integer)
 
     class TraceStep(Base):
         locals().update(tenant("chat_message_trace_step"))
@@ -74,7 +81,8 @@ def detail(monkeypatch):
     usage_event = _sa.Table(
         "usage_event", Base.metadata, _sa.Column("id", _sa.Integer, primary_key=True),
         *(_sa.Column(name, kind) for name, kind in (
-            ("project_id", _sa.Integer), ("conversation_id", _sa.String), ("ts", _sa.DateTime(timezone=True)),
+            ("project_id", _sa.Integer), ("conversation_id", _sa.String), ("run_id", _sa.String),
+            ("ts", _sa.DateTime(timezone=True)),
             ("event_type", _sa.String), ("input_tokens", _sa.Integer), ("output_tokens", _sa.Integer),
             ("cost_nano_usd", _sa.BigInteger))),
     )
@@ -95,6 +103,7 @@ def detail(monkeypatch):
     _sa.Table("applications", Base.metadata, _sa.Column("id", _sa.Integer, primary_key=True), schema="tenant")
     load("models/entity_schedule.py", fresh=True).EntitySchedule.__table__.c.variables.server_default = None
     load("utils/schedule_claim.py", fresh=True)
+    load("utils/run_id.py", fresh=True)
     module = load("utils/schedule_run_detail.py", fresh=True)
 
     engine = _sa.create_engine("sqlite://", execution_options={"schema_translate_map": {"tenant": None}})
@@ -106,6 +115,12 @@ def detail(monkeypatch):
         Conversation(id=CONVERSATION_ID, uuid=CONVERSATION_UUID),
         Conversation(id=OTHER_CONVERSATION_ID, uuid=str(uuid.uuid4())),
         MessageGroup(id=1, conversation_id=CONVERSATION_ID), MessageGroup(id=2, conversation_id=OTHER_CONVERSATION_ID),
+        MessageGroup(id=MEMBER_GROUP, conversation_id=CONVERSATION_ID),
+        MessageGroup(id=TRIGGER_GROUP, conversation_id=CONVERSATION_ID),
+        MessageGroup(id=ANSWER_GROUP, conversation_id=CONVERSATION_ID, uuid=ANSWER_GROUP_UUID,
+                     reply_to_id=TRIGGER_GROUP),
+        MessageGroup(id=MEMBER_ANSWER_GROUP, conversation_id=CONVERSATION_ID, uuid=str(uuid.uuid4()),
+                     reply_to_id=MEMBER_GROUP),
     ])
     session.commit()
 
@@ -123,8 +138,9 @@ def detail(monkeypatch):
                 "event_type": "llm", "input_tokens": 0, "output_tokens": 0, "cost_nano_usd": 0, **columns}))
 
     def run(**columns):
-        return types.SimpleNamespace(**{"id": 77, "conversation_id": CONVERSATION_ID, "started_at": START,
-                                        "finished_at": START + timedelta(seconds=38), **columns})
+        return types.SimpleNamespace(**{
+            "id": 77, "conversation_id": CONVERSATION_ID, "message_group_id": None, "started_at": START,
+            "finished_at": START + timedelta(seconds=38), **columns})
 
     yield types.SimpleNamespace(module=module, session=session, tool=tool, usage=usage, run=run, engine=engine)
     session.close()
@@ -194,6 +210,58 @@ def test_cr_el7011_no_usage_row_no_conversation_or_a_failed_read_gives_null(deta
     detail.usage(input_tokens=10)
     monkeypatch.setattr(sys.modules["tools"].db, "engine", None)  # the usage store is not reachable
     assert detail.module.usage_summary(detail.session, PROJECT_ID, detail.run()) == (None, None)
+
+
+def test_a_delivered_run_reads_the_tool_calls_of_its_own_groups_only(detail):
+    detail.tool(1, group=TRIGGER_GROUP, tool_name="trigger_tool")
+    detail.tool(2, group=ANSWER_GROUP, tool_name="answer_tool")
+    detail.tool(3, group=MEMBER_GROUP, tool_name="member_tool", tool_output="secret of another member")
+    detail.tool(4, group=MEMBER_ANSWER_GROUP, tool_name="member_answer_tool")
+    detail.tool(5, group=1, tool_name="earlier_tool")
+
+    events = detail.module.tool_call_events(detail.session, CONVERSATION_ID, ANSWER_GROUP)
+
+    assert [event["tool"] for event in events] == ["trigger_tool", "answer_tool"]
+    assert len(detail.module.tool_call_events(detail.session, CONVERSATION_ID)) == 5
+
+
+def test_a_delivered_run_whose_answer_replies_to_nothing_reads_its_answer_group_only(detail):
+    detail.tool(1, group=1, tool_name="own_tool")
+    detail.tool(2, group=TRIGGER_GROUP, tool_name="other_tool")
+
+    events = detail.module.tool_call_events(detail.session, CONVERSATION_ID, 1)
+
+    assert [event["tool"] for event in events] == ["own_tool"]
+
+
+def _answer_run_id(generation=0):
+    return sys.modules[f"{PKG}.utils.run_id"].derived_run_id(
+        {"message_id": ANSWER_GROUP_UUID, "execution_generation": generation})
+
+
+def test_a_delivered_run_sums_the_usage_of_its_own_message_only(detail):
+    detail.usage(input_tokens=1000, output_tokens=200, cost_nano_usd=10_000_000, run_id=_answer_run_id())
+    detail.usage(20, input_tokens=300, output_tokens=0, cost_nano_usd=2_000_000, run_id=_answer_run_id())
+    detail.usage(15, input_tokens=9000, output_tokens=9000, cost_nano_usd=900_000_000, run_id=str(uuid.uuid4()))
+    detail.usage(16, input_tokens=5000, run_id=None)
+
+    run = detail.run(message_group_id=ANSWER_GROUP)
+
+    assert detail.module.usage_summary(detail.session, PROJECT_ID, run) == (1500, 0.012)
+
+
+def test_a_delivered_run_with_no_usage_of_its_own_gives_null_not_the_chat_total(detail):
+    detail.usage(input_tokens=9000, run_id=str(uuid.uuid4()))
+
+    assert detail.module.usage_summary(
+        detail.session, PROJECT_ID, detail.run(message_group_id=ANSWER_GROUP)) == (None, None)
+
+
+def test_a_delivered_run_whose_group_is_gone_gives_null_usage(detail):
+    detail.usage(input_tokens=9000)
+
+    assert detail.module.usage_summary(
+        detail.session, PROJECT_ID, detail.run(message_group_id=999)) == (None, None)
 
 
 def test_cr_el7011_the_version_label_is_the_version_name(detail):

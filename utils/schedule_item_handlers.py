@@ -96,15 +96,27 @@ def _owner_name(owner_id: int) -> str | None:
     return user.get("name") or user.get("email")
 
 
+def _delivery(row) -> dict:
+    """The delivery object of a row; the table keeps it as flat columns."""
+    target = row.delivery_conversation_uuid
+    return {
+        "mode": row.delivery_mode,
+        "conversation_uuid": str(target) if target is not None else None,
+        "participant_id": row.delivery_participant_id,
+        "include_history": row.delivery_include_history,
+    }
+
+
 def _details(row, scope: ScheduleScope) -> dict:
     """Shape a row as the API answers it, with the owner's and the confirmer's name for the edit page (US-32)."""
-    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by"}
+    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by", "delivery"}
     confirmer = row.approval_confirmed_by
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
         "owner": {"id": row.created_by, "name": _owner_name(row.created_by)},
         "approval_confirmed_by": _owner_name(confirmer) if confirmer is not None else None,
         "allowed_actions": allowed_actions(row, scope),
+        "delivery": _delivery(row),
     }).model_dump(mode="json")
 
 
@@ -460,6 +472,7 @@ class ScheduleItemHandlers:
         """Answer one run of a schedule for the Test schedule panel, with its usage summary and event log.
 
         The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
+        A run delivered into a chat reads only the tool calls and the usage of its own answer message.
         A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
         Tokens and cost are null while the usage store has no row for the conversation.
         Who may call: the owner with `schedules.details`, or a schedules admin.
@@ -479,9 +492,11 @@ class ScheduleItemHandlers:
                 return RUN_NOT_FOUND
             row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
             tokens, cost_usd = usage_summary(session, project_id, run)
-            events = merge_events(run.events, tool_call_events(session, run.conversation_id))
+            events = merge_events(run.events, tool_call_events(session, run.conversation_id, run.message_group_id))
             return {
                 **row,
+                "conversation_uuid": str(run.conversation_uuid) if run.conversation_uuid else None,
+                "message_group_id": run.message_group_id,
                 "version_label": version_label(session, run.version_id),
                 "principal_label": run.principal_label,
                 "risk_outcome": run.risk_outcome,

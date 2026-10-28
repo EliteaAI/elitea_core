@@ -54,21 +54,89 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
-                approval_confirmed_by=schedule.approval_confirmed_by),
+                approval_confirmed_by=schedule.approval_confirmed_by,
+                delivery_mode=getattr(schedule, 'delivery_mode', None),
+                delivery_conversation_uuid=getattr(schedule, 'delivery_conversation_uuid', None),
+                delivery_participant_id=getattr(schedule, 'delivery_participant_id', None),
+                delivery_include_history=getattr(schedule, 'delivery_include_history', None) or 0),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
 
 
-def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
-    """Write the conversation id on the run row; False when the run row is gone."""
+def _link_conversation(project_id: int, run_id: int, conversation_uuid: str, message_group_uuid: str | None = None) -> bool:
+    """Write the conversation id on the run row, and with `message_group_uuid` the chat message of a delivered run.
+
+    A delivered run holds the shared chat in `conversation_id`, so many runs share that value: its own
+    `message_group_id` tells the runs apart. False when the run row is gone.
+    """
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
         if run is None:
             return False
         run.conversation_id = session.query(Conversation).filter_by(uuid=conversation_uuid).one().id
+        if message_group_uuid:
+            # late: only a delivered run reads the message models
+            from ..models.message_group import ConversationMessageGroup
+            run.conversation_uuid = conversation_uuid
+            run.message_group_id = session.query(ConversationMessageGroup).filter_by(uuid=message_group_uuid).one().id
         session.commit()
         return True
+
+
+def _delivery_target(project_id: int, schedule, owner_id: int) -> SimpleNamespace | None:
+    """The chat a `conversation` schedule delivers to, while it still exists and holds the entity and the owner.
+
+    The stored participant must be the application participant of the schedule's own agent or pipeline:
+    the answer is authored as that participant. None means the run_history path: the mode says so, or the
+    target is gone or does not fit.
+    """
+    if getattr(schedule, 'delivery_mode', None) != 'conversation':
+        return None
+    # late: the chat models pull in the plugin database layer
+    from ..models.enums.all import ParticipantTypes
+    from ..models.participants import Participant, ParticipantMapping
+    from .conversation_access import is_conversation_participant
+    with db.get_session(project_id) as session:
+        chat = session.query(Conversation).filter_by(uuid=schedule.delivery_conversation_uuid).one_or_none()
+        participant = session.get(Participant, schedule.delivery_participant_id)
+        # str() on both sides: entity_meta ids are JSON and may be stored as text
+        is_entity = participant and participant.entity_name == ParticipantTypes.application.value and str(
+            (participant.entity_meta or {}).get('id')) == str(schedule.application_id)
+        in_chat = chat and is_entity and session.query(ParticipantMapping).filter_by(
+            conversation_id=chat.id, participant_id=schedule.delivery_participant_id).first()
+        if in_chat and is_conversation_participant(session, chat.id, owner_id):
+            return SimpleNamespace(conversation_id=chat.id, participant_id=schedule.delivery_participant_id)
+    log.warning('Schedule %s: the delivery chat is gone, so the run goes to Run History', schedule.id)
+    return None
+
+
+def _recent_history(project_id: int, target, count: int) -> list[dict]:
+    """The last `count` message groups of the target chat, oldest first, in the shape of a normal chat turn.
+
+    Call it before the trigger group is written, so the trigger is the user input and not history.
+    A count of 0 reads nothing: it is the default and must cost no query.
+    """
+    if not target or count < 1:
+        return []
+    # late: the chat models pull in the plugin database layer
+    from ..models.message_group import ConversationMessageGroup
+    from .chat_history import generate_chat_history
+    with db.get_session(project_id) as session:
+        newest_first = session.query(ConversationMessageGroup).filter(
+            ConversationMessageGroup.conversation_id == target.conversation_id,
+        ).order_by(ConversationMessageGroup.created_at.desc(), ConversationMessageGroup.id.desc()).limit(count).all()
+        # built inside the session: the message items load lazily
+        return generate_chat_history(newest_first[::-1])
+
+
+def _end_delivered_group(project_id: int, target, response_id: str | None, reason: str) -> None:
+    """End the answer group of a delivered run with a fixed `reason`, so a shared chat shows no endless stream.
+
+    No-op for a run_history run (its private chat stays) and when no group was written.
+    """
+    if target and response_id:
+        finish_trigger_run_with_error(project_id, response_id, reason)
 
 
 def _setting_allows_auto_approve(project_id: int) -> bool:
@@ -179,21 +247,29 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
     manual = trigger in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
+    response_id = target = None
+    history: list[dict] = []
     try:
-        # lean: a conversation stays when the link fails after it; the run still closes as failed
+        # lean: a private run chat stays when the link fails after it; a delivered group is ended below
+        target = _delivery_target(project_id, loaded.schedule, check.owner_id)
+        history = _recent_history(project_id, target, loaded.schedule.delivery_include_history)
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             trigger_type=trigger_type, trigger_message=message,
             conversation_name=f"{'Manual' if manual else 'Scheduled'} run: {loaded.entity_name}",
             extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': trigger_type},
             source=source,
+            **({'target_conversation': target.conversation_id,
+                'delivery_participant_id': target.participant_id} if target else {}),
         )
-        linked = _link_conversation(project_id, run_id, conversation_uuid)
+        linked = _link_conversation(project_id, run_id, conversation_uuid, response_id if target else None)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule
         log.exception('Schedule %s run %s: cannot create the run conversation', schedule_id, run_id)
+        _end_delivered_group(project_id, target, response_id, START_FAILED)
         fail_schedule_run(project_id, run_id, START_FAILED)
         return
     if not linked:
+        _end_delivered_group(project_id, target, response_id, RUN_NOT_FOUND)
         fail_schedule_run(project_id, run_id, RUN_NOT_FOUND)
         return
     record_run_events(project_id, run_id, run_event(
@@ -203,13 +279,20 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source=trigger_type, is_system_user=False,
-            auto_approve_sensitive_actions=approved,
+            auto_approve_sensitive_actions=approved, chat_history=history,
+            **({'participant_id': target.participant_id} if target else {}),
         )
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
         log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
-        finish_trigger_run_with_error(project_id, response_id, error)
+        finish_trigger_run_with_error(
+            project_id, response_id, BUDGET_CLOSED.format(error.scope) if target else error,
+            private_run=target is None)
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(error.scope))
     except Exception as error:  # noqa: BLE001 -- the run message ends with the reason (R2.5)
-        finish_trigger_run_with_error(project_id, response_id, error)
+        # a shared chat shows other members a fixed text; the error text stays in the log
+        if target:
+            log.exception('Schedule %s run %s: the predict call failed', schedule_id, run_id)
+        finish_trigger_run_with_error(project_id, response_id, PREDICT_FAILED if target else error,
+                                       private_run=target is None)
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)

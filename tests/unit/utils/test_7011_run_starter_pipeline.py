@@ -20,7 +20,7 @@ def _module(name, **attrs):
     return module
 
 
-def _ignore(*_args):
+def _ignore(*_args, **_kwargs):
     return None
 
 
