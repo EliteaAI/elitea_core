@@ -15,7 +15,8 @@ LOCK_SECONDS = 30
 LOCK_WAIT_SECONDS = 5
 LOCK_POLL_SECONDS = 0.25
 EXPIRY_MARGIN_SECONDS = 120
-GRAPH_CONFIGURATION_KEYS = ("sharepoint_configuration", "outlook_configuration", "teams_configuration")
+GRAPH_CONFIGURATION_KEYS = ("sharepoint_configuration", "outlook_configuration", "teams_configuration",
+                            "ms_graph_configuration")
 
 
 def _graph_login(config: dict) -> Optional[dict]:
