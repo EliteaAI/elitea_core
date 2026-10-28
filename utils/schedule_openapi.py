@@ -6,6 +6,8 @@ checks that both tables match. `Module._register_openapi` registers every entry 
 """
 from typing import get_args
 
+from pydantic import create_model
+
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
@@ -264,8 +266,8 @@ OPERATIONS = {
         "name": "List schedules",
         "summary": "List schedules",
         "description": _text(
-            "Answer one page of schedules with filters, sort and paging. Each row has the owner's name "
-            "and the actions the caller may take on it.",
+            "Answer one page of schedules with filters, sort and paging. Each row has the full details of "
+            "the schedule, with the owner's name and the actions the caller may take on it.",
             "a project member with `schedules.list`; only a schedules admin sees other owners' schedules",
             "400 an invalid query option; 403 no permission"),
         "parameters": PROJECT_PARAMS + LIST_QUERY_PARAMS,
@@ -555,9 +557,40 @@ MCP_TOOL_NAMES = {
     ("delete", ITEM): "delete_elitea_core_schedules",
     ("post", f"{ITEM}/run"): "post_schedules_run",
 }
+MCP_RISK_TEXT = (
+    "The risk review runs first. A blocking finding answers 409 `schedule_blocked`: fix the agent or pipeline. "
+    "Sensitive tools or a personal credential answer 409 `risk_confirmation_required`: a person confirms them in "
+    "the schedule page, an agent cannot. An agent never sets \"Run without asking\": the rule stays "
+    "\"Pause and ask me\"."
+)
+MCP_SAVE_ERRORS = ("403 no permission; 404 not found or not visible; 409 `schedule_blocked`, "
+                   "`risk_confirmation_required` or the project limit of active schedules")
+MCP_SAVE_TEXTS = {
+    ("post", ""): _text(
+        "Create a schedule for an agent or a pipeline version. The caller becomes the owner. "
+        + MCP_RISK_TEXT + " " + DELIVERY_TEXT,
+        "a project member with `schedules.create`", "400 an invalid field; " + MCP_SAVE_ERRORS),
+    ("put", ITEM): _text(
+        "Change the fields of a schedule; send only the fields to change. Send `enabled` false to pause the "
+        "schedule or true to resume it, alone or with other fields, in one save. "
+        + MCP_RISK_TEXT + " " + DELIVERY_TEXT + " A body without `delivery` keeps the stored delivery.",
+        OWNER_OR_ADMIN.format(permission="schedules.update"), "400 an invalid field; " + MCP_SAVE_ERRORS),
+}
+
+
+def _mcp_body(model):
+    """The save body as a chat model sees it: the same fields without `risk_ack`, the human consent."""
+    return create_model(f"{model.__name__}Mcp", **{
+        name: (field.annotation, field) for name, field in model.model_fields.items() if name != "risk_ack"})
+
+
+MCP_SAVE_OVERRIDES = {
+    key: {"mcp_request_body": _mcp_body(OPERATIONS[key]["request_body"]), "mcp_description": text}
+    for key, text in MCP_SAVE_TEXTS.items()
+}
 OPENAPI_ENDPOINTS = [
     {"method": method, "path": f"{BASE_URL}/{tail}".rstrip("/"), **operation,
-     "mcp_tool": (method, tail) in MCP_TOOL_NAMES}
+     "mcp_tool": (method, tail) in MCP_TOOL_NAMES, **MCP_SAVE_OVERRIDES.get((method, tail), {})}
     for (method, tail), operation in OPERATIONS.items()
 ]
 

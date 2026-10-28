@@ -7,6 +7,7 @@ and the platform around them are lenient stubs, and the registry is a recorder.
 Run via:
     python tests/run_tests.py unit/test_schedule_mcp_tools.py -v
 """
+import ast
 import importlib.util
 import pathlib
 import re
@@ -27,6 +28,13 @@ TOOLS = {
     ('put', ITEM): 'put_elitea_core_schedules',
     ('delete', ITEM): 'delete_elitea_core_schedules',
     ('post', f'{ITEM}/run'): 'post_schedules_run',
+}
+# The run token class of each write tool, the line `ENDPOINT_OPERATIONS` needs in utils/internal_obo.py
+WRITE_OPERATIONS = {
+    ('post', BASE): 'build',
+    ('put', ITEM): 'build',
+    ('delete', ITEM): 'build',
+    ('post', f'{ITEM}/run'): 'run',
 }
 REAL_MODULES = (
     'utils/constants.py', 'models/pd/entity_schedule.py', 'models/pd/schedule_run.py',
@@ -80,7 +88,7 @@ class Registry:
         parameters=None, request_body=None, mcp_request_body=None, response_model=None, responses=None,
         security=None, deprecated=False, mcp_tool=False, available_to_users=False,
     ):
-        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool})
+        self.calls.append({'path': path, 'method': method, 'mcp_tool': mcp_tool, 'mcp_request_body': mcp_request_body})
 
 
 def _registered(openapi):
@@ -123,9 +131,9 @@ def _edit_endpoint(openapi):
 
 
 def test_the_edit_tool_schema_lists_the_enabled_field(openapi):
-    properties = _edit_endpoint(openapi)['request_body'].model_json_schema()['properties']
+    properties = _registered_body(openapi, 'put', ITEM).model_json_schema()['properties']
     assert properties['enabled']['anyOf'][0]['type'] == 'boolean'
-    assert {'name', 'cron', 'risk_ack'} <= set(properties)
+    assert {'name', 'cron'} <= set(properties)
 
 
 def test_the_edit_text_says_enabled_pauses_or_resumes(openapi):
@@ -138,3 +146,51 @@ def test_the_edit_answers_400_for_an_enabled_value_that_is_not_a_boolean(openapi
     bad_input = _edit_endpoint(openapi)['responses']['400']['description']
     assert '`enabled` that is not true or false' in bad_input
     assert not hasattr(openapi, 'ENABLED_NOT_EDITABLE')
+
+
+def _registered_body(openapi, method, path):
+    return next(c for c in _registered(openapi) if (c['method'], c['path']) == (method, path))['mcp_request_body']
+
+
+@pytest.mark.parametrize('method, path', [('post', BASE), ('put', ITEM)])
+def test_the_save_tools_never_offer_the_risk_acknowledgement(openapi, method, path):
+    endpoint = next(c for c in openapi.OPENAPI_ENDPOINTS if (c['method'], c['path']) == (method, path))
+    assert 'risk_ack' in endpoint['request_body'].model_json_schema()['properties']
+    tool_properties = _registered_body(openapi, method, path).model_json_schema()['properties']
+    assert 'risk_ack' not in tool_properties
+    assert {'name', 'cron'} <= set(tool_properties)
+
+
+def test_the_read_only_tools_keep_their_own_schema(openapi):
+    assert _registered_body(openapi, 'get', BASE) is None
+    assert _registered_body(openapi, 'delete', ITEM) is None
+
+
+def _endpoint_operations():
+    """The `ENDPOINT_OPERATIONS` literal of utils/internal_obo.py, read without importing the Pylon runtime."""
+    tree = ast.parse((PLUGIN_ROOT / 'utils' / 'internal_obo.py').read_text())
+    assignment = next(
+        n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == 'ENDPOINT_OPERATIONS'
+    )
+    return ast.literal_eval(assignment.value)
+
+
+def _operation_key(method, path):
+    template = re.sub(r'<\w+:(\w+)>', r'{\1}', path)
+    return method.upper(), template.removeprefix('/api/v2/')
+
+
+def test_every_schedule_write_tool_has_a_run_token_operation(openapi):
+    writes = {(c['method'], c['path']) for c in _registered(openapi) if c['mcp_tool'] and c['method'] != 'get'}
+    assert writes == set(WRITE_OPERATIONS)
+    operations = _endpoint_operations()
+    assert {key: operations.get(_operation_key(*key)) for key in writes} == WRITE_OPERATIONS
+
+
+@pytest.mark.parametrize('schedule_id', [0, -1, 2**31, 'abc'])
+def test_the_risk_check_refuses_a_schedule_id_outside_the_database_range(openapi, schedule_id):
+    models = sys.modules[f'{PKG}.models.pd.entity_schedule']
+    body = {'entity_type': 'agent', 'application_id': 12, 'version_id': 34}
+    assert models.ScheduleRiskCheck.model_validate({**body, 'schedule_id': 7}).schedule_id == 7
+    with pytest.raises(ValueError):
+        models.ScheduleRiskCheck.model_validate({**body, 'schedule_id': schedule_id})

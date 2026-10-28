@@ -66,6 +66,13 @@
    "put_project_context_project-context",
    "delete_project_context_project-context"
   ],
+  "elitea_core/schedules": [
+   "get_elitea_core_schedules",
+   "post_elitea_core_schedules",
+   "put_elitea_core_schedules",
+   "delete_elitea_core_schedules",
+   "post_schedules_run"
+  ],
   "elitea_core/skills": [
    "get_elitea_core_application_skills",
    "post_elitea_core_generate_skill_draft",
@@ -123,6 +130,9 @@
   ],
   "delete_elitea_core_participant": [
    "DELETE elitea_core/participant/{mode}/{project_id}/{conversation_id}/{participant_id}"
+  ],
+  "delete_elitea_core_schedules": [
+   "DELETE elitea_core/schedules/{mode}/{project_id}/{schedule_id}"
   ],
   "delete_project_context_project-context": [
    "DELETE elitea_core/project_context/{mode}/{project_id}/project-context"
@@ -184,6 +194,9 @@
   "post_elitea_core_public_skill_predict": [
    "POST elitea_core/public_skill_predict/{mode}/{project_id}/{public_skill_id}"
   ],
+  "post_elitea_core_schedules": [
+   "POST elitea_core/schedules/{mode}/{project_id}"
+  ],
   "post_elitea_core_skill_predict": [
    "POST elitea_core/skill_predict/{mode}/{project_id}/{skill_id}"
   ],
@@ -198,6 +211,9 @@
   ],
   "post_elitea_core_versions": [
    "POST elitea_core/versions/{mode}/{project_id}/{application_id}"
+  ],
+  "post_schedules_run": [
+   "POST elitea_core/schedules/{mode}/{project_id}/{schedule_id}/run"
   ],
   "post_secrets_secrets": [
    "POST secrets/secrets/{mode}/{project_id}"
@@ -219,6 +235,9 @@
   ],
   "put_elitea_core_folder": [
    "PUT elitea_core/folder/{mode}/{project_id}/{folder_id}"
+  ],
+  "put_elitea_core_schedules": [
+   "PUT elitea_core/schedules/{mode}/{project_id}/{schedule_id}"
   ],
   "put_elitea_core_skill": [
    "PUT elitea_core/skill/{mode}/{project_id}/{skill_id}"
