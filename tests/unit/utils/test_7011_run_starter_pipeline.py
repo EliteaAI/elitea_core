@@ -47,9 +47,13 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
             "TriggerType": types.SimpleNamespace(SCHEDULED="scheduled"),
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
-            "finish_trigger_run_with_error": finish_error},
+            "finish_trigger_run_with_error": finish_error,
+            "finish_trigger_run_refused": _ignore,
+            "is_trigger_refusal": lambda _result: False},  # governance off: nothing is refused
+        "utils.mandate_admission": {"prepare_schedule_run": lambda **_kwargs: {}},  # off: no extra predict argument
         "utils.schedule_prerun": {"run_prerun_check": prerun},
         "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block,
+                                "finish_schedule_run": _ignore, "run_failure_reason": str,
                                 "record_run_events": lambda *args, **kwargs: None, "run_event": lambda *args, **kwargs: {}},
         "utils.budget_door": {"closed_budget_scope": budget_scope},
         "utils.exceptions": {

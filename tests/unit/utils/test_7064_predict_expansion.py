@@ -65,6 +65,7 @@ def env(models_path):
 
     functions = [DropImports().visit(f) for f in functions]
     calls = NS(expand=[], prefetch=[], resolve=[], system_user=[], token=[])
+    env_flags = {}   # 'run_token': enforce with a signing key (C9-SEC-47)
 
     rpc = Mock()
     rpc.configurations_get_configuration_model.return_value = {'supports_reasoning': False}
@@ -87,7 +88,7 @@ def env(models_path):
         calls.token.append(('system', project_id))
         return 'system-token'
 
-    def get_predict_token_and_session(project_id, user_id, sid, run_identity=False):
+    def get_predict_token_and_session(project_id, user_id, sid, run_identity=False, mandate_run=False):
         calls.token.append(('user', user_id))
         return 'user-token', None
 
@@ -99,6 +100,7 @@ def env(models_path):
         'rpc_tools': NS(RpcMixin=lambda: NS(rpc=NS(call=rpc, timeout=lambda seconds: rpc))),
         'get_predict_token_and_session': get_predict_token_and_session,
         'get_system_token': get_system_token,
+        'run_identity_applies': lambda sid=None, mandate=False: mandate and env_flags.get('run_token', False),
         'get_session_cookie_name': lambda: None,
         'get_predict_base_url': lambda *a: 'https://unit.invalid',
         'get_public_base_url': lambda: 'https://public.invalid',
@@ -119,7 +121,7 @@ def env(models_path):
     exec(compile(ast.Module(functions, []), str(path), 'exec'), namespace)
 
     env = NS(build=namespace['generate_predict_payload'], llm=llm, calls=calls,
-             expanded=copy.deepcopy(EXPANDED))
+             expanded=copy.deepcopy(EXPANDED), flags=env_flags)
     return env
 
 
@@ -244,3 +246,20 @@ def test_inline_agents_without_an_application_skip_the_system_user_lookup(env):
 
     assert env.calls.system_user == [] and env.calls.expand == []
     assert env.calls.prefetch == [(7, 2)]
+
+
+def test_a_mandate_trigger_run_under_enforce_reads_no_system_token(env):
+    """C9-SEC-47: a scheduled or webhook run admitted under a mandate runs on its run token; the project system token is
+    neither read nor created for it. Off, audit only or no signing key: as before."""
+    env.flags['run_token'] = True
+    result = env.build(agent_request(env), 2, is_system_user=True, mandate_run=True)
+    assert ('system', 7) not in env.calls.token and not result['llm']['kwargs'].get('api_key')
+    env.flags['run_token'] = False
+    result = env.build(agent_request(env), 2, is_system_user=True, mandate_run=True)
+    assert ('system', 7) in env.calls.token and result['llm']['kwargs']['api_key'] == 'system-token'
+
+
+def test_a_trigger_run_without_a_mandate_keeps_its_system_token(env):
+    env.flags['run_token'] = True
+    result = env.build(agent_request(env), 2, is_system_user=True)
+    assert ('system', 7) in env.calls.token and result['llm']['kwargs']['api_key'] == 'system-token'

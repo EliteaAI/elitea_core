@@ -1138,6 +1138,15 @@ def record_index_schedule_refusal(module, code, *, project_id, toolkit_id) -> No
     _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", code)
 
 
+def record_schedule_would_deny(module, code, *, project_id, application_id, trigger_ref) -> None:
+    """Audit only: what enforce would say of an owner schedule's run (#7011) for want of a mandate of its owner that
+    can carry it (``code``). The run goes on; ``predict_sio`` does not evaluate it again (an unattended run is a system
+    run, which audit only skips)."""
+    _record_deny(module, code, would_deny=True, project_id=project_id, application_id=application_id,
+                 caller_ref=trigger_ref)
+    _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny", code)
+
+
 def _admit(  # pylint: disable=R0914
     module, request: AdmissionRequest, run_id, payload=None, shadow=False,
 ) -> Union[ExecutionSecurityContextView, list, None]:
@@ -1578,8 +1587,11 @@ def admit_dispatch(  # pylint: disable=R0911
     if task_name == TOOLKIT_TASK and isinstance(meta.get("toolkit_config"), dict):
         # the task meta is a tracking surface: it gets the sealed toolkit, never the one expansion left material in
         meta["toolkit_config"] = copy.deepcopy(payload.get("toolkit_config"))
-    if admission.run_kind == "interactive" and admission.caller_type == "user" and internal_obo.signing_key() is not None:
-        _strip_platform_tokens(payload, meta)   # the run token is its only platform identity (#7229)
+    if internal_obo.signing_key() is not None and (
+            (admission.run_kind == "interactive" and admission.caller_type == "user") or admission.run_kind == "mandate"):
+        # the run token is its only platform identity: an interactive run of a signed-in person (#7229) and a run
+        # admitted under an autonomous mandate (C9-SEC-47), whose token keeps the mandate's deadline
+        _strip_platform_tokens(payload, meta)
     if not _deliver_run_token(payload, lambda internal: internal_obo.mint_for_admission(
             view, task_name, view_payload, internal=internal), view_payload):
         track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
@@ -1616,9 +1628,9 @@ def carries_platform_token(payload) -> bool:
 
 
 def _strip_platform_tokens(payload, meta) -> None:
-    """Reference-only identity (#7229): an admitted interactive run of a signed-in person has the run token as its only
-    platform identity; any personal or system token or session the payload builders left is removed from the payload
-    and the task meta (a tracking surface)."""
+    """Reference-only identity: an admitted interactive run of a signed-in person (#7229) and a run admitted under an
+    autonomous mandate (C9-SEC-47) have the run token as their only platform identity; any personal or system token or
+    session the payload builders left is removed from the payload and the task meta (a tracking surface)."""
     for holder, names in ((payload, PLATFORM_TOKEN_FIELDS), (_llm_kwargs(payload), LLM_TOKEN_FIELDS),
                           (meta, PLATFORM_TOKEN_FIELDS)):
         for name in names if isinstance(holder, dict) else ():

@@ -4,6 +4,8 @@ decision for a mandate subject, the re-check at the worker, the time limit and t
 Real models and statements on SQLite files (see ``fixtures/admission_env.py`` and ``fixtures/mandate_env.py``);
 only the Pylon runtime, the identity service and the audit methods are fakes.
 """
+import base64
+import json
 import re
 import sys
 import threading
@@ -1052,18 +1054,43 @@ def test_a_mandate_run_whose_sub_agents_carry_no_credential_of_their_own_is_admi
     assert len(contexts(env, ns)) == 2
 
 
-def test_a_mandate_dispatch_keeps_its_system_token_and_gets_no_client_token(ns, env, agent):
-    """#7229: only an interactive run of a signed-in person has the run token as its only identity; a scheduled or
-    webhook run keeps the token its payload builder gave it, as before."""
+TOKEN_FIELDS = ("api_token", "project_auth_token", "auth_session")
+
+
+def mandate_call(**top):
+    """A mandate dispatch as the payload builders leave it without the skip: the owner's token everywhere."""
+    return {"args": [], "pool": "agents", "meta": {"project_id": 1, "project_auth_token": "owner-token-value"}, "kwargs": {
+        "project_id": 1, "_elitea_predict_run_id": RUN, **top,
+        "llm": {"kwargs": {"api_key": "owner-token-value", "auth_session": "owner-session-value"}},
+        "application": {"version_details": {"tools": []}},
+        "envelope": {"schema_version": 1, "security_profile": "governed",
+                     "required_capabilities": ["task_envelope.v1"], "context_ref": None}}}
+
+
+def test_a_mandate_dispatch_carries_no_token_shaped_field_and_runs_on_its_run_token(ns, env, agent):
+    """C9-SEC-47: a scheduled or webhook run admitted under a mandate has the run token as its only platform identity,
+    like an interactive run (#7229): no owner token in the payload or the task meta; its token keeps the mandate run's
+    own deadline (it never slides)."""
     ns.tools.config.SECRETS_MASTER_KEY = "test-master-key-not-a-secret"
     try:
-        call = {"args": [], "pool": "agents", "meta": {"project_id": 1}, "kwargs": {
-            "project_id": 1, "_elitea_predict_run_id": RUN, "llm": {"kwargs": {"api_key": "system-token-value"}},
-            "application": {"version_details": {"tools": []}},
-            "envelope": {"schema_version": 1, "security_profile": "governed",
-                         "required_capabilities": ["task_envelope.v1"], "context_ref": None}}}
-        assert ns.adm.admit_dispatch(env.module(), "indexer_agent", call, request(ns, agent.mandate))
-        assert call["kwargs"]["llm"]["kwargs"]["api_key"] == "system-token-value"
-        assert "internal_run_token" not in call["kwargs"]
+        call = mandate_call(api_token="owner-token-value", auth_session="owner-session-value")
+        ref = ns.adm.admit_dispatch(env.module(), "indexer_agent", call, request(ns, agent.mandate))
+        assert ref
+        text = json.dumps({"kwargs": {k: v for k, v in call["kwargs"].items() if k != "internal_run_token"},
+                           "meta": call["meta"]}, default=str)
+        assert "owner-token-value" not in text and "owner-session-value" not in text
+        assert not any(call["kwargs"].get(name) or call["meta"].get(name) for name in TOKEN_FIELDS)
+        token = call["kwargs"]["internal_run_token"]["token"]
+        body = token[len("eio1."):].split(".")[0]
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        row = next(row for row in contexts(env, ns) if str(row.id) == ref)
+        assert claims["exp"] == pytest.approx(ns.adm._aware(row.expires_at).timestamp(), abs=1)  # pylint: disable=W0212
     finally:
         vars(ns.tools.config).pop("SECRETS_MASTER_KEY", None)
+
+
+def test_without_a_signing_key_a_mandate_dispatch_keeps_what_its_builder_gave_it(ns, env, agent):
+    call = mandate_call()
+    assert ns.adm.admit_dispatch(env.module(), "indexer_agent", call, request(ns, agent.mandate))
+    assert call["kwargs"]["llm"]["kwargs"]["api_key"] == "owner-token-value"
+    assert "internal_run_token" not in call["kwargs"]

@@ -112,7 +112,7 @@ def proxy(monkeypatch):
 
     monkeypatch.setattr(oauth_utils.requests, 'post', record)
     handler = _load(monkeypatch, f'{PKG}.api.v2.mcp_oauth_proxy', PLUGIN_ROOT / 'api' / 'v2' / 'mcp_oauth_proxy.py')
-    return types.SimpleNamespace(api=handler.ProjectAPI(), request=request, posted=posted)
+    return types.SimpleNamespace(api=handler.ProjectAPI(), request=request, posted=posted, handler=handler)
 
 
 def _post(proxy, **body):

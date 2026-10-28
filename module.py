@@ -585,6 +585,10 @@ class Module(module.ModuleModel):
                 "create_governance_settings_tables", self.create_governance_settings_tables,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "fix_platform_tick_row", self.fix_platform_tick_row,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

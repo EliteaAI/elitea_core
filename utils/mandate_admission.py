@@ -8,19 +8,26 @@ hand the ticket to ``predict_sio`` by reference. A ticket that was forged, repla
 replica, or presented for another agent version is simply not found, and the run is an ordinary system run: refused
 with ``MANDATE_REQUIRED`` when governed.
 
+An owner schedule (#7011) is a third trusted caller: its starter loaded the schedule row itself and runs it as the
+schedule's owner (``prepare_schedule_run``).
+
 Nothing here runs when governance is off: no ticket is minted or looked up, no row is read.
 """
 import secrets
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Optional
 
+from pylon.core.tools import log
 from tools import db, this
 
 from ..models.pd.admission import AdmissionRequest
-from .governance import is_governed
-from .trigger_principal import TriggerPrincipal, resolve_trigger_principal
+from .governance import is_auditing, is_governed
+from .trigger_principal import (
+    OPERATION_OF, TriggerPrincipal, latest_mandates, principal_of, resolve_trigger_principal,
+)
 
 # Refusals that say "try again", not "no": a webhook sender retries a 5xx and never a 403
 UNAVAILABLE_CODES = frozenset({"DEPENDENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE"})
@@ -133,3 +140,75 @@ def prepare_trigger_run(  # pylint: disable=R0913
         project_id=project_id, version_row=version, principal=principal, entry_point=entry_point,
         trigger_ref=trigger_ref)
     return principal.owner_user_id, mint_trigger_admission(module, request)
+
+
+def schedule_trigger_ref(schedule_id) -> str:
+    """The trigger of one owner schedule (#7011), as admission and the audit trail name it."""
+    return f"schedule:entity:{schedule_id}"
+
+
+def _covering_mandate(project_id, version, owner_id):
+    """The latest mandate row of the version when it was made for the schedule's own owner, else ``None``. A schedule
+    is its owner's, so another person's mandate never lends its authority to it. One indexed read, the one the legacy
+    scheduler does."""
+    with db.get_session(project_id) as session:
+        mandate = latest_mandates(session, project_id, [version.id]).get(version.id)
+    if mandate is None or mandate.owner_user_id is None or mandate.owner_user_id != owner_id:
+        return None
+    return mandate
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _audit_only_refusal(mandate) -> Optional[str]:
+    """What enforce would refuse a run for, as far as the covering mandate's row says, in the order ``_admit_mandate``
+    checks it: no mandate, past its end date or expired, suspended or revoked, or not allowed for schedules. ``None``:
+    the row would let the run on (the rest of a mandate admission is not rehearsed)."""
+    if mandate is None:
+        return "MANDATE_REQUIRED"
+    valid_until = mandate.valid_until
+    if valid_until is not None and valid_until.tzinfo is None:
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    overdue = mandate.state in ("active", "suspended") and valid_until is not None and valid_until <= _now()
+    if overdue or mandate.state == "expired":
+        return "MANDATE_EXPIRED"
+    if mandate.state != "active":
+        return "MANDATE_INACTIVE"
+    if OPERATION_OF["pipeline_schedule"] not in (mandate.allowed_operations or []):
+        return "DENIED_OPERATION"
+    return None
+
+
+def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
+    """For one run of an owner schedule (#7011, agent or pipeline): the extra arguments of its ``predict_sio`` call.
+
+    Off: ``{}``, nothing is read. Enforce or audit only: the run is ``unattended``, so the request ``predict_sio``
+    builds without a ticket is a system run (refused as ``MANDATE_REQUIRED`` under enforce, not rehearsed under audit
+    only), while its payload stays the owner's. Enforce: a run its owner's mandate covers gets a ticket for the mandate
+    request (entry point ``schedule``). Audit only: a run enforce would refuse for its mandate leaves one ``would_deny``
+    event (``_audit_only_refusal``); the rest of a mandate admission is not rehearsed. The audit-only evaluation never
+    stops a run.
+    """
+    module = this.module
+    if is_governed(module):
+        mandate = _covering_mandate(project_id, version, owner_id)
+        if mandate is None:
+            return {"unattended": True}
+        principal = principal_of("pipeline_schedule", mandate)
+        request = mandate_admission_request(
+            project_id=project_id, version_row=version, principal=principal, entry_point="schedule",
+            trigger_ref=schedule_trigger_ref(schedule_id))
+        return {"unattended": True, "mandate_ticket": mint_trigger_admission(module, request)}
+    if not is_auditing(module):
+        return {}
+    try:
+        code = _audit_only_refusal(_covering_mandate(project_id, version, owner_id))
+        if code is not None:
+            from .admission import record_schedule_would_deny  # pylint: disable=C0415  # audit only needs the writer
+            record_schedule_would_deny(module, code, project_id=project_id, application_id=version.application_id,
+                                       trigger_ref=schedule_trigger_ref(schedule_id))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("schedule %s: the audit-only evaluation failed (%s)", schedule_id, type(exc).__name__)
+    return {"unattended": True}

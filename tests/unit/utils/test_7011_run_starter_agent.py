@@ -106,6 +106,8 @@ def world(monkeypatch):
         "utils.schedule_runs": {
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
+            "finish_schedule_run": lambda *args: state.calls.append(("finish", *args)),
+            "run_failure_reason": str,
             "record_run_events": lambda *args, **kwargs: None,  # the run log has its own tests
             "run_event": lambda *args, **kwargs: {}},
         "utils.budget_door": {"closed_budget_scope": lambda *args: None},
@@ -118,7 +120,10 @@ def world(monkeypatch):
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
             "finish_trigger_run_with_error": lambda *args: state.calls.append(("finish_error", *args)),
+            "finish_trigger_run_refused": lambda *args: state.calls.append(("finish_refused", *args)),
+            "is_trigger_refusal": lambda _result: False,  # governance off: nothing is refused
         },
+        "utils.mandate_admission": {"prepare_schedule_run": lambda **_kwargs: {}},  # off: no extra predict argument
     }
     for dotted, attrs in stubs.items():
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", SimpleNamespace(**attrs))
@@ -197,7 +202,7 @@ def test_7011_r2_5_predict_error_ends_the_run_message_with_the_error(world):
     error = RuntimeError("rpc down")
     world.predict_error = error
     _run(world)
-    assert world.call("finish_error") == ("finish_error", PROJECT_ID, "response-1", error)
+    assert world.call("finish_error") == ("finish_error", PROJECT_ID, "response-1", error, "agent")  # agent wording
 
 
 def test_7011_r2_5_predict_error_closes_the_run_as_failed(world):
