@@ -155,8 +155,11 @@ def test_schedule_tool_call_with_a_risk_acknowledgement_is_refused(mcp_service):
     assert 'confirm the risk review in the Elitea UI' in refusal
 
 
-def test_schedule_tool_call_with_an_empty_risk_acknowledgement_goes_through(mcp_service):
-    assert mcp_service['_consent_refusal'](SCHEDULE_TOOL_PATH, {'name': 'x', 'risk_ack': None}) is None
+def test_schedule_tool_call_with_an_empty_risk_acknowledgement_is_refused(mcp_service):
+    assert mcp_service['_consent_refusal'](SCHEDULE_TOOL_PATH, {'name': 'x', 'risk_ack': None})
+
+
+def test_schedule_tool_call_without_a_risk_acknowledgement_goes_through(mcp_service):
     assert mcp_service['_consent_refusal'](SCHEDULE_TOOL_PATH, {'name': 'x'}) is None
 
 

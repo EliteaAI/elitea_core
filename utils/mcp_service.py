@@ -64,7 +64,7 @@ def _same_path_value(supplied, scoped) -> bool:
 def _consent_refusal(path: str, body: dict) -> str | None:
     """The refusal for a schedule tool call that carries the consent for "Run without asking" (a person gives it)."""
     if path.startswith(_SCHEDULES_API_ROOT) and (
-            body.get("risk_ack") is not None or body.get("approval_rule") == "run_without_asking"):
+            "risk_ack" in body or body.get("approval_rule") == "run_without_asking"):
         return ('An agent cannot set "Run without asking" or send `risk_ack`: ask the user to confirm the risk '
                 "review in the Elitea UI. Save the schedule with the rule \"Pause and ask me\".")
     return None

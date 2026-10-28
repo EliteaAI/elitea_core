@@ -194,3 +194,71 @@ def test_the_risk_check_refuses_a_schedule_id_outside_the_database_range(openapi
     assert models.ScheduleRiskCheck.model_validate({**body, 'schedule_id': 7}).schedule_id == 7
     with pytest.raises(ValueError):
         models.ScheduleRiskCheck.model_validate({**body, 'schedule_id': schedule_id})
+
+
+@pytest.fixture
+def executor(monkeypatch):
+    """`McpApiToolExecutor` from the source of utils/mcp_service.py (the module needs the Pylon runtime), with the
+    WSGI call replaced by a recorder, so a test sees whether the API was reached."""
+    tree = ast.parse((PLUGIN_ROOT / 'utils' / 'mcp_service.py').read_text())
+    functions = {'_path_segment', '_is_blank', '_same_path_value', '_consent_refusal', '_run_token_claims'}
+    constants = {'MULTI_SEGMENT_PATH_PARAMS', '_SCHEDULES_API_ROOT'}
+    classes = {'McpProjectScopeError', 'McpApiToolExecutor'}
+    wanted = [
+        node for node in tree.body
+        if (isinstance(node, ast.FunctionDef) and node.name in functions)
+        or (isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', '') in constants)
+        or (isinstance(node, ast.ClassDef) and node.name in classes)
+    ]
+    assert len(wanted) == len(functions | constants | classes), 'mcp_service helpers moved or were renamed'
+    namespace = {
+        're': re, 'json': __import__('json'), 'traceback': __import__('traceback'),
+        'sanitize_property_name': lambda name: name,
+        'log': types.SimpleNamespace(**{level: (lambda *a, **k: None) for level in ('debug', 'warning', 'error')}),
+    }
+    exec(compile(ast.Module(body=wanted, type_ignores=[]), '<mcp_service>', 'exec'), namespace)  # noqa: S102
+    cls = namespace['McpApiToolExecutor']
+    cls.sent = []
+    monkeypatch.setattr(cls, '_build_wsgi_environ', staticmethod(lambda *args: args))
+    monkeypatch.setattr(cls, '_execute_wsgi_request', staticmethod(lambda environ: (cls.sent.append(environ), 200, '{}')[1:]))
+    monkeypatch.setattr(cls, '_parse_response', staticmethod(lambda status, body: {'result': {}}))
+    return cls
+
+
+def _api_tool(method, path):
+    parameters = [
+        {'name': 'mode', 'in': 'path', 'schema': {'type': 'string', 'default': 'prompt_lib'}},
+        {'name': 'project_id', 'in': 'path', 'schema': {'type': 'integer'}},
+    ]
+    if '{schedule_id}' in path:
+        parameters.append({'name': 'schedule_id', 'in': 'path', 'schema': {'type': 'integer'}})
+    return {'method': method, 'path': path, 'label': 'schedule_tool', 'parameters': parameters}
+
+
+SAVE_TOOLS = [
+    ('POST', '/api/v2/elitea_core/schedules/{mode}/{project_id}', {'project_id': 1, 'name': 'Nightly'}),
+    ('PUT', '/api/v2/elitea_core/schedules/{mode}/{project_id}/{schedule_id}',
+     {'project_id': 1, 'schedule_id': 3, 'name': 'Nightly'}),
+]
+CONSENT_FIELDS = [
+    {'risk_ack': {'fingerprint': 'abc', 'confirmed_name': 'Nightly'}},
+    {'risk_ack': None},
+    {'risk_ack': ''},
+    {'approval_rule': 'run_without_asking'},
+    {'approval_rule': 'run_without_asking', 'risk_ack': None},
+]
+
+
+@pytest.mark.parametrize('method, path, arguments', SAVE_TOOLS)
+@pytest.mark.parametrize('consent', CONSENT_FIELDS)
+def test_a_save_tool_call_with_a_consent_is_refused_before_the_api_is_called(executor, method, path, arguments, consent):
+    result = executor.execute(_api_tool(method, path), {**arguments, **consent})
+    assert list(result) == ['error'] and 'ask the user to confirm the risk review' in result['error']
+    assert executor.sent == []
+
+
+@pytest.mark.parametrize('method, path, arguments', SAVE_TOOLS)
+def test_a_save_tool_call_with_pause_and_ask_reaches_the_api(executor, method, path, arguments):
+    result = executor.execute(_api_tool(method, path), {**arguments, 'approval_rule': 'pause_and_ask'})
+    assert result == {'result': {}}
+    assert len(executor.sent) == 1
