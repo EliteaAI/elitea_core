@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pylon.core.tools import log
 from sqlalchemy import asc, func
+from sqlalchemy.orm import selectinload
 from tools import db
 
 from ..models.message_group import ConversationMessageGroup
@@ -46,6 +47,9 @@ def generate_manual_summary(
     strategy = meta.get('context_strategy') or {}
     summary_instructions = strategy.get('summary_instructions') or DEFAULT_SUMMARY_INSTRUCTIONS
 
+    # Keep the session open during the RPC call: generate_summary_payload lazily
+    # loads author_participant and message_items on the ORM objects, so the session
+    # must remain open when predict_summary_content is called.
     with db.get_session(project_id) as session:
         row = session.query(
             func.min(ConversationMessageGroup.id),
@@ -58,20 +62,23 @@ def generate_manual_summary(
         if from_id is None:
             raise ValueError(f"No message groups found for conversation {conversation_id}")
 
-        message_groups = session.query(ConversationMessageGroup).filter(
+        message_groups = session.query(ConversationMessageGroup).options(
+            selectinload(ConversationMessageGroup.author_participant),
+            selectinload(ConversationMessageGroup.message_items),
+        ).filter(
             ConversationMessageGroup.conversation_id == conversation_id,
             ConversationMessageGroup.id >= from_id,
             ConversationMessageGroup.id <= to_id,
         ).order_by(asc(ConversationMessageGroup.created_at)).all()
 
-    # Call the existing RPC
-    result = rpc_manager.call.chat_predict_summary_content(
-        project_id=project_id,
-        message_groups=message_groups,
-        llm_settings=llm_settings,
-        summary_instructions=summary_instructions,
-        user_id=user_id,
-    )
+        # Call the RPC while the session is still open (ORM objects need the session)
+        result = rpc_manager.call.chat_predict_summary_content(
+            project_id=project_id,
+            message_groups=message_groups,
+            llm_settings=llm_settings,
+            summary_instructions=summary_instructions,
+            user_id=user_id,
+        )
 
     if not result:
         raise RuntimeError("Summary generation returned no result")
