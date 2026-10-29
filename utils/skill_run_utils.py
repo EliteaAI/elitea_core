@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, replace
+from typing import Callable, Optional
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -13,7 +13,7 @@ from .exceptions import BudgetDoorClosedError, InputGuardrailBlockedError, Maint
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 from .predict_utils import get_project_context
 from .project_context_utils import prepare_project_context_delivery
-from .sio_utils import SioValidationError
+from .sio_utils import SioEvents, SioValidationError
 from .skill_run_settings import is_requested_model_usable, selection_mode, without_model_binding
 from .usage_attribution import skill_attribution
 from ..models.enums.all import PublishStatus
@@ -268,13 +268,19 @@ def check_socket_access(sid: str, user_id: int, project_id: int) -> None:
         raise SkillRunError(SOCKET_NOT_IN_PROJECT_ERROR, 403)
 
 
+def bind_to_conversation(run: SkillRun, conversation_uuid: str, response_message_id: str) -> SkillRun:
+    data = {**run.data, 'stream_id': conversation_uuid, 'message_id': response_message_id}
+    return replace(run, data=data, stream_id=conversation_uuid)
+
+
 def dispatch_skill_run(
     module, run: SkillRun, *, caller_project_id: int, user_id: int, wait: bool, return_chat_history: bool,
-    sid: Optional[str] = None,
+    sid: Optional[str] = None, sio_event: str = SioEvents.application_predict,
 ) -> dict:
     outcome = module.predict_sio(
         sid=sid,
         data=run.data,
+        sio_event=sio_event,
         start_event_content=run.meta(),
         chat_project_id=caller_project_id,
         await_task_timeout=SKILL_RUN_TIMEOUT_SECONDS if wait else -1,
@@ -288,6 +294,21 @@ def dispatch_skill_run(
     )
     if outcome is None:
         raise SkillRunError(SOCKET_NOT_IN_PROJECT_ERROR, 403)
+    return outcome
+
+
+def is_started(outcome: dict) -> bool:
+    return 'task_id' in outcome or 'result' in outcome
+
+
+def dispatch_into_conversation(module, run: SkillRun, run_conversation, **dispatch) -> dict:
+    try:
+        outcome = dispatch_skill_run(module, run, sio_event=SioEvents.chat_predict.value, **dispatch)
+    except Exception:
+        run_conversation.discard()
+        raise
+    if not is_started(outcome):
+        run_conversation.discard()
     return outcome
 
 
@@ -350,6 +371,7 @@ def execute_skill_predict(
     user_id: int,
     async_requested: bool = False,
     request_model: type[SkillPredictMcpRequest] = SkillPredictRequest,
+    open_run_conversation: Optional[Callable] = None,
 ) -> tuple[dict | list, int]:
     try:
         request = request_model.model_validate(body if body is not None else {})
@@ -372,14 +394,25 @@ def execute_skill_predict(
             chat_history=request.chat_history,
             llm_override=request.llm_settings.model_dump(exclude_unset=True) if request.llm_settings else None,
         )
-        outcome = dispatch_skill_run(
-            module, run,
-            caller_project_id=caller_project_id,
-            user_id=user_id,
-            wait=wait,
-            return_chat_history=request.return_chat_history,
-            sid=sid,
-        )
+        dispatch = {
+            'caller_project_id': caller_project_id,
+            'user_id': user_id,
+            'wait': wait,
+            'return_chat_history': request.return_chat_history,
+            'sid': sid,
+        }
+        if open_run_conversation is not None and not sid:
+            run_conversation = open_run_conversation(
+                caller_project_id=caller_project_id,
+                skill_project_id=skill_project_id,
+                target=target,
+                user_id=user_id,
+                user_input=request.user_input,
+            )
+            run = bind_to_conversation(run, run_conversation.conversation_uuid, run_conversation.response_message_id)
+            outcome = dispatch_into_conversation(module, run, run_conversation, **dispatch)
+        else:
+            outcome = dispatch_skill_run(module, run, **dispatch)
         if callback_url is not None and outcome.get('task_id'):
             module.callback_tasks[outcome['task_id']] = {
                 'callback_url': callback_url,

@@ -77,6 +77,7 @@ def _install(openapi_tools):
     _stub(f'{PKG}.utils.folder_access', require_folder_access=lambda *a, **k: (lambda f: f))
     _stub(f'{PKG}.utils.skill_run_utils', execute_skill_predict=None, is_async_query=None, request_model_for=None)
     _stub(f'{PKG}.utils.utils', get_public_project_id=lambda: 1)
+    _stub(f'{PKG}.utils.skill_api_run_history', run_conversation_opener=None)
 
     return {
         name: _load(f'{PKG}.api.v2.{name}', PLUGIN_ROOT / 'api' / 'v2' / f'{name}.py')

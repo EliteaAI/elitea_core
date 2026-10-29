@@ -629,3 +629,91 @@ class TestMcpRequest:
 
     def test_plain_http_keeps_the_full_request_model(self, env):
         assert env.mod.request_model_for({}) is sys.modules[f'{PACKAGE}.models.pd.skill_predict'].SkillPredictRequest
+
+
+class FakeRunConversation:
+    def __init__(self):
+        self.conversation_uuid = 'conversation-uuid'
+        self.response_message_id = 'answer-uuid'
+        self.opened_with = None
+        self.discarded = False
+
+    def open(self, **kwargs):
+        self.opened_with = kwargs
+        return self
+
+    def discard(self):
+        self.discarded = True
+
+
+def _run_into_history(env, module, body, history, **kwargs):
+    return env.mod.execute_skill_predict(
+        module, body,
+        caller_project_id=CALLER_PROJECT_ID,
+        skill_project_id=kwargs.pop('skill_project_id', CALLER_PROJECT_ID),
+        skill_id=kwargs.pop('skill_id', 10),
+        version_id=kwargs.pop('version_id', None),
+        published_only=False,
+        user_id=42,
+        open_run_conversation=history.open,
+        **kwargs,
+    )
+
+
+class TestApiRunHistory:
+    """#7298: an API run is saved as a Run panel conversation so the skill's Run History lists it."""
+
+    def test_the_run_streams_into_the_conversation_it_opened(self, env, own_skill):
+        module, history = FakeModule(), FakeRunConversation()
+        body, status = _run_into_history(env, module, {'user_input': 'hi'}, history, version_id=101)
+        call = module.calls[0]
+        assert status == 200 and not history.discarded
+        assert call['sio_event'] == 'chat_predict'
+        assert call['data']['stream_id'] == body['stream_id'] == 'conversation-uuid'
+        assert call['data']['message_id'] == 'answer-uuid'
+
+    def test_the_conversation_is_opened_for_the_run_version_and_caller(self, env, own_skill):
+        history = FakeRunConversation()
+        _run_into_history(env, FakeModule(), {'user_input': 'hi'}, history, version_id=101)
+        opened = history.opened_with
+        assert (opened['caller_project_id'], opened['skill_project_id'], opened['user_id']) == (CALLER_PROJECT_ID,) * 2 + (42,)
+        assert (opened['target'].skill_id, opened['target'].version_id, opened['user_input']) == (10, 101, 'hi')
+
+    def test_async_runs_are_saved_too(self, env, own_skill):
+        module, history = FakeModule(outcome={'task_id': 't-1'}), FakeRunConversation()
+        body, status = _run_into_history(env, module, {'user_input': 'hi', 'async_mode': True}, history)
+        assert status == 200 and body['task_id'] == 't-1' and not history.discarded
+        assert module.calls[0]['sio_event'] == 'chat_predict'
+
+    def test_a_socket_run_keeps_its_stream_and_is_not_saved(self, env, own_skill):
+        module, history = FakeModule(outcome={'task_id': 't-1'}), FakeRunConversation()
+        _run_into_history(env, module, {'user_input': 'hi', 'sid': 'socket-of-42'}, history)
+        call = module.calls[0]
+        assert history.opened_with is None
+        assert call['sio_event'] == env.mod.SioEvents.application_predict
+        assert call['data']['stream_id'] == call['data']['message_id']
+
+    def test_a_run_refused_at_dispatch_leaves_no_conversation(self, env, own_skill):
+        error = sys.modules[f'{PACKAGE}.utils.exceptions'].BudgetDoorClosedError(project_id=CALLER_PROJECT_ID)
+        history = FakeRunConversation()
+        _, status = _run_into_history(env, FakeModule(raises=error), {'user_input': 'hi'}, history)
+        assert status == 429 and history.discarded
+
+    @pytest.mark.parametrize('outcome', [
+        {'error': 'maintenance_in_progress', 'message': 'later'},
+        {'code': 'mandate_required', 'error': 'refused'},
+    ])
+    def test_a_run_that_never_started_leaves_no_conversation(self, env, own_skill, outcome):
+        history = FakeRunConversation()
+        _run_into_history(env, FakeModule(outcome=outcome), {'user_input': 'hi'}, history)
+        assert history.discarded
+
+    def test_a_timed_out_run_keeps_its_conversation(self, env, own_skill):
+        history = FakeRunConversation()
+        _, status = _run_into_history(env, FakeModule(outcome={'task_id': 't-1'}), {'user_input': 'hi'}, history)
+        assert status == 400 and not history.discarded
+
+    def test_an_unrunnable_skill_opens_no_conversation(self, env, own_skill):
+        history = FakeRunConversation()
+        _, status = _run_into_history(env, FakeModule(), {'user_input': 'hi'}, history, skill_id=404)
+        assert status == 404 and history.opened_with is None

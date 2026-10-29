@@ -6,6 +6,7 @@ from .skill import resolve_version_id  # pylint: disable=E0402
 from ...models.pd.skill_predict import SkillPredictMcpRequest, SkillPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.folder_access import require_folder_access  # pylint: disable=E0402
+from ...utils.skill_api_run_history import run_conversation_opener  # pylint: disable=E0402
 from ...utils.skill_run_utils import execute_skill_predict, is_async_query, request_model_for  # pylint: disable=E0402
 from ...utils.utils import get_public_project_id  # pylint: disable=E0402
 
@@ -20,7 +21,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             "settings, then the project's default model; model_fallback is true when the requested "
             "model was unavailable and the default ran instead. Sync by default; async_mode or "
             "callback_url returns a task_id immediately; with sid the run streams to that socket and the call "
-            "returns task_id and stream_id. In the public project only published versions run."
+            "returns task_id and stream_id. In the public project only published versions run. Without sid the run is saved to the skill's Run History as an API run (MCP run over MCP), and stream_id is its conversation uuid."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
@@ -73,6 +74,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             user_id=auth.current_user()["id"],
             async_requested=is_async_query(request.args),
             request_model=request_model_for(request.environ),
+            open_run_conversation=run_conversation_opener(request.environ),
         )
 
 

@@ -129,6 +129,7 @@ def harness(isolated_sys_modules):
             'request_model_for': lambda environ: McpRequest if environ.get('mcp') else FullRequest,
         },
         'utils.utils': {'get_public_project_id': lambda: PUBLIC_PROJECT_ID},
+        'utils.skill_api_run_history': {'run_conversation_opener': run_conversation_opener},
         'api.v2.skill': {'resolve_version_id': harness.resolve_version_id},
     }
     for name, attrs in stubs.items():
@@ -139,6 +140,10 @@ def harness(isolated_sys_modules):
     harness.own = _load('api/v2/skill_predict.py', f'{PACKAGE}.api.v2.skill_predict')
     harness.catalog = _load('api/v2/public_skill_predict.py', f'{PACKAGE}.api.v2.public_skill_predict')
     return harness
+
+
+def run_conversation_opener(environ):
+    return ('opener', 'mcp' if environ.get('mcp') else 'api')
 
 
 def _own_post(harness, skill_id=10, version_id=None):
@@ -196,6 +201,7 @@ def test_own_skill_is_read_from_the_caller_project(harness):
         'user_id': 42,
         'async_requested': False,
         'request_model': FullRequest,
+        'open_run_conversation': ('opener', 'api'),
     }]
 
 
@@ -221,6 +227,7 @@ def test_catalog_skill_is_read_from_the_public_project_and_billed_to_the_caller(
         'user_id': 42,
         'async_requested': False,
         'request_model': FullRequest,
+        'open_run_conversation': ('opener', 'api'),
     }]
 
 
@@ -250,6 +257,14 @@ def test_mcp_requests_are_validated_with_the_narrowed_model(harness, post):
     harness.environ['mcp'] = True
     post(harness)
     assert harness.runs[0]['request_model'] is McpRequest
+
+
+@pytest.mark.parametrize('post', [_own_post, _catalog_post])
+def test_mcp_runs_are_saved_as_mcp_runs(harness, post):
+    harness.user_permissions = {PREDICT, SKILL_READ, CATALOG_READ}
+    harness.environ['mcp'] = True
+    post(harness)
+    assert harness.runs[0]['open_run_conversation'] == ('opener', 'mcp')
 
 
 @pytest.mark.parametrize('post, permissions', [
