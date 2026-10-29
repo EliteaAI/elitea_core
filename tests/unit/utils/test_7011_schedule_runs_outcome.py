@@ -293,3 +293,43 @@ def test_run_failure_reason_without_error_text(reasons, error):
 ])
 def test_run_failure_reason_hides_only_query_strings(reasons, error, reason):
     assert reasons.run_failure_reason(error) == f"The run failed: {reason}"
+
+
+from plugins.elitea_core.utils.error_text import public_event, public_reason  # noqa: E402
+
+OLD_REASON = "The run failed: langchain_core.tools.base.ToolException: Node `Calltool` has tool 'get_issue' which is not found"
+
+
+def test_a_reason_stored_before_the_generic_text_is_shown_as_the_generic_text():
+    assert public_reason(OLD_REASON) == GENERIC
+    assert public_reason(f"The run failed: {WORKER_SENTENCE}") == f"The run failed: {WORKER_SENTENCE}"
+    assert public_reason(None) is None
+
+
+def test_a_stored_finished_event_with_an_engineer_text_is_shown_as_the_generic_text():
+    old = {"kind": "finished", "at": "2026-10-29T20:20:00Z", "text": f"Run finished: failed ({OLD_REASON})"}
+    assert public_event(old)["text"] == f"Run finished: failed ({GENERIC})"
+    assert public_event(old)["at"] == old["at"]
+    plain = {"kind": "finished", "at": None, "text": "Run finished: success"}
+    assert public_event(plain) == plain
+    other = {"kind": "log", "at": None, "text": "ToolException in a step"}
+    assert public_event(other) == other
+
+
+def test_a_two_line_error_keeps_the_last_line_when_it_is_plain(reasons):
+    assert reasons.run_failure_reason("The step stopped\nThe title is missing") == "The run failed: The title is missing"
+
+
+def test_a_two_line_error_with_an_engineer_line_anywhere_in_the_last_line_is_generic(reasons):
+    assert reasons.run_failure_reason("The step stopped\nValueError: boom") == GENERIC
+
+
+def test_the_worker_sentence_goes_from_the_end_event_to_the_stored_run(runs, session, sent):
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule)
+
+    runs.finish_schedule_run(1, run.id, "failed", runs.run_failure_reason(WORKER_SENTENCE), conversation_id=55)
+
+    session.refresh(run)
+    assert run.reason == f"The run failed: {WORKER_SENTENCE}"
+    assert run.events[-1]["text"] == f"Run finished: failed ({run.reason})"

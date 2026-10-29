@@ -171,7 +171,9 @@ def test_stream_end_with_a_short_tool_error_finishes_the_run_as_failed_with_that
     assert finish in world.events
 
 
-def test_stream_end_with_error_text_but_no_error_flag_finishes_the_run_as_success(make_world):
+# The reason code is stubbed here: these tests pin the is_error mapping and the call arguments only.
+# Core trusts the flag, so a tool that returns its error as plain text still ends as success.
+def test_stream_end_ignores_error_text_without_the_error_flag(make_world):
     world = make_world(dict(SCHEDULE_META))
     world.end({"error": WORKER_ERROR})
     finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)

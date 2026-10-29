@@ -2,6 +2,9 @@
 import re
 
 ERROR_LINE_MAX_LENGTH = 300
+FAILED_REASON = 'The run failed'
+# Shown when the error text is written for engineers; the text itself goes to the server log only
+GENERIC_FAILED_REASON = f'{FAILED_REASON}. Open the run log or ask an administrator for details.'
 # A query string of an http(s) URL: it may hold a token, so only its place is kept
 _URL_QUERY = re.compile(r'(https?://[^\s?#]+)\?[^\s#]*')
 # A Windows path (C:\work\x.py) or a POSIX absolute path (/data/x.py, /x.py), up to the first space. The
@@ -48,3 +51,18 @@ def hide_locations(text: str) -> str:
 def readable_reason(text: str) -> str:
     """One plain line for people: no control or direction characters and no Python module before the class name."""
     return _MODULE_PREFIX.sub('', ' '.join(_INVISIBLE.sub(' ', text).split()))
+
+
+def public_reason(reason):
+    """A stored reason as people may see it: a run saved before the generic text existed may hold an engineer's text."""
+    if reason and is_technical(reason):
+        return GENERIC_FAILED_REASON
+    return reason
+
+
+def public_event(event: dict) -> dict:
+    """The same rule for the text of a stored `finished` event ("Run finished: failed (<reason>)")."""
+    text = event.get('text')
+    if event.get('kind') == 'finished' and text and is_technical(text):
+        return {**event, 'text': f'Run finished: failed ({GENERIC_FAILED_REASON})'}
+    return event

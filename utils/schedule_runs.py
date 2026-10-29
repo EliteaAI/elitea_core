@@ -6,7 +6,7 @@ from sqlalchemy import and_, func, or_, select, update
 from tools import db
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
-from .error_text import hide_locations, is_technical, last_exception_line, readable_reason, without_markup
+from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
 
@@ -109,9 +109,6 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
         session.commit()
 
 
-FAILED_REASON = 'The run failed'
-# Shown when the error text is written for engineers; the text itself goes to the server log only
-GENERIC_FAILED_REASON = f'{FAILED_REASON}. Open the run log or ask an administrator for details.'
 REASON_MAX_LENGTH = 300
 
 
