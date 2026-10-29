@@ -1,4 +1,5 @@
 import json
+import time
 from copy import deepcopy
 from typing import Optional, Tuple, List
 from uuid import uuid4
@@ -22,6 +23,8 @@ from ..models.pd.search import MultipleApplicationSearchModel
 from ..models.pd.tool import ToolDetails, ToolImportModel, ToolValidatedDetails
 from ..models.pd.version import ApplicationVersionDetailModel, ApplicationVersionCloneModel
 from ..utils.application_tools import (
+    delete_toolkit,
+    toolkit_kind,
     IndexMetaLockTimeoutError,
     IndexRunInProgressError,
     toolkits_listing,
@@ -50,13 +53,17 @@ from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
-from ..utils.skill_utils import detach_skills_for_entity_versions
+from ..utils.skill_utils import (
+    detach_skills_for_entity_versions, delete_skill, SkillNotFoundError, SkillPublishedError,
+)
+from ..models.skill import Skill, SkillVersion
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
     get_public_base_url, get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
     load_context_settings_from_conversation, user_input_preview
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
+from ..utils.sio_guards import ensure_sio_user_in_project
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
 from ..utils.internal_tools import (
     require_internal_mcp_pat,
@@ -216,6 +223,80 @@ def _raise_input_guardrail_blocked(
     raise blocked_error
 
 
+def _delete_application(module, session, project_id: int, application: Application, slim_event: bool = False):
+    """Delete one application and commit: True, or an error dict when a version is published or embedded.
+
+    slim_event builds the ``application_deleted`` payload from the fields its handlers read
+    instead of serializing every version (bulk delete, #7242).
+    """
+    blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
+    for ver in application.versions:
+        if ver.status in blocked_statuses:
+            return {
+                'error': 'Cannot delete application with published or '
+                         'embedded versions. Unpublish first.',
+                'blocked_version_id': ver.id,
+                'blocked_status': ver.status,
+            }
+
+    versions = list(application.versions)
+    default_version = application.get_default_version()
+    agent_type = default_version.agent_type if default_version else None
+
+    detach_skills_for_entity_versions(
+        session, [ver.id for ver in versions]
+    )
+
+    if slim_event:
+        application_data = {
+            'id': application.id,
+            'name': application.name,
+            'owner_id': application.owner_id,
+            'version_details': None,
+        }
+    else:
+        application_data = ApplicationDetailModel.from_orm(application).model_dump()
+    application_data['project_id'] = project_id
+    if application_data.get('version_details') is None and agent_type:
+        application_data['version_details'] = {'agent_type': agent_type}
+
+    session.delete(application)
+    session.commit()
+
+    try:
+        module.context.event_manager.fire_event(
+            ApplicationEvents.application_deleted, application_data
+        )
+    except Exception:
+        log.exception("application_deleted handlers failed for application %s of project %s",
+                      application_data['id'], project_id)
+
+    return True
+
+
+APPLICATION_KINDS = ('agent', 'pipeline')
+
+
+def _application_ids_of_kind(session, kind: str) -> list:
+    # An unknown kind must never fall through to "every agent"
+    if kind not in APPLICATION_KINDS:
+        raise ValueError(f'unsupported application kind: {kind!r}')
+    is_pipeline = Application.versions.any(ApplicationVersion.agent_type == AgentTypes.pipeline.value)
+    query = session.query(Application.id).filter(
+        is_pipeline if kind == 'pipeline' else ~is_pipeline
+    )
+    return [row[0] for row in query.all()]
+
+
+def _blocked_application_ids(session) -> set:
+    blocked_statuses = (PublishStatus.published, PublishStatus.embedded)
+    return {
+        row[0] for row in session.query(ApplicationVersion.application_id).filter(
+            ApplicationVersion.status.in_(blocked_statuses)
+        ).distinct().all()
+    }
+
+
 def _toolkit_run_refused(module, sid, sio_event, data, message_id, denied):
     """A toolkit Test run or on-demand indexing that admission refused (#7229): the readable ``{code, error}`` the chat
     refusal card shows (over the socket), or returned to a caller with no socket."""
@@ -327,9 +408,9 @@ class RPC:
             )
 
         sid_project_id = sid_project_id or parsed.project_id
-        if sid and not auth.is_sio_user_in_project(sid, sid_project_id):
-            log.warning("Sid %s is not in project %s", sid, sid_project_id)
-            return  # FIXME: need some proper error?
+        ensure_sio_user_in_project(
+            self.context.sio, sid, sid_project_id, sio_event, data.get("stream_id"), data.get("message_id"),
+        )
 
         admission_version_row = None  # the row governed admission binds to, never ids from the payload
         if parsed.version_id:
@@ -1231,40 +1312,145 @@ class RPC:
     def application_delete(self, project_id: int, application_id: int) -> bool:
         with db.get_session(project_id) as session:
             if application := session.query(Application).get(application_id):
-                # Block deletion if any version is published or embedded
-                blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
-                for ver in application.versions:
-                    if ver.status in blocked_statuses:
-                        return {
-                            'error': 'Cannot delete application with published or '
-                                     'embedded versions. Unpublish first.',
-                            'blocked_version_id': ver.id,
-                            'blocked_status': ver.status,
-                        }
-
-                versions = list(application.versions)
-                default_version = application.get_default_version()
-                agent_type = default_version.agent_type if default_version else None
-
-                detach_skills_for_entity_versions(
-                    session, [ver.id for ver in versions]
-                )
-
-                application_data = ApplicationDetailModel.from_orm(application)
-                application_data = application_data.model_dump()
-                application_data['project_id'] = project_id
-                if application_data.get('version_details') is None and agent_type:
-                    application_data['version_details'] = {'agent_type': agent_type}
-
-                session.delete(application)
-                session.commit()
-
-                self.context.event_manager.fire_event(
-                    ApplicationEvents.application_deleted, application_data
-                )
-
-                return True
+                return _delete_application(self, session, project_id, application)
         return False
+
+    @web.rpc("applications_delete_by_kind")
+    def applications_delete_by_kind(self, project_id: int, kind: str, time_budget: float = None) -> dict:
+        """Bulk project data delete (#7242): every agent or every pipeline of the project.
+
+        kind is 'agent' or 'pipeline'; an application with any pipeline version is a pipeline
+        (the agents_type rule of the application list). Published or embedded ones are skipped.
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
+        """
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, skipped, remaining = 0, 0, 0, 0
+        with db.get_session(project_id) as session:
+            application_ids = _application_ids_of_kind(session, kind)
+            for index, application_id in enumerate(application_ids):
+                if deadline is not None and time.monotonic() >= deadline:
+                    remaining = len(application_ids) - index
+                    break
+                try:
+                    application = session.query(Application).get(application_id)
+                    if application is None:
+                        continue
+                    result = _delete_application(self, session, project_id, application, slim_event=True)
+                    if result is True:
+                        deleted += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    session.rollback()
+                    failed += 1
+                    log.exception(
+                        "applications_delete_by_kind: failed to delete application %s of project %s",
+                        application_id, project_id,
+                    )
+        return {'deleted': deleted, 'failed': failed, 'skipped': skipped, 'remaining': remaining}
+
+    @web.rpc("elitea_core_project_data_counts")
+    def project_data_counts(self, project_id: int) -> dict:
+        """Counts for the bulk project data delete (#7242); blocked = published or embedded, to be skipped"""
+        with db.get_session(project_id) as session:
+            blocked_apps = _blocked_application_ids(session)
+            counts = {}
+            for type_name, kind in (('agents', 'agent'), ('pipelines', 'pipeline')):
+                ids = _application_ids_of_kind(session, kind)
+                counts[type_name] = {
+                    'count': len(ids),
+                    'blocked': sum(1 for app_id in ids if app_id in blocked_apps),
+                }
+
+            skill_ids = [row[0] for row in session.query(Skill.id).all()]
+            blocked_skills = {
+                row[0] for row in session.query(SkillVersion.skill_id).filter(
+                    SkillVersion.status.in_((PublishStatus.published, PublishStatus.embedded))
+                ).distinct().all()
+            }
+            counts['skills'] = {
+                'count': len(skill_ids),
+                'blocked': sum(1 for skill_id in skill_ids if skill_id in blocked_skills),
+            }
+
+            toolkits, mcps = 0, 0
+            for tool_type, meta in session.query(EliteATool.type, EliteATool.meta).all():
+                kind = toolkit_kind(tool_type, meta)
+                if kind == 'mcp':
+                    mcps += 1
+                elif kind == 'toolkit':
+                    toolkits += 1
+            counts['toolkits'] = {'count': toolkits, 'blocked': 0}
+            counts['mcps'] = {'count': mcps, 'blocked': 0}
+        return counts
+
+    @web.rpc("skills_delete_all")
+    def skills_delete_all(self, project_id: int, time_budget: float = None) -> dict:
+        """Bulk project data delete (#7242): every skill of the project; published or embedded ones are skipped.
+
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
+        """
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, skipped, remaining = 0, 0, 0, 0
+        with db.get_session(project_id) as session:
+            skill_ids = [row[0] for row in session.query(Skill.id).all()]
+        for index, skill_id in enumerate(skill_ids):
+            if deadline is not None and time.monotonic() >= deadline:
+                remaining = len(skill_ids) - index
+                break
+            try:
+                delete_skill(project_id, skill_id)
+                deleted += 1
+            except SkillPublishedError:
+                skipped += 1
+            except SkillNotFoundError:
+                continue
+            except Exception:
+                failed += 1
+                log.exception("skills_delete_all: failed to delete skill %s of project %s", skill_id, project_id)
+        return {'deleted': deleted, 'failed': failed, 'skipped': skipped, 'remaining': remaining}
+
+    @web.rpc("toolkits_delete_by_kind")
+    def toolkits_delete_by_kind(self, project_id: int, kind: str, time_budget: float = None) -> dict:
+        """Bulk project data delete (#7242): every toolkit ('toolkit') or MCP server ('mcp') of the project.
+
+        Agent-as-tool entries are left to their agent. Copies from other projects are deleted too.
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
+        """
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, remaining = 0, 0, 0
+        with db.get_session(project_id) as session:
+            tool_ids = [
+                tool_id for tool_id, tool_type, meta in
+                session.query(EliteATool.id, EliteATool.type, EliteATool.meta).all()
+                if toolkit_kind(tool_type, meta) == kind
+            ]
+            for index, tool_id in enumerate(tool_ids):
+                if deadline is not None and time.monotonic() >= deadline:
+                    remaining = len(tool_ids) - index
+                    break
+                try:
+                    tool = session.query(EliteATool).get(tool_id)
+                    if tool is None:
+                        continue
+                    toolkit_data = delete_toolkit(session, project_id, tool)
+                    deleted += 1
+                except Exception:
+                    session.rollback()
+                    failed += 1
+                    log.exception(
+                        "toolkits_delete_by_kind: failed to delete toolkit %s of project %s", tool_id, project_id,
+                    )
+                    continue
+                # The toolkit is gone already: a failing handler is logged, it does not stop the rest
+                try:
+                    self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted, toolkit_data)
+                except Exception:
+                    log.exception(
+                        "toolkits_delete_by_kind: toolkit_deleted handlers failed for toolkit %s of project %s",
+                        tool_id, project_id,
+                    )
+        return {'deleted': deleted, 'failed': failed, 'skipped': 0, 'remaining': remaining}
 
     @web.rpc("applications_find_existing_fork", "find_existing_fork")
     def applications_find_existing_fork(
@@ -1960,9 +2146,12 @@ class RPC:
             raise ValueError("project_id is required")
         data['chat_project_id'] = chat_project_id
 
-        if not auth.is_sio_user_in_project(sid, project_id):
-            log.warning("Sid %s is not in project %s", sid, project_id)
-            return  # FIXME: need some proper error?
+        if not sid:
+            # Unchanged: a caller without a socket never got past the membership check here
+            return
+        ensure_sio_user_in_project(
+            self.context.sio, sid, project_id, sio_event, data.get("stream_id"), data.get("message_id"),
+        )
 
         if sid:
             if sid not in auth.sio_users.keys():

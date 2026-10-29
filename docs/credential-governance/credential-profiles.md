@@ -22,7 +22,7 @@ either a *shared service reference* (approved, granted explicitly) or used under
 |---|---|---|---|
 | Shared service reference | Stored once for the project. Registered as `project_shared`, `service` or `technical`. Value is imported from an existing credential configuration by the server. | A person (`user_delegation`) or a mandate (`mandate`) | Implemented |
 | Personal reference | One project member, who sets the value. Administrators register, probe, approve, suspend and retire the reference but cannot set or read the value. | The owner only (a grant for another person is refused) | Implemented |
-| `entra_obo` | No stored material. The release would be an on-behalf-of token exchange from the person's delegated session token. | A person | Planned (WP-2A, #6941 b). Not in the schema. |
+| `entra_delegated` (planned as `entra_obo`) | No stored material: a descriptor only (app, tenant, resource, scopes). The release is an on-behalf-of token exchange from the person's Microsoft sign-in; the token lives in memory for the run. | A person | From PR #602/#7/#21/#786, pending. Not on `main`. See [operator runbook, section 8](operator-runbook.md#8-microsoft-sign-in-credentials-delegated). |
 | Autonomous mandate | Not a credential. An approved, time-boxed permission for one agent version to run on schedules and webhooks without a signed-in person. It uses shared or the owner's personal references through grants made to `mandate:<uuid>`. | The mandate | Implemented (admin task only, no REST) |
 
 The schema reserves the class value `scheduled`. It cannot be onboarded in slice 1.

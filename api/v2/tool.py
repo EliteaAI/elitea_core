@@ -18,6 +18,7 @@ from ...models.enums.all import AgentTypes
 
 from ...utils.pipeline_utils import from_str_to_yaml
 from ...utils.application_tools import (
+    delete_toolkit,
     toolkit_change_relation,
     ToolkitChangeRelationError,
     expand_toolkit_settings,
@@ -106,22 +107,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def delete(self, project_id, tool_id):
         with db.with_project_schema_session(project_id) as session:
             if tool := session.query(EliteATool).get(tool_id):
-                if (tool.meta or {}).get('shared'):
-                    from ...utils.web_search import invalidate_web_search_cache
-                    invalidate_web_search_cache()
-                session.delete(tool)
-                session.query(ApplicationVersion).filter(
-                    ApplicationVersion.meta['attachment_toolkit_id'].astext == str(tool_id)
-                ).update(
-                    {
-                        ApplicationVersion.meta: ApplicationVersion.meta.op('-')('attachment_toolkit_id')
-                    }
-                )
-                session.commit()
-                toolkit_data = ToolDetails.from_orm(tool)
-                toolkit_data.fix_name(project_id)
-                toolkit_data = toolkit_data.dict()
-                toolkit_data['owner_id'] = project_id
+                toolkit_data = delete_toolkit(session, project_id, tool)
                 self.module.context.event_manager.fire_event(
                     ApplicationEvents.toolkit_deleted, toolkit_data
                 )

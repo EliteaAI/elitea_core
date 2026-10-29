@@ -36,7 +36,7 @@ from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_
 from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
-from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.sio_utils import SioEvents, SioValidationError, emit_refusal
 from ..utils.conversation_access import check_post_access
 from ..utils.application_utils import build_skill_mappings_list
 from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
@@ -516,6 +516,7 @@ def generate_summary_payload(
         message_groups: list[ConversationMessageGroup],
         llm_settings: dict | None = None,
         summary_instructions: str | None = None,
+        prompt: str | None = None,
 ) -> dict:
     """
     Generate payload for LLM summary prediction using message groups ORM objects
@@ -525,10 +526,26 @@ def generate_summary_payload(
         message_groups: List of ConversationMessageGroup ORM objects
         llm_settings: LLM configuration settings
         summary_instructions: Custom instructions for summary generation
+        prompt: Ready summary prompt with the conversation embedded; sent as the only message
     Returns:
         Dict containing the structured payload for applications_predict_sio_llm
     """
     try:
+        if prompt:
+            if not llm_settings:
+                raise PayloadGenerationError("LLM settings must be provided for summary generation")
+            return {
+                "project_id": project_id,
+                "llm_settings": llm_settings,
+                "user_input": prompt,
+                "chat_history": [],
+                "thread_id": None,
+                "instructions": None,
+                "interaction_uuid": None,
+                "tools": [],
+                "variables": None,
+            }
+
         # Convert message groups to chat history format using existing utility
         chat_history = generate_chat_history(message_groups, include_context=False)
 
@@ -1281,16 +1298,9 @@ class RPC:
                     "Rejecting resend of question_id %s in conversation %s",
                     parsed.question_id, parsed.conversation_uuid,
                 )
-                self.context.sio.emit(
-                    event=SioEvents.socket_validation_error.value,
-                    data={
-                        'event': SioEvents.chat_predict.value,
-                        'content': 'This message has already been submitted',
-                        'type': 'error',
-                        'stream_id': parsed.conversation_uuid,
-                        'message_id': parsed.question_id,
-                    },
-                    room=room,
+                emit_refusal(
+                    self.context.sio, sid, room, SioEvents.chat_predict.value,
+                    'This message has already been submitted', parsed.conversation_uuid, parsed.question_id,
                 )
                 return {"error": "This message has already been submitted"}
 
@@ -1378,30 +1388,17 @@ class RPC:
 
                 if is_conversation_locked:
                     log.error("Conversation is locked while summarization is in progress")
-                    self.context.sio.emit(
-                        event=SioEvents.socket_validation_error.value,
-                        data={
-                            'event': SioEvents.chat_predict.value,
-                            'content': 'Conversation is locked while summarization is in progress',
-                            'type': 'error',
-                            'stream_id': parsed.conversation_uuid,
-                            'message_id': parsed.question_id
-                        },
-                        room=room
+                    emit_refusal(
+                        self.context.sio, sid, room, SioEvents.chat_predict.value,
+                        'Conversation is locked while summarization is in progress',
+                        parsed.conversation_uuid, parsed.question_id,
                     )
                     return {"error": "Conversation is locked while summarization is in progress"}
             except redis.exceptions.ConnectionError:
                 log.error("Redis connection error")
-                self.context.sio.emit(
-                    event=SioEvents.socket_validation_error.value,
-                    data={
-                        'event': SioEvents.chat_predict.value,
-                        'content': "Redis connection error",
-                        'type': 'error',
-                        'stream_id': parsed.conversation_uuid,
-                        'message_id': parsed.question_id
-                    },
-                    room=room
+                emit_refusal(
+                    self.context.sio, sid, room, SioEvents.chat_predict.value,
+                    "Redis connection error", parsed.conversation_uuid, parsed.question_id,
                 )
                 return {"error": "Redis connection error"}
 
@@ -1546,16 +1543,9 @@ class RPC:
                 except Exception as e:
                     log.error(e)
                     room = get_chat_room(parsed.conversation_uuid)
-                    self.context.sio.emit(
-                        event=SioEvents.socket_validation_error.value,
-                        data={
-                            'event': SioEvents.chat_predict.value,
-                            'content': str(e),
-                            'type': 'error',
-                            'stream_id': parsed.conversation_uuid,
-                            'message_id': parsed.question_id
-                        },
-                        room=room
+                    emit_refusal(
+                        self.context.sio, sid, room, SioEvents.chat_predict.value, str(e),
+                        parsed.conversation_uuid, parsed.question_id,
                     )
                     return {"error": str(e)}
 
@@ -1629,16 +1619,9 @@ class RPC:
                         log.error(e)
                         response_msg.is_streaming = False
                         session.commit()
-                        self.context.sio.emit(
-                            event=SioEvents.socket_validation_error.value,
-                            data={
-                                'event': SioEvents.chat_predict.value,
-                                'content': e.content,
-                                'type': 'error',
-                                'stream_id': parsed.conversation_uuid,
-                                'message_id': parsed.question_id
-                            },
-                            room=room
+                        emit_refusal(
+                            self.context.sio, sid, room, SioEvents.chat_predict.value, e.content,
+                            parsed.conversation_uuid, parsed.question_id,
                         )
                         return {"error": str(e)}
 
@@ -2995,6 +2978,8 @@ class RPC:
             summary_instructions: str | None = None,
             conversation_uuid: str | None = None,
             user_id: int | None = None,
+            prompt: str | None = None,
+            is_system_user: bool = False,
     ) -> dict:
         """
         Predict summary content based on message groups using LLM
@@ -3006,6 +2991,8 @@ class RPC:
             summary_instructions: Custom instructions for summary generation
             conversation_uuid: The conversation UUID for socket room
             user_id: The user ID
+            prompt: Ready summary prompt; when set, message_groups is not used
+            is_system_user: Run with the project system token (callers without a user session)
         Returns:
             Dict containing the prediction result
         """
@@ -3016,9 +3003,10 @@ class RPC:
                 message_groups=message_groups,
                 llm_settings=llm_settings,
                 summary_instructions=summary_instructions,
+                prompt=prompt,
             )
 
-            if not message_groups:
+            if not message_groups and not prompt:
                 raise Exception(f"No message groups found for summary generation")
 
             # Make the LLM prediction call
@@ -3039,10 +3027,12 @@ class RPC:
                         chat_project_id=project_id,
                         await_task_timeout=SUMMARIZATION_LOCKING_TTL,
                         user_id=user_id,
-                        skip_expansion=True
+                        is_system_user=is_system_user,
+                        skip_expansion=True,
                     )
                 except Exception:
                     log.exception("Error during RPC call to LLM model in predict_summary_content")
+                    raise
                 finally:
                     client.set(conversation_locked_key, 'false')
 

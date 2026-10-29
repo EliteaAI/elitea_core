@@ -43,8 +43,11 @@ def test_socket_membership_is_checked_in_the_run_project_unless_the_caller_names
         and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'sid_project_id'
     )
     assert ast.unparse(fallback.value) == 'sid_project_id or parsed.project_id'
+    # The membership check itself lives in ensure_sio_user_in_project (utils/sio_guards.py); what has to hold
+    # here is which project it is asked about
     membership_checks = [
-        ast.unparse(node) for node in ast.walk(predict_sio)
-        if isinstance(node, ast.Call) and ast.unparse(node.func) == 'auth.is_sio_user_in_project'
+        node for node in ast.walk(predict_sio)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == 'ensure_sio_user_in_project'
     ]
-    assert membership_checks == ['auth.is_sio_user_in_project(sid, sid_project_id)']
+    assert len(membership_checks) == 1
+    assert [ast.unparse(arg) for arg in membership_checks[0].args[1:3]] == ['sid', 'sid_project_id']

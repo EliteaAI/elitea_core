@@ -1,8 +1,11 @@
 # Identity boundaries
 
 Part of [credential governance](README.md). This file says where identity is trusted, who decides, what the
-worker must prove, and how credential material travels. Credentials and approvals are in
-[credential-profiles.md](credential-profiles.md).
+worker must prove, and how credential material travels. It also defines the three ways into the platform, the
+subject model, and the run token, the identity a governed run carries. Credentials and approvals are in
+[credential-profiles.md](credential-profiles.md). Operator steps are in [operator-runbook.md](operator-runbook.md).
+
+Items marked *(from PR #602/#7/#21/#786, pending)* are on open pull requests and not on `main` yet.
 
 ```
 browser / API client
@@ -29,7 +32,9 @@ browser / API client
 |---|---|---|
 | Interactive chat (`chat_sio`, `chat_sio_llm`) | `auth.sio_users[sid]`, set when the socket connected | `user_context`, `user_id` or any id inside the payload |
 | Predict API (`predict_api`) | `flask.g.auth` of the HTTP request | The same fields in the body |
-| Schedule and webhook (`schedule`, `webhook`) | A single-use ticket minted in-process by the scheduler tick or by the webhook API after signature verification, bound to the agent version (60 s, 1000 entries, memory of one process) | A run that arrives at the predict RPC without a ticket is an ordinary system run and is refused (`MANDATE_REQUIRED`) |
+| Schedule and webhook (`schedule`, `webhook`) | A single-use ticket minted in-process by the scheduler tick, by the owner-schedule starter (a person's schedule, entry point `schedule`) or by the webhook API after signature verification, bound to the agent version (60 s, 1000 entries, memory of one process) | A run that arrives at the predict RPC without a ticket is an ordinary system run and is refused (`MANDATE_REQUIRED`) |
+| Toolkit test and on-demand indexing (`toolkit_test`, `index_on_demand`) | The same session or HTTP identity as chat; the entry point is set by the trusted test entry from the tool it was asked to run | The payload |
+| Calls the run makes back to the platform | The run token (below), checked on every call | Any identity the worker or a toolkit supplies |
 | Worker | Nothing by itself. It presents `context_ref`, and Main checks it against rows Main owns. | Any claim the worker makes about the user |
 
 The entry point builds an `AdmissionRequest` from the holder (`type`, `id`, session reference) and from the
@@ -62,7 +67,7 @@ its own transaction, so a failing audit write cannot let a run through.
 | 1 | The security audit trail can take a decision | `AUDIT_UNAVAILABLE` |
 | 2 | A run with no person behind it (system) needs a mandate | `MANDATE_REQUIRED` |
 | 3 | The caller is a verified person (or an admitted token) | `IDENTITY_*` |
-| 4 | The agent version has exactly one active binding of an admitted mode, and the definition digest still matches. A **development run** (entry point `editor_chat`, a signed-in person, *Allow development runs* on) reads the definition and its digest instead, and requires the author's right to edit the application; the decision is taken from the request kind before any binding is read | `DENIED_BINDING`, `BINDING_DIGEST_MISMATCH`, `DENIED_RBAC` |
+| 4 | The agent version has exactly one active binding of an admitted mode, and the definition digest still matches. A **development run** (entry point `editor_chat`, `toolkit_test`, `index_on_demand`, or a plain LLM chat that carries a credential; a signed-in person; *Allow development runs* on) reads the definition and its digest instead, and requires the author's right to edit the application; the decision is taken from the request kind before any binding is read | `DENIED_BINDING`, `BINDING_DIGEST_MISMATCH`, `DENIED_RBAC` |
 | 5 | The subject is a verified delegation. A mandate run replaces steps 2 to 5 (below). | `MANDATE_REQUIRED`, `IDENTITY_EVIDENCE_MISSING` |
 | 5b | Every credential the run uses passes the [credential decision](credential-profiles.md#the-credential-decision). A development run replaces the grant to the binding with the author's own right: a personal credential of the author, or an active grant of the author's subject on the credential, on any binding and toolkit | `CREDENTIAL_*`, `DENIED_GRANT`, `DENIED_RBAC`, `DENIED_DEVELOPMENT_CREDENTIAL` |
 | 6 | The `ExecutionSecurityContext` row and the allow events are written in one transaction | `DEPENDENCY_UNAVAILABLE` |
@@ -79,8 +84,11 @@ binding, mandate, credential), the credential decisions (`allowed_bindings`), po
 `expires_at` (the context TTL, default 3600 s, or the mandate bound) and `state`
 (`admitted`, `running`, `completed`, `revoked`). It never holds a token, cookie or secret.
 
-Children of a run (parallel children, resumed parents) carry the parent's `context_ref` and are sealed against
-the parent's decisions: a credential the parent was not admitted for is refused. A parent's admission outlives a
+Children of a governed run (parallel children, resumed parents) carry the parent's `context_ref` and are sealed
+against the parent's decisions: a credential the parent was not admitted for is refused. Under a **development**
+parent, each sub-agent the draft calls gets its own decision and its own context row (`parent_context_ref` and the
+ancestors in `call_lineage`): bound with one active binding and an unchanged digest means a governed child on its
+own binding and grants; anything else is a development child of the same author. A parent's admission outlives a
 switch to `off`.
 
 ## The worker proves its admission
@@ -202,3 +210,134 @@ of `context_ref`. Only a **saved** credential is tested; values typed into a for
 `{success: true, ...}`, a provider failure `{success: false, message}`, or a refusal
 `{success: false, code, message}`. For a personal reference the actor may be an administrator while the
 `user_id` is the owner whose value is tested.
+
+## Three ways in
+
+A run can start in three ways. The platform checks each by its own evidence and never converts one into
+another. Behind all of them a governed run carries the same kind of internal identity, the run token (below).
+The audit trail always names the way in.
+
+| Way in | Evidence | Who the run acts for | What it may do under Enforce |
+|---|---|---|---|
+| **Session** | A signed-in person's OIDC session (`verified_user`) | That person: subject `idp:<tid>:<oid>` | Everything governance allows: bound agents with grants, development runs of their own drafts, toolkit tests, Microsoft sign-in credentials. |
+| **API token** (a personal API token, PAT) | The token is active (`legacy_pat`, an asserted user). Admitted only with *Admit legacy API tokens*. | No one. An asserted user is never converted into a verified one. | Cannot act for a person: such a run needs a mandate (`MANDATE_REQUIRED`). Cannot author (no development runs). Toolkit runs started with it are refused (`TOOLKIT_RUN_TOKEN_NOT_ADMITTED`). Cannot use a Microsoft sign-in credential. |
+| **Mandate** (autonomous) | A ticket from a trusted in-process caller (scheduler, owner-schedule starter, webhook API) and a mandate row | The mandate: subject `mandate:<uuid>` | Only the version the mandate names, the operations it allows, until its deadline, with credentials granted to the mandate. Cannot use a Microsoft sign-in credential. |
+
+Personal API tokens stay in the platform. Agents and pipelines are also exposed as MCP servers and over the API,
+and a caller there has no browser session. What changes is the token's role: inside a run, where a verified
+context already exists, the run token replaces it. The token still identifies an **external caller**.
+
+*Planned, not promised:* scoped, expiring API tokens (projects, operations, expiry, revocation visible to admission)
+as their own evidence kind, so that they can be admitted by default; tracked as #7230. Mandates on the owner's
+refresh token and a sharing model for schedules are tracked as #7131.
+
+## The subject model
+
+Every governed run has a subject: the party it acts for. It is stored on the context row as references only.
+
+| Part | Meaning |
+|---|---|
+| `issuer` | Who vouched for the person (the token's `iss`). |
+| `tid` | The tenant. Entra: the `tid` claim. Other issuers: a fixed GUID the operator assigns to the realm. |
+| `oid` | The person inside that tenant. Entra: the `oid` claim. Other issuers: a claim you name, usually `sub`. |
+| `ref` | `idp:<tid>:<oid>` for a person, `mandate:<uuid>` for a mandate. Grants and mandates are tied to it. |
+| `kind` | `delegation` (a person) or `mandate`. |
+
+The platform user is linked to **issuer + tid + oid**, never to an e-mail address. A person that signs in again
+through the same issuer is the same subject. A person that signs in through a different identity provider is a
+**different subject**: their grants and mandates do not follow them, and an operator makes the grants again.
+
+**How a Keycloak login maps into it.** Keycloak has no tenant claim and its subject claim is `sub`. In `auth_oidc`
+set `subject_claims: {tid: null, oid: sub}` and `subject_tenant: <GUID>`; in the `auth` plugin's
+`identity_verifier.session_user` set the same `subject_claims` and the same GUID as `tenant_id`. The subject is then
+`idp:<GUID>:<keycloak user id>` and the issuer is the realm URL. Keycloak omits `nbf` (set `require_nbf: false`),
+and if its access token has no audience for the platform the verifier can read the ID token instead
+(`delegation_token: id_token`). The operator steps are in the [runbook](operator-runbook.md#2-before-you-switch-it-on-preflight).
+
+## The run token
+
+When a run is admitted under Enforce, the platform (Main) mints one short-lived token for it. It is the run's
+**only** platform identity: no personal token, no system token and no session is put on the run's payload, for a
+signed-in person's run and for a run under a mandate. Main is the issuer. The platform's own endpoints, mainly the
+built-in Elitea tools, are the resource. The audit trail names both: "user X through agent Y".
+
+The token is a bearer. It never leaves the run's worker, goes only to the platform's own origins, and lives no
+longer than its run. It is signed with HMAC-SHA256 under a key derived from the platform master key. It is **not**
+an Entra token and nothing outside the platform accepts it.
+
+| Claim | Meaning |
+|---|---|
+| `iss` | The issuer, `elitea:main`. |
+| `aud` | The audience, `elitea:internal`. |
+| `sub` | The subject reference (`idp:<tid>:<oid>` or `mandate:<uuid>`). |
+| `uid` | The platform user the run acts as. |
+| `act` | The actor: the agent binding id, or `development:<definition digest>` for a development run. |
+| `scope` | The platform operations (`read`, `build`, `credentials`, `run`): the binding's operations **intersected with** the person's permissions, worked out once at admission. Empty for a token that only serves the run's own client calls. |
+| `ctx` | The security context (the admission) the token belongs to. |
+| `prj`, `tgt` | The agent's project, and the projects its built-in Elitea tools address. |
+| `run`, `tsk` | The run id and the task. |
+| `iat`, `exp`, `jti` | Issue time, expiry and a unique id. |
+| `v` | Token version, `1`. |
+
+Rules, in the order they are checked on every call:
+
+1. The signature, version, issuer and audience, the claim shapes, the issue time and the expiry. A forged or
+   malformed token is `INTERNAL_TOKEN_INVALID`; an expired one `INTERNAL_TOKEN_EXPIRED`.
+2. The route. Only the built-in Elitea MCP routes and the run's own client routes accept the token (operator
+   runbook, section 7). Any other route answers `INTERNAL_TOKEN_INVALID`, the same text for every route.
+3. The project. The call must be in the token's projects, else `INTERNAL_TARGET_DENIED`.
+4. The context. It must be admitted or running, in time, and every epoch it was admitted under must still hold
+   (`CONTEXT_NOT_LIVE` otherwise). A positive answer is reused for about five seconds.
+5. The operation, for the built-in Elitea tools: an operation outside `scope` is `INTERNAL_SCOPE_DENIED`; a write
+   the platform has no operation for is `INTERNAL_OPERATION_UNKNOWN`.
+6. The person's own permission check on the endpoint, as for a session. The token adds a limit; it never adds a
+   right.
+
+Every write through the built-in Elitea tools is recorded (`platform_operation`) before it is made.
+
+**Lifetime and revocation.** There is no revocation list. The token is only as good as its context. A person's run
+keeps its context while it is used: the idle window is `context_ttl_s` (default 3600 s), use slides it, and an
+absolute cap of 24 hours applies. A mandate run keeps its fixed deadline and never slides. When the run ends, the
+context is `completed` and the token stops working. Revoking a binding, grant, mandate or credential, or a change
+of the person's access, changes an epoch, and the token stops working at the next check. A context that is ended,
+revoked or expired is never revived by use.
+
+**What a token cannot do.** It cannot reach tokens, governance, administration, secrets in general,
+configurations, listings, public agents, or another project. It cannot create or change anything outside its
+`scope`.
+
+## Microsoft delegation beside the run token *(from PR #602/#7/#21/#786, pending)*
+
+The run token is Elitea's own identity for Elitea's own resources. For a Microsoft resource (SharePoint through
+Graph) the platform uses the person's **Microsoft** sign-in instead. The two never mix: the run token is never
+sent to Microsoft, and a Microsoft token is never given to Elitea routes.
+
+| | Run token | Microsoft delegation |
+|---|---|---|
+| Issuer | Elitea (Main) | Microsoft Entra, in exchange for the person's sign-in (OAuth 2.0 on-behalf-of) |
+| Resource | The platform's own endpoints | Microsoft Graph (SharePoint) |
+| Minted | At admission, once per run | At credential release, per use; cached in memory until it expires |
+| Stored | Nowhere (signed, checked against the context) | The person's sign-in for the session; the Graph token never |
+| Subject | The run's subject | The same person: tenant and object id must equal the run's subject, else `DENIED_SUBJECT_MISMATCH` |
+| Mandate runs | Yes (their own deadline) | No (`DENIED_MANDATE_DELEGATION_UNSUPPORTED`) |
+| API-token runs | No identity of a person | No (`DENIED_DELEGATION_UNSUPPORTED_CALLER`) |
+| Keycloak login | Yes | Not yet (`DENIED_ASSERTION_SOURCE_UNSUPPORTED`) |
+
+The binding to the person is checked before anything is exchanged, from the explicit fields of the run's context
+(never by parsing `ref`): the run is a signed-in person's run, its subject carries issuer, tenant and object id,
+the credential's tenant equals the subject's, a personal credential's custodian is that subject, and the stored
+sign-in and its token name the same tenant and object id. Any difference is `DENIED_SUBJECT_MISMATCH`.
+
+## Acceptance checks for this page
+
+| Check | Observable |
+|---|---|
+| A session run under Enforce carries the run token and no other platform token | The dispatched payload has no `api_token`, `api_key`, `project_auth_token` or `auth_session` field |
+| A forged or expired run token | `INTERNAL_TOKEN_INVALID` or `INTERNAL_TOKEN_EXPIRED` on every route |
+| A run token used on a route outside its list, or in another project | `INTERNAL_TOKEN_INVALID` or `INTERNAL_TARGET_DENIED` |
+| A binding without platform operations | The built-in Elitea tools can read only; a write is `INTERNAL_SCOPE_DENIED` |
+| A run ended or revoked | The token answers `CONTEXT_NOT_LIVE` within about five seconds |
+| A personal API token on a governed agent | `IDENTITY_KIND_NOT_ADMITTED`, or `MANDATE_REQUIRED` when tokens are admitted |
+| A schedule whose owner is not the mandate's owner | `MANDATE_REQUIRED` and a failed run, never a run left in *running* |
+| A Keycloak login | The same governance checks, with the subject `idp:<realm GUID>:<sub>` |
+| A Microsoft token | Not in any table, log, payload or audit event; a delegated release makes no secret-store or database write *(pending)* |

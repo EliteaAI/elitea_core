@@ -552,6 +552,45 @@ def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
     return result
 
 
+def toolkit_kind(tool_type: str, meta: Optional[dict]) -> Optional[str]:
+    """'mcp' / 'toolkit', or None for an agent-as-tool entry (it belongs to its agent).
+
+    Same split as toolkits_listing (#7242).
+    """
+    if tool_type == 'application':
+        return None
+    if tool_type == 'mcp' or (meta or {}).get('mcp'):
+        return 'mcp'
+    return 'toolkit'
+
+
+def delete_toolkit(session, project_id: int, tool: EliteATool) -> dict:
+    """Delete a toolkit and commit; returns the ``toolkit_deleted`` payload for the caller to fire.
+
+    Shared by the single toolkit delete and the bulk project data delete (#7242).
+    """
+    from ..models.pd.tool import ToolDetails
+
+    if (tool.meta or {}).get('shared'):
+        from .web_search import invalidate_web_search_cache
+        invalidate_web_search_cache()
+    tool_id = tool.id
+    session.delete(tool)
+    session.query(ApplicationVersion).filter(
+        ApplicationVersion.meta['attachment_toolkit_id'].astext == str(tool_id)
+    ).update(
+        {
+            ApplicationVersion.meta: ApplicationVersion.meta.op('-')('attachment_toolkit_id')
+        }
+    )
+    session.commit()
+    toolkit_data = ToolDetails.from_orm(tool)
+    toolkit_data.fix_name(project_id)
+    toolkit_data = toolkit_data.dict()
+    toolkit_data['owner_id'] = project_id
+    return toolkit_data
+
+
 def toolkits_listing(
     project_id: int,
     query: str,
