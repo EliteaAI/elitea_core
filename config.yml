@@ -2,6 +2,11 @@ nltk_data: /tmp/nltk_data
 
 ai_token: ""
 
+# In-cluster base URL of this platform. The internal Elitea MCP toolkits are addressed at it
+# (unset: http://pylon_main:8080, never the public app_host, #7278); the runtime's platform client
+# uses it too (unset: app_host).
+# base_url: http://pylon_main:8080
+
 ai_project_id: 1
 ai_project_allowed_domains: "centry.user"
 

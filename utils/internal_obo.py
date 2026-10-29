@@ -42,6 +42,7 @@ from sqlalchemy import select
 from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
+from .internal_base_url import internal_base_url
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 
 TOKEN_PREFIX = "eio1."
@@ -281,9 +282,10 @@ def _origin(url) -> Optional[str]:
 
 
 def internal_origins() -> list:
-    """The origins the worker may send the run token to: the platform's own (``APP_HOST``) and the in-cluster one."""
+    """The origins the worker may send the run token to: the platform's own (``APP_HOST``), the one the internal
+    toolkits are addressed at (``internal_base_url``, #7278) and the in-cluster one."""
     found = []
-    for url in (getattr(c, "APP_HOST", None), INTERNAL_FALLBACK_URL):
+    for url in (getattr(c, "APP_HOST", None), internal_base_url(), INTERNAL_FALLBACK_URL):
         origin = _origin(url)
         if origin and origin not in found:
             found.append(origin)

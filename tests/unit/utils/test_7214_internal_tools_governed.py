@@ -80,10 +80,12 @@ def loaded():
     for name, obj in stubs.items():
         sys.modules[name] = obj
     load_module_with_stubs(PLUGIN_ROOT / "utils" / "governance.py", f"{PKG}.utils.governance")
+    base = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_base_url.py", f"{PKG}.utils.internal_base_url")
+    base.host_resolves = lambda host: True   # no real DNS in a unit test
     internal_tools = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_tools.py", f"{PKG}.utils.internal_tools")
     status_api = load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / "internal_mcp_pat_status.py",
                                         f"{PKG}.api.v2.internal_mcp_pat_status")
-    yield types.SimpleNamespace(it=internal_tools, api=status_api, auth=auth, module=module_state)
+    yield types.SimpleNamespace(it=internal_tools, api=status_api, auth=auth, module=module_state, base=base)
     sys.modules.clear()
     sys.modules.update(saved)
 
@@ -144,3 +146,36 @@ def test_the_pat_status_endpoint_says_governed_under_enforce_only(loaded):
     assert handler.get(1, "mcp_elitea") == ({"internal": True, "state": "VALID"}, 200)
     governed(loaded)
     assert handler.get(1, "mcp_elitea") == ({"internal": True, "state": "GOVERNED"}, 200)
+
+
+# --- #7278: internal toolkits are addressed in-cluster, never at the shared public app_host ---------------------
+
+PUBLIC = "https://dev.example.com"
+
+
+@pytest.mark.parametrize("config, resolves, base, reason", [
+    ({"base_url": "http://main.internal:8080/"}, False, "http://main.internal:8080", "configured base_url"),
+    ({}, True, "http://pylon_main:8080", "default, pylon_main resolves"),
+    ({}, False, PUBLIC, "app_host fallback, pylon_main does not resolve"),
+])
+def test_internal_toolkits_use_base_url_else_pylon_main_else_app_host(loaded, config, resolves, base, reason):
+    logged = []
+    loaded.base.c.APP_HOST = PUBLIC
+    loaded.base.host_resolves = lambda host: resolves
+    loaded.base.log = types.SimpleNamespace(info=logged.append)
+    loaded.base.internal_base_url(config)   # module init
+    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp", "skill_builder"],
+                                          scope_project_id=7)
+    urls = {tool["name"]: tool["settings"]["url"] for tool in tools}
+    assert urls["Elitea Applications"] == f"{base}/app/5/mcp/elitea_core/applications?scope_project_id=7"
+    assert urls["Elitea Skills"] == f"{base}/app/1/mcp/elitea_core/skills?scope_project_id=7"
+    assert urls["Secrets"] == f"{base}/app/5/mcp/secrets"
+    assert logged == [f"Internal MCP base URL: {base} ({reason})"]
+
+
+def test_the_host_lookup_runs_once_per_process(loaded):
+    lookups = []
+    loaded.base.host_resolves = lambda host: lookups.append(host) or True
+    for _ in range(3):
+        loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp"])
+    assert lookups == ["pylon_main"] and loaded.it._get_internal_base_url() == "http://pylon_main:8080"

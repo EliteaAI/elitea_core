@@ -12,6 +12,7 @@ from typing import Optional
 from pylon.core.tools import log
 from tools import VaultClient, rpc_tools, this, config as c, auth
 
+from .internal_base_url import internal_base_url
 from .mcp_config import is_mcp_exposure_enabled
 from .support_utils import get_support_config
 
@@ -599,11 +600,8 @@ def _get_user_token(user_id: int) -> str | None:
 
 
 def _get_internal_base_url() -> str:
-    """Get internal base URL for container-to-container communication."""
-    base_url = c.APP_HOST
-    if not base_url or base_url in ('http://localhost', 'http://127.0.0.1'):
-        base_url = 'http://pylon_main:8080'
-    return base_url
+    """Base URL of the internal MCP toolkits, chosen once per process (``internal_base_url``, #7278)."""
+    return internal_base_url()
 
 
 # Internal Elitea MCP endpoints always have the shape .../app/<project_id>/mcp/<suffix>, where
