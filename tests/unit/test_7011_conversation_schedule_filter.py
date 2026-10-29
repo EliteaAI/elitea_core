@@ -157,6 +157,7 @@ def rpc_module(isolated_sys_modules):
     _fuzzy(f'{PACKAGE}.models.enums.all')
     _fuzzy(f'{PACKAGE}.models.message_items.text')
     sys.modules[f'{PACKAGE}.models.conversation'] = types.SimpleNamespace(Conversation=Conversation)
+    sys.modules[f'{PACKAGE}.models.folder'] = types.SimpleNamespace(ConversationFolder=mock.MagicMock())
     sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
         EntitySchedule=mock.MagicMock(), EntityScheduleRun=EntityScheduleRun)
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
