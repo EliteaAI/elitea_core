@@ -83,3 +83,29 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         from ..utils.credential_probe import governed_check_connection_many  # pylint: disable=C0415
         #
         return governed_check_connection_many(self, project_id, items, user_id, actor_user_id, onboarding)
+
+    @web.method()
+    def entra_delegated_probe(self, project_id, reference_id, delegation, person):  # pylint: disable=R0913
+        """ Same process (the credential onboarding of ``secrets``, #6756 step 4): can ``person`` (``{issuer, tid,
+        oid}``, which ``secrets`` resolved from the identity service, never from a caller) obtain a token through the
+        Entra-delegated reference ``reference_id`` of ``project_id`` now? ``delegation``: its descriptor with
+        ``ownership_class`` and ``custodian_subject_ref``. ``None`` when yes, else the refusal code. One exchange (or a
+        cached token); the outcome is kept a minute, the token never leaves this process. Never raises. """
+        from ..utils import entra_obo  # pylint: disable=C0415
+        #
+        try:
+            return entra_obo.probe(self, reference_id, dict(person), dict(delegation), project_id)
+        except Exception:  # pylint: disable=W0703
+            return "DEPENDENCY_UNAVAILABLE"
+
+    @web.method()
+    def entra_delegated_app_available(self, project_id, delegation):
+        """ Same process (the credential onboarding of ``secrets``, #6756 step 4): can the app this delegated
+        descriptor names be resolved now, for project ``project_id``? A boolean; the app's secret is never returned.
+        Never raises. """
+        from ..utils import entra_obo  # pylint: disable=C0415
+        #
+        try:
+            return entra_obo.app_available(self, dict(delegation), project_id)
+        except Exception:  # pylint: disable=W0703
+            return False

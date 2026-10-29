@@ -23,6 +23,9 @@ Checks, in order, the first failure wins (a run; a probe has its ticket instead 
      (#7213) has no binding: its decisions are rechecked against the author's
      own grants, and its release events carry ``development:<digest>``
   8. the store read, by the secrets plugin, which re-reads the reference    CREDENTIAL_REFERENCE_INACTIVE / STORE_*
+     (an Entra-delegated reference holds no value: the secrets plugin      the codes of ``entra_obo``
+     answers its descriptor, and the slot's token is minted now on behalf
+     of the run's person, bound to the context's subject; #6756 step 4)
   9. the release event is committed before the reply leaves                 AUDIT_UNAVAILABLE
 
 Every release, allowed or denied, from check 3 on is audited (``credential_acquired``). A request that is not well formed,
@@ -36,6 +39,7 @@ import binascii
 import importlib
 import json
 import re
+import time
 import uuid
 from datetime import timedelta
 from typing import Optional
@@ -46,8 +50,9 @@ from tools import auth, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
+from . import entra_obo
 from .credential_decision import MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure
-from .credential_slots import MAX_SLOT_FIELDS
+from .credential_slots import DELEGATED_FIELD, MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
 from .governance import governance_lifecycle_active
 
@@ -70,6 +75,7 @@ BATCH_REQUEST_KEYS = ("project_id", "context_ref", "probe_ref", "caller", "recip
 BATCH_SLOT_KEYS = frozenset({"toolkit_instance_id", "field", "slot"})
 AAD_VERSION = "v1"
 RELEASED = "CREDENTIAL_RELEASED"
+RELEASED_DELEGATED = "CREDENTIAL_RELEASED_DELEGATED"   # a token minted on behalf of the run's person (#6756 step 4)
 EVENT = "credential_acquired"
 
 _NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -343,10 +349,13 @@ class _Scope:  # pylint: disable=R0903
     may be released, the audit identity of the requester of each slot, and when the release stops being usable."""
 
     def __init__(self, binding_project_id, allow_validated, expires_at, events, on_revoke=None,
-                 allow_pending=False):  # pylint: disable=R0913
+                 allow_pending=False, person=None):  # pylint: disable=R0913
         self.binding_project_id, self.allow_validated, self.expires_at = binding_project_id, allow_validated, expires_at
         self.events, self.on_revoke = events, on_revoke
         self.allow_pending = allow_pending   # a probe of a value the credential onboarding has just written
+        # (subject, tenant, caller) of the context row the checks read: who an Entra-delegated slot acts for. A probe
+        # ticket names no person, so a delegated slot is refused there (the credential onboarding probes it itself)
+        self.person = person
 
 
 def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
@@ -431,7 +440,8 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
     def on_revoke(code):   # a reference that changed between the recheck and the read ends the run, as the recheck would
         _revoke(first, code)
 
-    return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), events, on_revoke=on_revoke)
+    return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), events, on_revoke=on_revoke,
+                  person=(row.subject, row.tenant, row.caller))
 
 
 def _entries_of(row, requests: list) -> tuple:
@@ -631,7 +641,8 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
     first one is also the store's decision id (a Vault correlation id) for the read of the whole batch."""
     release_ids = [str(uuid.uuid4()) for _ in requests]
     values = _read_store(module, requests, scope, release_ids)
-    releases = []
+    releases, kinds = [], []
+    deadline = entra_obo.deadline_for(len(requests))   # one budget for every delegated slot of this request
     for request, release_id in zip(requests, release_ids):
         slot = request.slot
         value = values.get(slot["credential_ref"])
@@ -639,13 +650,20 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
             raise _denied_at(request, "STORE_NOT_FOUND")
         if value.generation != slot["credential_generation"]:
             raise _denied_at(request, "CREDENTIAL_GENERATION_MISMATCH")
-        if not set(slot["fields"]) <= set(value.fields):
-            raise _denied_at(request, "STORE_NOT_FOUND")   # nothing partial is released
+        delegation = getattr(value, "delegation", None)
+        if delegation is not None:   # no stored value: a token minted now, on behalf of the run's person
+            fields, expires_at = _delegated(module, request, scope, delegation, deadline)
+            kinds.append(delegation.get("resource"))
+        else:
+            if not set(slot["fields"]) <= set(value.fields):
+                raise _denied_at(request, "STORE_NOT_FOUND")   # nothing partial is released
+            fields = {path: value.fields[path].get_secret_value() for path in slot["fields"]}
+            expires_at = scope.expires_at
+            kinds.append(None)
         plaintext = json.dumps({
-            "fields": {path: value.fields[path].get_secret_value() for path in slot["fields"]},
-            "generation": value.generation, "expires_at": scope.expires_at.isoformat(),
+            "fields": fields, "generation": value.generation, "expires_at": expires_at.isoformat(),
         }).encode("utf-8")
-        value = None
+        value = fields = None
         aad = "|".join((AAD_VERSION, str(request.project_id), request.ref, request.toolkit_instance_id, request.field,
                         request.decision_id, release_id)).encode("utf-8")
         try:
@@ -657,21 +675,43 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
             plaintext = None   # noqa: F841  # pylint: disable=W0642
         releases.append({
             "toolkit_instance_id": request.toolkit_instance_id, "field": request.field, "release_id": release_id,
-            "fields": list(slot["fields"]), "expires_at": scope.expires_at.isoformat(), "sealed": sealed})
+            "fields": list(slot["fields"]), "expires_at": expires_at.isoformat(), "sealed": sealed})
     values = None
     #   9. the events are committed before the reply leaves; if they cannot be, the sealed bytes are dropped with them
     try:
         with db.get_session(requests[0].project_id) as session:
-            for event, release_id in zip(scope.events, release_ids):
+            for event, release_id, resource in zip(scope.events, release_ids, kinds):
                 stamped = {"environment": module.admission_settings.environment,   # a probe has no admitted context
                            "policy_revision": module.governance_profile.policy_revision}
                 stamped.update({key: item for key, item in event.items() if item is not None})
+                if resource is not None:   # the kind is in the reason code, the resource is the target
+                    stamped["target_ref"] = resource
                 adm._tracing().security_audit_record(session, adm._event(
-                    event_type=EVENT, decision="allow", reason_code=RELEASED, event_id=release_id, **stamped))
+                    event_type=EVENT, decision="allow", reason_code=RELEASED if resource is None else RELEASED_DELEGATED,
+                    event_id=release_id, **stamped))
             session.commit()
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the release event was not recorded (%s)", type(exc).__name__)
         raise adm._denied("AUDIT_UNAVAILABLE") from None
-    for _ in requests:
-        adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "allow", RELEASED)
+    for resource in kinds:
+        adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "allow",
+                    RELEASED if resource is None else RELEASED_DELEGATED)
     return releases
+
+
+def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadline=None) -> tuple:
+    """The value of an Entra-delegated slot: ``({"access_token": token}, expires_at)``. The slot asks for the token
+    only; the run must be a signed-in person's, bound to the reference's tenant and custodian (``entra_obo``). The
+    token lives in this reply (sealed) and in ``entra_obo``'s in-memory cache, nowhere else. No read, no write here."""
+    if request.slot["fields"] != [DELEGATED_FIELD]:
+        raise _denied_at(request, "STORE_NOT_FOUND")
+    try:
+        if scope.person is None:
+            raise entra_obo.DelegationRefused(entra_obo.CALLER_UNSUPPORTED)
+        person = entra_obo.run_subject(*scope.person)
+        token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id, deadline)
+    except entra_obo.DelegationRefused as refused:
+        raise _denied_at(request, refused.code) from None
+    expires_at = min(scope.expires_at, adm._now() + timedelta(seconds=max(0, expires - time.time()
+                                                                            - entra_obo.SLOT_MARGIN_S)))
+    return {DELEGATED_FIELD: token}, expires_at

@@ -732,7 +732,8 @@ def test_the_module_registers_the_release_handler_lazily_and_the_methods_are_web
     methods = (PLUGIN_ROOT / "methods" / "governed_credentials.py").read_text()
     assert "def release_credential(" in methods and "def governed_check_connection(" in methods
     assert "def release_credentials(" in methods and "def governed_check_connection_many(" in methods
-    assert methods.count("@web.method()") == 4
+    assert "def entra_delegated_probe(" in methods   # the onboarding probe of a delegated credential (#6756)
+    assert methods.count("@web.method()") == 6
 
 
 def test_the_preflight_needs_the_release_methods_and_the_transport(ns, env):
