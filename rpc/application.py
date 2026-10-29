@@ -1,4 +1,5 @@
 import json
+import time
 from copy import deepcopy
 from typing import Optional, Tuple, List
 from uuid import uuid4
@@ -221,8 +222,12 @@ def _raise_input_guardrail_blocked(
     raise blocked_error
 
 
-def _delete_application(module, session, project_id: int, application: Application):
-    """Delete one application and commit: True, or an error dict when a version is published or embedded"""
+def _delete_application(module, session, project_id: int, application: Application, slim_event: bool = False):
+    """Delete one application and commit: True, or an error dict when a version is published or embedded.
+
+    slim_event builds the ``application_deleted`` payload from the fields its handlers read
+    instead of serializing every version (bulk delete, #7242).
+    """
     blocked_statuses = {PublishStatus.published, PublishStatus.embedded}
     for ver in application.versions:
         if ver.status in blocked_statuses:
@@ -241,8 +246,15 @@ def _delete_application(module, session, project_id: int, application: Applicati
         session, [ver.id for ver in versions]
     )
 
-    application_data = ApplicationDetailModel.from_orm(application)
-    application_data = application_data.model_dump()
+    if slim_event:
+        application_data = {
+            'id': application.id,
+            'name': application.name,
+            'owner_id': application.owner_id,
+            'version_details': None,
+        }
+    else:
+        application_data = ApplicationDetailModel.from_orm(application).model_dump()
     application_data['project_id'] = project_id
     if application_data.get('version_details') is None and agent_type:
         application_data['version_details'] = {'agent_type': agent_type}
@@ -250,9 +262,13 @@ def _delete_application(module, session, project_id: int, application: Applicati
     session.delete(application)
     session.commit()
 
-    module.context.event_manager.fire_event(
-        ApplicationEvents.application_deleted, application_data
-    )
+    try:
+        module.context.event_manager.fire_event(
+            ApplicationEvents.application_deleted, application_data
+        )
+    except Exception:
+        log.exception("application_deleted handlers failed for application %s of project %s",
+                      application_data['id'], project_id)
 
     return True
 
@@ -1299,20 +1315,26 @@ class RPC:
         return False
 
     @web.rpc("applications_delete_by_kind")
-    def applications_delete_by_kind(self, project_id: int, kind: str) -> dict:
+    def applications_delete_by_kind(self, project_id: int, kind: str, time_budget: float = None) -> dict:
         """Bulk project data delete (#7242): every agent or every pipeline of the project.
 
         kind is 'agent' or 'pipeline'; an application with any pipeline version is a pipeline
         (the agents_type rule of the application list). Published or embedded ones are skipped.
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
         """
-        deleted, failed, skipped = 0, 0, 0
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, skipped, remaining = 0, 0, 0, 0
         with db.get_session(project_id) as session:
-            for application_id in _application_ids_of_kind(session, kind):
+            application_ids = _application_ids_of_kind(session, kind)
+            for index, application_id in enumerate(application_ids):
+                if deadline is not None and time.monotonic() >= deadline:
+                    remaining = len(application_ids) - index
+                    break
                 try:
                     application = session.query(Application).get(application_id)
                     if application is None:
                         continue
-                    result = _delete_application(self, session, project_id, application)
+                    result = _delete_application(self, session, project_id, application, slim_event=True)
                     if result is True:
                         deleted += 1
                     else:
@@ -1324,7 +1346,7 @@ class RPC:
                         "applications_delete_by_kind: failed to delete application %s of project %s",
                         application_id, project_id,
                     )
-        return {'deleted': deleted, 'failed': failed, 'skipped': skipped}
+        return {'deleted': deleted, 'failed': failed, 'skipped': skipped, 'remaining': remaining}
 
     @web.rpc("elitea_core_project_data_counts")
     def project_data_counts(self, project_id: int) -> dict:
@@ -1362,12 +1384,19 @@ class RPC:
         return counts
 
     @web.rpc("skills_delete_all")
-    def skills_delete_all(self, project_id: int) -> dict:
-        """Bulk project data delete (#7242): every skill of the project; published or embedded ones are skipped"""
-        deleted, failed, skipped = 0, 0, 0
+    def skills_delete_all(self, project_id: int, time_budget: float = None) -> dict:
+        """Bulk project data delete (#7242): every skill of the project; published or embedded ones are skipped.
+
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
+        """
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, skipped, remaining = 0, 0, 0, 0
         with db.get_session(project_id) as session:
             skill_ids = [row[0] for row in session.query(Skill.id).all()]
-        for skill_id in skill_ids:
+        for index, skill_id in enumerate(skill_ids):
+            if deadline is not None and time.monotonic() >= deadline:
+                remaining = len(skill_ids) - index
+                break
             try:
                 delete_skill(project_id, skill_id)
                 deleted += 1
@@ -1378,22 +1407,27 @@ class RPC:
             except Exception:
                 failed += 1
                 log.exception("skills_delete_all: failed to delete skill %s of project %s", skill_id, project_id)
-        return {'deleted': deleted, 'failed': failed, 'skipped': skipped}
+        return {'deleted': deleted, 'failed': failed, 'skipped': skipped, 'remaining': remaining}
 
     @web.rpc("toolkits_delete_by_kind")
-    def toolkits_delete_by_kind(self, project_id: int, kind: str) -> dict:
+    def toolkits_delete_by_kind(self, project_id: int, kind: str, time_budget: float = None) -> dict:
         """Bulk project data delete (#7242): every toolkit ('toolkit') or MCP server ('mcp') of the project.
 
         Agent-as-tool entries are left to their agent. Copies from other projects are deleted too.
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
         """
-        deleted, failed = 0, 0
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, remaining = 0, 0, 0
         with db.get_session(project_id) as session:
             tool_ids = [
                 tool_id for tool_id, tool_type, meta in
                 session.query(EliteATool.id, EliteATool.type, EliteATool.meta).all()
                 if toolkit_kind(tool_type, meta) == kind
             ]
-            for tool_id in tool_ids:
+            for index, tool_id in enumerate(tool_ids):
+                if deadline is not None and time.monotonic() >= deadline:
+                    remaining = len(tool_ids) - index
+                    break
                 try:
                     tool = session.query(EliteATool).get(tool_id)
                     if tool is None:
@@ -1407,8 +1441,15 @@ class RPC:
                         "toolkits_delete_by_kind: failed to delete toolkit %s of project %s", tool_id, project_id,
                     )
                     continue
-                self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted, toolkit_data)
-        return {'deleted': deleted, 'failed': failed, 'skipped': 0}
+                # The toolkit is gone already: a failing handler is logged, it does not stop the rest
+                try:
+                    self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted, toolkit_data)
+                except Exception:
+                    log.exception(
+                        "toolkits_delete_by_kind: toolkit_deleted handlers failed for toolkit %s of project %s",
+                        tool_id, project_id,
+                    )
+        return {'deleted': deleted, 'failed': failed, 'skipped': 0, 'remaining': remaining}
 
     @web.rpc("applications_find_existing_fork", "find_existing_fork")
     def applications_find_existing_fork(

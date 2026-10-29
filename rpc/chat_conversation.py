@@ -1,3 +1,5 @@
+import time
+
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
@@ -700,6 +702,7 @@ class RPC:
         project_id: int,
         conversation_ids: list,
         folder_owner_id: int = None,
+        time_budget: float = None,
     ) -> dict:
         """
         Bulk delete of the given conversations (project data delete, #7242).
@@ -707,8 +710,10 @@ class RPC:
         The caller resolves which conversations it may delete. Each one is committed
         on its own so a failure does not abort the rest. Folders left empty that held
         a deleted conversation or belong to folder_owner_id are removed afterwards.
+        Stops once time_budget seconds have passed; the ones not reached are returned as remaining.
         """
-        deleted, failed = 0, 0
+        deadline = None if time_budget is None else time.monotonic() + time_budget
+        deleted, failed, remaining = 0, 0, 0
         folder_ids = set()
         mc = None
         try:
@@ -717,7 +722,10 @@ class RPC:
             log.exception("delete_conversations_rpc: no storage client for project %s", project_id)
 
         with db.get_session(project_id) as session:
-            for conversation_id in conversation_ids:
+            for index, conversation_id in enumerate(conversation_ids):
+                if deadline is not None and time.monotonic() >= deadline:
+                    remaining = len(conversation_ids) - index
+                    break
                 try:
                     conversation = session.query(Conversation).filter(
                         Conversation.id == conversation_id,
@@ -758,7 +766,7 @@ class RPC:
                 session.rollback()
                 log.exception("delete_conversations_rpc: failed to delete empty folders of project %s", project_id)
 
-        return {'deleted': deleted, 'failed': failed, 'folders_deleted': folders_deleted}
+        return {'deleted': deleted, 'failed': failed, 'folders_deleted': folders_deleted, 'remaining': remaining}
 
     @web.rpc("chat_list_messages_rpc", "list_messages_rpc")
     def list_messages_rpc(
