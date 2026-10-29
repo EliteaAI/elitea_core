@@ -200,6 +200,37 @@ def test_el_7011_r4_3_announce_skips_a_run_whose_status_has_no_notice(runs, sess
     assert (sent.notices, sent.emitted) == ([], [])
 
 
+TOOL_ERROR = "GitHub \u00b7 create_pull_request: missing title"
+
+
+def test_a_failed_run_with_a_short_tool_error_stores_the_reason_and_sends_the_failed_notice(runs, session, sent):
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule)
+
+    runs.finish_schedule_run(1, run.id, "failed", runs.run_failure_reason(TOOL_ERROR), conversation_id=55)
+
+    session.refresh(run)
+    session.refresh(schedule)
+    assert (run.status, schedule.last_run_status) == ("failed", "failed")
+    assert TOOL_ERROR in run.reason and "\n" not in run.reason
+    assert sent.notices == [(12, "schedule_run_failed", run.id)]
+    assert run.events[-1]["kind"] == "finished"
+    assert run.events[-1]["text"] == f"Run finished: failed ({run.reason})"
+
+
+def test_a_run_finished_without_a_reason_ends_success_and_sends_the_succeeded_notice(runs, session, sent):
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule)
+
+    runs.finish_schedule_run(1, run.id, "success", conversation_id=55)
+
+    session.refresh(run)
+    session.refresh(schedule)
+    assert (run.status, run.reason, schedule.last_run_status) == ("success", None, "success")
+    assert sent.notices == [(12, "schedule_run_succeeded", run.id)]
+    assert run.events[-1]["text"] == "Run finished: success"
+
+
 @pytest.fixture
 def reasons(runs):
     """schedule_runs with the real error_text helpers (a plain module, nothing to stub)."""

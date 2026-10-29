@@ -161,6 +161,23 @@ def test_7011_r1_1_stream_end_with_an_error_finishes_the_run_as_failed_with_the_
     assert ("finish", PROJECT_ID, RUN_ID, "failed", "short(the model failed)", CONVERSATION_ID, AUTHOR_ID) in world.events
 
 
+WORKER_ERROR = "GitHub \u00b7 create_pull_request: missing title"
+
+
+def test_7011_stream_end_with_a_short_tool_error_finishes_the_run_as_failed_with_that_text(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({"is_error": True, "error": WORKER_ERROR})
+    finish = ("finish", PROJECT_ID, RUN_ID, "failed", f"short({WORKER_ERROR})", CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events
+
+
+def test_7011_stream_end_with_error_text_but_no_error_flag_finishes_the_run_as_success(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({"error": WORKER_ERROR})
+    finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events
+
+
 # BUG-37 (US-13 R1.3, R6.1): the stored reason is the short one, never the raw traceback
 def test_7011_bug37_stream_end_stores_the_short_reason_not_the_traceback(make_world):
     world = make_world(dict(SCHEDULE_META))
