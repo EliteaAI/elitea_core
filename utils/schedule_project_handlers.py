@@ -11,6 +11,7 @@ from tools import auth, db
 from ..models.entity_schedule import EntitySchedulePreference
 from ..models.pd.schedule_list import ScheduleListFilters, ScheduleListItem
 from .authors import get_authors_data
+from .error_text import public_reason
 from .schedule_access import allowed_actions, schedule_check_spec, schedule_scope
 from .schedule_queries import list_schedules
 
@@ -80,7 +81,7 @@ class ScheduleProjectHandlers:
         names = _owner_names({row.created_by for row in rows})
         items = [
             ScheduleListItem(
-                **row._mapping,
+                **{**row._mapping, "last_run_reason": public_reason(row.last_run_reason)},
                 owner={"id": row.created_by, "name": names.get(row.created_by)},
                 allowed_actions=allowed_actions(row, scope),
             ).model_dump(mode="json")  # one ISO offset per date; serialize() adds a second 'Z'

@@ -19,6 +19,7 @@ from ..models.pd.entity_schedule import (
 )
 from ..models.pd.schedule_list import RunStatus
 from ..models.pd.schedule_run import ScheduleRunRequest
+from .error_text import public_event, public_reason
 from .schedule_access import (
     SCHEDULE_PERMISSIONS,
     ScheduleScope,
@@ -79,7 +80,8 @@ def _run_row(row) -> dict:
     """A run as the lists and the run detail answer it: ISO times and `duration_ms` once the run ended."""
     started, finished = row["started_at"], row["finished_at"]
     return {
-        **row, "started_at": _iso(started), "finished_at": _iso(finished),
+        **row, "reason": public_reason(row.get("reason")),
+        "started_at": _iso(started), "finished_at": _iso(finished),
         "duration_ms": round((finished - started).total_seconds() * 1000) if started and finished else None,
     }
 
@@ -479,7 +481,7 @@ class ScheduleItemHandlers:
                 return RUN_NOT_FOUND
             row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
             tokens, cost_usd = usage_summary(session, project_id, run)
-            events = merge_events(run.events, tool_call_events(session, run.conversation_id))
+            events = [public_event(e) for e in merge_events(run.events, tool_call_events(session, run.conversation_id))]
             return {
                 **row,
                 "version_label": version_label(session, run.version_id),

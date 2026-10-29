@@ -182,6 +182,8 @@ def env(monkeypatch):
     settings = _register(monkeypatch, f"{PKG}.utils.schedule_settings", types.ModuleType(f"{PKG}.utils.schedule_settings"))
     settings.is_run_without_asking_allowed = lambda project_id: env.run_without_asking_allowed
 
+    _load(monkeypatch, "utils/error_text.py", f"{PKG}.utils.error_text")
+
     preferences = _register(monkeypatch, f"{PKG}.models.entity_schedule", types.ModuleType(f"{PKG}.models.entity_schedule"))
     preferences.EntitySchedulePreference = object
     _load(monkeypatch, "utils/schedule_project_handlers.py", f"{PKG}.utils.schedule_project_handlers")
@@ -357,3 +359,16 @@ def test_r5_3_el7011_rows_have_no_tags_field(env):
     for row in rows:
         assert "tags" not in row
         assert set(row) == ROW_KEYS
+
+
+def test_a_last_run_reason_stored_with_an_engineer_text_is_listed_as_the_generic_text(env):
+    env.grant(5, "list")
+    env.rows = [
+        make_row(1, 5, last_run_reason="The run failed: langchain_core.tools.base.ToolException: Node x"),
+        make_row(2, 5, last_run_reason="The run failed: The step 'a' of b could not be completed."),
+    ]
+
+    rows = ok(env)["rows"]
+
+    assert rows[0]["last_run_reason"] == "The run failed. Open the run log or ask an administrator for details."
+    assert rows[1]["last_run_reason"] == "The run failed: The step 'a' of b could not be completed."

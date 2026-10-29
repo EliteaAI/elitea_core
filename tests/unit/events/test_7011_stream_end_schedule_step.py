@@ -161,6 +161,25 @@ def test_7011_r1_1_stream_end_with_an_error_finishes_the_run_as_failed_with_the_
     assert ("finish", PROJECT_ID, RUN_ID, "failed", "short(the model failed)", CONVERSATION_ID, AUTHOR_ID) in world.events
 
 
+WORKER_ERROR = "GitHub \u00b7 create_pull_request: missing title"
+
+
+def test_stream_end_with_a_short_tool_error_finishes_the_run_as_failed_with_that_text(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({"is_error": True, "error": WORKER_ERROR})
+    finish = ("finish", PROJECT_ID, RUN_ID, "failed", f"short({WORKER_ERROR})", CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events
+
+
+# The reason code is stubbed here: these tests pin the is_error mapping and the call arguments only.
+# Core trusts the flag, so a tool that returns its error as plain text still ends as success.
+def test_stream_end_ignores_error_text_without_the_error_flag(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({"error": WORKER_ERROR})
+    finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events
+
+
 # BUG-37 (US-13 R1.3, R6.1): the stored reason is the short one, never the raw traceback
 def test_7011_bug37_stream_end_stores_the_short_reason_not_the_traceback(make_world):
     world = make_world(dict(SCHEDULE_META))
