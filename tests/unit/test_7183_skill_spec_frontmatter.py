@@ -336,6 +336,11 @@ class TestExistingSkillsStaySavable:
         update_skill(skill_utils, skill, name='my--skill', description='Use <b> carefully')
         assert (skill.name, skill.description) == ('my--skill', 'Use <b> carefully')
 
+    def test_a_stored_description_with_trailing_whitespace_still_saves_unchanged(self, skill_utils):
+        skill = stored_skill(description='Turns a -> b\n')
+        update_skill(skill_utils, skill, description='Turns a -> b')
+        assert skill.description == 'Turns a -> b'
+
     def test_renaming_to_a_double_hyphen_is_rejected(self, skill_utils):
         skill = stored_skill(name='ok')
         with pytest.raises(skill_utils.SkillSpecViolationError, match='consecutive hyphens'):

@@ -1065,7 +1065,7 @@ def update_skill(
                 enforce_skill_spec(name=update_data.name)
             skill.name = update_data.name
         if update_data.description is not None:
-            if update_data.description != skill.description:
+            if update_data.description.strip() != (skill.description or '').strip():
                 enforce_skill_spec(description=update_data.description)
             skill.description = update_data.description
         if update_data.meta is not None:
