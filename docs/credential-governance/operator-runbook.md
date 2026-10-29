@@ -304,14 +304,14 @@ Consequences:
    off).
 2. `manage_autonomous_mandate`: `create` (version, owner, `operations=run:schedule[,run:webhook]`,
    `max_runtime_s`, `valid_until` within 180 days), `submit`, then `approve` by someone who is neither creator
-   nor owner. The Mandates tab of the Admin UI is a placeholder; the admin task is the only way today.
+   nor owner. The Admin UI Governance -> Mandates tab does the same (it runs the admin task's code).
 3. Grant the credentials the run needs to the mandate (`subject_ref=mandate:<uuid>`).
 4. The owner creates (or keeps) the schedule. The schedule's owner must be the mandate's owner.
 
 A mandate run is stopped by Main at the earlier of `max_runtime_s` and `valid_until` (`RUNTIME_LIMIT_EXCEEDED`).
 A mandate run carries the run token only, with the mandate's deadline. Its sub-agents that use credentials are
-not admitted yet (`SUB_AGENT_CREDENTIAL_NOT_ADMITTED`). A mandate run cannot use a Microsoft sign-in credential
-(section 8).
+not admitted yet (`SUB_AGENT_CREDENTIAL_NOT_ADMITTED`). A mandate run uses a Microsoft sign-in credential only when
+the mandate names the owner's identity and the owner consented (section 8a).
 
 ## 7. The run token
 
@@ -448,7 +448,7 @@ deny event.
 |---|---|---|
 | `DENIED_ASSERTION_UNAVAILABLE` | No stored sign-in: signed out, expired, never signed in with Microsoft, or the refresh was refused. | Ask the person to sign in with Microsoft again. If it repeats for everyone, check `obo_custody_enabled`, the scope and the key. |
 | `DENIED_SUBJECT_MISMATCH` | The credential, its custody or its token belongs to another person or tenant than the one running. | Check that the credential is the person's own (personal) and the tenant in the descriptor. |
-| `DENIED_MANDATE_DELEGATION_UNSUPPORTED` | A scheduled or webhook run (mandate) uses it. | Use a stored credential for unattended runs. |
+| `DENIED_MANDATE_DELEGATION_UNSUPPORTED` | A scheduled or webhook run (mandate) uses it, and the mandate does not act with its owner's consent (section 8a). | Use an application credential, or a mandate that names `owner_delegated`. |
 | `DENIED_DELEGATION_UNSUPPORTED_CALLER` | The run is not a signed-in person's own run (API token, system run, governance off). | Run it from Elitea as the person. |
 | `DENIED_ASSERTION_SOURCE_UNSUPPORTED` | The person signed in through Keycloak, or the source is `connected_account`. | Sign in directly with Microsoft. |
 | `DENIED_OAUTH_APP_UNAVAILABLE` | The app cannot be resolved: client id not set, secret missing, admin app disabled, or the login token was issued for another app. | Check `entra_obo_client_id`, the secret variable and the app. |
@@ -459,6 +459,42 @@ If the exchange works but SharePoint answers 403, the site grant (prerequisite 5
 
 At the time of writing, a refusal raised at release time can reach the chat card as the generic text "This run was
 not authorized." The code and the readable cause are in the audit trail. Mapping them to the card is a follow-up.
+
+## 8a. Mandates that name their identity (#7131)
+
+A scheduled or webhook run has nobody signed in. A mandate states what its runs act with on resources that need an
+identity (`identity_source`, part of what is approved, set at create):
+
+| Identity | The runs act with | What DevOps configures |
+|---|---|---|
+| none (default) | the stored credentials the mandate is granted, as before | nothing |
+| `application` | an application credential: a SharePoint App-only configuration (client id + client secret, or a certificate), an ordinary governed secret reference, granted to the mandate like any other. Named on the mandate for the record; the run is the same as with none | the API app's **application** permissions with admin consent (SharePoint/Graph `Sites.Selected`), one site grant per site the agent may reach (PnP `Grant-PnPAzureADAppSitePermission` or Graph `POST /sites/{id}/permissions`, role read or write), a client secret or certificate stored as the credential's value |
+| `owner_delegated` | the mandate owner's Microsoft sign-in, through the owner's offline consent: the platform exchanges it on behalf of the owner exactly as for the owner's own runs (section 8) | section 8 (delegated `Sites.Selected`, the site grant for the platform API app, `offline_access` in the login scope), plus custody on (`obo_custody_enabled`, the request key) |
+
+The deployment states which identities a mandate may name: `mandate_identity_sources` in elitea_core's plugin config
+(`[]` by default: no mandate can name one and nothing about one is read).
+
+Owner consent, `owner_delegated` only:
+1. Create the mandate with "Acts with: Owner's Microsoft sign-in" (or the task's `identity=owner_delegated`), submit,
+   approve (another operator).
+2. The owner, signed in with Microsoft (directly or through the brokering realm) as the very identity the mandate was
+   made for, opens Governance -> Mandates and chooses **Give consent**. The platform keeps one refresh token of that
+   sign-in as the owner's personal material in the governed store (never in the mandate, an event or a log).
+3. Grant the delegated credential to the mandate (`subject_ref=mandate:<uuid>`), or use the owner's personal one.
+4. Signing out does not end the consent (it is offline by design). **Withdraw consent** (an operator) or revoking the
+   mandate does; the next run is refused. Microsoft refusing the consent (expired after its lifetime of inactivity,
+   revoked, password reset, conditional access) withdraws it and the next run is refused; the owner consents again.
+5. A schedule changed by someone other than its owner after the consent needs the owner again (they consent again
+   or save the schedule themselves).
+
+| Code | Cause | Action |
+|---|---|---|
+| `DENIED_MANDATE_CONSENT_REQUIRED` | No consent, withdrawn, or the schedule was changed by someone else since. | The owner gives consent again. |
+| `DENIED_MANDATE_CONSENT_EXPIRED` | Microsoft no longer accepts the consent. | The owner gives consent again. |
+| `DENIED_SUBJECT_MISMATCH` | The consent or the run is not the mandate owner's identity. | Make a new mandate for the owner's current identity. |
+
+A webhook run under an `owner_delegated` mandate acts with the owner's sign-in on input chosen by the webhook's
+caller: grant `run:webhook` to such a mandate only for webhooks the owner trusts.
 
 ## 9. Read a refusal
 
