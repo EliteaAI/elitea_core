@@ -516,6 +516,7 @@ def generate_summary_payload(
         message_groups: list[ConversationMessageGroup],
         llm_settings: dict | None = None,
         summary_instructions: str | None = None,
+        prompt: str | None = None,
 ) -> dict:
     """
     Generate payload for LLM summary prediction using message groups ORM objects
@@ -525,10 +526,26 @@ def generate_summary_payload(
         message_groups: List of ConversationMessageGroup ORM objects
         llm_settings: LLM configuration settings
         summary_instructions: Custom instructions for summary generation
+        prompt: Ready summary prompt with the conversation embedded; sent as the only message
     Returns:
         Dict containing the structured payload for applications_predict_sio_llm
     """
     try:
+        if prompt:
+            if not llm_settings:
+                raise PayloadGenerationError("LLM settings must be provided for summary generation")
+            return {
+                "project_id": project_id,
+                "llm_settings": llm_settings,
+                "user_input": prompt,
+                "chat_history": [],
+                "thread_id": None,
+                "instructions": None,
+                "interaction_uuid": None,
+                "tools": [],
+                "variables": None,
+            }
+
         # Convert message groups to chat history format using existing utility
         chat_history = generate_chat_history(message_groups, include_context=False)
 
@@ -2961,6 +2978,8 @@ class RPC:
             summary_instructions: str | None = None,
             conversation_uuid: str | None = None,
             user_id: int | None = None,
+            prompt: str | None = None,
+            is_system_user: bool = False,
     ) -> dict:
         """
         Predict summary content based on message groups using LLM
@@ -2972,6 +2991,8 @@ class RPC:
             summary_instructions: Custom instructions for summary generation
             conversation_uuid: The conversation UUID for socket room
             user_id: The user ID
+            prompt: Ready summary prompt; when set, message_groups is not used
+            is_system_user: Run with the project system token (callers without a user session)
         Returns:
             Dict containing the prediction result
         """
@@ -2982,9 +3003,10 @@ class RPC:
                 message_groups=message_groups,
                 llm_settings=llm_settings,
                 summary_instructions=summary_instructions,
+                prompt=prompt,
             )
 
-            if not message_groups:
+            if not message_groups and not prompt:
                 raise Exception(f"No message groups found for summary generation")
 
             # Make the LLM prediction call
@@ -3005,9 +3027,8 @@ class RPC:
                         chat_project_id=project_id,
                         await_task_timeout=SUMMARIZATION_LOCKING_TTL,
                         user_id=user_id,
-                        is_system_user=user_id is None,
+                        is_system_user=is_system_user,
                         skip_expansion=True,
-                        return_chat_history=True
                     )
                 except Exception:
                     log.exception("Error during RPC call to LLM model in predict_summary_content")

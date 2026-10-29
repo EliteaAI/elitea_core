@@ -3,7 +3,10 @@
 from tools import api_tools, auth, config as c, register_openapi
 from pylon.core.tools import log
 
-from ...utils.summarization import generate_manual_summary, get_conversation_summary_history
+from ...utils.summarization import (
+    ConversationNotFoundError, SummaryGenerationError, SummaryRequestError,
+    generate_manual_summary, get_conversation_summary_history,
+)
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -12,8 +15,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Generate Conversation Summary",
         description=(
             "Triggers a manual summarization of the conversation's message history. "
-            "Calls the configured summary LLM model and stores the result. "
-            "Requires summary_llm_settings to be configured in the conversation's context strategy."
+            "Summarizes the messages since the last summary, keeping the most recent ones, "
+            "with the configured summary model or the project low-tier model."
         ),
         tags=["elitea_core/chat"],
         responses={
@@ -34,11 +37,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     }
                 },
             },
-            "400": {"description": "No summary LLM settings configured"},
+            "400": {"description": "No summary model available or nothing to summarize"},
             "401": {"description": "Unauthorized"},
             "403": {"description": "Forbidden"},
             "404": {"description": "Conversation not found"},
-            "500": {"description": "Summary generation failed"},
+            "500": {"description": "Internal server error"},
+            "502": {"description": "Summary generation failed"},
         },
         available_to_users=True,
     )
@@ -59,10 +63,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 user_id=user_id,
             )
             return result, 200
-        except ValueError as e:
+        except ConversationNotFoundError as e:
             return {"error": str(e)}, 404
-        except RuntimeError as e:
+        except SummaryRequestError as e:
             return {"error": str(e)}, 400
+        except SummaryGenerationError as e:
+            log.warning("Summary generation failed for conversation %d: %s", conversation_id, e)
+            return {"error": str(e)}, 502
         except Exception:
             log.exception("Error generating summary for conversation %d", conversation_id)
             return {"error": "Failed to generate summary"}, 500
@@ -100,7 +107,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             result = get_conversation_summary_history(project_id, conversation_id)
             return result, 200
-        except ValueError as e:
+        except ConversationNotFoundError as e:
             return {"error": str(e)}, 404
         except Exception:
             log.exception("Error getting summaries for conversation %d", conversation_id)
