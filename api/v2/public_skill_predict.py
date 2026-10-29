@@ -5,6 +5,7 @@ from tools import api_tools, auth, config as c, register_openapi  # pylint: disa
 from .skill import resolve_version_id  # pylint: disable=E0402
 from ...models.pd.skill_predict import SkillPredictMcpRequest, SkillPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
+from ...utils.skill_api_run_history import run_conversation_opener  # pylint: disable=E0402
 from ...utils.skill_run_utils import execute_skill_predict, is_async_query, request_model_for  # pylint: disable=E0402
 from ...utils.utils import get_public_project_id  # pylint: disable=E0402
 
@@ -19,7 +20,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             "trailing path segment (/{project_id}/{public_skill_id}/{version_id}) or version_id query parameter; a version that is not "
             "published is rejected. Model: request llm_settings, then the version's saved settings, then "
             "the project's default model. Sync by default; async_mode or callback_url returns a task_id; with sid "
-            "the run streams to that socket and the call returns task_id and stream_id."
+            "the run streams to that socket and the call returns task_id and stream_id. Without sid the run is saved to the skill's Run History as an API run (MCP run over MCP), and stream_id is its conversation uuid."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
@@ -74,6 +75,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             user_id=auth.current_user()["id"],
             async_requested=is_async_query(request.args),
             request_model=request_model_for(request.environ),
+            open_run_conversation=run_conversation_opener(request.environ),
         )
 
 
