@@ -58,6 +58,15 @@ def check_conversation_access(project_id: int, conversation, user_id: int, needs
     return denied
 
 
+def check_read_access(project_id: int, conversation, user_id: int):
+    if conversation is None:
+        return NOT_FOUND
+    # Whoever can open the chat can read it: public chats are open to the whole project (#7165)
+    if not conversation.is_private:
+        return None
+    return check_conversation_access(project_id, conversation, user_id)
+
+
 def check_post_access(project_id: int, conversation, user_id: int):
     if conversation is None:
         return NOT_FOUND
