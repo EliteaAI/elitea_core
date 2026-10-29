@@ -11,6 +11,7 @@ import datetime
 import pathlib
 import sys
 import types
+import uuid
 
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
@@ -39,18 +40,20 @@ TOOL = {'at': '2026-10-01T00:00:10+00:00', 'kind': 'tool_call', 'text': 'Tool ca
         'level': 'info', 'toolkit': 'github', 'tool': 'list_issues', 'duration_ms': 1200}
 DETAIL_FIELDS = FIELDS | {
     'version_label', 'principal_label', 'risk_outcome', 'approval_rule', 'approval_expires_at', 'summary', 'events',
+    'conversation_uuid', 'message_group_id',
 }
 
 
 @pytest.fixture
 def reads(monkeypatch):
     """The read helpers the handler imports late; `usage` is what the usage store answers."""
-    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], tool_events=[TOOL])
+    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], groups=[], tool_events=[TOOL])
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
     module.version_label = lambda session, version_id: {10: 'v3'}.get(version_id)
 
-    def tool_call_events(session, conversation_id):
+    def tool_call_events(session, conversation_id, message_group_id=None):
         state.conversations.append(conversation_id)
+        state.groups.append(message_group_id)
         return state.tool_events if conversation_id else []
 
     module.tool_call_events = tool_call_events
@@ -170,3 +173,24 @@ def test_cr_el7011_other_verbs_on_the_run_url_are_refused(harness, reads, verb):
 
     assert call_run(harness, verb, schedule_id, run_id)[1] == 405
     assert harness.row(schedule_id).name == 'Nightly'
+
+
+def test_a_delivered_run_hands_its_answer_group_to_the_tool_call_reader_and_shows_its_chat_link(harness, reads):
+    schedule_id = harness.seed()
+    chat_uuid = uuid.uuid4()
+    run_id = seed_run(harness, schedule_id, conversation_uuid=chat_uuid, message_group_id=45)
+
+    body, status = call_run(harness, 'get', schedule_id, run_id)
+
+    assert status == 200
+    assert (body['conversation_uuid'], body['message_group_id']) == (str(chat_uuid), 45)
+    assert (reads.conversations, reads.groups) == ([901], [45])
+
+
+def test_a_run_history_run_shows_no_chat_link_and_no_group_filter(harness, reads):
+    schedule_id = harness.seed()
+    run_id = seed_run(harness, schedule_id)
+
+    body, _ = call_run(harness, 'get', schedule_id, run_id)
+
+    assert (body['conversation_uuid'], body['message_group_id'], reads.groups) == (None, None, [None])

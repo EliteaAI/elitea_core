@@ -346,17 +346,7 @@ def test_pause_does_not_ask_for_a_governance_notice(harness):
     assert harness.governance_calls == []
 
 
-# --- Owner CR 2026-10-21: PUT edits fields only; pause and resume are their own actions
-
-@pytest.mark.parametrize('enabled', [True, False])
-def test_7011_cr_put_with_enabled_is_400_and_names_pause_and_resume(harness, enabled):
-    schedule_id = harness.seed(enabled=not enabled)
-    body, status = harness.call('put', {'name': 'Renamed', 'enabled': enabled}, schedule_id)
-    assert (status, body['field']) == (400, 'enabled')
-    assert 'pause' in body['error'] and 'resume' in body['error']
-    row = harness.row(schedule_id)
-    assert (row.name, row.enabled) == ('Nightly', not enabled)
-
+# --- Pause and resume are their own actions; an edit with `enabled` is covered in test_schedule_edit_enabled.py
 
 def test_7011_cr_pause_disables_the_schedule_and_answers_the_details(harness):
     schedule_id = harness.seed()

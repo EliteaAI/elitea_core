@@ -43,6 +43,7 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedules_created_by', 'created_by'),
         Index('ix_entity_schedules_application_version', 'application_id', 'version_id'),
         Index('uq_entity_schedules_uuid', 'uuid', unique=True),
+        Index('ix_entity_schedules_delivery_conversation_uuid', 'delivery_conversation_uuid'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
@@ -84,6 +85,12 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     approval_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The legacy version trigger a migrated row replaced, read back by restore_version_trigger; NULL on rows moved before the column existed
     original_trigger: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Where a run posts its result: Run History only, or one chat; the target columns stay NULL in run_history
+    delivery_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default='run_history', server_default='run_history'
+    )
+    delivery_conversation_uuid: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    delivery_participant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -129,6 +136,9 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
     version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     principal_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
     risk_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The chat message of a delivered run; NULL on a run_history run, where conversation_id is the run chat
+    conversation_uuid: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    message_group_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class EntitySchedulePreference(db_tools.AbstractBaseMixin, db.Base):

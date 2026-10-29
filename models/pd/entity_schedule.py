@@ -3,7 +3,14 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ...utils.schedule_timing import compute_next_run, end_of_day, schedule_limits
 from .index import _cron_gaps, _validate_cron_expression
@@ -58,6 +65,8 @@ class ScheduleTiming(BaseModel):
 NAME_MAX = 256
 DESCRIPTION_MAX = 2304  # the entity_schedules.description column width
 RunMode = Literal['entry_point', 'prompt']
+DeliveryMode = Literal['run_history', 'conversation']
+DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]  # the database integer range
 ApprovalRule = Literal['pause_and_ask', 'run_without_asking']
 NAME_TEXT = 'Schedule name'
 DESCRIPTION_TEXT = 'Free text about the schedule'
@@ -100,9 +109,32 @@ class ScheduleRiskCheck(BaseModel):
     entity_type: EntityType
     application_id: ApplicationId
     version_id: VersionId
-    schedule_id: int | None = Field(
+    schedule_id: DbId | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
+
+
+class ScheduleDelivery(BaseModel):
+    """Where a run posts its answer: the run history, or one chat the person is in."""
+    mode: DeliveryMode = Field('run_history', description='`run_history` keeps the answer in the run log, '
+                               '`conversation` also posts it into the chat', examples=['conversation'])
+    conversation_uuid: str | None = Field(None, max_length=36, description='Chat that receives the answer; '
+                                          'required for `conversation`', examples=['3f1c9a0e-5b7d-4c2a-8e6f-0b1d3c5a7e9f'])
+    participant_id: DbId | None = Field(None, description='Participant of that chat that posts; '
+                                        'required for `conversation`', examples=[5])
+
+    @model_validator(mode='after')
+    def check_targets(self) -> 'ScheduleDelivery':
+        if self.mode == 'run_history':
+            self.conversation_uuid = self.participant_id = None
+        elif not self.conversation_uuid or self.participant_id is None:
+            raise ValueError('Mode conversation needs conversation_uuid and participant_id')
+        return self
+
+
+DELIVERY_TEXT = 'Where each run posts its answer; on an edit, absent keeps the stored delivery'
+DELIVERY_EXAMPLE = {'mode': 'conversation', 'conversation_uuid': '3f1c9a0e-5b7d-4c2a-8e6f-0b1d3c5a7e9f',
+                    'participant_id': 5}
 
 
 class ScheduleVariable(BaseModel):
@@ -129,13 +161,18 @@ class ScheduleCreate(ScheduleTiming):
     variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
     enabled: bool = Field(True, description='False saves the schedule paused', examples=[True])
     approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
+    delivery: ScheduleDelivery | None = Field(None, description=DELIVERY_TEXT, examples=[DELIVERY_EXAMPLE])
     risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
                                      examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
 
 
 class ScheduleEdit(BaseModel):
-    """The PUT body: no owner, entity or `enabled` field; extra `created_by` and `principal` are dropped (R2.2)."""
-    model_config = ConfigDict(json_schema_extra={'examples': [{'cron': '30 8 * * *'}, {'name': NAME_EXAMPLE}]})
+    """The PUT body: no owner or entity field; extra `created_by` and `principal` are dropped.
+
+    `enabled` pauses (false) or resumes (true) the schedule in the same save as the other fields.
+    """
+    model_config = ConfigDict(json_schema_extra={
+        'examples': [{'cron': '30 8 * * *'}, {'name': NAME_EXAMPLE}, {'enabled': False}]})
 
     name: str | None = Field(None, min_length=1, max_length=NAME_MAX, description=NAME_TEXT, examples=[NAME_EXAMPLE])
     description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
@@ -148,6 +185,8 @@ class ScheduleEdit(BaseModel):
     timezone: str | None = Field(None, description=TIMEZONE_TEXT, examples=['Europe/Warsaw'])
     expires_at: date | None = Field(None, description=EXPIRES_TEXT, examples=['2026-12-31'])
     approval_rule: ApprovalRule | None = Field(None, description=APPROVAL_TEXT, examples=['run_without_asking'])
+    delivery: ScheduleDelivery | None = Field(None, description=DELIVERY_TEXT, examples=[DELIVERY_EXAMPLE])
+    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
     risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
                                      examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
 
@@ -163,10 +202,7 @@ class ScheduleEdit(BaseModel):
 
 
 class ScheduleUpdate(ScheduleEdit):
-    """What the service applies: an edit, or `enabled` from the pause and resume actions and the file import."""
-    model_config = ConfigDict(json_schema_extra={'examples': [{'enabled': False}, {'cron': '30 8 * * *'}]})
-
-    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
+    """What the service applies: an edit, or `enabled` alone from the pause and resume actions and the file import."""
 
 
 class ScheduleOwner(BaseModel):
@@ -199,6 +235,7 @@ class ScheduleDetails(BaseModel):
     last_run_status: str | None
     disabled_reason: str | None
     approval_rule: str
+    delivery: ScheduleDelivery = Field(default_factory=ScheduleDelivery)
     approval_confirmed_by: str | None = None  # the name of who confirmed "Run without asking"
     approval_confirmed_at: datetime | None = None
     allowed_actions: list[str]

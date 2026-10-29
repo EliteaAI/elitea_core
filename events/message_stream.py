@@ -3,6 +3,7 @@ from pylon.core.tools import web, log
 from tools import db, serialize, rpc_tools
 from sqlalchemy.orm.attributes import flag_modified
 
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from ..models.participants import Participant
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
@@ -41,6 +42,28 @@ from ..utils.sio_utils import SioEvents
 def _schedule_run_id(conversation):
     """The schedule run a conversation belongs to (EL-7011); None for every other chat."""
     return (conversation.meta or {}).get('schedule_run_id') if conversation else None
+
+
+def _schedule_run(session, msg_group):
+    """(run id, author id, message group id) of the schedule run that owns this message group; None for any other.
+
+    A private run chat holds the run id in its meta and the chat author is the owner. A run delivered into a
+    shared chat holds it in the meta of its answer group, and the schedule owner is the author: the chat
+    author is any member. The owner comes from the schedule of the run itself, never from the schedule id in
+    the group meta, which a chat member can write. A run or schedule that is gone leaves no author, so the
+    stale sweep ends that run and its answer group.
+    """
+    conversation = msg_group.conversation
+    run_id = _schedule_run_id(conversation)
+    if run_id:
+        return run_id, conversation.author_id, None
+    meta = msg_group.meta or {}
+    if not (meta.get('scheduled_run') and meta.get('schedule_run_id')):
+        return None
+    owner_id = (session.query(EntitySchedule.created_by)
+                .join(EntityScheduleRun, EntityScheduleRun.schedule_id == EntitySchedule.id)
+                .filter(EntityScheduleRun.id == meta['schedule_run_id']).scalar())
+    return (meta['schedule_run_id'], owner_id, msg_group.id) if owner_id else None
 
 
 class Event:
@@ -297,8 +320,9 @@ class Event:
                         room=room,
                     )
 
-                run_id = _schedule_run_id(msg_group.conversation)
-                if run_id:
+                run = _schedule_run(session, msg_group)
+                if run:
+                    run_id, author_id, group_id = run
                     metadata = payload['response_metadata']
                     is_error = metadata.get('is_error')
                     reason = None
@@ -307,10 +331,11 @@ class Event:
                         log.warning('chat_message_stream_end: schedule run %s failed: %s', run_id, metadata.get('error'))
                         reason = run_failure_reason(metadata.get('error'))
                     schedule_end = (run_id, 'failed' if is_error else 'success', reason, msg_group.conversation.id,
-                                    msg_group.conversation.author_id)
+                                    author_id, group_id)
         if schedule_end:
             try:
-                finish_schedule_run(chat_project_id, *schedule_end[:4], author_id=schedule_end[4])
+                finish_schedule_run(chat_project_id, *schedule_end[:4], author_id=schedule_end[4],
+                                    message_group_id=schedule_end[5])
             except Exception:  # noqa: BLE001 -- the chat end stays; the stale sweep closes the run
                 log.exception('chat_message_stream_end: schedule run %s not finished', schedule_end[0])
 
@@ -596,13 +621,15 @@ class Event:
                 session.add(msg_group)
                 session.commit()
                 # Only a pause that ends the run closes it; a child or MCP-auth pause keeps streaming
-                pause_run_id = None if msg_group.is_streaming else _schedule_run_id(msg_group.conversation)
-                if pause_run_id:
-                    pause_chat = (msg_group.conversation.id, msg_group.conversation.author_id)
+                run = None if msg_group.is_streaming else _schedule_run(session, msg_group)
+                if run:
+                    pause_run_id, author_id, group_id = run
+                    pause_chat = (msg_group.conversation.id, author_id, group_id)
                 log.debug(f'chat_message_stream_pause: Set is_streaming={msg_group.is_streaming} for message {message_id}'
                           f'{" (HITL interrupt persisted)" if hitl_interrupt or hitl_interrupts else ""}')
         if pause_run_id:
             try:
-                pause_schedule_run(chat_project_id, pause_run_id, response_metadata, *pause_chat)
+                pause_schedule_run(chat_project_id, pause_run_id, response_metadata, *pause_chat[:2],
+                                   message_group_id=pause_chat[2])
             except Exception:  # noqa: BLE001 -- the pause stays; the stale sweep closes the run
                 log.exception('chat_message_stream_pause: schedule run %s not closed', pause_run_id)

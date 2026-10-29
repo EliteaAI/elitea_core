@@ -311,7 +311,8 @@ _CONTEXT_FOOTER = '\n</runtime_context>'
 # Identifier-like tags take a tight charset so a forged block cannot smuggle a token
 # through them; the free-text tags (names, page, model, meta) only need a single line.
 _CONTEXT_LINE = re.compile(
-    r'  <(?P<tag>user_id|project_id|assistant_version|current_entity_id)>[0-9A-Za-z.-]{1,64}</(?P=tag)>'
+    r'  <(?P<tag>user_id|project_id|assistant_version|current_entity_id|conversation_uuid|participant_id)>[0-9A-Za-z.-]{1,64}</(?P=tag)>'
+    r'|  <timezone>[0-9A-Za-z_+/.-]{1,64}</timezone>'
     r'|  <(?P<free>assistant|project|current_page|working_on|provider|model|meta)>[^\n<]{1,4096}</(?P=free)>'
 )
 
