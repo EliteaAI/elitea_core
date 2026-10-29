@@ -12,6 +12,7 @@ from typing import Optional
 from pylon.core.tools import log
 from tools import VaultClient, rpc_tools, this, config as c, auth
 
+from .internal_base_url import internal_base_url
 from .mcp_config import is_mcp_exposure_enabled
 from .support_utils import get_support_config
 
@@ -599,15 +600,8 @@ def _get_user_token(user_id: int) -> str | None:
 
 
 def _get_internal_base_url() -> str:
-    """Base URL of the internal MCP toolkits: elitea_core ``base_url`` when set, else the in-cluster pylon_main.
-
-    Never the shared public ``app_host``: through the public edge the toolkit's request is redirected to the
-    login page and every internal toolkit ends with no tools (#7278)."""
-    try:
-        configured = this.descriptor.config.get('base_url')
-    except AttributeError:  # the descriptor is not populated yet
-        configured = None
-    return (configured or 'http://pylon_main:8080').rstrip('/')
+    """Base URL of the internal MCP toolkits, chosen once per process (``internal_base_url``, #7278)."""
+    return internal_base_url()
 
 
 # Internal Elitea MCP endpoints always have the shape .../app/<project_id>/mcp/<suffix>, where

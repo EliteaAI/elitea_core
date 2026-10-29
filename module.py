@@ -848,6 +848,9 @@ class Module(module.ModuleModel):
     def init(self):
         # Fail fast on a misconfigured governance ceiling, before anything can consult the switch
         init_governance(self)
+        # Choose the internal MCP toolkits' base URL once, here, so its DNS lookup is never on a request (#7278)
+        from .utils.internal_base_url import internal_base_url  # pylint: disable=C0415
+        internal_base_url(self.descriptor.config)
         #
         self.bp = self.descriptor.init_all(url_prefix="/app")
 
