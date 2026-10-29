@@ -242,7 +242,7 @@ class TestSkillMd:
     def test_auto_selection_is_exported(self, env):
         markdown = env.md.skill_to_md(self.skill({'llm_settings': {'selection': AUTO}}))
         frontmatter = self.imported_frontmatter(env, markdown)
-        assert env.md.run_settings_from_frontmatter(frontmatter)['llm_settings'] == {'selection': AUTO}
+        assert env.md.run_settings_from_frontmatter(frontmatter)['llm_settings'] == {'selection': AUTO, 'max_tokens': -1}
 
     def test_skill_without_run_settings_exports_plain_frontmatter(self, env):
         markdown = env.md.skill_to_md(self.skill(None))

@@ -44,6 +44,7 @@ RUN_SETTINGS_METADATA_KEYS = {
     'selection': 'elitea-model-selection',
 }
 JSON_ENCODED_METADATA_KEYS = (TAGS_METADATA_KEY, RUN_SETTINGS_METADATA_KEYS['selection'])
+AUTO_MAX_TOKENS = -1
 FLAG_STRINGS = {'true': True, 'false': False}
 
 
@@ -163,6 +164,8 @@ def encode_elitea_metadata(version_name: Optional[str], tags: List[str], run_set
     if version_name and version_name != DEFAULT_VERSION_NAME:
         metadata[VERSION_METADATA_KEY] = version_name
     for field, value in run_settings_to_frontmatter(run_settings).items():
+        if field == 'max_tokens' and value == AUTO_MAX_TOKENS:
+            continue
         key = RUN_SETTINGS_METADATA_KEYS[field]
         if key in JSON_ENCODED_METADATA_KEYS:
             metadata[key] = json.dumps(value, ensure_ascii=False)
@@ -184,6 +187,7 @@ def decode_elitea_metadata(metadata: dict) -> Dict[str, Any]:
         if key in metadata
     }
     if run_settings:
+        run_settings.setdefault('max_tokens', AUTO_MAX_TOKENS)
         decoded[RUN_SETTINGS_FRONTMATTER_KEY] = run_settings
     return decoded
 

@@ -193,6 +193,11 @@ class TestExportFollowsTheSpec:
         assert frontmatter['metadata']['elitea-version'] == 'v2'
         assert frontmatter['metadata']['elitea-temperature'] == '0.2'
 
+    def test_auto_max_tokens_is_left_out_of_the_export(self, md):
+        run_settings = {'llm_settings': {'model_name': 'gpt-4.1', 'max_tokens': -1}}
+        _, frontmatter = exported(md, run_settings=run_settings)
+        assert frontmatter['metadata'] == {'elitea-model': 'gpt-4.1'}
+
     def test_stale_elitea_metadata_in_the_stored_frontmatter_is_not_exported(self, md):
         meta = {'frontmatter': {'metadata': {'author': 'me', 'elitea-tags': '["old"]'}}}
         _, frontmatter = exported(md, meta=meta)
@@ -225,6 +230,13 @@ class TestReimportRestoresEliteaFields:
         }
         assert version['meta'] == {'frontmatter': {'metadata': {'author': 'me'}}}
 
+    def test_auto_max_tokens_left_out_of_the_export_comes_back_as_auto(self, md):
+        markdown, _ = exported(md, run_settings={'llm_settings': {'model_name': 'gpt-4.1', 'max_tokens': -1}})
+
+        _, _, version = imported_version(md, markdown)
+
+        assert version['run_settings']['llm_settings'] == {'model_name': 'gpt-4.1', 'max_tokens': -1}
+
     def test_a_legacy_export_still_imports(self, md):
         legacy = (
             '---\nname: legacy\ndescription: d\nelitea_version: v3\ntags:\n- python\n'
@@ -250,7 +262,10 @@ class TestReimportRestoresEliteaFields:
         )
         _, _, version = imported_version(md, typed)
         assert version['tags'] == [{'name': 'python'}]
-        assert version['run_settings'] == {'ignore_project_context': False, 'llm_settings': {'temperature': 0.4}}
+        assert version['run_settings'] == {
+            'ignore_project_context': False,
+            'llm_settings': {'temperature': 0.4, 'max_tokens': -1},
+        }
 
     def test_broken_json_is_rejected_with_the_key_named(self, md):
         broken = "---\nname: broken\ndescription: d\nmetadata:\n  elitea-tags: '[python'\n---\nBody"
@@ -541,7 +556,7 @@ class TestSkillsEmbeddedInAgentMarkdown:
         assert unpacked['tags'] == [{'name': 'release'}]
         assert unpacked['run_settings'] == {
             'ignore_project_context': True,
-            'llm_settings': {'model_name': 'gpt-4.1', 'temperature': 0.3},
+            'llm_settings': {'model_name': 'gpt-4.1', 'temperature': 0.3, 'max_tokens': -1},
         }
         assert unpacked['meta'] == {'frontmatter': {'license': 'MIT', 'metadata': {'author': 'me'}}}
 
@@ -638,7 +653,7 @@ def test_the_import_wizard_unpacks_embedded_skill_frontmatter(skill_rpc, md):
     assert errors == []
     [version] = skill_rpc.imported[0]['versions']
     assert version['tags'] == [{'name': 'release'}]
-    assert version['run_settings']['llm_settings'] == {'model_name': 'gpt-4.1', 'temperature': 0.3}
+    assert version['run_settings']['llm_settings'] == {'model_name': 'gpt-4.1', 'temperature': 0.3, 'max_tokens': -1}
     assert version['meta']['frontmatter'] == {'license': 'MIT', 'metadata': {'author': 'me'}}
 
 
