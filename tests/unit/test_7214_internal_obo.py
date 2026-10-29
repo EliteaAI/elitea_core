@@ -311,7 +311,7 @@ def test_a_tampered_token_is_invalid(ns, env, change):
     forged = {
         "body": "eio1." + base64.urlsafe_b64encode(json.dumps({**claims_of(token), "uid": 1}).encode()).decode().rstrip("=")
                 + "." + mac,
-        "mac": f"eio1.{body}.{mac[:-2]}AA",
+        "mac": f"eio1.{body}.{mac[:-2]}" + ("BB" if mac.endswith("AA") else "AA"),   # always differs from the real MAC
         "prefix": "eio2." + token[5:],
         "truncate": f"eio1.{body}",
         "huge": "eio1." + "A" * 5000 + "." + mac,
