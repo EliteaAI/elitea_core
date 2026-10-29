@@ -1,3 +1,4 @@
+import json
 from json import loads
 from datetime import datetime
 from typing import List, NamedTuple, Optional, Tuple, Literal, Generator
@@ -6,7 +7,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import ValidationError
 
-from tools import context, db, serialize, store_secrets, rpc_tools, auth
+from tools import context, db, serialize, store_secrets, rpc_tools, auth, this
 from pylon.core.tools import log
 
 from .utils import get_public_project_id, parse_ids_filter
@@ -53,6 +54,31 @@ def connection_errors_from(err: dict):
     payload = ctx_error.args[0] if getattr(ctx_error, 'args', None) else ctx_error
     if isinstance(payload, dict) and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL in payload:
         return payload[ToolValidatedDetails.CONNECTION_ERROR_SENTINEL]
+    return None
+
+
+def governed_refusal_of(connection_errors) -> str | None:
+    """The first governed refusal (``{"code", "error"}``, the refusal shape the UI reads) among the connection errors
+    of a toolkit: only the governed probe gives a connection error a ``code`` (#7281). ``None`` otherwise."""
+    for error in connection_errors or ():
+        if isinstance(error, dict) and isinstance(error.get('code'), str) and error['code']:
+            return json.dumps({'code': error['code'], 'error': error.get('message') or ''})
+    return None
+
+
+def _nested_governed_refusal(ex) -> str | None:
+    """The governed refusal a sub-agent's validation raised (``governed_refusal_of``, as ``Value error, <json>``)."""
+    if not isinstance(ex, ValidationError):
+        return None
+    for err in ex.errors(include_url=False, include_context=False, include_input=False):
+        message = err.get('msg') or ''
+        body = message[len('Value error, '):] if message.startswith('Value error, ') else ''
+        try:
+            found = json.loads(body) if body.startswith('{') else None
+        except ValueError:
+            found = None
+        if isinstance(found, dict) and set(found) == {'code', 'error'}:
+            return body
     return None
 
 
@@ -938,17 +964,53 @@ def _inject_oauth_tokens(config_data: dict, mcp_tokens: dict) -> dict:
     return config_data
 
 
+# What the validators show no marker for: the user may not test saved credentials, or the check could not run right
+# now (the governed pool is busy, a service is down) — not a fact about the credential (#7281)
+NOT_CHECKED = frozenset({'DENIED_RBAC', 'DEPENDENCY_UNAVAILABLE', 'RATE_LIMITED', 'WORKER_CAPABILITY_UNAVAILABLE',
+                         'AUDIT_UNAVAILABLE', 'STALE_CONTEXT'})
+
+
+def _governed_connection_error(config: dict, project_id, user_id) -> dict | None:
+    """Under enforce, the connection check of a saved credential is the governed probe (#7281): the stored
+    configuration and a single-use ticket go to the governed worker, which asks Main for the value through the trusted
+    release (audited); nothing expanded here is sent. ``None`` when it passed, or when nothing could be checked
+    (``NOT_CHECKED``); else the connection error with the probe's code and readable text. A kept outcome answers a
+    repeat for a short while (``reuse``)."""
+    data = config['data']
+    answer = this.module.governed_check_connection(
+        data.get('configuration_project_id') or project_id, data.get('configuration_uuid'), config['type'], user_id,
+        reuse=True)
+    if isinstance(answer, dict) and (answer.get('success') is True or answer.get('code') in NOT_CHECKED):
+        return None
+    answer = answer if isinstance(answer, dict) else {}
+    error = {
+        'configuration_title': config['title'],
+        'configuration_type': config['type'],
+        'message': answer.get('message') or 'The credential check was refused.',
+        'requires_authorization': answer.get('requires_authorization') is True,
+        'auth_metadata': answer.get('auth_metadata'),
+    }
+    if answer.get('code'):
+        error['code'] = answer['code']
+    return error
+
+
 def _check_configurations_connection_from_expanded_settings(
     expanded_settings: dict,
     mcp_tokens: dict = None,
+    project_id: int = None,
+    user_id: int = None,
 ) -> list[dict] | None:
     """
     Run connection checks against already-expanded toolkit settings.
     Called by:
     - ToolValidatedDetails.check_connection model_validator (reuses self.settings,
       avoiding a second expand_toolkit_settings call)
+    Under enforce a saved credential is checked through the governed probe instead (``_governed_connection_error``).
     """
     mcp_tokens = mcp_tokens or {}
+    profile = getattr(this.module, 'governance_profile', None)
+    governed = getattr(profile, 'enabled', False) is True
 
     # Find all configurations in expanded settings
     configurations = _find_configurations_in_settings(expanded_settings)
@@ -995,6 +1057,12 @@ def _check_configurations_connection_from_expanded_settings(
                 f"Skipping connection check for {config_type}/{config_title}: "
                 f"delegated OAuth configured, no token available at validation time"
             )
+            continue
+
+        if governed and getattr(registry_item, 'section', None) == 'credentials':
+            error = _governed_connection_error(config, project_id, user_id)
+            if error is not None:
+                errors.append(error)
             continue
 
         # Inject OAuth tokens for configurations that need them
@@ -1075,8 +1143,12 @@ def _validate_toolkit_type_application(
         # Circular check is now done inside validate_application_version_details
         validate_application_version_details(project_id, application_id, application_version_id, user_id, _visited=_visited)
     except Exception as ex:
+        refusal = _nested_governed_refusal(ex)   # the sub-agent's credential was refused: say what, and where (#7281)
+        if refusal is not None:
+            found = json.loads(refusal)
+            refusal = json.dumps({'code': found['code'], 'error': f"{agent_name}: {found['error']}"})
         raise ValueError(
-            f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}"
+            refusal or f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}"
         ) from None
 
     return True
@@ -1177,7 +1249,15 @@ def validate_application_version_details(
                 except ValidationError as e:
                     for err in e.errors():
                         connection_errors = connection_errors_from(err)
-                        if connection_errors is not None:
+                        refusal = governed_refusal_of(connection_errors)
+                        if refusal is not None:   # the governed probe refused (enforce only): readable (#7281)
+                            application_toolkit_errors.append({
+                                'type': 'value_error',
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': {'error': refusal},
+                            })
+                        elif connection_errors is not None:
                             application_toolkit_errors.append({
                                 'type': 'connection_error',
                                 'loc': ('tools', tool['id'], '__root__'),

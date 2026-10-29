@@ -207,15 +207,19 @@ def fetch_assertion(module, tid, oid, refresh=False, timeout=RPC_TIMEOUT_S) -> d
         raise DelegationRefused(UNAVAILABLE) from None
 
 
-def _assertion(module, person, refresh, left, client_id) -> str:
+def _assertion(module, person, refresh, left, client_id) -> tuple:
+    """``(assertion, custody end)``: the person's Entra access token, and when their custody ends (epoch seconds, or
+    ``None`` from an auth_oidc that does not say). No custody drops every token cached for the person (#7281)."""
     if left() < MIN_CALL_S:
         raise DelegationRefused(UNAVAILABLE)
     answer = fetch_assertion(module, person["tid"], person["oid"], refresh, timeout=min(RPC_TIMEOUT_S, left()))
     if not isinstance(answer, dict):
         raise DelegationRefused(UNAVAILABLE)
     if answer.get("ok") is not True:
-        raise DelegationRefused(
-            ASSERTION_UNAVAILABLE if answer.get("code") in (None, "ASSERTION_UNAVAILABLE") else UNAVAILABLE)
+        if answer.get("code") in (None, "ASSERTION_UNAVAILABLE"):
+            forget_subject(person["tid"], person["oid"])   # signed out or expired: nothing minted from it serves on
+            raise DelegationRefused(ASSERTION_UNAVAILABLE)
+        raise DelegationRefused(UNAVAILABLE)
     token = answer.get("assertion")
     claims = _claims(token)
     if claims is None:
@@ -224,7 +228,8 @@ def _assertion(module, person, refresh, left, client_id) -> str:
         raise DelegationRefused(SUBJECT_MISMATCH)   # custody under the wrong person is never exchanged
     if claims.get("aud") not in (client_id, f"api://{client_id}"):
         raise DelegationRefused(APP_UNAVAILABLE)    # a login token for another app cannot be exchanged by this one
-    return token
+    ends = answer.get("custody_expires_at")
+    return token, ends if isinstance(ends, int) and not isinstance(ends, bool) else None
 
 
 # --- the exchange ----------------------------------------------------------------------------
@@ -286,7 +291,7 @@ def _exchange(url, client, assertion, scopes, left) -> tuple:
     raise DelegationRefused(EXCHANGE_FAILED)
 
 
-_CACHE = {}   # (tid, oid, client id, resource, scopes) -> (token, expires_at): this process only
+_CACHE = {}   # (tid, oid, client id, resource, scopes) -> (token, expires_at, custody end or None): this process only
 _PROBES = {}  # (reference id, tid, oid) -> (code or None, until)
 _LOCK = threading.Lock()
 
@@ -328,22 +333,24 @@ def check_config(module) -> bool:
 
 
 def _cached(key, now) -> Optional[tuple]:
+    """``(token, expires_at)`` while the token has life left and the custody it was minted from has not ended."""
     with _LOCK:
         hit = _CACHE.get(key)
-        if hit is not None and hit[1] - now >= MIN_REMAINING_S:
-            return hit
+        if hit is not None and hit[1] - now >= MIN_REMAINING_S and (hit[2] is None or hit[2] > now):
+            return hit[:2]
         _CACHE.pop(key, None)
         return None
 
 
-def _keep(key, token, expires_at, now) -> None:
+def _keep(key, token, expires_at, custody_ends, now) -> None:
     with _LOCK:
         if len(_CACHE) >= MAX_CACHE_ENTRIES:
-            for stale in [item for item, (_, until) in _CACHE.items() if until - now < MIN_REMAINING_S]:
+            for stale in [item for item, (_, until, ends) in _CACHE.items()
+                          if until - now < MIN_REMAINING_S or (ends is not None and ends <= now)]:
                 del _CACHE[stale]
             while len(_CACHE) >= MAX_CACHE_ENTRIES:
                 del _CACHE[next(iter(_CACHE))]   # the oldest
-        _CACHE[key] = (token, expires_at)
+        _CACHE[key] = (token, expires_at, custody_ends)
 
 
 def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -> tuple:  # pylint: disable=R0914
@@ -373,8 +380,10 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
     deadline = deadline if deadline is not None else time.monotonic() + BUDGET_S
     left = lambda: max(0.0, deadline - time.monotonic())  # noqa: E731
 
+    custody = {}
+
     def exchange(refresh):
-        assertion = _assertion(module, person, refresh, left, client[0])
+        assertion, custody["ends"] = _assertion(module, person, refresh, left, client[0])
         if left() < MIN_CALL_S:
             raise DelegationRefused(UNAVAILABLE)   # not started: it would end after the worker stopped waiting
         return _exchange(url, client, assertion, scopes, left())
@@ -387,7 +396,7 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
         outcome, token, expires_at = exchange(True)
         if outcome != "ok":
             raise DelegationRefused(EXCHANGE_FAILED)
-    _keep(key, token, expires_at, now)
+    _keep(key, token, expires_at, custody["ends"], now)
     return token, expires_at
 
 

@@ -366,5 +366,5 @@ def test_what_the_probe_sends_is_what_the_release_accepts(ns, env, probe):
 def test_the_governed_probe_is_a_module_method_over_the_same_function():
     text = (PLUGIN_ROOT / "methods" / "governed_credentials.py").read_text()
     assert "def governed_check_connection(" in text and "self, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False," in text
-    assert "self, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding)" in text   # the same function
+    assert "self, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, reuse=reuse)" in text   # the same function (#7281: + reuse)
     assert "def release_credential(" in text and "return release_credential(" in text

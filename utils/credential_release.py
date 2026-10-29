@@ -51,7 +51,10 @@ from tools import auth, db, this
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
 from . import entra_obo
-from .credential_decision import MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure
+from .credential_decision import (
+    MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure, subject_grant_in_force,
+    subject_grant_key,
+)
 from .credential_slots import DELEGATED_FIELD, MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
 from .governance import governance_lifecycle_active
@@ -349,13 +352,16 @@ class _Scope:  # pylint: disable=R0903
     may be released, the audit identity of the requester of each slot, and when the release stops being usable."""
 
     def __init__(self, binding_project_id, allow_validated, expires_at, events, on_revoke=None,
-                 allow_pending=False, person=None):  # pylint: disable=R0913
+                 allow_pending=False, person=None, grant_checked=None):  # pylint: disable=R0913
         self.binding_project_id, self.allow_validated, self.expires_at = binding_project_id, allow_validated, expires_at
         self.events, self.on_revoke = events, on_revoke
         self.allow_pending = allow_pending   # a probe of a value the credential onboarding has just written
-        # (subject, tenant, caller) of the context row the checks read: who an Entra-delegated slot acts for. A probe
-        # ticket names no person, so a delegated slot is refused there (the credential onboarding probes it itself)
+        # (subject, tenant, caller) of the context row the checks read, or of a probe ticket's verified person
+        # (#7281): who an Entra-delegated slot acts for. None: a delegated slot is refused
         self.person = person
+        # a probe only: whether the grant its ticket names was checked again here (a shared delegated reference needs
+        # it, C9-SEC-64); None for a run, whose grants are rechecked with its admission (checks 6, 7)
+        self.grant_checked = grant_checked
 
 
 def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
@@ -580,7 +586,42 @@ def _check_probe(module, request: _Request) -> _Scope:
         toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
         credential_generation=slot["credential_generation"])
     request.known.update(user_ref=event["user_ref"])
-    return _Scope(request.project_id, True, _horizon(), [event], allow_pending=ticket.get("onboarding") is True)
+    person = _ticket_person(ticket.get("person"))
+    if ticket.get("grant") is not None and person is not None:
+        _recheck_probe_grant(request.project_id, slot["credential_ref"], person, ticket["grant"])
+    return _Scope(request.project_id, True, _horizon(), [event], allow_pending=ticket.get("onboarding") is True,
+                  person=person, grant_checked=ticket.get("grant") is not None and person is not None)
+
+
+def _recheck_probe_grant(project_id, credential_ref, person, grant) -> None:
+    """The grant a probe of a shared Entra-delegated reference was opened on must still be in force, at the same
+    epoch, when the token is minted (a run's release rechecks its grants the same way, ``recheck_development``). One
+    facts read, a delegated probe of a shared reference only."""
+    if not isinstance(grant, dict) or not isinstance(grant.get("grant_id"), str) or not _int(grant.get("epoch")):
+        raise adm._denied("STALE_CONTEXT")
+    subject_ref = f"idp:{person[1]}:{person[0]['oid']}"
+    try:
+        facts = this.for_module("secrets").module.credential_use_facts(
+            project_id, [], [], [credential_ref], subject_grants=[(credential_ref, subject_ref)])
+        held = (facts.get("subject_grants") or {}).get(subject_grant_key(credential_ref, subject_ref))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: the probe grant could not be read (%s)", type(exc).__name__)
+        raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
+    found = subject_grant_in_force(held, adm._now(), grant_id=grant["grant_id"])
+    if found is None:
+        raise adm._denied("DENIED_GRANT")
+    if found.get("revocation_epoch") != grant["epoch"]:
+        raise adm._denied("EPOCH_MISMATCH")
+
+
+def _ticket_person(found) -> Optional[tuple]:
+    """The verified person an Entra-delegated probe acts for (``credential_probe`` put it in the ticket, from the
+    signed-in session that asked, #7281), as a run's context row carries its person; ``None`` when the ticket names
+    none: a delegated slot is then refused (``DENIED_DELEGATION_UNSUPPORTED_CALLER``)."""
+    if not isinstance(found, dict) or set(found) != {"issuer", "tid", "oid"} or \
+            not all(isinstance(value, str) and value for value in found.values()):
+        return None
+    return {"kind": "delegation", "issuer": found["issuer"], "oid": found["oid"]}, found["tid"], {"kind": "user"}
 
 
 # --- the store read and the reply ------------------------------------------------------------
@@ -708,6 +749,8 @@ def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadl
     try:
         if scope.person is None:
             raise entra_obo.DelegationRefused(entra_obo.CALLER_UNSUPPORTED)
+        if scope.grant_checked is False and delegation.get("ownership_class") != "personal":
+            raise _denied_at(request, "DENIED_GRANT")   # a probe of a shared reference whose ticket names no grant
         person = entra_obo.run_subject(*scope.person)
         token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id, deadline)
     except entra_obo.DelegationRefused as refused:
