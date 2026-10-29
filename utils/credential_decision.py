@@ -55,6 +55,8 @@ DEVELOPMENT_GRANT_REQUIRED = "DENIED_DEVELOPMENT_CREDENTIAL"
 PROFILE_GOVERNED, PROFILE_DEVELOPMENT = "governed", "development"
 DELEGATED_AUTH_MODE = "entra_delegated"   # a reference with no value: a token is minted at release (#6756 step 4)
 MANDATE_DELEGATION_UNSUPPORTED = "DENIED_MANDATE_DELEGATION_UNSUPPORTED"
+MANDATE_CONSENT_REQUIRED = "DENIED_MANDATE_CONSENT_REQUIRED"
+OWNER_DELEGATED = "owner_delegated"   # a mandate whose runs act with the owner's offline consent (#7131)
 WHOLE_TARGET = "*"
 MANDATE_SUBJECT_PREFIX = "mandate:"
 NESTED_FIELD = "<nested>"
@@ -100,6 +102,9 @@ class CredentialDecisionContext:
     subject_user_id: Optional[int] = None
     # ``development``: the editor's test chat of an unbound version (#7213); the grant is the author's, on any binding
     profile: str = PROFILE_GOVERNED
+    # A mandate run (#7131): ``{"source", "consented"}`` of the identity the mandate names, asked only once a delegated
+    # credential reaches check 4b; None (the deployment allows no owner identity): such a credential is refused
+    mandate_identity: Optional[Callable[[], Optional[Mapping]]] = None
 
 
 @dataclass(frozen=True)
@@ -464,8 +469,12 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
         known.update(auth_mode=DELEGATED_AUTH_MODE)
     if reference.get("state") != "active" or reference.get("store_kind") not in STORE_KINDS:   # 4. in force
         return verdict(False, "CREDENTIAL_REFERENCE_INACTIVE")
-    if known.get("auth_mode") and ctx.subject_kind == "mandate":                   # 4b. a person's sign-in, not a
-        return verdict(False, MANDATE_DELEGATION_UNSUPPORTED)                      #     mandate's owner (#7131)
+    if known.get("auth_mode") and ctx.subject_kind == "mandate":                   # 4b. a person's sign-in: only a
+        identity = ctx.mandate_identity() if ctx.mandate_identity is not None else None   # mandate acting with its
+        if not identity or identity.get("source") != OWNER_DELEGATED:              #     owner's consent (#7131)
+            return verdict(False, MANDATE_DELEGATION_UNSUPPORTED)
+        if not identity.get("consented"):
+            return verdict(False, MANDATE_CONSENT_REQUIRED)
     if reference.get("ownership_class") == "personal" and not holds_personal(ctx, reference):   # 5. a personal one
         return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")                  #    only its custodian may use
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval

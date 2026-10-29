@@ -403,6 +403,7 @@ CHANGES = {
     "allowed_targets": lambda row: ["other"], "max_runtime_s": lambda row: 61,
     "valid_until": lambda row: row.valid_until + timedelta(days=1), "revision": lambda row: 9, "created_by": lambda row: 99,
     "created_at": lambda row: row.created_at + timedelta(days=1),
+    "identity_source": lambda row: "owner_delegated",   # part of the approved scope (#7131)
 }
 
 

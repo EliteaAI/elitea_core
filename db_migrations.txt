@@ -524,3 +524,9 @@ Run admin task seed_eval_trajectory_dimensions
 # query, ADD COLUMN IF NOT EXISTS per schema that lacks it). Until then, in that schema, a governed run with internal
 # Elitea tools is refused (INTERNAL_TOKEN_UNAVAILABLE, fail closed); runs without them are not affected. Set the list with manage_agent_identity_binding (action=create or rebind,
 # platform_operations=read,build,credentials,run) or the binding REST API (platform_operations on create).
+
+# Issue #7131 (C-1009): mandates that name the identity their runs act with. autonomous_mandate gains the nullable columns
+# identity_source, identity_material_ref and identity_consented_at in every project schema. No task: the startup safety
+# net adds them (one catalog query, ADD COLUMN IF NOT EXISTS per schema that lacks them). They are read only where the
+# plugin config allows an identity (mandate_identity_sources, default []: nothing changes). The secrets plugin creates
+# its credential_offline_material table the same way (startup safety net / create_credential_governance_tables).

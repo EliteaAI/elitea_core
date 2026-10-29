@@ -251,6 +251,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.secret_fields_raises = None
         self.material = {}              # credential ref id -> {field path: value}
         self.delegations = {}           # credential ref id -> descriptor of an Entra-delegated reference (#6756)
+        self.secrets_extra = {}         # name -> callable added to the fake secrets plugin (#7131 offline material)
         self.release_calls = []         # (project_id, ref_id, generation, release_id, actor_ref, allow_validated)
         self.release_reply = None       # a fixed answer of `release_credential_material`
         self.batch_store = False        # does the secrets plugin offer `release_credential_materials` (perf PR 2)
@@ -549,8 +550,9 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.trigger_principal = load("utils", "trigger_principal")
     load("utils", "mcp_versioning")
     ns.internal_obo = load("utils", "internal_obo")   # the run token admission mints (#7214)
-    ns.adm = load("utils", "admission")
     ns.entra_obo = load("utils", "entra_obo")   # the on-behalf-of exchange of Entra-delegated credentials (#6756)
+    ns.mandate_identity = load("utils", "mandate_identity")   # a mandate owner's offline consent (#7131)
+    ns.adm = load("utils", "admission")
     ns.credential_release = load("utils", "credential_release")
     ns.credential_probe = load("utils", "credential_probe")
     ns.binding_admin = load("utils", "binding_admin")
@@ -819,6 +821,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                                             release_credential_material=release_credential_material)
             if env.batch_store:
                 secrets.release_credential_materials = release_credential_materials
+            for name, method in env.secrets_extra.items():   # more of the secrets plugin, per test (#7131)
+                setattr(secrets, name, method)
             return {
                 "tracing": tracing_module(),
                 "configurations": types.SimpleNamespace(configuration_credential_facts=configuration_credential_facts,

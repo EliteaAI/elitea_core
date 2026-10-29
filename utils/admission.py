@@ -46,7 +46,8 @@ from ..models.pd.admission import (
 )
 from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
-    ALLOWED as CREDENTIAL_USE_ALLOWED, DEVELOPMENT_GRANT_REQUIRED, PROFILE_DEVELOPMENT, USE_PERMISSION, WHOLE_TARGET,
+    ALLOWED as CREDENTIAL_USE_ALLOWED, DELEGATED_AUTH_MODE, DEVELOPMENT_GRANT_REQUIRED, PROFILE_DEVELOPMENT,
+    USE_PERMISSION, WHOLE_TARGET,
     CredentialDecisionContext, CredentialDecisionError, _uuid_text, binding_ref, collect_credential_uses, decide_credential_uses,
     CREDENTIAL_SECTION, _int_or_none, _payload_toolkits, configurations_in, read_configuration_facts, recheck_credentials,
     recheck_development, toolkit_secret_fields, user_may_use_credentials, walk_scope, want_configuration_facts,
@@ -57,6 +58,7 @@ from .exceptions import AdmissionDenied
 from .governance import MODE_AUDIT_ONLY, governance_lifecycle_active, is_auditing, is_governed, is_unavailable
 from .governance_settings import Check
 from . import internal_obo
+from .mandate_identity import identity_reader
 from .mandate_state import expire_if_due, suspend_owner_mandates
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
 from .trigger_principal import OPERATION_OF
@@ -195,6 +197,14 @@ MESSAGES = {
                                     "The run was not started.",
     "DELEGATION_EXCHANGE_FAILED": "Microsoft refused to issue a token for this credential (consent or site access "
                                   "missing); ask an administrator. The run was not started.",
+    # a mandate run acting with its owner's offline consent (#7131)
+    "DENIED_MANDATE_CONSENT_REQUIRED": "This scheduled or webhook run acts with the mandate owner's Microsoft sign-in, "
+                                       "which needs the owner's consent: it is missing, was withdrawn, or must be "
+                                       "given again because someone else changed the schedule. The owner gives it "
+                                       "under Governance, Mandates. The run was not started.",
+    "DENIED_MANDATE_CONSENT_EXPIRED": "Microsoft no longer accepts the mandate owner's consent (it expired or was "
+                                      "revoked at Microsoft). The owner gives it again under Governance, Mandates. "
+                                      "The run was not started.",
     # the run token of the internal Elitea MCP (#7214)
     "INTERNAL_TOKEN_UNAVAILABLE": "The built-in Elitea tools of this agent cannot get the run's own identity right now; "
                                   "the run was not started. Try again later.",
@@ -783,7 +793,7 @@ def _subject_of(principal: dict) -> dict:
 
 def _decide_credentials(  # pylint: disable=R0913
     module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False, rows=None,
-    can_use=None,
+    can_use=None, mandate_identity=None,
 ) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
     agent without governed credentials), or ``AdmissionDenied`` for the first refusal. ``shadow``: audit only, the
@@ -796,7 +806,7 @@ def _decide_credentials(  # pylint: disable=R0913
         policy_revision=module.governance_profile.policy_revision, now=_now(), expires_at=expires_at,
         can_use=can_use or user_may_use_credentials(user_id, request.binding_project_id),
         subject_kind="mandate" if subject["kind"] == "mandate" else "user_delegation", subject_user_id=user_id,
-        profile=PROFILE_DEVELOPMENT if binding.id is None else "governed",
+        profile=PROFILE_DEVELOPMENT if binding.id is None else "governed", mandate_identity=mandate_identity,
     )
     try:
         inline_fields = lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id)  # noqa: E731
@@ -1108,7 +1118,13 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
                 else RunDeadline(by_runtime, "RUNTIME_LIMIT_EXCEEDED"))
     # 5b. which credentials the run uses, and whether the agent may use them for the mandate
     _want_prefetched_facts(payload)
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, rows=rows)
+    decisions = _decide_credentials(
+        module, request, subject, binding, payload, expires_at, rows=rows,
+        mandate_identity=identity_reader(module, request.binding_project_id, mandate.id, request.trigger_ref, owner))
+    if any(getattr(decision, "auth_mode", None) == DELEGATED_AUTH_MODE for decision in decisions):
+        # the run acts with the owner's consent (#7131): its context names the owner's subject, which the release
+        # compares with the mandate's and the consent's
+        subject.update(issuer=issuer, oid=oid)
     # 5c. its sub-agents: none is admitted for a mandate yet, so one that carries a credential the mandate's own
     # decisions do not name refuses the run readably (the seal would refuse it too, less readably)
     prefetched = prefetched_tool_lists(payload)

@@ -50,7 +50,7 @@ from tools import auth, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
-from . import entra_obo
+from . import entra_obo, mandate_identity
 from .credential_decision import (
     MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure, subject_grant_in_force,
     subject_grant_key,
@@ -743,7 +743,9 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
 def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadline=None) -> tuple:
     """The value of an Entra-delegated slot: ``({"access_token": token}, expires_at)``. The slot asks for the token
     only; the run must be a signed-in person's, bound to the reference's tenant and custodian (``entra_obo``). The
-    token lives in this reply (sealed) and in ``entra_obo``'s in-memory cache, nowhere else. No read, no write here."""
+    token lives in this reply (sealed) and in ``entra_obo``'s in-memory cache, nowhere else. No read, no write here,
+    but for a mandate run acting with its owner's consent (#7131): the mandate's identity and the consent are read, a
+    rotated consent is kept, and one Microsoft refused is withdrawn (``mandate_identity``)."""
     if request.slot["fields"] != [DELEGATED_FIELD]:
         raise _denied_at(request, "STORE_NOT_FOUND")
     try:
@@ -751,8 +753,22 @@ def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadl
             raise entra_obo.DelegationRefused(entra_obo.CALLER_UNSUPPORTED)
         if scope.grant_checked is False and delegation.get("ownership_class") != "personal":
             raise _denied_at(request, "DENIED_GRANT")   # a probe of a shared reference whose ticket names no grant
-        person = entra_obo.run_subject(*scope.person)
-        token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id, deadline)
+        subject = scope.person[0]
+        if isinstance(subject, dict) and subject.get("kind") == "mandate" and \
+                mandate_identity.owner_delegated_allowed(module):
+            # a mandate run acting with its owner's offline consent (#7131): the owner's frozen subject and the
+            # consent kept for this mandate, read now
+            person, material = mandate_identity.release_person(scope.binding_project_id, *scope.person)
+            try:
+                token, expires = entra_obo.acquire_offline(
+                    module, person, delegation, scope.binding_project_id, material, deadline)
+            except entra_obo.DelegationRefused as refused:
+                if refused.code == entra_obo.CONSENT_EXPIRED:
+                    mandate_identity.consent_refused(scope.binding_project_id, subject, material)
+                raise
+        else:
+            person = entra_obo.run_subject(*scope.person)
+            token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id, deadline)
     except entra_obo.DelegationRefused as refused:
         raise _denied_at(request, refused.code) from None
     expires_at = min(scope.expires_at, adm._now() + timedelta(seconds=max(0, expires - time.time()
