@@ -476,6 +476,8 @@ def test_the_chat_payload_error_handlers_send_the_coded_content():
         and any(_calls(stmt, 'generate_payload') for stmt in node.body)
         for handler in node.handlers if getattr(handler.type, 'id', None) == 'PayloadGenerationError'
     ]
+    # The handler may build the frame itself (a dict with a 'content' key), raise a SioValidationError with an
+    # 'error', or hand the text to emit_refusal, whose fifth argument is the content
     sent = [
         value for handler in handlers for call in ast.walk(ast.Module(handler.body, []))
         if isinstance(call, ast.Dict) for key, value in zip(call.keys, call.values)
@@ -483,6 +485,8 @@ def test_the_chat_payload_error_handlers_send_the_coded_content():
     ] + [
         k.value for handler in handlers for call in _calls(ast.Module(handler.body, []), 'SioValidationError')
         for k in call.keywords if k.arg == 'error'
+    ] + [
+        call.args[4] for handler in handlers for call in _calls(ast.Module(handler.body, []), 'emit_refusal')
     ]
 
     assert len(sent) == len(handlers) == 2

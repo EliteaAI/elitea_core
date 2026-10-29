@@ -82,8 +82,52 @@ class SioEvents(StrEnum):
     eval_run_room_joined = 'eval_run_room_joined'
 
 
+# Machine-readable reason sent with a rejection of a socket whose handshake did not yield a user
+# that belongs to the project (anonymous after an expired session or a failed authorize call).
+# The client reacts by checking the session and re-handshaking instead of just showing the text.
+SOCKET_UNAUTHENTICATED_CODE = 'socket_unauthenticated'
+SOCKET_UNAUTHENTICATED_MESSAGE = (
+    'Your connection is not authorized for this project. '
+    'Reconnecting; please resend your message.'
+)
+# Shown when a send fails for a reason the user cannot act on, so the reply never hangs
+SEND_FAILED_MESSAGE = 'The request could not be started. Please try again.'
+
+
+def refusal_frame(event, error, stream_id, message_id, code=None) -> dict:
+    """The ``socket_validation_error`` frame the client settles a reply placeholder with."""
+    frame = {
+        'event': event,
+        'content': error,
+        'type': 'error',
+        'stream_id': stream_id,
+        'message_id': message_id,
+    }
+    if code:
+        frame['code'] = code
+    return frame
+
+
+def emit_refusal(sio, sid, room, event, error, stream_id, message_id) -> None:
+    """Tell the sender that a send was refused before it started a run.
+
+    Addressed to the sender's socket when there is one. A socket that reconnected has not rejoined the chat
+    room yet, so a refusal sent to the room would never reach it (#7024). Callers without a socket keep
+    using the room, which is where their listeners are.
+    """
+    target = {'to': sid} if sid else {'room': room}
+    sio.emit(
+        event=SioEvents.socket_validation_error.value,
+        data=refusal_frame(event, error, stream_id, message_id),
+        **target,
+    )
+
+
 class SioValidationError(Exception):
-    def __init__(self, sio, sid: str | None, event: str, error, stream_id: str = '', message_id: str | None = None):
+    def __init__(
+        self, sio, sid: str | None, event: str, error, stream_id: str = '',
+        message_id: str | None = None, code: str | None = None,
+    ):
         self.sio = sio
         self.type = 'error'
         self.event = event
@@ -91,6 +135,7 @@ class SioValidationError(Exception):
         self.stream_id = stream_id
         self.sid = sid
         self.message_id = message_id
+        self.code = code
         # self.room = get_event_room(
         #     event_name=event,
         #     room_id=stream_id
@@ -106,13 +151,7 @@ class SioValidationError(Exception):
     def emit_error(self) -> None:
         self.sio.emit(
             event=SioEvents.socket_validation_error.value,
-            data={
-                'event': self.event,
-                'content': self.error,
-                'type': self.type,
-                'stream_id': self.stream_id,
-                'message_id': self.message_id
-            },
+            data=refusal_frame(self.event, self.error, self.stream_id, self.message_id, self.code),
             to=self.sid,
         )
 

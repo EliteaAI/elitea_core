@@ -11,11 +11,14 @@ One platform-wide setting with three modes. There is no per-project mode in slic
 | Mode | Behaviour |
 |---|---|
 | `off` | **Exactly today's behaviour.** Nothing is verified, bound, decided or sealed. No identity-verifier call, no audit method, no credential facts, no secret store, no database read and no Vault module is touched on the dispatch path. The worker receives the same payload as before this feature. |
-| `audit_only` | The full decision is taken for each person's interactive run, as `enforce` would take it, and recorded. **Nothing is refused.** An event that `enforce` would have refused is written as `decision=allow, would_deny=true` with the refusal code in `reason_code`; one that would pass is `would_deny=false`. No context row is written and the run goes out as a legacy run. |
+| `audit_only` | The full decision is taken for each person's interactive run, as `enforce` would take it, and recorded. **Nothing is refused.** An event that `enforce` would have refused is written as `decision=allow, would_deny=true` with the refusal code in `reason_code`; one that would pass is `would_deny=false`. No context row is written and the run goes out as a legacy run. A built-in Elitea tools toolkit that still authenticates with a personal token is recorded as `LEGACY_PAT_INTERNAL_MCP`. A person's schedule run is rehearsed against its mandate only (one `would_deny` row, see below). |
 | `enforce` | Runs are refused unless identity, binding and every credential decision pass. Admitted runs carry a governed envelope and reference-only payloads. |
 
-Audit-only does **not** evaluate: runs started by schedules or webhooks, runs under a mandate, system-user runs,
-and child dispatches. The evaluation runs after the task is started, in the same request, so it adds no latency
+Audit-only does **not** evaluate: webhooks, legacy cron triggers, runs under a mandate beyond the existence, owner,
+state and operation of the version's mandate, system-user runs, and child dispatches. A person's schedule run
+(entry point `schedule`) is checked against the version's mandate: if enforce would refuse it, one
+`decision=allow, would_deny=true` event is written with `reason_code` `MANDATE_REQUIRED`, `MANDATE_INACTIVE`,
+`MANDATE_EXPIRED` or `DENIED_OPERATION` and the caller `schedule:entity:<id>`. The run goes ahead. The evaluation runs after the task is started, in the same request, so it adds no latency
 before the model call; `admission_duration_seconds{mode}` still measures it.
 
 "Off is exactly today's behaviour" is pinned by a test: for a stored `off` row, no row, a missing table,
@@ -48,7 +51,7 @@ Admin UI or with `PUT`:
 | `policy_revision` | Free label of the approved rules (change ticket, date), at most 128 characters. Required for `audit_only` and `enforce`. It is stamped on every admission and approval. |
 | `admit_legacy_pat` | Runs started with a personal API token may pass the identity check. They still cannot act for a person. Default off. |
 | `allow_runtime_domain_binding` | Bindings of mode `runtime_domain_binding` may be activated and used. Default off. |
-| `allow_development_runs` | The agent and pipeline editor's test chat may run a version without a binding as a *development run*: the signed-in author only, the author's own credentials only (personal, or project credentials granted to that person on any agent). Null (not chosen) means the default of the mode: on under `audit_only`, off under `enforce`. |
+| `allow_development_runs` | The editor's test chat, toolkit tests, on-demand indexing and chats with credential-bearing toolkits may run without a binding as a *development run*: the signed-in author only, the author's own credentials only (personal, or project credentials granted to that person on any agent). Null (not chosen) means the default of the mode: on under `audit_only`, off under `off` and `enforce`. A write that switches into `enforce` and sends no value switches it on; an explicit value always wins; a deployment already in `enforce` keeps its value at upgrade. |
 | `environment` | Label; refused with `FIELD_LOCKED` when the deployment sets it |
 | `change_note`, `expected_revision` | Required. The write is a compare-and-set on the revision (`REVISION_CONFLICT`). |
 
@@ -79,7 +82,7 @@ Behaviour of the stored state:
 | `audit_schema` | `audit_only` only | The audit schema accepts `would_deny` |
 | `audit_backlog` | yes | The outbox backlog is under its limit (evaluated live by every admission) |
 | `credential_facts` | yes | `secrets` and `configurations` provide the facts, release and secret-field methods, the sealed transport loads, and the facts version is at least 3 |
-| `master_key` | yes | The `database` store has its master key |
+| `master_key` | yes | The `database` store has its master key. The run token is signed with a key derived from the same master key whatever the engine, so set it in every engine once governance is on. |
 | `settings_table` | for saving | The settings tables exist |
 | `corporate_vault` | warning | A corporate Vault address is configured |
 | `governed_worker` | warning | A live worker announces the governed capabilities |
@@ -93,13 +96,20 @@ dependency text.
 |---|---|---|
 | Identity | `IDENTITY_EVIDENCE_MISSING`, `IDENTITY_SUBJECT_UNLINKED`, `IDENTITY_KIND_NOT_ADMITTED`, `IDENTITY_REVOKED`, `IDENTITY_EXPIRED`, `IDENTITY_SIGNATURE_INVALID`, `IDENTITY_AUDIENCE_MISMATCH`, `IDENTITY_TENANT_MISMATCH` | No verified person behind the run |
 | Binding | `DENIED_BINDING` | The agent version has no usable active binding (from the editor: development runs are off) |
+| | `DENIED_ENTRY_POINT` | This kind of run cannot be started from that entry point |
 | Development | `DENIED_DEVELOPMENT_CREDENTIAL` | A development run asked for a project credential the author holds no active grant on |
 | | `DENIED_DEVELOPMENT_CHILD` | A sub-agent of a development run asked for a credential the draft was not admitted for |
+| | `DEVELOPMENT_RUNS_DISABLED` | Development runs are switched off |
+| | `TOOLKIT_RUN_TOKEN_NOT_ADMITTED` | A toolkit run started with an API token |
+| Run token | `INTERNAL_TOKEN_INVALID`, `INTERNAL_TOKEN_EXPIRED`, `CONTEXT_NOT_LIVE` | The run token is forged or on a route it may not use; past its time limit; its run is no longer admitted |
+| | `INTERNAL_SCOPE_DENIED`, `INTERNAL_OPERATION_UNKNOWN`, `INTERNAL_TARGET_DENIED` | The operation is outside the binding's scope; the write has no operation; the call names another project |
+| | `INTERNAL_TOKEN_UNAVAILABLE`, `INTERNAL_MCP_ORIGIN_NOT_ALLOWED` | No run token could be minted; an Elitea MCP toolkit points to another address |
 | | `BINDING_DIGEST_MISMATCH` | The agent changed after its binding was approved |
 | Mandate | `MANDATE_REQUIRED` | No approved mandate or verified person covers this run |
 | | `AUTHORIZATION_REQUIRED` | A per-user schedule acts on a person's behalf without that person |
 | | `DENIED_OPERATION`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` | Wrong trigger kind, suspended or revoked, past validity |
 | | `RUNTIME_LIMIT_EXCEEDED` | The run overran `max_runtime_s` and was stopped |
+| | `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` | A scheduled or webhook run calls a sub-agent that uses credentials |
 | Credential | `CREDENTIAL_REFERENCE_REQUIRED` | The credential is not registered for governed use, or is selected by title or inline |
 | | `CREDENTIAL_REFERENCE_INACTIVE`, `CREDENTIAL_GENERATION_MISMATCH` | Reference not active or in a usable store; credential changed after approval |
 | | `CREDENTIAL_CLASS_NOT_ALLOWED` | A personal credential that belongs to someone else |
@@ -108,6 +118,7 @@ dependency text.
 | Release | `RATE_LIMITED`, `STORE_DENIED`, `STORE_SEALED`, `STORE_UNAVAILABLE`, `STORE_TLS_INVALID`, `STORE_NOT_FOUND`, `STORE_VERSION_CONFLICT` | Release bound exceeded; the credential store refused or is unavailable |
 | Worker | `WORKER_CAPABILITY_UNAVAILABLE` | No live worker can honour the governed task |
 | Context | `STALE_CONTEXT`, `EPOCH_MISMATCH`, `UNKNOWN_SCHEMA_VERSION` | The admission is no longer valid, access was revoked since, or the record is not understood |
+| Delegated *(from PR #602/#7/#21/#786, pending)* | `DENIED_SUBJECT_MISMATCH`, `DENIED_ASSERTION_UNAVAILABLE`, `DENIED_ASSERTION_SOURCE_UNSUPPORTED`, `DENIED_MANDATE_DELEGATION_UNSUPPORTED`, `DENIED_DELEGATION_UNSUPPORTED_CALLER`, `DENIED_OAUTH_APP_UNAVAILABLE`, `DELEGATION_EXCHANGE_FAILED` | A Microsoft sign-in credential cannot be released for this run. Meaning and action: [operator runbook, section 8](operator-runbook.md#8-microsoft-sign-in-credentials-delegated) |
 | Platform | `AUDIT_UNAVAILABLE`, `DEPENDENCY_UNAVAILABLE` | The decision could not be taken or recorded. Nothing is let through; try again. |
 
 Allow reason codes: `ADMITTED`, `CREDENTIAL_USE_ALLOWED`, `CREDENTIAL_RELEASED`, `CREDENTIAL_PROBE_ALLOWED`,
@@ -120,7 +131,8 @@ Allow reason codes: `ADMITTED`, `CREDENTIAL_USE_ALLOWED`, `CREDENTIAL_RELEASED`,
 | Chat (Socket.IO) | The error event carries `{code, error}` and the chat shows an error card with that message |
 | Predict API | HTTP 403 `{code, error}` |
 | Webhook | HTTP 403 `{code, error}`; HTTP 503 for `DEPENDENCY_UNAVAILABLE` and `AUDIT_UNAVAILABLE` so the sender retries |
-| Pipeline schedule | The refusal is written to the run's History entry; the cron slot is consumed, so it does not retry every minute |
+| Pipeline schedule (legacy cron) | The refusal is written to the run's History entry; the cron slot is consumed, so it does not retry every minute |
+| A person's schedule (agent or pipeline), including Run now and Test run | The run is marked failed at once with the readable reason, the owner gets a "schedule failed" notice, and the run's chat says why. The run never stays *running*. |
 | Credential test (check connection) | HTTP 403 with `{success: false, code, message}`; a provider failure is `{success: false, message}` |
 | Operator API | `{error, code}` with a fixed message and a status per code: 400 invalid, 401, 403 permission or self-approval, 404, 409 state or concurrent change, 413 too large, 503 dependency or audit |
 
@@ -131,7 +143,8 @@ describe). Fields are closed and secret-shaped strings are rejected.
 
 | `event_type` | `reason_code` examples | Written when |
 |---|---|---|
-| `admission` | `ADMITTED`, or a refusal code | Each admission decision |
+| `admission` | `ADMITTED`, `ADMITTED_DEVELOPMENT`, or a refusal code | Each admission decision |
+| `platform_operation` | `PLATFORM_OPERATION`, `INTERNAL_SCOPE_DENIED`, `INTERNAL_OPERATION_UNKNOWN`, `INTERNAL_TARGET_DENIED`, `INTERNAL_TOKEN_INVALID` | A write through the built-in Elitea tools, before it is made, and a refusal of the run token. Reads in scope are not recorded. |
 | `decision` | `CREDENTIAL_USE_ALLOWED` (one per credential use; event id = `decision_id`), refusal codes | Admission credential decisions; refused context validation |
 | `credential_acquired` | `CREDENTIAL_RELEASED`, refusal codes (event id = `release_id`) | Every release after the request is well formed |
 | `probe` | `CREDENTIAL_PROBE_ALLOWED`, `_SUCCEEDED`, `_FAILED`; `CREDENTIAL_PROBE_STARTED`, `CREDENTIAL_REF_VALIDATED`, `CREDENTIAL_CONNECTION_CHECKED`, `_CHECK_FAILED` | Governed probe; operator probe of a reference |
@@ -238,7 +251,7 @@ idempotent and accept `dry_run`.
 
 | Not in slice 1 | Tracked in |
 |---|---|
-| Entra on-behalf-of exchange (`entra_obo` class, no stored material) | #6941 (part b), #7131 for autonomous runs on Entra resources |
+| Entra on-behalf-of exchange for **autonomous** runs (mandates on a person's refresh token). The exchange for a signed-in person's run is built (`entra_delegated`) but pending, see the [runbook](operator-runbook.md#8-microsoft-sign-in-credentials-delegated) | #7131 |
 | OAuth-authorized toolkit tokens and MCP OAuth/DCR registrations as governed references; `mcp_tokens` removed from payloads | #7132 |
 | Project-level governance (platform ceiling, optional floor, project override, project operator view); project administrators approving within their project | #7133 |
 | Owner self-service for personal credentials in EliteaUI (the owner writes the value through the API today) | #7130 |
