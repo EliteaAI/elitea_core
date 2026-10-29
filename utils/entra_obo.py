@@ -128,6 +128,14 @@ def _claims(token) -> Optional[dict]:
     return claims if isinstance(claims, dict) else None
 
 
+def broker_issuers(module) -> tuple:
+    """Issuers (exact strings) of the realms that broker the login to Entra (step 4b, ``entra_obo_broker_issuers``):
+    their identities carry Entra's own ``tid``/``oid`` mapped by the realm, and auth_oidc keeps the brokered Entra
+    sign-in under them. Empty by default: only an Entra issuer is a Microsoft sign-in."""
+    found = _plugin_config(module).get("entra_obo_broker_issuers") or ()
+    return tuple(found) if isinstance(found, (list, tuple)) else ()   # a plain string would match by substring
+
+
 # --- the app client: the one seam ------------------------------------------------------------
 
 def _plugin_config(module) -> dict:
@@ -346,8 +354,9 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
     whole release request must be done by (``deadline_for``); one request of one slot when absent. Raises
     ``DelegationRefused``."""
     if delegation.get("assertion_source") != "login":
-        raise DelegationRefused(SOURCE_UNSUPPORTED)   # a connected Microsoft account is the next slice (4b)
-    if person.get("issuer") is not None and not ENTRA_ISSUER.match(person["issuer"]):
+        raise DelegationRefused(SOURCE_UNSUPPORTED)   # a connected Microsoft account is not built (4b chose the broker)
+    if person.get("issuer") is not None and not ENTRA_ISSUER.match(person["issuer"]) and \
+            person["issuer"] not in broker_issuers(module):
         raise DelegationRefused(SOURCE_UNSUPPORTED)   # a Keycloak (or other) login holds no Entra token to exchange
     bind_subject(person, delegation)
     tenant = str(delegation.get("tenant_id", "")).lower()
