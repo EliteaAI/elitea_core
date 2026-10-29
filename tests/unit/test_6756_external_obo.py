@@ -1067,3 +1067,87 @@ def test_a_probe_of_a_stored_secret_asks_nothing_more_than_before(ns, env, monke
     assert len(env.secrets_calls) == 1 and env.subject_grant_calls[-1] is None   # the facts read of before, only
     [ticket] = [json.loads(v) for k, v in env.at_start[0].items() if k.startswith(ns.credential_release.PROBE_KEY)]
     assert set(ticket) == {"project_id", "credential_ref", "credential_generation", "task_name", "user_id"}
+
+
+# --- #7281 fix round: the probe release checks the shared reference's grant again --------------------------------
+
+def test_a_probe_of_a_shared_reference_names_its_grant_and_is_released_while_it_stands(ns, env, monkeypatch):
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    assert probe.check() == {"success": True}
+    assert probe.ticket()[1]["grant"] == {"grant_id": probe.cred.grant_id, "epoch": 4}
+    reply, _ = probe.release()
+    assert reply["ok"] is True, reply
+
+
+@pytest.mark.parametrize("change, code", [
+    (lambda grant: grant.update(state="revoked"), "DENIED_GRANT"),        # revoked while the probe was open
+    (lambda grant: grant.update(revocation_epoch=5), "EPOCH_MISMATCH"),    # re-issued at another epoch
+])
+def test_a_grant_revoked_between_the_probe_and_the_release_refuses_the_token(ns, env, monkeypatch, change, code):
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    assert probe.check() == {"success": True}
+    change(env.grants[(1, probe.cred.key(PERSON_REF))])
+    reply, _ = probe.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, code)
+    assert env.custody.calls == [] and env.entra.posts == []   # no token minted
+    assert env.denied[-1]["reason_code"] == code
+
+
+def test_a_shared_reference_probe_ticket_without_its_grant_mints_nothing(ns, env, monkeypatch):
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    assert probe.check() == {"success": True}
+    probe_ref, ticket = probe.ticket()
+    del ticket["grant"]
+    env.at_start[0][ns.credential_release.PROBE_KEY + probe_ref] = json.dumps(ticket)
+    reply, _ = probe.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "DENIED_GRANT")
+    assert env.custody.calls == []
+
+
+# --- #7281 fix round: the validators' checks are answered from a kept outcome for a short while ------------------
+
+def _validator_check(ns, env, cred, ctype="sharepoint"):
+    return ns.credential_probe.governed_check_connection(env.module(), 1, cred.uuid, ctype, 42, reuse=True)
+
+
+def test_a_validator_asking_again_gets_the_kept_outcome_without_a_probe(ns, env, monkeypatch):
+    ns.credential_probe.forget_outcomes()
+    probe = Probe(ns, env, monkeypatch)
+    assert _validator_check(ns, env, probe.cred) == {"success": True}
+    started, recorded = len(env.started), len(env.recorded)
+    assert _validator_check(ns, env, probe.cred) == {"success": True}
+    assert (len(env.started), len(env.recorded)) == (started, recorded)   # no task, no audit row, no ticket
+    assert probe.check() == {"success": True} and len(env.started) == started + 1   # Check connection: always fresh
+    probe.cred.reference["generation"] = 2   # the reference changed: a new key
+    _validator_check(ns, env, probe.cred)
+    assert len(env.started) == started + 2
+    ns.credential_probe.forget_outcomes()
+
+
+def test_a_signed_out_person_loses_the_kept_outcome_and_a_missing_sign_in_is_never_kept(ns, env, monkeypatch):
+    ns.credential_probe.forget_outcomes()
+    probe = Probe(ns, env, monkeypatch)
+    _validator_check(ns, env, probe.cred)
+    ns.credential_probe.forget_outcomes(TID.upper(), OID)   # auth_oidc's drop event
+    started = len(env.started)
+    _validator_check(ns, env, probe.cred)
+    assert len(env.started) == started + 1
+    env.task_result = {"success": False, "reason_code": "DENIED_ASSERTION_UNAVAILABLE"}
+    ns.credential_probe.forget_outcomes()
+    for _ in range(2):
+        assert _validator_check(ns, env, probe.cred)["code"] == "DENIED_ASSERTION_UNAVAILABLE"
+    assert len(env.started) == started + 3   # asked again each time: a fresh sign-in clears the marker at once
+    ns.credential_probe.forget_outcomes()
+
+
+def test_a_kept_outcome_needs_the_same_grant(ns, env, monkeypatch):
+    ns.credential_probe.forget_outcomes()
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    _validator_check(ns, env, probe.cred)
+    env.grants.clear()
+    answer = _validator_check(ns, env, probe.cred)
+    assert answer["code"] == "DENIED_GRANT"   # the grant read precedes the kept outcome
+    ns.credential_probe.forget_outcomes()

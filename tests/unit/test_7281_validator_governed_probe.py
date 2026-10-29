@@ -1,11 +1,9 @@
 """#7281 (C-1009): under enforce the toolkit and agent validators check a saved credential through the governed probe.
 
-The connection check of ``ToolValidatedDetails`` ran on settings that ``expand_toolkit_settings`` had already
-resolved, and sent them to the indexer (``applications_configuration_check_connection``): the stored value of a
-governed credential travelled outside the trusted release. Under enforce it is now the governed probe (ids only, the
-worker asks for the value through the release); governance off and every configuration outside the ``credentials``
-section keep the old path byte for byte. The helpers are lifted out of the module with ``ast`` (the module itself
-cannot be imported without Pylon). Every value below is made up for the test.
+Validator probes go through the governed path: the probe gets the configuration's ids, and its outcome becomes the
+connection error the cards show. Governance off and every configuration outside the ``credentials`` section keep the
+path they had. The helpers are lifted out of the module with ``ast`` (the module itself cannot be imported without
+Pylon). Every value below is made up for the test.
 """
 import ast
 import pathlib
@@ -43,7 +41,8 @@ class Module:
         self.governance_profile = types.SimpleNamespace(enabled=enabled)
         self.answer, self.probes = answer if answer is not None else {"success": True}, []
 
-    def governed_check_connection(self, project_id, configuration_uuid, config_type, user_id):
+    def governed_check_connection(self, project_id, configuration_uuid, config_type, user_id, reuse=False):
+        assert reuse is True   # the validators may be answered from a kept outcome
         self.probes.append((project_id, configuration_uuid, config_type, user_id))
         return dict(self.answer)
 
@@ -58,7 +57,8 @@ def load(module, rpc):
     namespace = {"this": types.SimpleNamespace(module=module), "context": types.SimpleNamespace(rpc_manager=rpc),
                  "log": types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)}
     for node in TREE.body:
-        if isinstance(node, ast.FunctionDef) and node.name in NAMES:
+        named = isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "NOT_CHECKED" for t in node.targets)
+        if named or (isinstance(node, ast.FunctionDef) and node.name in NAMES):
             exec(textwrap.dedent(ast.get_source_segment(SOURCE, node)), namespace)  # noqa: S102
     return namespace["_check_configurations_connection_from_expanded_settings"]
 
@@ -101,8 +101,11 @@ def test_a_refusal_of_the_probe_is_the_connection_error_with_its_code_and_text()
     assert rpc.calls == []
 
 
-def test_a_user_who_may_not_test_credentials_sees_no_marker():
-    module, rpc = Module(enabled=True, answer={"success": False, "code": "DENIED_RBAC", "message": "x"}), Rpc()
+@pytest.mark.parametrize("code", ["DENIED_RBAC", "DEPENDENCY_UNAVAILABLE", "RATE_LIMITED",
+                                  "WORKER_CAPABILITY_UNAVAILABLE", "AUDIT_UNAVAILABLE"])
+def test_nothing_checked_is_no_marker(code):
+    """The user may not test saved credentials, or the governed pool is busy: not a fact about the credential."""
+    module, rpc = Module(enabled=True, answer={"success": False, "code": code, "message": "x"}), Rpc()
     assert load(module, rpc)(settings(), {}, 5, 9) is None
     assert [type_ for type_, _ in rpc.calls] == ["pgvector"]
 
@@ -139,3 +142,24 @@ def test_an_agents_validation_carries_the_probes_refusal_as_the_refusal_shape_up
     other = ValidationError.from_exception_data("M", [
         {"type": "value_error", "loc": ("tools", 1, "__root__"), "input": None, "ctx": {"error": "boom"}}])
     assert nested(other) is None and nested(RuntimeError("x")) is None
+
+
+def test_a_parent_agents_card_names_the_sub_agent_whose_credential_was_refused():
+    from pydantic import ValidationError
+    refusal_of, nested = _helpers()
+    refusal = refusal_of([{"message": "Sign in with Microsoft again, then retry.", "code": "DENIED_ASSERTION_UNAVAILABLE"}])
+
+    def child_validation(*_a, **_k):
+        raise ValidationError.from_exception_data("M", [
+            {"type": "value_error", "loc": ("tools", 1, "__root__"), "input": None, "ctx": {"error": refusal}}])
+
+    namespace = {"json": __import__("json"), "_nested_governed_refusal": nested,
+                 "application_ids_to_names": lambda *_a: ("obo-sharepoint-reader", "v1"),
+                 "validate_application_version_details": child_validation}
+    [node] = [n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_validate_toolkit_type_application"]
+    exec(textwrap.dedent(ast.get_source_segment(SOURCE, node)), namespace)  # noqa: S102
+    tool = {"settings": {"application_id": 1, "application_version_id": 2}}
+    with pytest.raises(ValueError) as raised:
+        namespace["_validate_toolkit_type_application"](None, tool, 5, 9, set())
+    assert __import__("json").loads(str(raised.value)) == {
+        "code": "DENIED_ASSERTION_UNAVAILABLE", "error": "obo-sharepoint-reader: Sign in with Microsoft again, then retry."}

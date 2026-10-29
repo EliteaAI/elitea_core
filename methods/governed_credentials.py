@@ -58,18 +58,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def governed_check_connection(  # pylint: disable=R0913
-        self, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False,
+        self, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False, reuse=False,
     ):
         """ Same process (the check-connection routes of ``configurations``, and the credential onboarding of
         ``secrets``): test a saved credential through the governed path. ``user_id`` is whose personal reference is
         preferred, ``actor_user_id`` (default ``user_id``) who holds ``credentials.probe`` (an operator testing a
-        personal reference for its custodian), ``onboarding`` lets a ``pending`` reference be probed. Returns
+        personal reference for its custodian), ``onboarding`` lets a ``pending`` reference be probed, ``reuse`` (the
+        validators, #7281) answers from an outcome kept a short while for the same tester and reference state. Returns
         ``{"success": True, ...}``, a provider failure ``{"success": False, "message"}``, an authorization request,
         or a refusal ``{"success": False, "code", "message"}``. Never raises. """
         from ..utils.credential_probe import governed_check_connection  # pylint: disable=C0415
         #
         return governed_check_connection(
-            self, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding)
+            self, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, reuse=reuse)
 
     @web.method()
     def governed_check_connection_many(  # pylint: disable=R0913

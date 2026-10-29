@@ -542,6 +542,16 @@ def test_a_toolkit_run_is_admitted_as_the_persons_run_whatever_the_development_s
                            ).reason_code == "IDENTITY_EXPIRED"
 
 
+@pytest.mark.parametrize("development", [True, False])
+def test_a_member_without_the_right_to_use_credentials_is_refused_a_toolkit_run(ns, env, development):
+    """A member of the project who may not use credentials there (``credentials.use``), even a granted one; a person
+    outside the project never reaches admission (the socket entry checks membership)."""
+    cred = Credential(env, uuid.uuid4(), tool_id=21, config_id=121)
+    env.permissions[42] = {EDIT}
+    assert refused_toolkit(env, ns, toolkit_call(cred), module_=module(env, allow_development_runs=development),
+                           toolkit_id=21).reason_code == "DENIED_RBAC"
+
+
 def test_a_toolkit_run_with_a_project_credential_the_caller_holds_no_grant_on_is_refused(ns, env):
     cred = Credential(env, uuid.uuid4(), grants=False)
     assert refused_toolkit(env, ns, toolkit_call(cred)).reason_code == DEV_CODE

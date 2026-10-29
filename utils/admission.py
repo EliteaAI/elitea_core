@@ -1184,7 +1184,9 @@ def _admit(  # pylint: disable=R0914
         # of its own to be governed by. Whatever the development-runs setting, which is about running agent
         # definitions that were not approved (#7281, #7229 item 2)
         if not _is_development(request, replace(settings, allow_development_runs=True)):
-            raise _denied("DEVELOPMENT_RUNS_DISABLED")
+            # a guard: system, token and anonymous callers are refused above, so only a non-interactive run of a
+            # person would reach it (none does today)
+            raise _denied("DENIED_ENTRY_POINT")
         binding, rows = _read_toolkit(request)
         permissions = _author_permissions(request)
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001

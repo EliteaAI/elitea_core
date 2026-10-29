@@ -26,6 +26,7 @@ What is and is not covered, stated so nobody has to guess:
   - a release is bound to the context (and the decision), not to a task id: any process of the run that holds both can ask
     (design-accepted, WP-1D design section 5).
 """
+import copy
 import re
 from typing import Callable, Mapping, Optional
 
@@ -273,6 +274,56 @@ def strip_secret_fields(config: dict, paths) -> list:
     if len(held) > MAX_SLOT_FIELDS:
         raise CredentialDecisionError(REQUIRED)
     return held
+
+
+# --- a validator task gets references, not values (#7281) -----------------------------------------------------------
+
+GOVERNED_VALUE = "governed-reference"   # what a validator sees where a governed credential holds a value
+MAX_MASK_DEPTH = 16
+
+
+def _set_path(node: dict, path: str, value) -> None:
+    *parents, leaf = path.split(".")
+    for part in parents:
+        node = node[part]
+    node[leaf] = value
+
+
+def is_credential_type(type_name) -> bool:
+    """Is ``type_name`` a configuration of the ``credentials`` section? A type the registry does not know counts as
+    one (its secret paths are then unknown and nothing is sent)."""
+    from plugins.configurations.models.pd.registry import CONFIG_TYPE_REGISTRY  # pylint: disable=C0415,E0401
+    entry = CONFIG_TYPE_REGISTRY.get(type_name)
+    return entry is None or getattr(entry, "section", None) == CREDENTIAL_SECTION
+
+
+def mask_credential_values(settings, is_credential_type: Callable, secret_fields_of: Callable = configuration_secret_fields):
+    """A copy of expanded toolkit settings in which every value held at a secret path of a ``credentials``
+    configuration is the fixed ``GOVERNED_VALUE``: the configuration keeps its selector, its non-secret fields and
+    the presence of each secret it holds (what a settings validator checks), never the value. Raises
+    ``CredentialDecisionError`` when the secret paths cannot be known (the caller then sends nothing)."""
+    masked = copy.deepcopy(settings)
+    configs = []
+
+    def walk(node, depth):
+        if depth > MAX_MASK_DEPTH:
+            raise CredentialDecisionError(REQUIRED)
+        if isinstance(node, dict):
+            if isinstance(node.get(CONFIGURATION_TYPE), str) and is_credential_type(node[CONFIGURATION_TYPE]):
+                configs.append(node)
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, depth + 1)
+
+    walk(masked, 0)
+    if configs:
+        paths = secret_paths_for({config[CONFIGURATION_TYPE] for config in configs}, secret_fields_of)
+        for config in configs:
+            for path in strip_secret_fields(copy.deepcopy(config), paths[config[CONFIGURATION_TYPE]]):
+                _set_path(config, path, GOVERNED_VALUE)
+    return masked
 
 
 def slot_of(entry: Mapping, fields: list, *, ticket: Optional[str] = None) -> dict:

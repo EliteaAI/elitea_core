@@ -964,15 +964,23 @@ def _inject_oauth_tokens(config_data: dict, mcp_tokens: dict) -> dict:
     return config_data
 
 
+# What the validators show no marker for: the user may not test saved credentials, or the check could not run right
+# now (the governed pool is busy, a service is down) — not a fact about the credential (#7281)
+NOT_CHECKED = frozenset({'DENIED_RBAC', 'DEPENDENCY_UNAVAILABLE', 'RATE_LIMITED', 'WORKER_CAPABILITY_UNAVAILABLE',
+                         'AUDIT_UNAVAILABLE', 'STALE_CONTEXT'})
+
+
 def _governed_connection_error(config: dict, project_id, user_id) -> dict | None:
     """Under enforce, the connection check of a saved credential is the governed probe (#7281): the stored
     configuration and a single-use ticket go to the governed worker, which asks Main for the value through the trusted
-    release (audited); nothing expanded here is sent. ``None`` when it passed, or when the user may not test saved
-    credentials (nothing to show them); else the connection error with the probe's code and readable text."""
+    release (audited); nothing expanded here is sent. ``None`` when it passed, or when nothing could be checked
+    (``NOT_CHECKED``); else the connection error with the probe's code and readable text. A kept outcome answers a
+    repeat for a short while (``reuse``)."""
     data = config['data']
     answer = this.module.governed_check_connection(
-        data.get('configuration_project_id') or project_id, data.get('configuration_uuid'), config['type'], user_id)
-    if isinstance(answer, dict) and (answer.get('success') is True or answer.get('code') == 'DENIED_RBAC'):
+        data.get('configuration_project_id') or project_id, data.get('configuration_uuid'), config['type'], user_id,
+        reuse=True)
+    if isinstance(answer, dict) and (answer.get('success') is True or answer.get('code') in NOT_CHECKED):
         return None
     answer = answer if isinstance(answer, dict) else {}
     error = {
@@ -1135,7 +1143,10 @@ def _validate_toolkit_type_application(
         # Circular check is now done inside validate_application_version_details
         validate_application_version_details(project_id, application_id, application_version_id, user_id, _visited=_visited)
     except Exception as ex:
-        refusal = _nested_governed_refusal(ex)   # the sub-agent's credential was refused: say what (#7281)
+        refusal = _nested_governed_refusal(ex)   # the sub-agent's credential was refused: say what, and where (#7281)
+        if refusal is not None:
+            found = json.loads(refusal)
+            refusal = json.dumps({'code': found['code'], 'error': f"{agent_name}: {found['error']}"})
         raise ValueError(
             refusal or f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}"
         ) from None

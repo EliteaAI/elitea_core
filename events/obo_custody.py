@@ -9,7 +9,9 @@ class Event:  # pylint: disable=R0903
         """auth_oidc dropped a person's custody at logout: drop the Graph tokens this process minted for them, so
         signing out stops delegated access at once rather than at the token's own expiry. ``payload``: ``{tid, oid}``
         only. A forged event can only make the next release exchange again."""
-        from ..utils import entra_obo  # pylint: disable=C0415
+        from ..utils import credential_probe, entra_obo  # pylint: disable=C0415
         #
         payload = payload if isinstance(payload, dict) else {}
         entra_obo.forget_subject(payload.get("tid"), payload.get("oid"))
+        if isinstance(payload.get("tid"), str) and isinstance(payload.get("oid"), str):
+            credential_probe.forget_outcomes(payload["tid"], payload["oid"])   # the validators' kept outcomes too
