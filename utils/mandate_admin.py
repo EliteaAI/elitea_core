@@ -19,7 +19,7 @@ from ..models.agent_identity import LIVE_MANDATE_STATES, AgentIdentityBinding, A
 from .admission import revoke_mandate_contexts, version_application_id
 from .binding_state import InvalidTransition
 from .definition_digest import DigestError, digest_for_version
-from .mandate_identity import IDENTITY_SOURCES, allowed_sources, retire_with_mandate
+from .mandate_identity import IDENTITY_SOURCES, allowed_sources, retire_consent
 from .mandate_state import (
     BUMPS_EPOCH, MAX_MANDATE_VALIDITY_DAYS, approve_mandate, expire_if_due, next_revision, transition_mandate,
 )
@@ -253,13 +253,13 @@ def _create(module, session, tracing, values, actor):
     if identity is not None and identity not in allowed_sources(module):
         raise MandateTaskError("IDENTITY_SOURCE_NOT_ALLOWED")
     owner = _owner_ref(values["owner_user_id"])
-    live, now = _live_mandate(session, project_id, version_id), _now()
+    live, now, expired = _live_mandate(session, project_id, version_id), _now(), None
     if live is not None:
         # An overdue active or suspended mandate does not hold the version's slot: renewal must be possible
         if not _overdue(live, now):
             raise MandateTaskError("MANDATE_EXISTS")
-        if not values["dry_run"]:
-            _expire_overdue(session, tracing, live, actor, now)
+        if not values["dry_run"] and _expire_overdue(session, tracing, live, actor, now):
+            expired = live.id
     revision = next_revision(session, project_id, version_id)
     if values["dry_run"]:
         return {"dry_run": True, "action": "create", "state": "draft", "revision": revision}
@@ -279,6 +279,8 @@ def _create(module, session, tracing, values, actor):
     mandate_ref = str(mandate.id)
     tracing.security_audit_record(session, _event("lifecycle", "MANDATE_DRAFT", mandate, actor, revocation_epoch=0))
     session.commit()
+    if expired is not None:   # the expired mandate's consent goes with it (#7131)
+        retire_consent(project_id, expired, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor}", actor)
     result = {"action": "create", "mandate_ref": mandate_ref, "revision": revision, "state": "draft", "dry_run": False}
     return {**result, "identity": identity} if identity is not None else result
 
@@ -323,6 +325,8 @@ def _change(module, session, tracing, values, actor):
         # Past its validity: refused, not acted on. An active or suspended one is expired on the spot.
         if not values["dry_run"] and _expire_overdue(session, tracing, mandate, actor, now):
             session.commit()
+            retire_consent(values["project_id"], values["mandate"], "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor}",
+                           actor)
         raise MandateTaskError("MANDATE_EXPIRED")
     starts, target = ("pending_approval",), "active"
     if action != "approve":
@@ -352,8 +356,8 @@ def _change(module, session, tracing, values, actor):
         "approval" if action == "approve" else "lifecycle", reason, mandate, actor,
         revocation_epoch=mandate.revocation_epoch, **extra))
     session.commit()
-    if target == "revoked":   # the owner's consent goes with the mandate (#7131); nothing is read when none is allowed
-        retire_with_mandate(module, values["project_id"], mandate_id, actor)
+    if target == "revoked":   # the owner's consent goes with the mandate (#7131), whatever the switch
+        retire_consent(values["project_id"], mandate_id, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor}", actor)
     return {"action": action, "mandate_ref": str(mandate_id), "state": target, "dry_run": False}
 
 

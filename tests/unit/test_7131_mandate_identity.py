@@ -51,9 +51,30 @@ ASSERTION = jwt(tid=TID, oid=OID, aud="api-client")
 @pytest.fixture(scope="module")
 def ns(tmp_path_factory):
     saved = dict(sys.modules)
-    yield mandate_env.install(PLUGIN_ROOT, tmp_path_factory.mktemp("mandate_identity"))
+    ns = mandate_env.install(PLUGIN_ROOT, tmp_path_factory.mktemp("mandate_identity"))
+    _install_schedules(ns)
+    yield ns
     sys.modules.clear()
     sys.modules.update(saved)
+
+
+def _install_schedules(ns):
+    """The real schedule tables and the scheduler's own claim and run writes, on the harness database (#7131 S1)."""
+    from fixtures.helpers import load_module_with_stubs  # pylint: disable=C0415
+    pkg = mandate_env.admission_env.PKG
+    models = sys.modules[f"{pkg}.models"]
+    models.config, models.db, models.db_tools = ns.tools.config, ns.tools.db, ns.tools.db_tools
+    ns.tools.config.POSTGRES_TENANT_SCHEMA = "tenant"
+    ns.Application = type("Application", (ns.Base,), {
+        "__tablename__": "applications", "__table_args__": {"schema": "tenant"},
+        "id": ns.sa.Column(ns.sa.Integer, primary_key=True)})
+    ns.schedules = load_module_with_stubs(PLUGIN_ROOT / "models" / "entity_schedule.py", f"{pkg}.models.entity_schedule")
+    for table in ns.Base.metadata.tables.values():   # PostgreSQL-only defaults do not exist on SQLite
+        for column in table.columns:
+            if column.server_default is not None and "jsonb" in str(getattr(column.server_default, "arg", "")):
+                column.server_default = None
+    ns.schedule_claim = load_module_with_stubs(PLUGIN_ROOT / "utils" / "schedule_claim.py",
+                                               f"{pkg}.utils.schedule_claim")
 
 
 class Entra:
@@ -68,12 +89,15 @@ class Entra:
 
 
 class AuthOidc:
-    """auth_oidc's offline RPCs; each checks the signature the real one checks."""
+    """auth_oidc's offline RPCs: each checks the signature the real one checks, and the refresh token travels sealed
+    both ways (``bus`` keeps every request and reply as sent, to show no token crosses in plain text)."""
 
     def __init__(self, obo):
-        self.obo, self.redeemed, self.granted, self.nonces = obo, [], [], set()
+        self.obo, self.redeemed, self.granted, self.nonces, self.bus = obo, [], [], set(), []
         self.answer = {"ok": True, "assertion": ASSERTION, "expires_at": int(time.time()) + 3600, "refresh_token": None}
         self.grant_answer = {"ok": True, "refresh_token": REFRESH, "assertion_source": "login"}
+        self.key = obo.seal_key(CUSTODY_KEY)
+        self.reply_binding = b""   # a test makes the rotated token's binding another request's
 
     def timeout(self, seconds):
         return self
@@ -83,16 +107,30 @@ class AuthOidc:
         assert abs(iat - time.time()) < 5 and nonce not in self.nonces
         self.nonces.add(nonce)
 
-    def auth_oidc_obo_offline_assertion(self, tid, oid, holder, source, refresh_token, iat, nonce, signature):
-        digest = __import__("hashlib").sha256(refresh_token.encode()).hexdigest()
+    def auth_oidc_obo_offline_assertion(self, tid, oid, holder, source, sealed_refresh_token, iat, nonce, signature):
+        digest = __import__("hashlib").sha256(sealed_refresh_token.encode()).hexdigest()
         self._check(("v1-offline", tid, oid, holder, source, digest), iat, nonce, signature)
-        self.redeemed.append((tid, oid, holder, source, refresh_token))
-        return dict(self.answer)
+        token = self.obo.open_sealed(self.key, sealed_refresh_token, self.obo.seal_aad("redeem-req", tid, oid, holder, nonce))
+        assert token is not None
+        self.redeemed.append((tid, oid, holder, source, token))
+        answer = dict(self.answer) if isinstance(self.answer, dict) else self.answer
+        if isinstance(answer, dict) and answer.get("ok") is True:
+            rotated = answer.pop("refresh_token", None)
+            answer["sealed_refresh_token"] = self.obo.seal(
+                self.key, rotated, self.obo.seal_aad("redeem-reply", tid, oid, holder, nonce) + self.reply_binding) \
+                if rotated else None
+        self.bus.append(json.dumps([tid, oid, holder, source, sealed_refresh_token, answer]))
+        return answer
 
     def auth_oidc_obo_offline_grant(self, tid, oid, holder, iat, nonce, signature):
         self._check(("v1-offline-grant", tid, oid, holder), iat, nonce, signature)
         self.granted.append((tid, oid, holder))
-        return dict(self.grant_answer)
+        answer = dict(self.grant_answer)
+        if answer.get("ok") is True:
+            answer["sealed_refresh_token"] = self.obo.seal(
+                self.key, answer.pop("refresh_token"), self.obo.seal_aad("grant-reply", tid, oid, holder, nonce))
+        self.bus.append(json.dumps(answer))
+        return answer
 
 
 class Offline:
@@ -152,6 +190,7 @@ def env(ns, monkeypatch):
     monkeypatch.setenv("ELITEA_API_CLIENT_SECRET", CLIENT_SECRET)
     monkeypatch.setenv("ELITEA_OBO_CUSTODY_KEY", CUSTODY_KEY)
     env.sources = ["owner_delegated", "application"]
+    env.facts_version = 5   # the owner's own grants come with the decision's facts
     real_module = env.module
 
     def module(**kwargs):
@@ -166,10 +205,11 @@ def env(ns, monkeypatch):
 
 
 class Delegated(Credential):
-    """A SharePoint configuration governed by an ``entra_delegated`` reference, granted to the mandate (or personal)."""
+    """A SharePoint configuration governed by an ``entra_delegated`` reference, granted to the mandate (or personal),
+    the owner's own grant on a shared one (``owner_grant``) and covered by the mandate's consent (``covered``)."""
 
     def __init__(self, env, binding, mandate, *, personal=False, custodian_user_id=OWNER, grant=True, tool_id=1,
-                 **kwargs):
+                 owner_grant=True, covered=True, **kwargs):
         env.secret_fields.setdefault("sharepoint", ["client_secret"])
         super().__init__(env, binding, ctype="sharepoint", material=False, grants=False, tool_id=tool_id,
                          config_id=10 + tool_id, **kwargs)
@@ -184,10 +224,30 @@ class Delegated(Credential):
             env.grants[(1, self.key(f"mandate:{mandate}"))] = {
                 "grant_id": self.grant_id, "state": "active", "revocation_epoch": 4, "valid_from": None,
                 "valid_until": None, "operations": ["*"], "subject_kind": "mandate"}
+        if owner_grant and not personal:   # the owner may use it themselves (any agent): a grant to their subject
+            self.owner_grant_id = str(uuid.uuid4())
+            env.grants[(1, self.key(OWNER_REF))] = {
+                "grant_id": self.owner_grant_id, "state": "active", "revocation_epoch": 7, "valid_from": None,
+                "valid_until": None, "operations": ["*"], "subject_kind": "user_delegation"}
+        if covered:
+            cover(env, env.ns, mandate, self)
 
     def expanded(self):
         return {"elitea_title": "sp", "configuration_uuid": self.uuid, "configuration_project_id": 1,
                 "configuration_type": "sharepoint", "configuration_generation": 3, "site_url": SITE}
+
+
+def cover(env, ns, mandate_id, cred, generation=1, configuration_generation=3):
+    """Add ``cred`` to what the mandate's consent covers (as a consent records it)."""
+    scope = list(mandate_columns_full(env, ns, mandate_id).identity_scope or [])
+    scope.append({"credential_ref": cred.ref_id, "credential_generation": generation,
+                  "configuration_generation": configuration_generation, "toolkits": ["sharepoint"]})
+    set_mandate(env, ns, mandate_id, identity_scope=scope)
+
+
+def mandate_columns_full(env, ns, mandate_id):
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return session.execute(ns.sa.select(ns.Mandate.identity_scope).where(ns.Mandate.id == mandate_id)).one()
 
 
 def set_mandate(env, ns, mandate_id, **values):
@@ -203,8 +263,10 @@ def mandate_columns(env, ns, mandate_id):
         ).where(ns.Mandate.id == mandate_id)).one()
 
 
-def new_mandate(env, ns, binding, *, identity="owner_delegated", consented=True, operations=("run:schedule",)):
-    mandate = mandate_env.add_mandate(env, ns, state="active", binding_ref=binding, operations=operations)
+def new_mandate(env, ns, binding, *, identity="owner_delegated", consented=True, operations=("run:schedule",),
+                version=70, application=7):
+    mandate = mandate_env.add_mandate(env, ns, state="active", binding_ref=binding, operations=operations,
+                                      version=version, application=application)
     values = {"owner_user_ref": {"user_id": OWNER, "issuer": ENTRA, "tid": TID, "oid": OID}}
     if identity is not None:
         values["identity_source"] = identity
@@ -365,25 +427,54 @@ def test_a_personal_delegated_credential_is_the_owners_own_or_nobodys(ns, env):
     assert refused(ns, env, mandate, cred) == "CREDENTIAL_CLASS_NOT_ALLOWED"
 
 
-def test_a_schedule_someone_else_changed_after_the_consent_needs_the_owner_again(ns, env, monkeypatch):
-    """C9-SEC-46: an operator's edit of the owner's schedule does not borrow the owner's sign-in until the owner consents
-    again (or saves the schedule themselves)."""
+def _schedule(env, ns, updated_by):
+    """A real schedule row of the agent version, owned by the mandate's owner, last changed by ``updated_by``."""
+    row = ns.schedules.EntitySchedule(
+        entity_type="agent", application_id=7, version_id=70, name="nightly", cron="* * * * *", timezone="UTC",
+        prompt="list the files", created_by=OWNER, updated_by=updated_by, principal={"kind": "delegation"},
+        next_run=datetime.now(timezone.utc) - timedelta(minutes=1))
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.add(row)
+        session.commit()
+        return row.id, row.next_run
+
+
+def _scheduler_writes(env, ns, schedule_id, seen):
+    """What the tick writes before a run is admitted: the claim of the slot and the run row."""
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        assert ns.schedule_claim.claim_schedule(session, schedule_id, seen, seen + timedelta(minutes=1))
+        assert ns.schedule_claim.insert_run(session, schedule_id, "cron") is not None
+        session.commit()
+
+
+def test_a_schedule_someone_else_changed_last_needs_the_owner_to_save_it(ns, env):
+    """C9-SEC-46: a schedule an operator changed last does not run with the owner's sign-in until the owner saves it;
+    the scheduler's own writes (claim, run row) change nothing about that, in either direction."""
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
-    consented_at = mandate_columns(env, ns, mandate).identity_consented_at
-    consented_at = consented_at if consented_at.tzinfo else consented_at.replace(tzinfo=timezone.utc)
-    changes = {}
-    monkeypatch.setattr(ns.mandate_identity, "_schedule_change", lambda project_id, schedule_id: changes.get(schedule_id))
-    trigger = {"trigger_ref": "schedule:entity:3"}
-    changes[3] = (77, consented_at + timedelta(minutes=5))           # an operator edited it after the consent
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.add(ns.Application(id=7))
+        session.commit()
+    schedule_id, seen = _schedule(env, ns, updated_by=77)                # an operator's edit
+    _scheduler_writes(env, ns, schedule_id, seen)
+    trigger = {"trigger_ref": f"schedule:entity:{schedule_id}"}
     assert refused(ns, env, mandate, Delegated(env, binding, mandate), **trigger) == "DENIED_MANDATE_CONSENT_REQUIRED"
-    changes[3] = (77, consented_at - timedelta(minutes=5))           # before the consent: the owner consented after it
-    admit(ns, env, mandate, Delegated(env, binding, mandate, tool_id=2), **trigger)
-    changes[3] = (OWNER, consented_at + timedelta(minutes=5))        # the owner's own change
-    admit(ns, env, mandate, Delegated(env, binding, mandate, tool_id=3), **trigger)
-    changes.clear()                                                  # no such schedule: fail closed
-    assert refused(ns, env, mandate, Delegated(env, binding, mandate, tool_id=4), **trigger) == \
-        "DENIED_MANDATE_CONSENT_REQUIRED"
+    assert "must save the schedule" in ns.adm.MESSAGES["DENIED_MANDATE_CONSENT_REQUIRED"]
+    with ns.sa_orm.Session(env.engine(1)) as session:                    # the owner saves it
+        session.get(ns.schedules.EntitySchedule, schedule_id).updated_by = OWNER
+        session.commit()
+    for slot, tool_id in enumerate((2, 3)):                                # two consecutive slots, each claimed first
+        with ns.sa_orm.Session(env.engine(1)) as session:
+            row = session.get(ns.schedules.EntitySchedule, schedule_id)
+            seen_now = row.next_run
+            for run in session.scalars(ns.sa.select(ns.schedules.EntityScheduleRun)):
+                run.status = "success"
+            session.commit()
+        _scheduler_writes(env, ns, schedule_id, seen_now)
+        admit(ns, env, mandate, Delegated(env, binding, mandate, tool_id=tool_id), **trigger)
+    assert slot == 1
+    assert refused(ns, env, mandate, Delegated(env, binding, mandate, tool_id=4), trigger_ref="schedule:entity:999") \
+        == "DENIED_MANDATE_CONSENT_REQUIRED"   # no such schedule: fail closed
 
 
 # --- the release ------------------------------------------------------------------------------------------------------
@@ -408,9 +499,11 @@ def test_a_mandate_run_is_released_a_token_minted_from_the_owners_consent(ns, en
     assert event["caller_ref"].startswith("indexer_worker") or event["caller_ref"]
     for secret in (GRAPH_TOKEN, ASSERTION, REFRESH, CLIENT_SECRET):
         assert secret not in everything_said(env, reply, context_row(ns, env, run.ref).subject)
+    assert REFRESH not in "".join(env.oidc.bus)   # the refresh token crossed the bus sealed only
 
 
 def test_a_second_release_is_served_from_the_cache_after_the_consent_is_read_again(ns, env):
+    ns.need_transport()   # the release seals its reply (the shared transport; absent in a lone checkout)
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
     run = admitted(ns, env, mandate, Delegated(env, binding, mandate))
@@ -420,6 +513,7 @@ def test_a_second_release_is_served_from_the_cache_after_the_consent_is_read_aga
 
 
 def test_a_withdrawn_consent_stops_the_next_release_even_with_a_cached_token(ns, env):
+    ns.need_transport()   # the release seals its reply (the shared transport; absent in a lone checkout)
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
     run = admitted(ns, env, mandate, Delegated(env, binding, mandate))
@@ -498,6 +592,7 @@ def test_an_assertion_of_another_person_or_app_is_never_exchanged(ns, env):
 
 
 def test_a_rotated_refresh_token_is_kept_as_the_next_generation(ns, env):
+    ns.need_transport()   # the release seals its reply (the shared transport; absent in a lone checkout)
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
     run = admitted(ns, env, mandate, Delegated(env, binding, mandate))
@@ -505,7 +600,65 @@ def test_a_rotated_refresh_token_is_kept_as_the_next_generation(ns, env):
     assert run.release()["ok"] is True
     material = str(mandate_columns(env, ns, mandate).identity_material_ref)
     assert ("rotate", material, 1) in env.offline.calls and env.offline.rows[material]["token"] == ROTATED
-    assert ROTATED not in everything_said(env)
+    assert ROTATED not in everything_said(env) and ROTATED not in "".join(env.oidc.bus)
+
+
+def test_a_rotated_token_that_does_not_open_is_not_kept(ns, env):
+    ns.need_transport()
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    run = admitted(ns, env, mandate, Delegated(env, binding, mandate))
+    env.oidc.answer = {**env.oidc.answer, "refresh_token": ROTATED}
+    env.oidc.reply_binding = b"|another-request"
+    assert run.release()["ok"] is True
+    assert not [call for call in env.offline.calls if call[0] == "rotate"]
+
+
+def test_a_shared_credential_needs_the_owners_own_grant_at_admission_and_at_release(ns, env):
+    ns.need_transport()
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    cred = Delegated(env, binding, mandate, owner_grant=False)
+    assert refused(ns, env, mandate, cred) == "DENIED_GRANT"   # granted to the mandate, not to the owner
+    cred.owner_grant_id = str(uuid.uuid4())
+    env.grants[(1, cred.key(OWNER_REF))] = {
+        "grant_id": cred.owner_grant_id, "state": "active", "revocation_epoch": 7, "valid_from": None,
+        "valid_until": None, "operations": ["*"], "subject_kind": "user_delegation"}
+    run = admitted(ns, env, mandate, cred)
+    [entry] = context_row(ns, env, run.ref).allowed_bindings
+    assert (entry["owner_grant_id"], entry["owner_grant_epoch"]) == (cred.owner_grant_id, 7)
+    assert run.release()["ok"] is True
+    env.grants[(1, cred.key(OWNER_REF))]["state"] = "revoked"   # revoked between admission and release
+    ns.entra_obo.forget()
+    assert run.release()["reason_code"] == "DENIED_GRANT"
+    env.grants[(1, cred.key(OWNER_REF))].update(state="active", revocation_epoch=8)   # re-issued at another epoch
+    assert run.release()["reason_code"] == "EPOCH_MISMATCH"
+
+
+def test_a_personal_delegated_credential_needs_no_grant_of_the_owner(ns, env):
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    _, ref = admit(ns, env, mandate, Delegated(env, binding, mandate, personal=True))
+    assert "owner_grant_id" not in context_row(ns, env, ref).allowed_bindings[0]
+
+
+def test_a_credential_the_consent_does_not_cover_is_refused(ns, env):
+    """The consent covers the credentials (and their generations) the version used when the owner gave it."""
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    assert refused(ns, env, mandate, Delegated(env, binding, mandate, covered=False)) == "DENIED_MANDATE_CONSENT_REQUIRED"
+    reapproved = Delegated(env, binding, mandate, tool_id=2, covered=False)
+    cover(env, ns, mandate, reapproved, configuration_generation=2)   # consented to an earlier approval of it
+    assert refused(ns, env, mandate, reapproved) == "DENIED_MANDATE_CONSENT_REQUIRED"
+
+
+def test_a_release_outside_the_consent_is_refused_even_after_admission(ns, env):
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    run = admitted(ns, env, mandate, Delegated(env, binding, mandate))
+    set_mandate(env, ns, mandate, identity_scope=[])   # a consent given again for something else
+    assert run.release()["reason_code"] == "DENIED_MANDATE_CONSENT_REQUIRED"
+    assert env.oidc.redeemed == []
 
 
 def test_a_revoked_grant_to_the_mandate_stops_the_release(ns, env):
@@ -521,6 +674,7 @@ def test_a_revoked_grant_to_the_mandate_stops_the_release(ns, env):
 def test_the_owners_own_sign_in_and_the_mandate_never_share_a_token(ns, env):
     """A Graph token minted from the owner's live sign-in is not served to the mandate (it would outlive a withdrawal),
     and one minted from the consent is dropped with the consent."""
+    ns.need_transport()   # the release seals its reply (the shared transport; absent in a lone checkout)
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
     run = admitted(ns, env, mandate, Delegated(env, binding, mandate))
@@ -556,9 +710,14 @@ def signed_in_as(ns, monkeypatch, person=None, code=None):
 def test_the_owner_consents_once_signed_in_and_the_mandate_keeps_a_reference_only(ns, env, monkeypatch):
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding, consented=False)
+    cred = Delegated(env, binding, mandate, covered=False)
     signed_in_as(ns, monkeypatch)
+    preview = ns.mandate_identity.consent_preview(env.module(), 1, mandate, OWNER)
     answer = ns.mandate_identity.consent(env.module(), 1, mandate, OWNER)
-    assert answer["mandate_ref"] == str(mandate)
+    assert answer["mandate_ref"] == str(mandate) and answer["covered"] == preview["covered"] == [{"toolkits": ["sharepoint"]}]
+    assert [(item["credential_ref"], item["credential_generation"], item["configuration_generation"])
+            for item in mandate_columns_full(env, ns, mandate).identity_scope] == [(cred.ref_id, 1, 3)]
+    assert REFRESH not in "".join(env.oidc.bus)   # sealed on the bus
     assert env.oidc.granted == [(TID, OID, f"mandate:{mandate}")]
     [keep] = env.offline.calls
     assert keep == ("keep", 1, f"mandate:{mandate}", OWNER, OWNER_REF, "login", OWNER)
@@ -576,6 +735,7 @@ def test_the_owner_consents_once_signed_in_and_the_mandate_keeps_a_reference_onl
 def test_a_consent_given_again_replaces_and_retires_the_earlier_one(ns, env, monkeypatch):
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
+    Delegated(env, binding, mandate)
     earlier = str(mandate_columns(env, ns, mandate).identity_material_ref)
     signed_in_as(ns, monkeypatch)
     ns.mandate_identity.consent(env.module(), 1, mandate, OWNER)
@@ -593,12 +753,16 @@ def test_a_consent_given_again_replaces_and_retires_the_earlier_one(ns, env, mon
     ("revoked", "INVALID_STATE"),
     ("unknown", "MANDATE_NOT_FOUND"),
     ("no_custody", "DENIED_ASSERTION_UNAVAILABLE"),
+    ("nothing_to_consent", "NOTHING_TO_CONSENT"),
+    ("sealed_with_another_key", "DENIED_ASSERTION_UNAVAILABLE"),
 ])
 def test_a_consent_that_is_not_the_owners_own_live_sign_in_is_refused_with_nothing_kept(
         ns, env, monkeypatch, case, code):
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding, consented=False, identity="application" if case == "application"
                           else "owner_delegated")
+    if case != "nothing_to_consent":
+        Delegated(env, binding, mandate, covered=False)
     actor = OWNER + 1 if case == "not_owner" else OWNER
     signed_in_as(ns, monkeypatch, person={"issuer": ENTRA, "tid": TID, "oid": "someone-else"}
                  if case == "other_subject" else None,
@@ -610,6 +774,8 @@ def test_a_consent_that_is_not_the_owners_own_live_sign_in_is_refused_with_nothi
         set_mandate(env, ns, mandate, state="revoked", revocation_epoch=1)
     if case == "no_custody":
         env.oidc.grant_answer = {"ok": False, "code": "ASSERTION_UNAVAILABLE"}
+    if case == "sealed_with_another_key":   # a reply Main cannot open is never kept
+        env.oidc.key = ns.entra_obo.seal_key("another-request-key-made-up-0123456789")
     target = uuid.uuid4() if case == "unknown" else mandate
     with pytest.raises(ns.mandate_identity.IdentityRefused) as refusal:
         ns.mandate_identity.consent(env.module(), 1, target, actor)
@@ -621,14 +787,53 @@ def test_withdrawing_retires_the_consent_and_the_next_run_is_refused(ns, env):
     binding = env.seed_agent()
     mandate = new_mandate(env, ns, binding)
     material = str(mandate_columns(env, ns, mandate).identity_material_ref)
-    assert ns.mandate_identity.withdraw(env.module(), 1, mandate, 1) == {"mandate_ref": str(mandate)}
+    assert ns.mandate_identity.withdraw(env.module(), 1, mandate, 1, operator=True) == {"mandate_ref": str(mandate)}
     assert mandate_columns(env, ns, mandate).identity_material_ref is None
     assert ("retire", material, "CONSENT_WITHDRAWN") in env.offline.calls
     assert [e["reason_code"] for _, e in env.recorded] == ["MANDATE_IDENTITY_WITHDRAWN"]
     assert refused(ns, env, mandate, Delegated(env, binding, mandate)) == "DENIED_MANDATE_CONSENT_REQUIRED"
     with pytest.raises(ns.mandate_identity.IdentityRefused) as again:
-        ns.mandate_identity.withdraw(env.module(), 1, mandate, 1)
+        ns.mandate_identity.withdraw(env.module(), 1, mandate, 1, operator=True)
     assert again.value.code == "CONSENT_NOT_GIVEN"
+
+
+def test_the_owner_withdraws_their_own_consent_and_nobody_else_without_manage(ns, env):
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    with pytest.raises(ns.mandate_identity.IdentityRefused) as other:
+        ns.mandate_identity.withdraw(env.module(), 1, mandate, OWNER + 1)
+    assert other.value.code == "WITHDRAW_NOT_ALLOWED"
+    assert ns.mandate_identity.withdraw(env.module(), 1, mandate, OWNER) == {"mandate_ref": str(mandate)}
+
+
+def test_with_the_switch_emptied_a_consent_can_still_be_withdrawn_and_revoking_retires_it(ns, env):
+    binding = env.seed_agent()
+    first = new_mandate(env, ns, binding)
+    second = new_mandate(env, ns, env.seed_agent(application_id=8, version_id=80), version=80, application=8)
+    env.sources = []
+    assert ns.mandate_identity.withdraw(env.module(), 1, first, OWNER) == {"mandate_ref": str(first)}
+    material = str(mandate_columns(env, ns, second).identity_material_ref)
+    assert task(ns, env, f"project_id=1;action=revoke;mandate={second}", actor=1)["state"] == "revoked"
+    assert ("retire", material, "HOLDER_REVOKED") in env.offline.calls
+
+
+def test_an_expired_mandate_retires_its_consent(ns, env):
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    material = str(mandate_columns(env, ns, mandate).identity_material_ref)
+    set_mandate(env, ns, mandate, valid_until=datetime.now(timezone.utc) - timedelta(minutes=1))
+    assert refused(ns, env, mandate, Delegated(env, binding, mandate)) == "MANDATE_EXPIRED"
+    assert ("retire", material, "HOLDER_REVOKED") in env.offline.calls
+    assert mandate_columns(env, ns, mandate).identity_material_ref is None
+
+
+def test_an_inactive_owner_takes_their_consents_with_them(ns, env):
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    material = str(mandate_columns(env, ns, mandate).identity_material_ref)
+    env.epochs[OWNER] = {"active": False, "user": 2, "token": 0}
+    assert refused(ns, env, mandate, Delegated(env, binding, mandate)) == "MANDATE_INACTIVE"
+    assert ("retire", material, "HOLDER_REVOKED") in env.offline.calls
 
 
 # --- the operator task ------------------------------------------------------------------------------------------------

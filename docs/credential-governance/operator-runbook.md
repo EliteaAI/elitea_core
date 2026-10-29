@@ -477,19 +477,27 @@ The deployment states which identities a mandate may name: `mandate_identity_sou
 Owner consent, `owner_delegated` only:
 1. Create the mandate with "Acts with: Owner's Microsoft sign-in" (or the task's `identity=owner_delegated`), submit,
    approve (another operator).
-2. The owner, signed in with Microsoft (directly or through the brokering realm) as the very identity the mandate was
-   made for, opens Governance -> Mandates and chooses **Give consent**. The platform keeps one refresh token of that
-   sign-in as the owner's personal material in the governed store (never in the mandate, an event or a log).
-3. Grant the delegated credential to the mandate (`subject_ref=mandate:<uuid>`), or use the owner's personal one.
-4. Signing out does not end the consent (it is offline by design). **Withdraw consent** (an operator) or revoking the
-   mandate does; the next run is refused. Microsoft refusing the consent (expired after its lifetime of inactivity,
-   revoked, password reset, conditional access) withdraws it and the next run is refused; the owner consents again.
-5. A schedule changed by someone other than its owner after the consent needs the owner again (they consent again
-   or save the schedule themselves).
+2. Grant first: each delegated credential of the agent version to the mandate (`subject_ref=mandate:<uuid>`), and
+   for a project (shared) one also to the **owner** (`subject_ref=idp:<tid>:<oid>`): the owner must be allowed to use
+   it themselves. A personal one must be the owner's own.
+3. The owner, signed in with Microsoft (directly or through the brokering realm) as the very identity the mandate was
+   made for, opens Governance -> Mandates and chooses **Give consent**. The dialog names the toolkits whose
+   credentials it covers. The platform keeps one refresh token of that sign-in as the owner's personal material in the
+   governed store (never in the mandate, an event or a log; sealed whenever it crosses the internal bus) and records
+   which credentials (and their approved generations) the consent covers. A credential granted or approved again
+   later needs a new consent.
+4. Signing out does not end the consent (it is offline by design). The owner (or an operator) **withdraws** it, or
+   revoking the mandate, its expiry, or the owner leaving (suspended) ends it; the next run is refused. Microsoft
+   refusing the consent (expired after its lifetime of inactivity, revoked, password reset, conditional access)
+   withdraws it and the next run is refused; the owner consents again. Emptying `mandate_identity_sources` stops every
+   such run; consents can still be withdrawn.
+5. A schedule changed last by someone other than its owner does not run with the owner's sign-in: the owner opens it
+   and saves it.
 
 | Code | Cause | Action |
 |---|---|---|
-| `DENIED_MANDATE_CONSENT_REQUIRED` | No consent, withdrawn, or the schedule was changed by someone else since. | The owner gives consent again. |
+| `DENIED_MANDATE_CONSENT_REQUIRED` | No consent, withdrawn, the credential is not one the consent covers (granted or approved again since), or someone else changed the schedule last. | The owner gives consent again, or saves the schedule. |
+| `DENIED_GRANT` | A shared delegated credential the owner holds no grant on. | Grant it to the owner, then the owner consents again if it was added after the consent. |
 | `DENIED_MANDATE_CONSENT_EXPIRED` | Microsoft no longer accepts the consent. | The owner gives consent again. |
 | `DENIED_SUBJECT_MISMATCH` | The consent or the run is not the mandate owner's identity. | Make a new mandate for the owner's current identity. |
 

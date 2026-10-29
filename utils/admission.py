@@ -58,7 +58,7 @@ from .exceptions import AdmissionDenied
 from .governance import MODE_AUDIT_ONLY, governance_lifecycle_active, is_auditing, is_governed, is_unavailable
 from .governance_settings import Check
 from . import internal_obo
-from .mandate_identity import identity_reader
+from .mandate_identity import identity_reader, owner_delegated_allowed, retire_consent
 from .mandate_state import expire_if_due, suspend_owner_mandates
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
 from .trigger_principal import OPERATION_OF
@@ -199,9 +199,10 @@ MESSAGES = {
                                   "missing); ask an administrator. The run was not started.",
     # a mandate run acting with its owner's offline consent (#7131)
     "DENIED_MANDATE_CONSENT_REQUIRED": "This scheduled or webhook run acts with the mandate owner's Microsoft sign-in, "
-                                       "which needs the owner's consent: it is missing, was withdrawn, or must be "
-                                       "given again because someone else changed the schedule. The owner gives it "
-                                       "under Governance, Mandates. The run was not started.",
+                                       "which needs the owner's consent for this credential: it is missing, was "
+                                       "withdrawn, or does not cover the credential as it is now (the owner consents "
+                                       "again under Governance, Mandates); or someone else changed the schedule last "
+                                       "(the owner must save the schedule). The run was not started.",
     "DENIED_MANDATE_CONSENT_EXPIRED": "Microsoft no longer accepts the mandate owner's consent (it expired or was "
                                       "revoked at Microsoft). The owner gives it again under Governance, Mandates. "
                                       "The run was not started.",
@@ -793,7 +794,7 @@ def _subject_of(principal: dict) -> dict:
 
 def _decide_credentials(  # pylint: disable=R0913
     module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False, rows=None,
-    can_use=None, mandate_identity=None,
+    can_use=None, mandate_identity=None, mandate_owner_ref=None,
 ) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
     agent without governed credentials), or ``AdmissionDenied`` for the first refusal. ``shadow``: audit only, the
@@ -807,6 +808,7 @@ def _decide_credentials(  # pylint: disable=R0913
         can_use=can_use or user_may_use_credentials(user_id, request.binding_project_id),
         subject_kind="mandate" if subject["kind"] == "mandate" else "user_delegation", subject_user_id=user_id,
         profile=PROFILE_DEVELOPMENT if binding.id is None else "governed", mandate_identity=mandate_identity,
+        mandate_owner_ref=mandate_owner_ref,
     )
     try:
         inline_fields = lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id)  # noqa: E731
@@ -1007,6 +1009,8 @@ def _expire_mandate(project_id, mandate_id) -> None:
             session.commit()
     except Exception as exc:  # pylint: disable=W0703
         log.error("admission: a mandate expiry could not be recorded (%s)", type(exc).__name__)
+        return
+    retire_consent(project_id, mandate_id, "MANDATE_IDENTITY_WITHDRAWN", "elitea_core:expiry")   # #7131
 
 
 def suspend_owner_in_project(project_id, owner_user_id) -> list:
@@ -1020,7 +1024,9 @@ def suspend_owner_in_project(project_id, owner_user_id) -> list:
             revoke_mandate_contexts(session, mandate.id, "MANDATE_INACTIVE")
             _tracing().security_audit_record(session, _mandate_event(mandate, "MANDATE_OWNER_SUSPENDED"))
         session.commit()
-        return suspended
+    for mandate_id in suspended:   # an inactive owner's consents go with them (#7131)
+        retire_consent(project_id, mandate_id, "MANDATE_IDENTITY_WITHDRAWN", "elitea_core:owner_inactive")
+    return suspended
 
 
 def _suspend_owner(project_id, owner_user_id) -> None:
@@ -1120,7 +1126,8 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
     _want_prefetched_facts(payload)
     decisions = _decide_credentials(
         module, request, subject, binding, payload, expires_at, rows=rows,
-        mandate_identity=identity_reader(module, request.binding_project_id, mandate.id, request.trigger_ref, owner))
+        mandate_identity=identity_reader(module, request.binding_project_id, mandate.id, request.trigger_ref, owner),
+        mandate_owner_ref=owner_ref if owner_delegated_allowed(module) else None)
     if any(getattr(decision, "auth_mode", None) == DELEGATED_AUTH_MODE for decision in decisions):
         # the run acts with the owner's consent (#7131): its context names the owner's subject, which the release
         # compares with the mandate's and the consent's

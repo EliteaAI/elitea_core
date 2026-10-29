@@ -102,9 +102,12 @@ class CredentialDecisionContext:
     subject_user_id: Optional[int] = None
     # ``development``: the editor's test chat of an unbound version (#7213); the grant is the author's, on any binding
     profile: str = PROFILE_GOVERNED
-    # A mandate run (#7131): ``{"source", "consented"}`` of the identity the mandate names, asked only once a delegated
-    # credential reaches check 4b; None (the deployment allows no owner identity): such a credential is refused
+    # A mandate run (#7131): ``{"source", "consented", "scope"}`` of the identity the mandate names, asked only once a
+    # delegated credential reaches check 4b; None (the deployment allows no owner identity): such a credential is refused
     mandate_identity: Optional[Callable[[], Optional[Mapping]]] = None
+    # ``idp:<tid>:<oid>`` of the mandate's owner when the deployment allows an owner identity: their own grants on the
+    # credentials are read with the decision's facts (a shared delegated credential needs one, #7131)
+    mandate_owner_ref: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,10 @@ class Decision(BaseModel):
     grant_id: Optional[str] = None
     grant_epoch: Optional[int] = None
     auth_mode: Optional[str] = None   # set for an Entra-delegated reference only (#6756 step 4)
+    # a shared Entra-delegated reference under a mandate acting with its owner's consent (#7131): the grant the owner
+    # holds on it, which the release checks again
+    owner_grant_id: Optional[str] = None
+    owner_grant_epoch: Optional[int] = None
 
 
 def binding_ref(decision: Decision) -> dict:
@@ -147,6 +154,8 @@ def binding_ref(decision: Decision) -> dict:
     }
     if decision.auth_mode == DELEGATED_AUTH_MODE:
         entry["auth_mode"] = DELEGATED_AUTH_MODE
+    if decision.owner_grant_id is not None:
+        entry.update(owner_grant_id=decision.owner_grant_id, owner_grant_epoch=decision.owner_grant_epoch)
     return entry
 
 
@@ -473,8 +482,15 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
         identity = ctx.mandate_identity() if ctx.mandate_identity is not None else None   # mandate acting with its
         if not identity or identity.get("source") != OWNER_DELEGATED:              #     owner's consent (#7131)
             return verdict(False, MANDATE_DELEGATION_UNSUPPORTED)
-        if not identity.get("consented"):
+        covered = (reference.get("ref_id"), reference.get("generation"), config.get("generation"))
+        if not identity.get("consented") or covered not in identity.get("scope", ()):   # what the owner consented to
             return verdict(False, MANDATE_CONSENT_REQUIRED)
+        if reference.get("ownership_class") != "personal":                         #     a shared one: the owner's own
+            owner_grant = subject_grant_in_force(facts.subject_grants.get(          #     grant on it, whatever the
+                subject_grant_key(reference.get("ref_id"), ctx.mandate_owner_ref)), ctx.now)   # mandate's
+            if ctx.mandate_owner_ref is None or owner_grant is None:
+                return verdict(False, "DENIED_GRANT")
+            known.update(owner_grant_id=owner_grant.get("grant_id"), owner_grant_epoch=owner_grant.get("revocation_epoch"))
     if reference.get("ownership_class") == "personal" and not holds_personal(ctx, reference):   # 5. a personal one
         return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")                  #    only its custodian may use
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval
@@ -540,14 +556,19 @@ def _read_decision_facts(ctx, uses, configurations) -> CredentialFacts:
         return CredentialFacts(configurations, found["references"], {}, found.get("subject_grants") or {})
     wanted = sorted({(ctx.agent_binding_ref, use.toolkit_instance_id, fact["id"], WHOLE_TARGET, ctx.subject_ref)
                      for use, fact in named if fact is not None and fact.get("id") in own})
+    # a mandate that may act with its owner's consent: the owner's own grants come with the same read (#7131)
+    held = {"subject_grants": [(config_id, ctx.mandate_owner_ref) for config_id in sorted(own)]} \
+        if ctx.mandate_owner_ref is not None and facts_answer_subject_grants() else {}
     if len(wanted) <= MAX_FACT_SELECTORS and facts_answer_grants():
-        found = _credential_use_facts(ctx.binding_project_id, sorted(own), [], None, grants_for=wanted, **_caller_of(ctx))
-        return CredentialFacts(configurations, found["references"], found["grants"])
-    references = _credential_use_facts(ctx.binding_project_id, sorted(own), [], **_caller_of(ctx))["references"]
+        found = _credential_use_facts(ctx.binding_project_id, sorted(own), [], None, grants_for=wanted, **held,
+                                      **_caller_of(ctx))
+        return CredentialFacts(configurations, found["references"], found["grants"], found.get("subject_grants") or {})
+    found = _credential_use_facts(ctx.binding_project_id, sorted(own), [], **held, **_caller_of(ctx))
+    references = found["references"]
     keys = {(ctx.agent_binding_ref, use.toolkit_instance_id, references[fact["id"]]["ref_id"], WHOLE_TARGET, ctx.subject_ref)
             for use, fact in named if fact is not None and fact.get("id") in references}
     grants = _credential_use_facts(ctx.binding_project_id, [], sorted(keys))["grants"] if keys else {}
-    return CredentialFacts(configurations, references, grants)
+    return CredentialFacts(configurations, references, grants, found.get("subject_grants") or {})
 
 
 def decide_credential_uses(ctx: CredentialDecisionContext, candidates) -> list:

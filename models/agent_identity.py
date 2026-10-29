@@ -181,13 +181,15 @@ class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
     # (the owner's Microsoft sign-in, through their offline consent) or ``application`` (named for the record: the runs
     # use application credentials, as with none). Part of the approved scope: set at create, never changed.
     # ``identity_material_ref``: the owner's consent kept by the secrets plugin (NULL = none yet, or withdrawn);
-    # ``identity_consented_at``: when it was given. Deferred: a mandate read never selects them; they are read only
+    # ``identity_consented_at``: when it was given; ``identity_scope``: the delegated credentials it covers (reference id
+    # and generations, recorded at consent). Deferred: a mandate read never selects them; they are read only
     # where the deployment allows an identity (``mandate_identity_sources``), so a schema that predates them (until the
     # startup safety net adds them) behaves as before.
     identity_source: Mapped[Optional[str]] = mapped_column(String(24), nullable=True, deferred=True)
     identity_material_ref: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, deferred=True)
     identity_consented_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True,
                                                                      deferred=True)
+    identity_scope: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, deferred=True)
 
 
 @event.listens_for(AutonomousMandate, 'before_update')

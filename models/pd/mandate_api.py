@@ -6,7 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from ..agent_identity import REFERENCE_PATTERN
 
-MANDATE_ACTIONS = ("submit", "reject", "approve", "suspend", "resume", "revoke", "consent", "withdraw_consent")
+MANDATE_ACTIONS = ("submit", "reject", "approve", "suspend", "resume", "revoke", "consent", "consent_preview",
+                   "withdraw_consent")
 
 
 class CreateMandateRequest(BaseModel):

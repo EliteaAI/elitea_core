@@ -20,6 +20,7 @@ PLUGIN_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 
 from fixtures import admission_env, mandate_env  # noqa: E402  pylint: disable=C0413
+from fixtures.governed_credentials import Credential  # noqa: E402  pylint: disable=C0413
 from fixtures.helpers import load_module_with_stubs  # noqa: E402  pylint: disable=C0413
 
 PKG = admission_env.PKG
@@ -35,6 +36,8 @@ ACTORS = {
     "admin": (11, "admin", None), "approver": (12, "admin", None), "owner": (OWNER, "admin", None),
     "viewer": (22, "viewer", None), "token_view": (11, "admin", {"governance.bindings.view"}),
     "token_manage": (11, "admin", {"governance.bindings.manage"}),
+    "owner_view": (OWNER, "admin", {"governance.bindings.view"}),   # the owner, who may only read mandates
+    "anonymous": (None, "admin", set()),
 }
 
 
@@ -119,7 +122,9 @@ class Fakes:
     def auth_oidc_obo_offline_grant(self, tid, oid, holder, iat, nonce, signature):
         assert signature == self.obo.sign_fields(CUSTODY_KEY, ("v1-offline-grant", tid, oid, holder), iat, nonce)
         self.granted.append((tid, oid, holder))
-        return {"ok": True, "refresh_token": REFRESH, "assertion_source": "login"}
+        sealed = self.obo.seal(self.obo.seal_key(CUSTODY_KEY), REFRESH,
+                               self.obo.seal_aad("grant-reply", tid, oid, holder, nonce))
+        return {"ok": True, "sealed_refresh_token": sealed, "assertion_source": "login"}
 
     def keep_offline_material(self, project_id, **kwargs):
         self.kept.append({key: value for key, value in kwargs.items() if key != "refresh_token"})
@@ -140,7 +145,13 @@ def env(ns, monkeypatch):
     env.idp_links[(ENTRA, TID, OID)] = {"id": OWNER}
     env.users.update({uid: f"user{uid}@example.test" for uid in (OWNER, 11, 12, 22)})
     env.add_application(1, 7, "SharePoint reader")
-    env.seed_agent()
+    binding = env.seed_agent()
+    env.secret_fields["sharepoint"] = ["client_secret"]
+    env.facts_version = 5
+    cred = Credential(env, binding, ctype="sharepoint", material=False, grants=False)   # a delegated one the version uses
+    cred.reference["auth_mode"] = "entra_delegated"
+    env.delegations[cred.ref_id] = {"oauth_app_id": "platform", "tenant_id": TID, "resource": "https://graph.microsoft.com",
+                                    "scopes": ["https://graph.microsoft.com/Sites.Selected"], "assertion_source": "login"}
     env.digests[70] = env.digests.get(70) or "adv1:" + "1" * 64
     env.fakes = Fakes(ns.entra_obo)
     env.secrets_extra = {"keep_offline_material": env.fakes.keep_offline_material,
@@ -273,11 +284,63 @@ def test_withdrawing_needs_manage_and_retires_the_consent(ns, env):
     mandate_id = active_mandate(ns, env)
     act(ns, env, mandate_id, "consent", actor="owner")
     assert act(ns, env, mandate_id, "withdraw_consent", actor="viewer")[1] == 403
+    refused, status = act(ns, env, mandate_id, "withdraw_consent", actor="token_view")   # a reader who is not the owner
+    assert (status, refused["code"]) == (403, "WITHDRAW_NOT_ALLOWED")
     answer, status = act(ns, env, mandate_id, "withdraw_consent")
     assert status == 200 and answer == {"ok": True, "id": mandate_id}
     assert [reason for _, reason in env.fakes.retired] == ["CONSENT_WITHDRAWN"]
     [row] = hit(ns, env, "autonomous_mandates", "get")[0]["rows"]
     assert row["consented"] is False
+
+
+def test_the_owner_withdraws_their_own_consent_with_view_only(ns, env):
+    mandate_id = active_mandate(ns, env)
+    act(ns, env, mandate_id, "consent", actor="owner")
+    assert act(ns, env, mandate_id, "withdraw_consent", actor="owner_view") == ({"ok": True, "id": mandate_id}, 200)
+
+
+def test_the_consent_preview_names_the_toolkits_it_would_cover(ns, env):
+    mandate_id = active_mandate(ns, env)
+    answer, status = act(ns, env, mandate_id, "consent_preview", actor="owner")
+    assert status == 200 and answer["covered"] == [{"toolkits": ["sharepoint"]}]
+    assert env.fakes.granted == [] and env.fakes.kept == []   # nothing asked, nothing kept
+
+
+@pytest.mark.parametrize("endpoint, method, body", [
+    ("autonomous_mandates", "get", None),
+    ("autonomous_mandates", "post", {"version_id": 70, "owner_user_id": OWNER, "operations": ["run:schedule"],
+                                     "max_runtime_s": 600, "valid_until": VALID_UNTIL}),
+])
+def test_an_unauthenticated_caller_is_refused(ns, env, endpoint, method, body):
+    assert hit(ns, env, endpoint, method, actor="anonymous", body=body)[1] == 403
+
+
+@pytest.mark.parametrize("action, more", [("withdraw_consent", {}), ("approve", {"approval_ref": "C", "policy_revision": "r"}),
+                                          ("consent", {})])
+def test_an_unauthenticated_caller_cannot_act_on_a_mandate(ns, env, action, more):
+    mandate_id = active_mandate(ns, env)
+    assert act(ns, env, mandate_id, action, actor="anonymous", **more)[1] == 403
+
+
+def _in_project(ns, env, project_id, endpoint, method, actor="admin", body=None, **path):
+    ns.actor, ns.request.body, ns.request.args = actor, body, {}
+    ns.request.content_length = None if body is None else len(json.dumps(body))
+    handler = getattr(ns.endpoints, endpoint).AdminAPI(module(ns, env))
+    return getattr(handler, method)(project_id=project_id, **path)
+
+
+def test_another_projects_mandates_are_neither_listed_created_withdrawn_nor_approved(ns, env):
+    mandate_id = active_mandate(ns, env)
+    page, status = _in_project(ns, env, 2, "autonomous_mandates", "get")
+    assert status == 200 and page["rows"] == [] and page["total"] == 0
+    created, status = _in_project(ns, env, 2, "autonomous_mandates", "post", body={
+        "version_id": 70, "owner_user_id": OWNER, "operations": ["run:schedule"], "max_runtime_s": 600,
+        "valid_until": VALID_UNTIL})
+    assert status == 404 and created["code"] == "VERSION_NOT_FOUND"   # project 1's version, asked in project 2
+    for action, more in (("withdraw_consent", {}), ("approve", {"approval_ref": "C", "policy_revision": "r"})):
+        answer, status = _in_project(ns, env, 2, "autonomous_mandate_action", "post", actor="approver",
+                                     body={"action": action, **more}, mandate_id=uuid.UUID(mandate_id))
+        assert status == 404 and answer["code"] == "MANDATE_NOT_FOUND"
 
 
 def test_another_projects_mandate_is_not_found(ns, env):

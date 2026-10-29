@@ -352,7 +352,7 @@ class _Scope:  # pylint: disable=R0903
     may be released, the audit identity of the requester of each slot, and when the release stops being usable."""
 
     def __init__(self, binding_project_id, allow_validated, expires_at, events, on_revoke=None,
-                 allow_pending=False, person=None, grant_checked=None):  # pylint: disable=R0913
+                 allow_pending=False, person=None, grant_checked=None, owner_grants=None):  # pylint: disable=R0913
         self.binding_project_id, self.allow_validated, self.expires_at = binding_project_id, allow_validated, expires_at
         self.events, self.on_revoke = events, on_revoke
         self.allow_pending = allow_pending   # a probe of a value the credential onboarding has just written
@@ -362,6 +362,8 @@ class _Scope:  # pylint: disable=R0903
         # a probe only: whether the grant its ticket names was checked again here (a shared delegated reference needs
         # it, C9-SEC-64); None for a run, whose grants are rechecked with its admission (checks 6, 7)
         self.grant_checked = grant_checked
+        # a mandate run (#7131): {credential ref: (grant id, epoch)} of the owner's own grants it was admitted on
+        self.owner_grants = owner_grants or {}
 
 
 def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
@@ -447,7 +449,9 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
         _revoke(first, code)
 
     return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), events, on_revoke=on_revoke,
-                  person=(row.subject, row.tenant, row.caller))
+                  person=(row.subject, row.tenant, row.caller),
+                  owner_grants={entry.get("credential_ref"): (entry.get("owner_grant_id"), entry.get("owner_grant_epoch"))
+                                for entry in entries if entry.get("owner_grant_id") is not None})
 
 
 def _entries_of(row, requests: list) -> tuple:
@@ -758,7 +762,10 @@ def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadl
                 mandate_identity.owner_delegated_allowed(module):
             # a mandate run acting with its owner's offline consent (#7131): the owner's frozen subject and the
             # consent kept for this mandate, read now
-            person, material = mandate_identity.release_person(scope.binding_project_id, *scope.person)
+            person, material = mandate_identity.release_person(
+                scope.binding_project_id, *scope.person, slot=request.slot,
+                ownership_class=delegation.get("ownership_class"),
+                owner_grant=scope.owner_grants.get(request.slot["credential_ref"]))
             try:
                 token, expires = entra_obo.acquire_offline(
                     module, person, delegation, scope.binding_project_id, material, deadline)

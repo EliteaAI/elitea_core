@@ -3,7 +3,8 @@
 ``submit``, ``reject``, ``suspend``, ``revoke`` need governance.bindings.manage; ``approve`` and ``resume`` need
 governance.bindings.approve and someone who is neither the creator nor the owner (the admin task's rules, the same
 code). ``consent``: the mandate's owner, signed in with their own session, lets its runs act with their Microsoft
-sign-in; ``withdraw_consent``: the owner or an operator with manage withdraws it.
+sign-in for the credentials the version uses now (``consent_preview`` names them first); ``withdraw_consent``: the
+owner, or an operator with manage, withdraws it.
 """
 import uuid
 
@@ -18,6 +19,7 @@ from .autonomous_mandates import task_answer
 
 APPROVE_ACTIONS = ("approve", "resume")
 IDENTITY_STATUS = {"IDENTITY_SOURCE_NOT_ALLOWED": 403, "IDENTITY_NOT_DELEGATED": 409, "CONSENT_OWNER_ONLY": 403,
+                   "WITHDRAW_NOT_ALLOWED": 403, "NOTHING_TO_CONSENT": 409,
                    "MANDATE_NOT_FOUND": 404, "INVALID_STATE": 409, "CONSENT_NOT_GIVEN": 409,
                    "DENIED_SUBJECT_MISMATCH": 403, "DENIED_ASSERTION_UNAVAILABLE": 409,
                    "DENIED_DELEGATION_UNSUPPORTED_CALLER": 403, "DEPENDENCY_UNAVAILABLE": 503,
@@ -28,13 +30,16 @@ def _identity(action, module, project_id, mandate_id, actor):
     try:
         if action == "consent":
             result = mandate_identity.consent(module, project_id, mandate_id, actor)
+        elif action == "consent_preview":
+            result = mandate_identity.consent_preview(module, project_id, mandate_id, actor)
         else:
-            result = mandate_identity.withdraw(module, project_id, mandate_id, actor)
+            result = mandate_identity.withdraw(module, project_id, mandate_id, actor,
+                                               operator=api.has_permission(api.MANAGE, project_id))
     except mandate_identity.IdentityRefused as refused:
         return {"error": mandate_identity.MESSAGES[refused.code], "code": refused.code}, \
             IDENTITY_STATUS.get(refused.code, 400)
-    return {"ok": True, "id": result["mandate_ref"], **({"consented_at": result["consented_at"]}
-                                                         if action == "consent" else {})}, 200
+    extra = {key: result[key] for key in ("consented_at", "covered") if key in result}
+    return {"ok": True, "id": result["mandate_ref"], **extra}, 200
 
 
 class AdminAPI(api_tools.APIModeHandler):
@@ -51,7 +56,8 @@ class AdminAPI(api_tools.APIModeHandler):
                    "404": {"description": "No such mandate in this project."}, "409": {"description": "State conflict."}},
         mcp_tool=False, available_to_users=False,
     )
-    # any of the three gets in; the one the action needs is checked below (consent: the owner, checked by the action)
+    # any of the three gets in; the one the action needs is checked below (consent and the owner's withdrawal: by the
+    # action, against the mandate's owner)
     @auth.decorators.check_api(api.check_spec(api.VIEW, api.MANAGE, api.APPROVE))
     def post(self, project_id: int, mandate_id, **kwargs):
         actor = api.current_actor()
@@ -63,13 +69,11 @@ class AdminAPI(api_tools.APIModeHandler):
         if body.action != "approve" and (body.approval_ref is not None or body.policy_revision is not None):
             return api.refusal("INVALID_REQUEST", "approval_ref and policy_revision belong to action approve only")
         mandate_id = uuid.UUID(str(mandate_id))
-        if body.action == "consent":
-            return _identity("consent", self.module, project_id, mandate_id, actor)
+        if body.action in ("consent", "consent_preview", "withdraw_consent"):   # the owner's own (withdraw: or manage)
+            return _identity(body.action, self.module, project_id, mandate_id, actor)
         needed = api.APPROVE if body.action in APPROVE_ACTIONS else api.MANAGE
         if not api.has_permission(needed, project_id):
             return api.refusal("FORBIDDEN")
-        if body.action == "withdraw_consent":
-            return _identity("withdraw", self.module, project_id, mandate_id, actor)
         param = f"project_id={project_id};action={body.action};mandate={mandate_id}"
         if body.action == "approve":
             if not body.approval_ref or not body.policy_revision:

@@ -63,6 +63,9 @@ MESSAGES = {
     "DEPENDENCY_UNAVAILABLE": "A service did not answer; nothing was changed. Try again.",
     "AUDIT_UNAVAILABLE": "The audit trail is unavailable; nothing was changed. Try again later.",
     "CONCURRENT_CHANGE": "The mandate changed while this ran; read it again and retry.",
+    "WITHDRAW_NOT_ALLOWED": "Only the mandate's owner, or an operator who manages mandates, can withdraw its consent.",
+    "NOTHING_TO_CONSENT": "This agent version uses no credential that acts with a Microsoft sign-in; there is nothing to "
+                          "consent to. Grant the credentials first, then consent.",
 }
 
 
@@ -105,20 +108,28 @@ def _secrets():
 
 # --- admission ----------------------------------------------------------------------------------------------------
 
+# --- admission ----------------------------------------------------------------------------------------------------
+
 def _read_identity(project_id, mandate_id):
     with db.get_session(project_id) as session:
         return session.execute(select(
             AutonomousMandate.identity_source, AutonomousMandate.identity_material_ref,
-            AutonomousMandate.identity_consented_at,
+            AutonomousMandate.identity_consented_at, AutonomousMandate.identity_scope,
         ).where(AutonomousMandate.id == mandate_id)).one_or_none()
 
 
+def scope_keys(scope) -> frozenset:
+    """``(credential ref, credential generation, configuration generation)`` of each credential a consent covers."""
+    return frozenset((item.get("credential_ref"), item.get("credential_generation"), item.get("configuration_generation"))
+                     for item in scope or () if isinstance(item, dict))
+
+
 def identity_reader(module, project_id, mandate_id, trigger_ref=None, owner_user_id=None):
-    """For the credential decision of a mandate run: a callable answering ``{"source", "consented"}`` of the mandate
-    (read once, when a delegated credential is first decided), or ``None`` when the deployment allows no owner
-    identity (nothing is ever read then). ``consented`` is False when the consent is missing, and also when the run is
-    a schedule's that someone other than its owner changed after the consent was given (C9-SEC-46: the owner confirms
-    by consenting again, or by saving the schedule themselves)."""
+    """For the credential decision of a mandate run: a callable answering ``{"source", "consented", "scope"}`` of the
+    mandate (read once, when a delegated credential is first decided), or ``None`` when the deployment allows no owner
+    identity (nothing is ever read then). ``scope``: the credentials (reference and generations) the owner consented
+    to. ``consented`` is False when the consent is missing, and also when the run is a schedule's that someone other
+    than its owner changed last (the owner saves the schedule again, C9-SEC-46)."""
     if not owner_delegated_allowed(module):
         return None
     answers = []
@@ -131,39 +142,61 @@ def identity_reader(module, project_id, mandate_id, trigger_ref=None, owner_user
             else:
                 consented = row.identity_material_ref is not None and row.identity_consented_at is not None
                 if consented and row.identity_source == OWNER_DELEGATED:
-                    consented = _schedule_confirmed(project_id, trigger_ref, owner_user_id,
-                                                    _aware(row.identity_consented_at))
-                answers.append({"source": row.identity_source, "consented": consented})
+                    consented = _schedule_confirmed(project_id, trigger_ref, owner_user_id)
+                answers.append({"source": row.identity_source, "consented": consented,
+                                "scope": scope_keys(row.identity_scope)})
         return answers[0]
 
     return read
 
 
-def _schedule_confirmed(project_id, trigger_ref, owner_user_id, consented_at) -> bool:
-    """A schedule run acts with the owner's sign-in only when the owner made its last change, or consented after it."""
+def _schedule_confirmed(project_id, trigger_ref, owner_user_id) -> bool:
+    """A schedule run acts with the owner's sign-in only when the owner made the schedule's last change (or nobody
+    did). ``updated_by`` is written by edits, pauses, resumes and owner changes, never by the scheduler's own claims."""
     if not isinstance(trigger_ref, str) or not trigger_ref.startswith(SCHEDULE_TRIGGER):
         return True
     try:
         schedule_id = int(trigger_ref[len(SCHEDULE_TRIGGER):])
     except ValueError:
         return False
-    change = _schedule_change(project_id, schedule_id)
-    if change is None:
-        return False
-    updated_by, updated_at = change
-    if updated_by is None or updated_by == owner_user_id:
-        return True
-    updated_at = _aware(updated_at)
-    return updated_at is not None and consented_at >= updated_at
-
-
-def _schedule_change(project_id, schedule_id):
-    """``(updated_by, updated_at)`` of a schedule, or ``None``: one read, only for a delegated mandate run."""
     from ..models.entity_schedule import EntitySchedule  # pylint: disable=C0415  # only this path reads a schedule
     with db.get_session(project_id) as session:
-        row = session.execute(select(EntitySchedule.updated_by, EntitySchedule.updated_at)
-                              .where(EntitySchedule.id == schedule_id)).one_or_none()
-    return None if row is None else (row.updated_by, row.updated_at)
+        row = session.execute(select(EntitySchedule.updated_by).where(EntitySchedule.id == schedule_id)).one_or_none()
+    return row is not None and row.updated_by in (None, owner_user_id)
+
+
+def consent_scope(project_id, version_id, owner_user_id) -> list:
+    """The Entra-delegated credentials the agent version uses, as a consent records them: ``[{credential_ref,
+    credential_generation, configuration_generation, toolkits}]`` (the owner's personal ones and the project's).
+    Read from the version's own toolkits (two queries) and the facts (two calls); no secret."""
+    from .credential_decision import (  # pylint: disable=C0415
+        CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, _credential_use_facts, collect_credential_uses,
+        read_configuration_facts,
+    )
+    from .definition_digest import toolkit_rows  # pylint: disable=C0415
+    with db.get_session(project_id) as session:
+        rows = toolkit_rows(session, version_id)
+        names = {str(tool.id): getattr(tool, "name", None) or tool.type for _, tool in rows}
+        uses = collect_credential_uses(None, project_id, version_id, {}, rows=rows)
+    stored = [use for use in uses if use.selector == "uuid" and use.configuration_uuid]
+    configurations = read_configuration_facts((use.configuration_uuid, use.configuration_project_id) for use in stored)
+    own = {fact["id"]: cfg_uuid for cfg_uuid, fact in configurations.items()
+           if isinstance(fact, dict) and fact.get("section") == CREDENTIAL_SECTION and fact.get("project_id") == project_id}
+    if not own:
+        return []
+    references = _credential_use_facts(project_id, sorted(own), [], personal_user_id=owner_user_id)["references"]
+    scope = []
+    for config_id, reference in references.items():
+        if not isinstance(reference, dict) or reference.get("auth_mode") != DELEGATED_AUTH_MODE:
+            continue
+        cfg_uuid = own.get(config_id)
+        scope.append({
+            "credential_ref": reference.get("ref_id"), "credential_generation": reference.get("generation"),
+            "configuration_generation": (configurations.get(cfg_uuid) or {}).get("generation"),
+            "toolkits": sorted({str(names.get(use.toolkit_instance_id, use.toolkit_instance_id))
+                                for use in stored if use.configuration_uuid == cfg_uuid}),
+        })
+    return sorted(scope, key=lambda item: str(item["credential_ref"]))
 
 
 # --- release ------------------------------------------------------------------------------------------------------
@@ -182,7 +215,8 @@ class OfflineMaterial:  # pylint: disable=R0903
         return f"OfflineMaterial(generation={self.generation})"
 
     def rotate(self, refresh_token) -> None:
-        """Keep the refresh token the authority issued on a redemption (best effort: the old one still works)."""
+        """Keep the refresh token the authority issued on a redemption (best effort: the old one still works; the
+        secrets plugin keeps at most one rotation a day)."""
         try:
             answer = _secrets().rotate_offline_material(
                 self.project_id, self.ref, expected_generation=self.generation,
@@ -202,18 +236,41 @@ def mandate_id_of(subject) -> Optional[uuid.UUID]:
         return None
 
 
-def release_person(project_id, subject, tenant, caller) -> tuple:
+def _recheck_owner_grant(project_id, credential_ref, owner_ref, owner_grant) -> None:
+    """The grant the owner held on a shared delegated credential at admission must still be in force, at the same
+    epoch (one facts read, before the consent is read)."""
+    from .credential_decision import (  # pylint: disable=C0415
+        _credential_use_facts, subject_grant_in_force, subject_grant_key,
+    )
+    if not owner_grant or not owner_grant[0]:
+        raise entra_obo.DelegationRefused("DENIED_GRANT")   # admitted without one (before #7131's fix): refused
+    try:
+        found = _credential_use_facts(project_id, [], [], [credential_ref],
+                                      subject_grants=[(credential_ref, owner_ref)])
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("mandate identity: the owner's grant could not be read (%s)", type(exc).__name__)
+        raise entra_obo.DelegationRefused(entra_obo.UNAVAILABLE) from None
+    grant = subject_grant_in_force((found.get("subject_grants") or {}).get(subject_grant_key(credential_ref, owner_ref)),
+                                   _now(), grant_id=owner_grant[0])
+    if grant is None:
+        raise entra_obo.DelegationRefused("DENIED_GRANT")
+    if grant.get("revocation_epoch") != owner_grant[1]:
+        raise entra_obo.DelegationRefused("EPOCH_MISMATCH")
+
+
+def release_person(project_id, subject, tenant, caller, *, slot, ownership_class, owner_grant=None) -> tuple:  # pylint: disable=R0913
     """``(person, OfflineMaterial)`` for an Entra-delegated slot of a mandate run: the owner's subject frozen in the
-    mandate, which must be the one the run was admitted with, and their consent read for this mandate and this person
-    only. Raises ``entra_obo.DelegationRefused``. Called after the release's own checks of the mandate (state, epoch,
-    binding); reads the mandate's identity once and the material once."""
+    mandate, which must be the one the run was admitted with; the credential among those the owner consented to; for a
+    shared credential the owner's own grant still in force (``owner_grant``: ``(grant id, epoch)`` the run was admitted
+    on); and their consent read for this mandate and this person only. Raises ``entra_obo.DelegationRefused``. Called
+    after the release's own checks of the mandate (state, epoch, binding)."""
     mandate_id = mandate_id_of(subject)
     if mandate_id is None or not isinstance(caller, dict) or caller.get("kind") != "trigger":
         raise entra_obo.DelegationRefused(entra_obo.CALLER_UNSUPPORTED)
     with db.get_session(project_id) as session:
         row = session.execute(select(
             AutonomousMandate.owner_user_ref, AutonomousMandate.identity_source,
-            AutonomousMandate.identity_material_ref,
+            AutonomousMandate.identity_material_ref, AutonomousMandate.identity_scope,
         ).where(AutonomousMandate.id == mandate_id)).one_or_none()
     if row is None or row.identity_source != OWNER_DELEGATED:
         raise entra_obo.DelegationRefused(entra_obo.MANDATE_UNSUPPORTED)
@@ -227,12 +284,17 @@ def release_person(project_id, subject, tenant, caller) -> tuple:
     if admitted != (person["issuer"], person["tid"], person["oid"]):
         # admitted before the identity was stored, or the owner's subject is not the one the run carries
         raise entra_obo.DelegationRefused(entra_obo.SUBJECT_MISMATCH if all(admitted) else entra_obo.STALE)
+    if not any(ref == slot["credential_ref"] and generation == slot["credential_generation"]
+               for ref, generation, _ in scope_keys(row.identity_scope)):
+        raise entra_obo.DelegationRefused(CONSENT_REQUIRED)   # not among what the owner consented to
+    owner_ref = f"idp:{person['tid']}:{person['oid']}"
+    if ownership_class != "personal":
+        _recheck_owner_grant(project_id, slot["credential_ref"], owner_ref, owner_grant)
     holder = holder_of(mandate_id)
     try:
         answer = _secrets().release_offline_material(
-            project_id, str(row.identity_material_ref), holder_ref=holder,
-            custodian_subject_ref=f"idp:{person['tid']}:{person['oid']}", release_id=str(uuid.uuid4()),
-            actor_ref=RELEASE_ACTOR)
+            project_id, str(row.identity_material_ref), holder_ref=holder, custodian_subject_ref=owner_ref,
+            release_id=str(uuid.uuid4()), actor_ref=RELEASE_ACTOR)
     except Exception as exc:  # pylint: disable=W0703
         log.error("mandate identity: the consent could not be read (%s)", type(exc).__name__)
         raise entra_obo.DelegationRefused(entra_obo.UNAVAILABLE) from None
@@ -272,9 +334,9 @@ def _event(event_type, reason_code, mandate, caller_ref, **fields) -> dict:
 def _read_mandate(session, project_id, mandate_id):
     return session.execute(select(
         AutonomousMandate.id, AutonomousMandate.project_id, AutonomousMandate.application_id,
-        AutonomousMandate.agent_binding_ref, AutonomousMandate.owner_user_id, AutonomousMandate.owner_user_ref,
-        AutonomousMandate.state, AutonomousMandate.valid_until, AutonomousMandate.identity_source,
-        AutonomousMandate.identity_material_ref,
+        AutonomousMandate.agent_version, AutonomousMandate.agent_binding_ref, AutonomousMandate.owner_user_id,
+        AutonomousMandate.owner_user_ref, AutonomousMandate.state, AutonomousMandate.valid_until,
+        AutonomousMandate.identity_source, AutonomousMandate.identity_material_ref,
     ).where(AutonomousMandate.id == mandate_id, AutonomousMandate.project_id == project_id)).one_or_none()
 
 
@@ -300,7 +362,7 @@ def _clear(project_id, mandate_id, material_ref, reason_code, caller_ref, *, ret
         moved = session.execute(update(AutonomousMandate).where(
             AutonomousMandate.id == mandate_id,
             AutonomousMandate.identity_material_ref == uuid.UUID(str(material_ref)),
-        ).values(identity_material_ref=None, identity_consented_at=None).execution_options(
+        ).values(identity_material_ref=None, identity_consented_at=None, identity_scope=None).execution_options(
             synchronize_session=False)).rowcount
         if moved:
             _tracing().security_audit_record(session, _event(
@@ -311,7 +373,8 @@ def _clear(project_id, mandate_id, material_ref, reason_code, caller_ref, *, ret
 
 
 def _grant(module, person, holder) -> dict:
-    """auth_oidc's one refresh token of the person's kept sign-in, for ``holder``: ``{refresh_token, assertion_source}``."""
+    """auth_oidc's one refresh token of the person's kept sign-in, for ``holder``: ``{refresh_token, source}``. The
+    token arrives sealed for this request and is opened here only."""
     rpc = getattr(getattr(module, "context", None), "rpc_manager", None)
     key = entra_obo.custody_key(module)
     if rpc is None or key is None:
@@ -330,8 +393,12 @@ def _grant(module, person, holder) -> dict:
         code = answer.get("code") if isinstance(answer, dict) else None
         raise IdentityRefused(entra_obo.ASSERTION_UNAVAILABLE if code == "ASSERTION_UNAVAILABLE"
                               else "DEPENDENCY_UNAVAILABLE")
-    token, source = answer.get("refresh_token"), answer.get("assertion_source")
-    if not isinstance(token, str) or not token or source not in ("login", "broker"):
+    token = entra_obo.open_sealed(entra_obo.seal_key(key), answer.get("sealed_refresh_token"),
+                                  entra_obo.seal_aad("grant-reply", person["tid"], person["oid"], holder, nonce))
+    source = answer.get("assertion_source")
+    if not token or source not in ("login", "broker"):
+        if answer.get("sealed_refresh_token") is not None:
+            log.error("mandate identity: the consent from the custody service did not open (is the request key the same?)")
         raise IdentityRefused(entra_obo.ASSERTION_UNAVAILABLE)
     return {"refresh_token": token, "source": source}
 
@@ -348,9 +415,8 @@ def _verified_person(module, actor_user_id) -> dict:
         raise IdentityRefused(code if code in MESSAGES else entra_obo.ASSERTION_UNAVAILABLE) from None
 
 
-def consent(module, project_id, mandate_id, actor_user_id) -> dict:  # pylint: disable=R0914
-    """The owner consents, while signed in, to the mandate's runs acting with their Microsoft sign-in: ``{"mandate_ref",
-    "consented_at"}``, or raises ``IdentityRefused``. A consent given again replaces the earlier one (retired)."""
+def _consentable(module, project_id, mandate_id, actor_user_id):
+    """The mandate a consent (or its preview) is for, refused unless the owner asks for a live owner_delegated one."""
     if not owner_delegated_allowed(module):
         raise IdentityRefused("IDENTITY_SOURCE_NOT_ALLOWED")
     with db.get_session(project_id) as session:
@@ -363,10 +429,38 @@ def consent(module, project_id, mandate_id, actor_user_id) -> dict:  # pylint: d
         raise IdentityRefused("INVALID_STATE")
     if actor_user_id != mandate.owner_user_id:
         raise IdentityRefused("CONSENT_OWNER_ONLY")
+    return mandate
+
+
+def _covered(project_id, mandate):
+    try:
+        scope = consent_scope(project_id, mandate.agent_version, mandate.owner_user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("mandate identity: the credentials of the version could not be read (%s)", type(exc).__name__)
+        raise IdentityRefused("DEPENDENCY_UNAVAILABLE") from None
+    if not scope:
+        raise IdentityRefused("NOTHING_TO_CONSENT")
+    return scope
+
+
+def consent_preview(module, project_id, mandate_id, actor_user_id) -> dict:
+    """What a consent would cover now: ``{"mandate_ref", "covered": [{toolkits}]}``; nothing is written or asked."""
+    mandate = _consentable(module, project_id, mandate_id, actor_user_id)
+    return {"mandate_ref": str(mandate.id),
+            "covered": [{"toolkits": item["toolkits"]} for item in _covered(project_id, mandate)]}
+
+
+def consent(module, project_id, mandate_id, actor_user_id) -> dict:  # pylint: disable=R0914
+    """The owner consents, while signed in, to the mandate's runs acting with their Microsoft sign-in, for the
+    delegated credentials the version uses now (recorded: a credential granted or re-approved later needs a new
+    consent): ``{"mandate_ref", "consented_at", "covered"}``, or raises ``IdentityRefused``. A consent given again
+    replaces the earlier one (retired)."""
+    mandate = _consentable(module, project_id, mandate_id, actor_user_id)
     owner = mandate.owner_user_ref if isinstance(mandate.owner_user_ref, dict) else {}
     person = _verified_person(module, actor_user_id)
     if (person["issuer"], person["tid"], person["oid"]) != (owner.get("issuer"), owner.get("tid"), owner.get("oid")):
         raise IdentityRefused("DENIED_SUBJECT_MISMATCH")   # signed in as another identity than the mandate's owner
+    scope = _covered(project_id, mandate)
     holder = holder_of(mandate.id)
     granted = _grant(module, person, holder)
     try:
@@ -389,9 +483,9 @@ def consent(module, project_id, mandate_id, actor_user_id) -> dict:  # pylint: d
                          else AutonomousMandate.identity_material_ref == earlier)
             moved = session.execute(update(AutonomousMandate).where(
                 AutonomousMandate.id == mandate.id, AutonomousMandate.state.in_(LIVE_MANDATE_STATES),
-                AutonomousMandate.identity_source == OWNER_DELEGATED, condition,
-            ).values(identity_material_ref=material_ref, identity_consented_at=now).execution_options(
-                synchronize_session=False)).rowcount
+                AutonomousMandate.identity_source == OWNER_DELEGATED, AutonomousMandate.valid_until > now, condition,
+            ).values(identity_material_ref=material_ref, identity_consented_at=now, identity_scope=scope)
+                .execution_options(synchronize_session=False)).rowcount
             if moved != 1:
                 session.rollback()
                 raise IdentityRefused("CONCURRENT_CHANGE")
@@ -407,24 +501,25 @@ def consent(module, project_id, mandate_id, actor_user_id) -> dict:  # pylint: d
         raise IdentityRefused("AUDIT_UNAVAILABLE") from None
     if earlier is not None:
         _retire(project_id, earlier, "CONSENT_REPLACED", caller_ref, actor_user_id)
-    return {"mandate_ref": str(mandate.id), "consented_at": now.isoformat()}
+    return {"mandate_ref": str(mandate.id), "consented_at": now.isoformat(),
+            "covered": [{"toolkits": item["toolkits"]} for item in scope]}
 
 
-def withdraw(module, project_id, mandate_id, actor_user_id) -> dict:
-    """Withdraw the mandate's consent (its owner, or an operator the API let in): the next run is refused
+def withdraw(module, project_id, mandate_id, actor_user_id, *, operator=False) -> dict:  # pylint: disable=W0613
+    """Withdraw the mandate's consent: its owner, or an operator who manages mandates (``operator``). Works whatever
+    the deployment switch says (withdrawing is always safe). The next run is refused
     ``DENIED_MANDATE_CONSENT_REQUIRED``. ``{"mandate_ref"}`` or raises ``IdentityRefused``."""
-    if not owner_delegated_allowed(module):
-        raise IdentityRefused("IDENTITY_SOURCE_NOT_ALLOWED")
     with db.get_session(project_id) as session:
         mandate = _read_mandate(session, project_id, mandate_id)
     if mandate is None:
         raise IdentityRefused("MANDATE_NOT_FOUND")
+    if not operator and actor_user_id != mandate.owner_user_id:
+        raise IdentityRefused("WITHDRAW_NOT_ALLOWED")
     if mandate.identity_material_ref is None:
         raise IdentityRefused("CONSENT_NOT_GIVEN")
     try:
         withdrawn = _clear(project_id, mandate.id, mandate.identity_material_ref, "MANDATE_IDENTITY_WITHDRAWN",
-                           f"operator:{actor_user_id}", retire_reason="CONSENT_WITHDRAWN",
-                           actor_user_id=actor_user_id)
+                           f"user:{actor_user_id}", retire_reason="CONSENT_WITHDRAWN", actor_user_id=actor_user_id)
     except Exception as exc:  # pylint: disable=W0703
         log.error("mandate identity: the consent was not withdrawn (%s)", type(exc).__name__)
         raise IdentityRefused("AUDIT_UNAVAILABLE") from None
@@ -433,15 +528,14 @@ def withdraw(module, project_id, mandate_id, actor_user_id) -> dict:
     return {"mandate_ref": str(mandate.id)}
 
 
-def retire_with_mandate(module, project_id, mandate_id, actor_user_id) -> None:
-    """The mandate was revoked: its consent goes with it (best effort, after the revocation committed)."""
-    if not owner_delegated_allowed(module):
-        return
+def retire_consent(project_id, mandate_id, reason_code, caller_ref, actor_user_id=None) -> None:
+    """The mandate ended (revoked, expired) or its owner was suspended: its consent goes with it. Whatever the switch
+    says; best effort, after the change committed (one read; a schema without the columns is logged, not raised)."""
     try:
         with db.get_session(project_id) as session:
             mandate = _read_mandate(session, project_id, mandate_id)
         if mandate is not None and mandate.identity_material_ref is not None:
-            _clear(project_id, mandate_id, mandate.identity_material_ref, "MANDATE_IDENTITY_WITHDRAWN",
-                   f"operator:{actor_user_id}", retire_reason="HOLDER_REVOKED", actor_user_id=actor_user_id)
+            _clear(project_id, mandate_id, mandate.identity_material_ref, reason_code, caller_ref,
+                   retire_reason="HOLDER_REVOKED", actor_user_id=actor_user_id)
     except Exception as exc:  # pylint: disable=W0703
-        log.error("mandate identity: the consent of a revoked mandate was not retired (%s)", type(exc).__name__)
+        log.error("mandate identity: the consent of an ended mandate was not retired (%s)", type(exc).__name__)
