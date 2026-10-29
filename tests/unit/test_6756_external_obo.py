@@ -743,3 +743,69 @@ def test_startup_says_so_when_the_platform_client_has_no_custody_key(ns, env, mo
     assert any("custody request key" in line for line in env.log.lines)
     module.descriptor.config.pop("entra_obo_client_id")
     assert ns.entra_obo.check_config(module) is True   # nothing configured, nothing to say
+
+
+# --- step 4b: a login brokered to Entra by a Keycloak realm ----------------------------------------------------------
+
+@pytest.fixture
+def brokered(env, monkeypatch):
+    """The run's person signed in through the realm KEYCLOAK, which maps Entra's tid/oid into its tokens and is listed
+    as a broker; auth_oidc's custody (the fake) holds the brokered Entra sign-in under that Entra subject."""
+    inner = env.module
+
+    def module(**kwargs):
+        built = inner(**kwargs)
+        built.descriptor.config["entra_obo_broker_issuers"] = [KEYCLOAK]
+        return built
+
+    monkeypatch.setattr(env, "module", module)
+    env.verify_result["principal"]["evidence"]["issuer"] = KEYCLOAK
+    return env
+
+
+def test_the_brokered_subject_is_the_entra_identity_with_the_realm_as_issuer(ns, brokered):
+    run = admitted(ns, brokered, Delegated(brokered, brokered.seed_agent()))
+    row = context_row(ns, brokered, run.ref)
+    assert (row.subject["issuer"], row.tenant, row.subject["oid"], row.subject["ref"]) == (KEYCLOAK, TID, OID, PERSON_REF)
+    assert ns.entra_obo.run_subject(row.subject, row.tenant, {"kind": "user"}) == {"issuer": KEYCLOAK, "tid": TID,
+                                                                                    "oid": OID}
+
+
+def test_a_brokered_person_gets_the_same_exchange_as_a_direct_microsoft_sign_in(ns, brokered):
+    ns.need_transport()
+    run = admitted(ns, brokered, Delegated(brokered, brokered.seed_agent(), personal=True))
+    reply = run.release()
+    assert reply["ok"] is True, reply
+    assert run.opened(reply["releases"][0])["fields"] == {"access_token": GRAPH_TOKEN}
+    assert brokered.custody.calls == [(TID, OID, False)]                     # the custody key is the Entra (tid, oid)
+    [(url, form)] = brokered.entra.posts
+    assert url == f"https://login.microsoftonline.com/{TID}/oauth2/v2.0/token" and form["assertion"] == ASSERTION
+
+
+def test_a_brokered_person_of_another_tenant_is_refused(ns, brokered):
+    cred = Delegated(brokered, brokered.seed_agent())
+    brokered.delegations[cred.ref_id] = descriptor(tenant_id="99999999-2222-3333-4444-555555555555")
+    assert admitted(ns, brokered, cred).release()["reason_code"] == "DENIED_SUBJECT_MISMATCH"
+    assert brokered.custody.calls == [] and brokered.entra.posts == []
+
+
+def test_a_brokered_person_without_a_kept_sign_in_is_told_to_sign_in_again(ns, brokered):
+    run = admitted(ns, brokered, Delegated(brokered, brokered.seed_agent()))
+    brokered.custody.answer = {"ok": False, "code": "ASSERTION_UNAVAILABLE"}
+    assert run.release()["reason_code"] == "DENIED_ASSERTION_UNAVAILABLE" and brokered.entra.posts == []
+
+
+@pytest.mark.parametrize("listed", [[], [KEYCLOAK + "/"], [KEYCLOAK + "2"], [KEYCLOAK.upper()],
+                                    f"{KEYCLOAK} https://other.example"])   # a string, not a list: no substring match
+def test_only_a_listed_realm_issuer_counts_as_a_broker_exactly(ns, env, monkeypatch, listed):
+    inner = env.module
+
+    def module(**kwargs):
+        built = inner(**kwargs)
+        built.descriptor.config["entra_obo_broker_issuers"] = listed
+        return built
+
+    monkeypatch.setattr(env, "module", module)
+    env.verify_result["principal"]["evidence"]["issuer"] = KEYCLOAK
+    reply = admitted(ns, env, Delegated(env, env.seed_agent())).release()
+    assert reply["reason_code"] == "DENIED_ASSERTION_SOURCE_UNSUPPORTED" and env.custody.calls == []

@@ -105,3 +105,8 @@ entra_obo_client_secret_env: ELITEA_API_CLIENT_SECRET
 # Both secrets are service-scoped: the client secret is given to pylon_main only, the request key to pylon_main and
 # pylon_auth only, never through an env file every pylon loads (pylon_indexer runs toolkit code).
 entra_obo_custody_key_env: ELITEA_OBO_CUSTODY_KEY
+# Issuers (exact strings) of Keycloak realms that broker the login to Entra (step 4b): a person signed in through one
+# of them acts with the Entra sign-in auth_oidc fetched from the realm (obo_assertion_source: keycloak_broker). The
+# realm must map Entra's tid/oid into its tokens (the identity verifier's subject_claims). Empty: such a login is
+# refused DENIED_ASSERTION_SOURCE_UNSUPPORTED.
+entra_obo_broker_issuers: []
