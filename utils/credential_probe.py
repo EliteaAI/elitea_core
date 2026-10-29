@@ -337,8 +337,8 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
     person = None
     if delegated:   # acts with the tester's own Microsoft sign-in (#7281)
         person = _probe_person(module, actor_user_id) if shared is None else shared.person
-        if isinstance(person, str):   # the batch could not verify the person: the code it was refused with
-            raise _deny(person)
+        if not isinstance(person, dict):   # the batch could not verify the person: the code it was refused with
+            raise _deny(person if isinstance(person, str) else entra_obo.CALLER_UNSUPPORTED)
         _require_grant(project_id, reference, person)
     required = {"task_envelope.v1", CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1}
     if not module.worker_capabilities.has_capable_worker(required):
