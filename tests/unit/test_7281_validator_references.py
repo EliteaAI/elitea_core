@@ -14,6 +14,7 @@ import json
 import pathlib
 import sys
 import textwrap
+import types
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -27,12 +28,14 @@ from fixtures import admission_env  # noqa: E402  pylint: disable=C0413
 STORED = "stored-value-made-up-for-the-test"
 HEADER = "header-value-made-up-for-the-test"
 SECRET_FIELDS = {"github": ["access_token", "password", "app_private_key"], "openapi": ["api_key", "headers.*"]}
-SCHEMA = {"title": "github", "properties": {}}
+SCHEMA = {"title": "github", "properties": {"repository": {"type": "string"},
+                                            "webhook_secret": {"type": "string", "secret": True},
+                                            "unused_secret": {"type": "string", "secret": True}}}
 
 
 def expanded():
     return {
-        "repository": "o/r",
+        "repository": "o/r", "webhook_secret": STORED, "unused_secret": "",
         "github_configuration": {"configuration_type": "github", "elitea_title": "gh", "private": False,
                                  "configuration_uuid": "6a3c4e7e-9b51-4cf5-8f86-1f0e8c3c1d10",
                                  "configuration_project_id": 2, "configuration_generation": 3,
@@ -84,6 +87,7 @@ def validator(ns, enabled, secret_fields=None):
         "is_credential_type": lambda name: name != "pgvector",
         "mask_credential_values": lambda settings, is_credential: ns.credential_slots.mask_credential_values(
             settings, is_credential, lambda types: {name: fields[name] for name in types if name in fields}),
+        "mask_schema_secrets": ns.credential_slots.mask_schema_secrets,
     }
     exec(_lift("toolkit_settings_validator"), namespace)  # noqa: S102
     node = Node()
@@ -107,6 +111,9 @@ def test_under_enforce_the_validator_task_gets_references_not_values(ns):
                                                                    "base_url")}   # the selector and its shape kept
     assert sent["openapi_configuration"]["headers"] == {"X-Api-Key": ns.credential_slots.GOVERNED_VALUE}
     assert sent["pgvector_configuration"] == expanded()["pgvector_configuration"]   # not a credential: unchanged
+    # a toolkit field the schema marks secret (resolved from the project vault): no resolved value either
+    assert (sent["webhook_secret"], sent["unused_secret"], sent["repository"]) == (
+        ns.credential_slots.GOVERNED_VALUE, "", "o/r")
     assert STORED not in json.dumps(list(cache._entries.values()), default=str)   # pylint: disable=W0212
 
 
@@ -171,3 +178,16 @@ def test_the_validator_task_is_started_in_one_place_only():
                         and isinstance(call.args[0], ast.Constant) and call.args[0].value == "indexer_validator":
                     hits.append((path.relative_to(PLUGIN_ROOT).as_posix(), fn.name))
     assert sorted(set(hits)) == [("rpc/application.py", "toolkit_settings_validator")]
+
+
+def test_a_type_the_registry_does_not_know_counts_as_a_credential(ns, monkeypatch):
+    """Its secret paths are then unknown, so nothing is sent (the rule of ``is_credential_type``, real code)."""
+    registry = types.ModuleType("plugins.configurations.models.pd.registry")
+    registry.CONFIG_TYPE_REGISTRY = {"github": SimpleNamespace(section="credentials"),
+                                     "pgvector": SimpleNamespace(section="vectorstorage")}
+    monkeypatch.setitem(sys.modules, "plugins.configurations.models.pd.registry", registry)
+    is_credential = ns.credential_slots.is_credential_type
+    assert (is_credential("github"), is_credential("pgvector"), is_credential("not-registered")) == (True, False, True)
+    settings = {"x": {"configuration_type": "not-registered", "token": STORED}}
+    with pytest.raises(ns.credential_decision.CredentialDecisionError):
+        ns.credential_slots.mask_credential_values(settings, is_credential, lambda names: {})

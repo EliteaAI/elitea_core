@@ -1151,3 +1151,9 @@ def test_a_kept_outcome_needs_the_same_grant(ns, env, monkeypatch):
     answer = _validator_check(ns, env, probe.cred)
     assert answer["code"] == "DENIED_GRANT"   # the grant read precedes the kept outcome
     ns.credential_probe.forget_outcomes()
+
+
+def test_a_grant_reissued_during_the_check_is_said_as_such_not_as_a_worker_problem(ns):
+    shaped = ns.credential_probe.shape_result({"success": False, "reason_code": "EPOCH_MISMATCH"})
+    assert shaped == {"success": False, "code": "EPOCH_MISMATCH",
+                      "message": ns.credential_probe.PROBE_MESSAGES["EPOCH_MISMATCH"]}

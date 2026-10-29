@@ -91,6 +91,7 @@ PROBE_MESSAGES = {
     **{code: adm.MESSAGES[code] for code in entra_obo.CODES},
     "DENIED_GRANT": "You hold no grant for this shared Microsoft credential; ask an administrator for one, then test "
                     "again.",
+    "EPOCH_MISMATCH": "Your access to this credential changed while it was being tested; test it again.",
 }
 
 

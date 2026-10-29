@@ -42,6 +42,7 @@ from ..utils.mandate_admission import take_trigger_admission
 from ..utils.admission import CREDENTIAL_FREE, strip_platform_fields
 from ..utils.credential_slots import (
     has_free_form_secret, has_secret_template, is_credential_type, mark_free_form_secret, mask_credential_values,
+    mask_schema_secrets,
 )
 from ..utils.governance import is_governed
 from ..utils.exceptions import (
@@ -1440,10 +1441,10 @@ class RPC:
             return {"ok": True, "result": settings}
         if not external:
             if getattr(getattr(self, "governance_profile", None), "enabled", False) is True:
-                # under enforce the validator task gets references, not values (#7281); the run itself still gets
-                # them only through its governed slots
+                # under enforce the validator task gets references, not values, and no resolved secret field
+                # (#7281); the run itself still gets them only through its governed slots
                 try:
-                    settings = mask_credential_values(settings, is_credential_type)
+                    settings = mask_schema_secrets(mask_credential_values(settings, is_credential_type), tk)
                 except Exception as exc:  # pylint: disable=W0703
                     log.warning("toolkit settings validator: credential fields not masked (%s), not validated",
                                 type(exc).__name__)

@@ -326,6 +326,16 @@ def mask_credential_values(settings, is_credential_type: Callable, secret_fields
     return masked
 
 
+def mask_schema_secrets(settings: dict, schema) -> dict:
+    """``settings`` with every toolkit field the schema marks ``secret: true`` (resolved from the project's vault by
+    ``expand_toolkit_settings``) that holds a value replaced by ``GOVERNED_VALUE``; changed in place and returned."""
+    properties = schema.get("properties") if isinstance(schema, Mapping) else None
+    for name, field in (properties or {}).items():
+        if isinstance(field, Mapping) and field.get("secret") is True and settings.get(name) not in (None, ""):
+            settings[name] = GOVERNED_VALUE
+    return settings
+
+
 def slot_of(entry: Mapping, fields: list, *, ticket: Optional[str] = None) -> dict:
     """The slot of a run's decision entry, or (``ticket`` set) of a probe: same shape, ``probe_ref`` for
     ``decision_id``."""
