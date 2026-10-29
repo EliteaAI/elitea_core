@@ -16,20 +16,33 @@ tester, or the custodian when an operator tests on their behalf); only that user
 actor (``actor_user_id``, the same user unless given) is who holds ``credentials.probe``, is named as the caller of the
 events and is the user the ticket and the stored-configuration read are for. The caller that passes a different actor has
 authorised them already (the credential onboarding's REST layer).
+
+An Entra-delegated reference (#6756 step 4) holds no value: the probe acts with the tester's own Microsoft sign-in, as a
+run they start does (#7281). Its ticket names the verified subject ``(issuer, tid, oid)`` of the signed-in session the
+request came with (never a value of the request, never a user id alone), and the release mints the token on behalf of
+that person through ``entra_obo``, with the same tenant, custodian and custody checks as a run. A project reference
+needs a grant to that person. No session (an API token) is ``DENIED_DELEGATION_UNSUPPORTED_CALLER``; a session without
+a verifiable Microsoft identity, or without a kept sign-in, is ``DENIED_ASSERTION_UNAVAILABLE``.
 """
 import json
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+from pydantic import SecretStr
 from pylon.core.tools import log
 from tools import auth, db, this
 
 from . import admission as adm   # audit and counter helpers
-from .credential_decision import CREDENTIAL_SECTION, MAX_FACT_SELECTORS, STORE_KINDS, read_configuration_facts
+from . import entra_obo
+from .credential_decision import (
+    CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, MAX_FACT_SELECTORS, STORE_KINDS, read_configuration_facts,
+    subject_grant_in_force, subject_grant_key,
+)
 from .credential_release import PROBE_KEY, PROBE_TASK
 from .credential_slots import (
-    SLOT_KEY, configuration_secret_fields, has_secret_template, secret_paths_for, slot_of, strip_secret_fields,
+    AUTH_MODE_KEY, DELEGATED_FIELD, DELEGATED_TYPES, SLOT_KEY, configuration_secret_fields, has_secret_template,
+    secret_paths_for, slot_of, strip_secret_fields,
 )
 from .exceptions import AdmissionDenied
 from .worker_capabilities import CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1
@@ -62,6 +75,10 @@ PROBE_MESSAGES = {
     **dict.fromkeys(
         ("STORE_DENIED", "STORE_SEALED", "STORE_UNAVAILABLE", "STORE_TLS_INVALID", "STORE_NOT_FOUND",
          "STORE_VERSION_CONFLICT"), _STORE_MESSAGE),
+    # an Entra-delegated credential acts with the tester's own Microsoft sign-in (#7281): the texts of a run (step 4)
+    **{code: adm.MESSAGES[code] for code in entra_obo.CODES},
+    "DENIED_GRANT": "You hold no grant for this shared Microsoft credential; ask an administrator for one, then test "
+                    "again.",
 }
 
 
@@ -145,15 +162,69 @@ def _reference_of(project_id, configuration_uuid, config_type, user_id, known, o
     return configuration, reference
 
 
+def _session_holder():
+    """The authenticated holder of the HTTP request this probe serves (``flask.g.auth``), or ``None``: read as a run's
+    admission reads it."""
+    from ..models.pd.admission import _holder  # pylint: disable=C0415
+    return _holder(None)
+
+
+def _probe_person(module, actor_user_id) -> dict:
+    """``{issuer, tid, oid}`` of the person testing an Entra-delegated credential: the verified subject of the signed-in
+    session the request came with, verified as a run's admission verifies its caller (the identity service, the
+    session's own reference), never a value of the request or a user id alone (#7281)."""
+    holder = _session_holder()
+    reference = getattr(holder, "reference", None)
+    try:
+        holder_id = int(getattr(holder, "id", None))
+    except (TypeError, ValueError):
+        holder_id = None
+    if getattr(holder, "type", None) != "user" or holder_id != actor_user_id or not isinstance(reference, str) \
+            or not reference:
+        raise _deny(entra_obo.CALLER_UNSUPPORTED)   # an API token, or no signed-in session behind the probe
+    caller = types.SimpleNamespace(caller_type="user", caller_id=actor_user_id, caller_reference=SecretStr(reference))
+    try:
+        subject = adm._subject_of(adm._verify_identity(caller, module.admission_settings))
+    except AdmissionDenied as denied:
+        if denied.reason_code == "DEPENDENCY_UNAVAILABLE":
+            raise
+        log.info("governed check_connection: no verified Microsoft identity (%s)", denied.reason_code)
+        raise _deny(entra_obo.ASSERTION_UNAVAILABLE) from None
+    person = {"issuer": subject.get("issuer"), "tid": subject.get("tid"), "oid": subject.get("oid")}
+    if not all(isinstance(value, str) and value for value in person.values()):
+        raise _deny(entra_obo.ASSERTION_UNAVAILABLE)
+    return person
+
+
+def _require_grant(project_id, reference, person) -> None:
+    """A shared Entra-delegated reference acts for the tester only with a grant to them in force (a run's development
+    rule, #7213); a personal one is its custodian's, bound again at the release. One facts read, delegated only."""
+    if reference.get("ownership_class") == "personal":
+        return
+    subject_ref = f"idp:{person['tid']}:{person['oid']}"
+    try:
+        found = this.for_module("secrets").module.credential_use_facts(
+            project_id, [], [], [reference["ref_id"]], subject_grants=[(reference["ref_id"], subject_ref)])
+        grants = (found.get("subject_grants") or {}).get(subject_grant_key(reference["ref_id"], subject_ref))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governed check_connection: the grants could not be read (%s)", type(exc).__name__)
+        raise _deny("DEPENDENCY_UNAVAILABLE") from None
+    if subject_grant_in_force(grants, adm._now()) is None:
+        raise _deny("DENIED_GRANT")
+
+
 def _probe_event(module, **fields) -> dict:
     return adm._event(
         event_type="probe", policy_revision=module.governance_profile.policy_revision,
         environment=module.admission_settings.environment, **fields)
 
 
-def _open_probe(module, project_id, user_id, actor_user_id, probe_ref, reference, onboarding=False) -> None:
+def _open_probe(  # pylint: disable=R0913
+    module, project_id, user_id, actor_user_id, probe_ref, reference, onboarding=False, person=None,
+) -> None:
     """Commit the ``probe`` event, then store the ticket the release takes. The event comes first: a ticket never
-    exists without its record, and a lost ticket only makes the probe fail."""
+    exists without its record, and a lost ticket only makes the probe fail. ``person``: the verified subject an
+    Entra-delegated probe acts for (``_probe_person``)."""
     event = _probe_event(
         module, decision="allow", reason_code=ALLOWED, event_id=probe_ref, project_id=project_id,
         caller_ref=f"user:{actor_user_id}", user_ref=f"user:{user_id}", credential_ref=reference["ref_id"],
@@ -171,6 +242,8 @@ def _open_probe(module, project_id, user_id, actor_user_id, probe_ref, reference
     }
     if onboarding:   # the release may read a pending reference for this ticket (and only this ticket)
         ticket["onboarding"] = True
+    if person is not None:   # the release mints the token on behalf of this person, and only for this ticket
+        ticket["person"] = person
     ticket = json.dumps(ticket)
     try:
         module.get_redis_client().set(PROBE_KEY + probe_ref, ticket, ex=PROBE_TTL_S)
@@ -260,6 +333,13 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
         _may_probe(actor_user_id, project_id)
     _configuration, reference = _reference_of(
         project_id, configuration_uuid, config_type, user_id, known, onboarding, None if shared is None else shared.facts)
+    delegated = reference.get("auth_mode") == DELEGATED_AUTH_MODE
+    person = None
+    if delegated:   # acts with the tester's own Microsoft sign-in (#7281)
+        person = _probe_person(module, actor_user_id) if shared is None else shared.person
+        if isinstance(person, str):   # the batch could not verify the person: the code it was refused with
+            raise _deny(person)
+        _require_grant(project_id, reference, person)
     required = {"task_envelope.v1", CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1}
     if not module.worker_capabilities.has_capable_worker(required):
         raise _deny("WORKER_CAPABILITY_UNAVAILABLE")
@@ -269,7 +349,14 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
         if settings.get("configuration_generation") != reference.get("configuration_generation"):
             raise _deny("CREDENTIAL_GENERATION_MISMATCH")   # changed between the facts and the read: no probe
         paths = secret_paths_for({config_type}, configuration_secret_fields)[config_type]
-        held = strip_secret_fields(settings, paths)
+        if delegated:   # a container with no value (the seal of a run's delegated entry): the slot asks for the token
+            stripped = strip_secret_fields(settings, list(dict.fromkeys([*paths, DELEGATED_FIELD])))
+            if config_type not in DELEGATED_TYPES or stripped:   # a value carried inline is refused, as at the seal
+                raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
+            settings[AUTH_MODE_KEY] = DELEGATED_AUTH_MODE
+            held = [DELEGATED_FIELD]
+        else:
+            held = strip_secret_fields(settings, paths)
     except AdmissionDenied:
         raise
     except Exception as exc:  # pylint: disable=W0703
@@ -284,7 +371,7 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
     settings[SLOT_KEY] = slot_of(
         {"credential_ref": reference["ref_id"], "credential_generation": reference["generation"]}, held,
         ticket=probe_ref)
-    _open_probe(module, project_id, user_id, actor_user_id, probe_ref, reference, onboarding)
+    _open_probe(module, project_id, user_id, actor_user_id, probe_ref, reference, onboarding, person)
     try:
         answer = shape_result(_run_probe(module, project_id, config_type, settings))
     finally:
@@ -326,10 +413,11 @@ def _refuse(module, code, known) -> dict:
     return refusal(code)
 
 
-def _shared_checks(project_id, uuids, user_id, actor_user_id) -> types.SimpleNamespace:
+def _shared_checks(module, project_id, uuids, user_id, actor_user_id) -> types.SimpleNamespace:
     """What every probe of a batch needs and the batch can ask once: the actor's permission, the facts of all the
-    configurations (``read_configuration_facts``) and of their references. Raises ``AdmissionDenied`` or whatever the
-    reads raise."""
+    configurations (``read_configuration_facts``) and of their references, and, when one is Entra-delegated, the
+    verified person (here, on the request's own greenlet: the probes run on others), or the code that refused it.
+    Raises ``AdmissionDenied`` or whatever the reads raise."""
     _may_probe(actor_user_id, project_id)
     configurations = read_configuration_facts([(item, project_id) for item in uuids])
     ids = sorted({fact["id"] for fact in configurations.values() if isinstance(fact, dict) and "id" in fact})
@@ -339,7 +427,14 @@ def _shared_checks(project_id, uuids, user_id, actor_user_id) -> types.SimpleNam
         found = secrets.credential_use_facts(
             project_id, ids[start:start + MAX_FACT_SELECTORS], [], None, personal_user_id=user_id)
         references.update(found.get("references") or {})
-    return types.SimpleNamespace(facts=types.SimpleNamespace(configurations=configurations, found={"references": references}))
+    person = None
+    if any(isinstance(item, dict) and item.get("auth_mode") == DELEGATED_AUTH_MODE for item in references.values()):
+        try:
+            person = _probe_person(module, actor_user_id)
+        except AdmissionDenied as denied:
+            person = denied.reason_code
+    return types.SimpleNamespace(
+        facts=types.SimpleNamespace(configurations=configurations, found={"references": references}), person=person)
 
 
 def governed_check_connection_many(  # pylint: disable=R0913,R0914
@@ -371,7 +466,7 @@ def governed_check_connection_many(  # pylint: disable=R0913,R0914
     try:
         if not module.governance_profile.enabled:
             raise _deny("DEPENDENCY_UNAVAILABLE")
-        shared = _shared_checks(project_id, sorted({item[1] for item in valid}), user_id, actor_user_id)
+        shared = _shared_checks(module, project_id, sorted({item[1] for item in valid}), user_id, actor_user_id)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703

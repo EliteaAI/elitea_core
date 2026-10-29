@@ -512,10 +512,10 @@ def test_the_cache_is_bounded_and_serves_only_tokens_with_life_left(ns):
     obo = ns.entra_obo
     obo.forget()
     now = time.time()
-    obo._keep(("a",), "t1", now + 30, now)                        # pylint: disable=W0212
+    obo._keep(("a",), "t1", now + 30, None, now)                  # pylint: disable=W0212
     assert obo._cached(("a",), now) is None                       # pylint: disable=W0212
     for index in range(obo.MAX_CACHE_ENTRIES + 5):
-        obo._keep((index,), "t", now + 3600, now)                 # pylint: disable=W0212
+        obo._keep((index,), "t", now + 3600, None, now)           # pylint: disable=W0212
     assert len(obo._CACHE) <= obo.MAX_CACHE_ENTRIES               # pylint: disable=W0212
     obo.forget()
 
@@ -809,3 +809,261 @@ def test_only_a_listed_realm_issuer_counts_as_a_broker_exactly(ns, env, monkeypa
     env.verify_result["principal"]["evidence"]["issuer"] = KEYCLOAK
     reply = admitted(ns, env, Delegated(env, env.seed_agent())).release()
     assert reply["reason_code"] == "DENIED_ASSERTION_SOURCE_UNSUPPORTED" and env.custody.calls == []
+
+
+# --- #7281: a toolkit Test run and on-demand indexing act with the person's own sign-in -----------------------------
+
+@pytest.mark.parametrize("entry_point", ["toolkit_test", "index_on_demand"])
+def test_a_toolkit_run_releases_a_delegated_credential_for_the_signed_in_person_with_development_runs_off(
+        ns, env, entry_point):
+    ns.need_transport()
+    env.facts_version = 5
+    cred = Delegated(env, env.seed_agent(), personal=True)
+    cred.reference["custodian_user_id"] = 42
+    tool = {"id": cred.tool_id, "type": "sharepoint", "settings": {"credentials": cred.expanded()}}
+    call = call_kwargs({"toolkit_config": tool, "tool_name": "get_files", "tool_params": {}}, toolkit_config=tool)
+    ref = ns.adm.admit_dispatch(env.module(allow_development_runs=False), ns.adm.TOOLKIT_TASK, call, env.request(
+        entry_point=entry_point, application_id=None, version_id=None, toolkit_id=cred.tool_id))
+    row = context_row(ns, env, ref)
+    assert (row.profile, row.caller["kind"], row.subject["kind"]) == ("development", "user", "delegation")
+    caller = {"kind": "indexer_worker", "task_name": ns.adm.TOOLKIT_TASK, "run_id": "run-1"}
+    run_to_running(env, ns, ref, caller=caller)
+    slot = call["kwargs"]["toolkit_config"]["settings"]["credentials"]["credential_slot"]
+    assert slot["fields"] == ["access_token"]
+    private, public = ns.keypair()
+    env.custody.calls.clear()
+    reply = ns.credential_release.release_credentials(
+        env.module(allow_development_runs=False), project_id=1, context_ref=ref, probe_ref=None, caller=caller,
+        recipient_key=public, slots=[{"toolkit_instance_id": str(cred.tool_id), "field": "credentials", "slot": slot}])
+    assert reply["ok"] is True, reply
+    assert env.custody.calls == [(TID, OID, False)]   # the person of the run: the signed-in session that started it
+    assert [event["reason_code"] for _, event in env.recorded][-1] == "CREDENTIAL_RELEASED_DELEGATED"
+
+
+# --- #7281 A1: the governed probe acts with the tester's own Microsoft sign-in ------------------------------------
+
+PROBE_CALLER = {"kind": "indexer_worker", "task_name": "indexer_governed_check_connection", "run_id": None}
+
+
+class Probe:
+    """Check connection on a saved Entra-delegated credential: the route's in-process call, then the worker's release
+    of the probe slot (the task itself is the harness's fake)."""
+
+    def __init__(self, ns, env, monkeypatch, *, personal=True, holder=None, **over):
+        self.ns, self.env = ns, env
+        env.facts_version = 5
+        env.permissions[42] = {"credentials.probe", "credentials.use"}
+        self.cred = Delegated(env, env.seed_agent(), personal=personal, **over)
+        self.cred.reference["custodian_user_id"] = 42 if personal else None
+        self.holder = holder if holder is not None else types.SimpleNamespace(
+            type="user", id=42, reference="session-ref")
+        monkeypatch.setattr(ns.credential_probe, "_session_holder", lambda: self.holder)
+        monkeypatch.setattr(ns.credential_probe, "_stored_configuration",
+                            lambda project_id, configuration_uuid, user_id: self.cred.expanded())
+
+    def check(self):
+        return self.ns.credential_probe.governed_check_connection(
+            self.env.module(), 1, self.cred.uuid, "sharepoint", 42)
+
+    def ticket(self):
+        prefix = self.ns.credential_release.PROBE_KEY
+        [(key, raw)] = [(k, v) for k, v in self.env.at_start[0].items() if k.startswith(prefix)]
+        return key[len(prefix):], json.loads(raw)
+
+    def release(self):
+        probe_ref, _ = self.ticket()
+        [(_, kwargs, _, _)] = self.env.started
+        self.env.redis.values.update(self.env.at_start[0])   # the ticket as the task found it
+        private, public = self.ns.keypair()
+        return self.ns.credential_release.release_credential(
+            self.env.module(), project_id=1, context_ref=None, probe_ref=probe_ref, caller=dict(PROBE_CALLER),
+            toolkit_instance_id="probe", field="configuration", slot=kwargs["settings"]["credential_slot"],
+            recipient_key=public), private
+
+
+@pytest.mark.parametrize("issuer", [ENTRA, "http://localhost:8082/realms/elitea"])   # direct Entra, brokered (4b)
+def test_a_probe_of_a_delegated_credential_is_released_for_the_verified_person(ns, env, monkeypatch, issuer):
+    ns.need_transport()
+    env.verify_result["principal"]["evidence"]["issuer"] = issuer
+    probe = Probe(ns, env, monkeypatch)
+    probe.env.module = (lambda real: lambda **kw: _with_brokers(real(**kw), issuer))(env.module)
+    assert probe.check() == {"success": True}
+    [(_, kwargs, pool, _)] = env.started
+    settings = kwargs["settings"]
+    assert pool == "governed_ops" and settings["auth_mode"] == "entra_delegated" and settings["site_url"] == SITE
+    assert settings["credential_slot"]["fields"] == ["access_token"] and "access_token" not in settings
+    _, ticket = probe.ticket()
+    assert ticket["person"] == {"issuer": issuer, "tid": TID, "oid": OID}   # the verified subject, not the user id
+    env.recorded.clear()
+    reply, _ = probe.release()
+    assert reply["ok"] is True, reply
+    assert env.custody.calls == [(TID, OID, False)]
+    [(_, event)] = env.recorded
+    assert (event["reason_code"], event["caller_ref"], event["target_ref"]) == (
+        "CREDENTIAL_RELEASED_DELEGATED", "indexer_worker:indexer_governed_check_connection", GRAPH)
+    assert GRAPH_TOKEN not in json.dumps(reply)
+
+
+def _with_brokers(module, issuer):
+    if issuer != ENTRA:
+        module.descriptor.config["entra_obo_broker_issuers"] = [issuer]
+    return module
+
+
+def test_a_probe_without_a_kept_sign_in_says_sign_in_again(ns, env, monkeypatch):
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch)
+    env.custody.answer = {"ok": False, "code": "ASSERTION_UNAVAILABLE"}
+    assert probe.check() == {"success": True}   # the fake task; the worker's release is what refuses
+    reply, _ = probe.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "DENIED_ASSERTION_UNAVAILABLE")
+    # the worker hands the code back; the route says it with the step-4 text, not as a worker problem
+    shaped = ns.credential_probe.shape_result({"success": False, "reason_code": "DENIED_ASSERTION_UNAVAILABLE"})
+    assert shaped == {"success": False, "code": "DENIED_ASSERTION_UNAVAILABLE",
+                      "message": ns.adm.MESSAGES["DENIED_ASSERTION_UNAVAILABLE"]}
+
+
+def test_a_probe_of_another_persons_personal_credential_is_refused(ns, env, monkeypatch):
+    probe = Probe(ns, env, monkeypatch, custodian="idp:{}:someone-else".format(TID))
+    probe.cred.reference["custodian_user_id"] = 7
+    answer = probe.check()
+    assert (answer["success"], answer["code"]) == (False, "CREDENTIAL_CLASS_NOT_ALLOWED")
+    assert env.started == [] and env.custody.calls == []
+
+
+def test_a_personal_reference_whose_custodian_is_another_identity_is_refused_at_release(ns, env, monkeypatch):
+    """The user id matches but the identity does not (a relinked account): the release binds to the verified one."""
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch, custodian="idp:{}:someone-else".format(TID))
+    assert probe.check() == {"success": True}
+    reply, _ = probe.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "DENIED_SUBJECT_MISMATCH")
+    assert env.custody.calls == []
+
+
+def test_a_probe_of_a_shared_delegated_credential_needs_a_grant_to_the_person(ns, env, monkeypatch):
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    env.grants.clear()
+    answer = probe.check()
+    assert answer == {"success": False, "code": "DENIED_GRANT",
+                      "message": ns.credential_probe.PROBE_MESSAGES["DENIED_GRANT"]}
+    assert env.started == []
+    [event] = env.denied
+    assert (event["event_type"], event["reason_code"]) == ("probe", "DENIED_GRANT")
+
+
+def test_a_probe_of_a_shared_delegated_credential_granted_to_the_person_runs(ns, env, monkeypatch):
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    assert probe.check() == {"success": True}
+    assert probe.ticket()[1]["person"]["oid"] == OID
+
+
+@pytest.mark.parametrize("holder, code", [
+    (types.SimpleNamespace(type="token", id=42, reference=None), "DENIED_DELEGATION_UNSUPPORTED_CALLER"),   # API token
+    (None, "DENIED_DELEGATION_UNSUPPORTED_CALLER"),                                       # no request behind it
+    (types.SimpleNamespace(type="user", id=43, reference="session-ref"), "DENIED_DELEGATION_UNSUPPORTED_CALLER"),
+])
+def test_a_probe_that_no_signed_in_session_of_the_tester_stands_behind_is_refused(ns, env, monkeypatch, holder, code):
+    probe = Probe(ns, env, monkeypatch, holder=holder or types.SimpleNamespace())
+    answer = probe.check()
+    assert (answer["success"], answer["code"]) == (False, code)
+    assert env.started == [] and env.custody.calls == []
+
+
+@pytest.mark.parametrize("result", [
+    {"ok": True, "principal": admission_env.principal(verified=False)},   # an asserted identity
+    {"ok": True, "principal": admission_env.principal(tid=None, oid=None)},   # no Microsoft identity
+    {"ok": False, "reason_code": "IDENTITY_EXPIRED"},
+])
+def test_a_session_without_a_verifiable_microsoft_identity_is_told_to_sign_in_again(ns, env, monkeypatch, result):
+    probe = Probe(ns, env, monkeypatch)
+    env.verify_result = result
+    answer = probe.check()
+    assert (answer["success"], answer["code"]) == (False, "DENIED_ASSERTION_UNAVAILABLE")
+    assert env.started == []
+
+
+def test_the_ticket_person_cannot_come_from_the_request(ns, env, monkeypatch):
+    """The route hands over ids only; the stored configuration may carry anything, the ticket names the session's
+    verified person."""
+    probe = Probe(ns, env, monkeypatch)
+    probe.cred.inline = {"person": {"issuer": ENTRA, "tid": TID, "oid": "someone-else"}, "oid": "someone-else"}
+    assert probe.check() == {"success": True}
+    assert probe.ticket()[1]["person"] == {"issuer": ENTRA, "tid": TID, "oid": OID}
+
+
+@pytest.mark.parametrize("person", [None, {"issuer": ENTRA, "tid": TID}, {"issuer": ENTRA, "tid": TID, "oid": ""},
+                                    {"issuer": ENTRA, "tid": TID, "oid": OID, "extra": 1}, "idp:x:y"])
+def test_a_ticket_without_a_well_formed_person_releases_no_delegated_slot(ns, env, monkeypatch, person):
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch)
+    assert probe.check() == {"success": True}
+    probe_ref, ticket = probe.ticket()
+    ticket["person"] = person
+    env.at_start[0][ns.credential_release.PROBE_KEY + probe_ref] = json.dumps(ticket)
+    reply, _ = probe.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "DENIED_DELEGATION_UNSUPPORTED_CALLER")
+    assert env.custody.calls == []
+
+
+def test_a_batch_probe_verifies_the_person_once_on_the_requests_own_greenlet(ns, env, monkeypatch):
+    probe = Probe(ns, env, monkeypatch)
+    calls = []
+    real = ns.credential_probe._probe_person   # pylint: disable=W0212
+    monkeypatch.setattr(ns.credential_probe, "_probe_person", lambda *a: calls.append(a) or real(*a))
+    answers = ns.credential_probe.governed_check_connection_many(
+        env.module(), 1, [{"configuration_uuid": probe.cred.uuid, "config_type": "sharepoint"}] * 2, 42)
+    assert answers == [{"success": True}, {"success": True}] and len(calls) == 1
+
+
+# --- #7281 A3: a token minted from a custody never outlives it --------------------------------------------------------
+
+def test_a_cached_token_is_not_served_past_the_end_of_the_custody_it_came_from(ns, env):
+    ns.need_transport()
+    env.custody.answer = {"ok": True, "assertion": ASSERTION, "custody_expires_at": int(time.time()) + 3600}
+    run = admitted(ns, env, Delegated(env, env.seed_agent()))
+    assert run.release()["ok"] is True and run.release()["ok"] is True
+    assert len(env.custody.calls) == 1   # the second from the cache, the custody still in force
+    [key] = list(ns.entra_obo._CACHE)                                                  # pylint: disable=W0212
+    token, expires_at, _ends = ns.entra_obo._CACHE[key]                                # pylint: disable=W0212
+    ns.entra_obo._CACHE[key] = (token, expires_at, int(time.time()) - 1)               # pylint: disable=W0212
+    env.custody.answer = {"ok": False, "code": "ASSERTION_UNAVAILABLE"}                # the sign-in has expired
+    reply = run.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "DENIED_ASSERTION_UNAVAILABLE")   # at once, not an hour later
+    assert len(env.custody.calls) == 2 and ns.entra_obo._CACHE == {}                  # pylint: disable=W0212
+
+
+def test_no_custody_drops_every_token_cached_for_the_person(ns, env):
+    obo, now = ns.entra_obo, time.time()
+    obo.forget()
+    obo._keep((TID, OID, "api-client", GRAPH, ("a",)), "t1", now + 3600, None, now)        # pylint: disable=W0212
+    obo._keep((TID, "oid-43", "api-client", GRAPH, ("a",)), "t2", now + 3600, None, now)   # pylint: disable=W0212
+    env.custody.answer = {"ok": False, "code": "ASSERTION_UNAVAILABLE"}
+    with pytest.raises(obo.DelegationRefused) as refused:
+        obo._assertion(                                                                 # pylint: disable=W0212
+            env.module(), {"tid": TID, "oid": OID}, False, lambda: 10, "api-client")
+    assert refused.value.code == "DENIED_ASSERTION_UNAVAILABLE"
+    assert [key[1] for key in obo._CACHE] == ["oid-43"]                                 # pylint: disable=W0212
+    obo.forget()
+
+
+def test_an_auth_oidc_that_does_not_say_when_custody_ends_keeps_the_cache_as_before(ns, env):
+    ns.need_transport()
+    run = admitted(ns, env, Delegated(env, env.seed_agent()))   # the fake answers no custody_expires_at
+    assert run.release()["ok"] is True and run.release()["ok"] is True
+    assert len(env.custody.calls) == 1
+
+
+def test_a_probe_of_a_stored_secret_asks_nothing_more_than_before(ns, env, monkeypatch):
+    """No identity check, no grant read, no person in the ticket: the delegated branch is not entered (#7281)."""
+    env.permissions[42] = {"credentials.probe", "credentials.use"}
+    cred = seeded(env)
+    monkeypatch.setattr(ns.credential_probe, "_probe_person", lambda *a: pytest.fail("asked for a person"))
+    monkeypatch.setattr(ns.credential_probe, "_stored_configuration", lambda *a: {
+        "configuration_uuid": cred.uuid, "configuration_project_id": 1, "configuration_type": "jira",
+        "configuration_generation": 3, "base_url": "https://jira.example", "token": "{{secret.jira_token}}"})
+    env.secrets_calls.clear()
+    assert ns.credential_probe.governed_check_connection(env.module(), 1, cred.uuid, "jira", 42) == {"success": True}
+    assert len(env.secrets_calls) == 1 and env.subject_grant_calls[-1] is None   # the facts read of before, only
+    [ticket] = [json.loads(v) for k, v in env.at_start[0].items() if k.startswith(ns.credential_release.PROBE_KEY)]
+    assert set(ticket) == {"project_id", "credential_ref", "credential_generation", "task_name", "user_id"}

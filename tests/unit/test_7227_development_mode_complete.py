@@ -489,10 +489,8 @@ def test_the_toolkit_digest_is_of_the_stored_toolkit_and_changes_with_it(ns, env
     assert contexts(env, ns)[-1].definition_digest != first
 
 
-def test_a_toolkit_run_needs_development_runs_switched_on_and_a_signed_in_person(ns, env):
+def test_a_toolkit_run_needs_a_signed_in_person_whatever_the_development_setting(ns, env):
     cred = Credential(env, uuid.uuid4())
-    error = refused_toolkit(env, ns, toolkit_call(cred), module_=module(env, allow_development_runs=False))
-    assert (error.reason_code, error.message) == ("DEVELOPMENT_RUNS_DISABLED", ns.adm.MESSAGES["DEVELOPMENT_RUNS_DISABLED"])
     assert refused_toolkit(env, ns, toolkit_call(cred), run_kind="system").reason_code == "MANDATE_REQUIRED"
     env.verify_result = {"ok": True, "principal": admission_env.principal()}
     error = refused_toolkit(env, ns, toolkit_call(cred), module_=module(env, admit_legacy_pat=True),
@@ -503,7 +501,45 @@ def test_a_toolkit_run_needs_development_runs_switched_on_and_a_signed_in_person
     error = refused_toolkit(env, ns, toolkit_call(cred), module_=module(env, admit_legacy_pat=True,
                             allow_development_runs=False), caller_type="token", caller_reference=None)
     assert error.reason_code == "TOOLKIT_RUN_TOKEN_NOT_ADMITTED"
-    assert contexts(env, ns) == [] and env.denied[0]["reason_code"] == "DEVELOPMENT_RUNS_DISABLED"
+    assert contexts(env, ns) == [] and env.denied[0]["reason_code"] == "MANDATE_REQUIRED"
+
+
+# --- #7281 (#7229 item 2): a toolkit Test run and on-demand indexing are the person's own run ------------------------
+
+@pytest.mark.parametrize("development", [True, False])
+@pytest.mark.parametrize("entry_point", ["toolkit_test", "index_on_demand"])
+def test_a_toolkit_run_is_admitted_as_the_persons_run_whatever_the_development_setting(
+        ns, env, entry_point, development):
+    """The development-runs switch is about running agent definitions nobody approved; a toolkit has no definition to
+    approve. The person's own credentials only: their personal one, or a project one granted to them."""
+    settings = module(env, allow_development_runs=development)
+
+    def credential(tool_id, custodian=None, **over):
+        cred = Credential(env, uuid.uuid4(), tool_id=tool_id, config_id=100 + tool_id, **over)
+        if custodian is not None:
+            cred.reference.update(ownership_class="personal", custodian_subject_ref=custodian[0],
+                                  custodian_user_id=custodian[1])
+        return cred, dict(entry_point=entry_point, toolkit_id=tool_id)
+
+    personal, at = credential(11, custodian=(SUBJECT, 42), grants=False)
+    assert admit_toolkit(env, ns, toolkit_call(personal), module_=settings, **at) is not None
+    granted, at_granted = credential(12)                                  # a project credential granted to them
+    assert admit_toolkit(env, ns, toolkit_call(granted), module_=settings, **at_granted) is not None
+    ungranted, at = credential(13, grants=False)                          # a member without a grant
+    assert refused_toolkit(env, ns, toolkit_call(ungranted), module_=settings, **at).reason_code == DEV_CODE
+    foreign, at = credential(14, custodian=("idp:t:someone-else", 7), grants=False)   # someone else's personal one
+    assert refused_toolkit(env, ns, toolkit_call(foreign), module_=settings, **at
+                           ).reason_code == "CREDENTIAL_CLASS_NOT_ALLOWED"
+    other, at = credential(15, project_id=2)                              # a credential of another project
+    assert refused_toolkit(env, ns, toolkit_call(other), module_=settings, **at).reason_code == "DENIED_GRANT"
+    assert [row.profile for row in contexts(env, ns)] == ["development", "development"]
+    env.verify_result = {"ok": True, "principal": admission_env.principal()}
+    assert refused_toolkit(env, ns, toolkit_call(granted), module_=module(env, admit_legacy_pat=True,
+                           allow_development_runs=development), caller_type="token", caller_reference=None,
+                           **at_granted).reason_code == "TOOLKIT_RUN_TOKEN_NOT_ADMITTED"
+    env.verify_result = {"ok": False, "reason_code": "IDENTITY_EXPIRED"}   # signed out
+    assert refused_toolkit(env, ns, toolkit_call(granted), module_=settings, **at_granted
+                           ).reason_code == "IDENTITY_EXPIRED"
 
 
 def test_a_toolkit_run_with_a_project_credential_the_caller_holds_no_grant_on_is_refused(ns, env):

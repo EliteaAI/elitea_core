@@ -353,8 +353,8 @@ class _Scope:  # pylint: disable=R0903
         self.binding_project_id, self.allow_validated, self.expires_at = binding_project_id, allow_validated, expires_at
         self.events, self.on_revoke = events, on_revoke
         self.allow_pending = allow_pending   # a probe of a value the credential onboarding has just written
-        # (subject, tenant, caller) of the context row the checks read: who an Entra-delegated slot acts for. A probe
-        # ticket names no person, so a delegated slot is refused there (the credential onboarding probes it itself)
+        # (subject, tenant, caller) of the context row the checks read, or of a probe ticket's verified person
+        # (#7281): who an Entra-delegated slot acts for. None: a delegated slot is refused
         self.person = person
 
 
@@ -580,7 +580,18 @@ def _check_probe(module, request: _Request) -> _Scope:
         toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
         credential_generation=slot["credential_generation"])
     request.known.update(user_ref=event["user_ref"])
-    return _Scope(request.project_id, True, _horizon(), [event], allow_pending=ticket.get("onboarding") is True)
+    return _Scope(request.project_id, True, _horizon(), [event], allow_pending=ticket.get("onboarding") is True,
+                  person=_ticket_person(ticket.get("person")))
+
+
+def _ticket_person(found) -> Optional[tuple]:
+    """The verified person an Entra-delegated probe acts for (``credential_probe`` put it in the ticket, from the
+    signed-in session that asked, #7281), as a run's context row carries its person; ``None`` when the ticket names
+    none: a delegated slot is then refused (``DENIED_DELEGATION_UNSUPPORTED_CALLER``)."""
+    if not isinstance(found, dict) or set(found) != {"issuer", "tid", "oid"} or \
+            not all(isinstance(value, str) and value for value in found.values()):
+        return None
+    return {"kind": "delegation", "issuer": found["issuer"], "oid": found["oid"]}, found["tid"], {"kind": "user"}
 
 
 # --- the store read and the reply ------------------------------------------------------------

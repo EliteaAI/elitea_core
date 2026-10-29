@@ -308,6 +308,8 @@ class ToolValidatedDetails(ToolDetails):
         connection_errors = _check_configurations_connection_from_expanded_settings(
             expanded_settings=self.settings,
             mcp_tokens=mcp_tokens,
+            project_id=self.project_id,
+            user_id=self.user_id,
         )
         if connection_errors:
             # Wrap in a sentinel ValueError so validate_toolkit_details can

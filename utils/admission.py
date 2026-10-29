@@ -166,9 +166,8 @@ MESSAGES = {
     "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
                                 "draft started (only the sub-agents the draft calls are checked, each on its own); the "
                                 "run was not started.",
-    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat, toolkit tests, on-demand indexing and "
-                                 "toolkits with credentials in a chat) are "
-                                 "switched off on this platform; an administrator can switch them on in Admin → "
+    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat and toolkits with credentials in a chat) "
+                                 "are switched off on this platform; an administrator can switch them on in Admin → "
                                  "Governance. The run was not started.",
     "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
                                       "included) are not admitted yet; run the toolkit from the Elitea UI or through a "
@@ -1180,9 +1179,11 @@ def _admit(  # pylint: disable=R0914
     children_of_drafts = None
     decide = True
     if request.entry_point in TOOLKIT_ENTRY_POINTS:
-        # 4. (a toolkit Test run or on-demand indexing, #7229) a development run of the person, or nothing: a toolkit has
-        # no binding of its own to be governed by
-        if not _is_development(request, settings):
+        # 4. (a toolkit Test run or on-demand indexing, #7229) the person's own interactive run, decided as a
+        # development run is (their personal credentials, or project ones granted to them): a toolkit has no binding
+        # of its own to be governed by. Whatever the development-runs setting, which is about running agent
+        # definitions that were not approved (#7281, #7229 item 2)
+        if not _is_development(request, replace(settings, allow_development_runs=True)):
             raise _denied("DEVELOPMENT_RUNS_DISABLED")
         binding, rows = _read_toolkit(request)
         permissions = _author_permissions(request)
@@ -1273,7 +1274,8 @@ _LLM_CHAT_DIGEST = definition_digest({"v": DIGEST_VERSION, "kind": "llm_chat"})
 
 def _is_development(request: AdmissionRequest, settings: AdmissionSettings) -> bool:
     """Is this run the editor's test chat, or a toolkit Test run or on-demand indexing (#7229), of a signed-in person,
-    and does the operator allow development runs (#7213)? Decided from the request kind alone: no read. Anything else
+    and does the operator allow development runs (#7213; a toolkit run asks with the setting on, #7281)? Decided from
+    the request kind alone: no read. Anything else
     (a shared or public chat, the API, a trigger, a system user, a token) takes the governed path, as does the editor
     when the setting is off (``DENIED_BINDING`` as before)."""
     return (settings.allow_development_runs and request.entry_point in DEVELOPMENT_ENTRY_POINTS
