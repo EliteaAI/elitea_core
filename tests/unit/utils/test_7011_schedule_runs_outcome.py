@@ -256,6 +256,7 @@ WORKER_SENTENCE = "The step 'create_issue' of GitHub could not be completed. Ope
     "ValueError: bad input",
     "see C:\\work\\elitea\\x.py",
     "failed in agent_common.py line 4",
+    "create_pull_request: 4 validation errors for CreatePR title Field required [type=missing, input_value={}, input_type=dict]",
 ])
 def test_run_failure_reason_hides_an_engineer_text_behind_a_generic_sentence(reasons, error):
     assert reasons.run_failure_reason(error) == GENERIC

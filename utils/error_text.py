@@ -19,7 +19,7 @@ _MODULE_PREFIX = re.compile(r'^(?:[A-Za-z_]\w*\.)+(?=[A-Z]\w*(?:Error|Exception)
 _INVISIBLE = re.compile(r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+')
 
 # Signs of an engineer's text: an exception class, a traceback, a source file or a file path
-_TECHNICAL = re.compile(r'\b[A-Z]\w*(?:Error|Exception)\b|Traceback|\.py\b|[A-Za-z]:\\|(?:^|[\s\'"(=])/[\w.\-]+/')
+_TECHNICAL = re.compile(r'\b[A-Z]\w*(?:Error|Exception)\b|Traceback|validation errors? for|input_value=|\[type=|pydantic|\.py\b|[A-Za-z]:\\|(?:^|[\s\'"(=])/[\w.\-]+/')
 # Characters that a notice or a log could show as a link, a tag or code
 _MARKUP = re.compile(r'[\[\]<>`]+')
 
