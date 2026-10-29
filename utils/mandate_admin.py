@@ -19,6 +19,7 @@ from ..models.agent_identity import LIVE_MANDATE_STATES, AgentIdentityBinding, A
 from .admission import revoke_mandate_contexts, version_application_id
 from .binding_state import InvalidTransition
 from .definition_digest import DigestError, digest_for_version
+from .mandate_identity import IDENTITY_SOURCES, allowed_sources, retire_consent
 from .mandate_state import (
     BUMPS_EPOCH, MAX_MANDATE_VALIDITY_DAYS, approve_mandate, expire_if_due, next_revision, transition_mandate,
 )
@@ -28,14 +29,14 @@ ACTIONS = ("create", "submit", "reject", "approve", "suspend", "resume", "revoke
 USAGE = (
     "Format: project_id=N;action=<create|submit|reject|approve|suspend|resume|revoke>;"
     "version_id=V;owner_user_id=U;operations=run:schedule[,run:webhook];max_runtime_s=60..86400;"
-    "valid_until=<ISO-8601 with offset> (create)[;targets=*]"
+    "valid_until=<ISO-8601 with offset> (create)[;targets=*][;identity=owner_delegated|application]"
     "[;mandate=M] (all other actions)[;approval_ref=...;policy_revision=...] (approve)[;dry_run]"
 )
 INT_KEYS = ("project_id", "version_id", "owner_user_id", "max_runtime_s")
-TEXT_KEYS = ("action", "operations", "targets", "valid_until", "mandate", "approval_ref", "policy_revision")
+TEXT_KEYS = ("action", "operations", "targets", "valid_until", "mandate", "approval_ref", "policy_revision", "identity")
 # What each action takes (project_id and action always); `targets` is optional and must be `*`
 ACTION_KEYS = {
-    "create": ("version_id", "owner_user_id", "operations", "max_runtime_s", "valid_until", "targets"),
+    "create": ("version_id", "owner_user_id", "operations", "max_runtime_s", "valid_until", "targets", "identity"),
     "approve": ("mandate", "approval_ref", "policy_revision"),
 }
 NEEDED = {"create": ("version_id", "owner_user_id", "operations", "max_runtime_s", "valid_until"),
@@ -71,6 +72,8 @@ MESSAGES = {
     "SELF_APPROVAL": "The creator or the owner of a mandate cannot approve or resume it.",
     "MANDATE_EXPIRED": "The mandate is past its validity.",
     "CONCURRENT_CHANGE": "The mandate changed while this ran; read it again and retry.",
+    "IDENTITY_SOURCE_NOT_ALLOWED": "This platform does not allow mandates to name this identity "
+                                   "(mandate_identity_sources).",
 }
 
 
@@ -158,6 +161,8 @@ def parse_mandate_param(param):  # pylint: disable=R0911,R0912
     if unknown:
         return None, f"invalid operations: '{values['operations']}' (allowed: {', '.join(OPERATIONS)})"
     values["operations"] = operations
+    if values.get("identity") is not None and values["identity"] not in IDENTITY_SOURCES:
+        return None, f"invalid identity: '{values['identity']}' (allowed: {', '.join(IDENTITY_SOURCES)})"
     if values.get("targets", ANY_TARGET) != ANY_TARGET:
         return None, f"invalid targets: '{values['targets']}' (only '{ANY_TARGET}' in this release)"
     low, high = RUNTIME_RANGE_S
@@ -244,22 +249,26 @@ def _create(module, session, tracing, values, actor):
     settings = getattr(module, "admission_settings", None)
     binding_ref = _active_binding(
         session, project_id, application_id, version_id, bool(settings and settings.allow_runtime_domain_binding))
+    identity = values.get("identity")
+    if identity is not None and identity not in allowed_sources(module):
+        raise MandateTaskError("IDENTITY_SOURCE_NOT_ALLOWED")
     owner = _owner_ref(values["owner_user_id"])
-    live, now = _live_mandate(session, project_id, version_id), _now()
+    live, now, expired = _live_mandate(session, project_id, version_id), _now(), None
     if live is not None:
         # An overdue active or suspended mandate does not hold the version's slot: renewal must be possible
         if not _overdue(live, now):
             raise MandateTaskError("MANDATE_EXISTS")
-        if not values["dry_run"]:
-            _expire_overdue(session, tracing, live, actor, now)
+        if not values["dry_run"] and _expire_overdue(session, tracing, live, actor, now):
+            expired = live.id
     revision = next_revision(session, project_id, version_id)
     if values["dry_run"]:
         return {"dry_run": True, "action": "create", "state": "draft", "revision": revision}
+    named = {"identity_source": identity} if identity is not None else {}   # no identity: the row as before
     mandate = AutonomousMandate(
         project_id=project_id, application_id=application_id, agent_version=version_id, agent_binding_ref=binding_ref,
         owner_user_id=values["owner_user_id"], owner_user_ref=owner, allowed_operations=values["operations"],
         allowed_targets=[ANY_TARGET], max_runtime_s=values["max_runtime_s"], valid_until=values["valid_until"],
-        state="draft", created_by=actor, state_changed_by=actor, revision=revision,
+        state="draft", created_by=actor, state_changed_by=actor, revision=revision, **named,
     )
     session.add(mandate)
     try:
@@ -270,7 +279,10 @@ def _create(module, session, tracing, values, actor):
     mandate_ref = str(mandate.id)
     tracing.security_audit_record(session, _event("lifecycle", "MANDATE_DRAFT", mandate, actor, revocation_epoch=0))
     session.commit()
-    return {"action": "create", "mandate_ref": mandate_ref, "revision": revision, "state": "draft", "dry_run": False}
+    if expired is not None:   # the expired mandate's consent goes with it (#7131)
+        retire_consent(project_id, expired, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor}", actor)
+    result = {"action": "create", "mandate_ref": mandate_ref, "revision": revision, "state": "draft", "dry_run": False}
+    return {**result, "identity": identity} if identity is not None else result
 
 
 def _read(session, values):
@@ -304,7 +316,7 @@ def _guard_change(session, mandate, action, actor):
             raise MandateTaskError("OWNER_INACTIVE")
 
 
-def _change(session, tracing, values, actor):
+def _change(module, session, tracing, values, actor):
     action = values["action"]
     mandate = _read(session, values)
     now = _now()
@@ -313,6 +325,8 @@ def _change(session, tracing, values, actor):
         # Past its validity: refused, not acted on. An active or suspended one is expired on the spot.
         if not values["dry_run"] and _expire_overdue(session, tracing, mandate, actor, now):
             session.commit()
+            retire_consent(values["project_id"], values["mandate"], "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor}",
+                           actor)
         raise MandateTaskError("MANDATE_EXPIRED")
     starts, target = ("pending_approval",), "active"
     if action != "approve":
@@ -342,6 +356,8 @@ def _change(session, tracing, values, actor):
         "approval" if action == "approve" else "lifecycle", reason, mandate, actor,
         revocation_epoch=mandate.revocation_epoch, **extra))
     session.commit()
+    if target == "revoked":   # the owner's consent goes with the mandate (#7131), whatever the switch
+        retire_consent(values["project_id"], mandate_id, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor}", actor)
     return {"action": action, "mandate_ref": str(mandate_id), "state": target, "dry_run": False}
 
 
@@ -363,7 +379,7 @@ def manage_mandate(module, param, actor_user_id=0):
             try:
                 if values["action"] == "create":
                     return _create(module, session, tracing, values, actor_user_id)
-                return _change(session, tracing, values, actor_user_id)
+                return _change(module, session, tracing, values, actor_user_id)
             except Exception:
                 session.rollback()
                 raise

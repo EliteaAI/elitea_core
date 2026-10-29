@@ -29,6 +29,7 @@ REFERENCE_PATTERN = r'^[A-Za-z0-9._:/@-]{1,128}$'
 MANDATE_IMMUTABLE = frozenset({
     'id', 'project_id', 'application_id', 'agent_version', 'agent_binding_ref', 'owner_user_id', 'owner_user_ref',
     'allowed_operations', 'allowed_targets', 'max_runtime_s', 'valid_until', 'revision', 'created_by', 'created_at',
+    'identity_source',
 })
 
 
@@ -175,6 +176,20 @@ class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Which identity the mandate's runs act with on resources that need a person (#7131): NULL = none named (today's
+    # behaviour: stored secrets, application credentials included; a delegated credential is refused), ``owner_delegated``
+    # (the owner's Microsoft sign-in, through their offline consent) or ``application`` (named for the record: the runs
+    # use application credentials, as with none). Part of the approved scope: set at create, never changed.
+    # ``identity_material_ref``: the owner's consent kept by the secrets plugin (NULL = none yet, or withdrawn);
+    # ``identity_consented_at``: when it was given; ``identity_scope``: the delegated credentials it covers (reference id
+    # and generations, recorded at consent). Deferred: a mandate read never selects them; they are read only
+    # where the deployment allows an identity (``mandate_identity_sources``), so a schema that predates them (until the
+    # startup safety net adds them) behaves as before.
+    identity_source: Mapped[Optional[str]] = mapped_column(String(24), nullable=True, deferred=True)
+    identity_material_ref: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, deferred=True)
+    identity_consented_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True,
+                                                                     deferred=True)
+    identity_scope: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, deferred=True)
 
 
 @event.listens_for(AutonomousMandate, 'before_update')

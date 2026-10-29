@@ -76,8 +76,12 @@ APP_UNAVAILABLE = "DENIED_OAUTH_APP_UNAVAILABLE"
 EXCHANGE_FAILED = "DELEGATION_EXCHANGE_FAILED"
 UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
 STALE = "STALE_CONTEXT"
+# a mandate run acting with its owner's offline consent (#7131): none, withdrawn, or refused by Microsoft
+CONSENT_REQUIRED = "DENIED_MANDATE_CONSENT_REQUIRED"
+CONSENT_EXPIRED = "DENIED_MANDATE_CONSENT_EXPIRED"
 CODES = (SUBJECT_MISMATCH, MANDATE_UNSUPPORTED, CALLER_UNSUPPORTED, ASSERTION_UNAVAILABLE, SOURCE_UNSUPPORTED,
-         APP_UNAVAILABLE, EXCHANGE_FAILED)
+         APP_UNAVAILABLE, EXCHANGE_FAILED, CONSENT_REQUIRED, CONSENT_EXPIRED)
+OFFLINE_RPC = "auth_oidc_obo_offline_assertion"
 
 
 class DelegationRefused(Exception):
@@ -188,6 +192,63 @@ def sign_request(key, tid, oid, refresh, iat, nonce) -> str:
     return hmac.new(key.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
+def custody_key(module) -> Optional[str]:
+    """The key that signs Main's requests to auth_oidc, or ``None`` when it is missing or too short."""
+    key = os.environ.get(_plugin_config(module).get("entra_obo_custody_key_env") or DEFAULT_CUSTODY_KEY_ENV) or ""
+    return key if len(key) >= MIN_CUSTODY_KEY_CHARS else None
+
+
+def sign_fields(key, fields, iat, nonce) -> str:
+    """The signature of a request of another kind than the assertion's (its version tag first, #7131): auth_oidc checks
+    it over the same fields, then ``iat`` and ``nonce``."""
+    message = "|".join((*fields, str(iat), nonce)).encode("utf-8")
+    return hmac.new(key.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+SEAL_INFO = b"elitea-obo-offline-seal-v1"   # auth_oidc derives the same subkey (#7131)
+SEAL_PREFIX = "s1."
+MAX_SEALED_CHARS = 2 * MAX_TOKEN_CHARS
+
+
+def seal_key(key) -> Optional[bytes]:
+    """The AES-256-GCM key that seals a refresh token on the bus: HKDF-SHA256 of the request key with its own info
+    string (never the HMAC key itself), or None without a request key."""
+    if not key:
+        return None
+    from cryptography.hazmat.primitives import hashes  # pylint: disable=C0415
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF  # pylint: disable=C0415
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=SEAL_INFO).derive(key.encode("utf-8"))
+
+
+def seal_aad(direction, tid, oid, holder, nonce) -> bytes:
+    """What a sealed refresh token is bound to: its direction (``grant-reply``, ``redeem-req``, ``redeem-reply``) and
+    the request it belongs to."""
+    return "|".join(("v1-seal", direction, tid, oid, holder, nonce)).encode("utf-8")
+
+
+def seal(key, plaintext, aad) -> str:
+    """``s1.<base64url(nonce || ciphertext)>``: AES-256-GCM with a fresh 96-bit nonce."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # pylint: disable=C0415
+    nonce = os.urandom(12)
+    return SEAL_PREFIX + base64.urlsafe_b64encode(nonce + AESGCM(key).encrypt(
+        nonce, plaintext.encode("utf-8"), aad)).decode("ascii")
+
+
+def open_sealed(key, sealed, aad) -> Optional[str]:
+    """The plaintext of ``seal``, or None for anything that does not open with this key and binding."""
+    if not key or not isinstance(sealed, str) or not sealed.startswith(SEAL_PREFIX) or len(sealed) > MAX_SEALED_CHARS:
+        return None
+    from cryptography.exceptions import InvalidTag  # pylint: disable=C0415
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # pylint: disable=C0415
+    try:
+        raw = base64.urlsafe_b64decode(sealed[len(SEAL_PREFIX):].encode("ascii"))
+        if len(raw) < 12 + 16:
+            return None
+        return AESGCM(key).decrypt(raw[:12], raw[12:], aad).decode("utf-8")
+    except (InvalidTag, ValueError, binascii.Error, UnicodeDecodeError):
+        return None
+
+
 def fetch_assertion(module, tid, oid, refresh=False, timeout=RPC_TIMEOUT_S) -> dict:
     """The person's Entra access token from auth_oidc (RPC): ``{"ok": True, "assertion"}`` or ``{"ok": False,
     "code"}``. ``refresh`` asks auth_oidc to renew it with the stored refresh token first. The request is signed with
@@ -291,7 +352,9 @@ def _exchange(url, client, assertion, scopes, left) -> tuple:
     raise DelegationRefused(EXCHANGE_FAILED)
 
 
-_CACHE = {}   # (tid, oid, client id, resource, scopes) -> (token, expires_at, custody end or None): this process only
+# (tid, oid, client id, resource, scopes[, "offline:<consent>"]) -> (token, expires_at, custody end or None): this
+# process only. A token redeemed from a mandate owner's offline consent (#7131) carries the consent in its key
+_CACHE = {}
 _PROBES = {}  # (reference id, tid, oid) -> (code or None, until)
 _LOCK = threading.Lock()
 
@@ -301,6 +364,16 @@ def forget() -> None:
     with _LOCK:
         _CACHE.clear()
         _PROBES.clear()
+
+
+def forget_material(material_ref) -> int:
+    """Drop the tokens minted from one offline consent (#7131: withdrawn or replaced). The number dropped."""
+    tag = f"offline:{material_ref}"
+    with _LOCK:
+        mine = [key for key in _CACHE if len(key) > 5 and key[5] == tag]
+        for key in mine:
+            del _CACHE[key]
+    return len(mine)
 
 
 def forget_subject(tid, oid) -> int:
@@ -397,6 +470,94 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
         if outcome != "ok":
             raise DelegationRefused(EXCHANGE_FAILED)
     _keep(key, token, expires_at, custody["ends"], now)
+    return token, expires_at
+
+
+def _offline_assertion(module, person, material, left, client_id) -> str:
+    """The owner's Entra access token, redeemed from their offline consent by auth_oidc (one signed RPC). The refresh
+    token crosses the bus only sealed (AES-256-GCM, a subkey of the request key, bound to this request), both ways; a
+    rotated one is handed to ``material.rotate``."""
+    key = custody_key(module)
+    rpc = getattr(getattr(module, "context", None), "rpc_manager", None)
+    if rpc is None or key is None:
+        log.error("entra obo: the custody service or its request key is not configured")
+        raise DelegationRefused(UNAVAILABLE)
+    if left() < MIN_CALL_S:
+        raise DelegationRefused(UNAVAILABLE)
+    token = material.refresh_token.get_secret_value() if hasattr(material.refresh_token, "get_secret_value") \
+        else material.refresh_token
+    if not isinstance(token, str) or not token:
+        raise DelegationRefused(CONSENT_REQUIRED)
+    iat, nonce, sealing = int(time.time()), secrets.token_urlsafe(16), seal_key(key)
+    sealed = seal(sealing, token, seal_aad("redeem-req", person["tid"], person["oid"], material.holder, nonce))
+    token = None
+    digest = hashlib.sha256(sealed.encode("utf-8")).hexdigest()
+    fields = ("v1-offline", person["tid"], person["oid"], material.holder, material.source, digest)
+    try:
+        answer = getattr(rpc.timeout(max(1, int(min(RPC_TIMEOUT_S, left())))), OFFLINE_RPC)(
+            tid=person["tid"], oid=person["oid"], holder=material.holder, source=material.source,
+            sealed_refresh_token=sealed, iat=iat, nonce=nonce, signature=sign_fields(key, fields, iat, nonce))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("entra obo: the custody service did not answer (%s)", type(exc).__name__)
+        raise DelegationRefused(UNAVAILABLE) from None
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        code = answer.get("code") if isinstance(answer, dict) else None
+        if code == "CONSENT_REFUSED":
+            raise DelegationRefused(CONSENT_EXPIRED)
+        if code == "REQUEST_REFUSED":
+            log.error("entra obo: auth_oidc refused the signed offline request (is the request key the same?)")
+        raise DelegationRefused(UNAVAILABLE)
+    assertion = answer.get("assertion")
+    claims = _claims(assertion)
+    if claims is None:
+        raise DelegationRefused(UNAVAILABLE)
+    if (str(claims.get("tid", "")).lower(), claims.get("oid")) != (person["tid"].lower(), person["oid"]):
+        raise DelegationRefused(SUBJECT_MISMATCH)
+    if claims.get("aud") not in (client_id, f"api://{client_id}"):
+        raise DelegationRefused(APP_UNAVAILABLE)
+    if answer.get("sealed_refresh_token") is not None:
+        rotated = open_sealed(sealing, answer["sealed_refresh_token"],
+                              seal_aad("redeem-reply", person["tid"], person["oid"], material.holder, nonce))
+        if rotated:
+            material.rotate(rotated)
+        else:
+            log.warning("entra obo: a rotated consent did not open; the current one is kept")
+    return assertion
+
+
+def acquire_offline(module, person: dict, delegation: dict, project_id, material, deadline=None) -> tuple:  # pylint: disable=R0913
+    """``acquire`` for a mandate run acting with its owner's offline consent (#7131): ``person`` is the owner's subject
+    frozen in the mandate, ``material`` their consent read for this mandate (``mandate_identity.release_person``). The
+    same descriptor checks and exchange; the assertion is redeemed from the consent, not from a live sign-in. Tokens are
+    cached apart from the owner's own sign-in (the key names the consent), so withdrawing it stops them and a run of the
+    owner's never gets one. Raises ``DelegationRefused``."""
+    if delegation.get("assertion_source") != "login":
+        raise DelegationRefused(SOURCE_UNSUPPORTED)
+    if person.get("issuer") is not None and not ENTRA_ISSUER.match(person["issuer"]) and \
+            person["issuer"] not in broker_issuers(module):
+        raise DelegationRefused(SOURCE_UNSUPPORTED)
+    bind_subject(person, delegation)
+    tenant = str(delegation.get("tenant_id", "")).lower()
+    if not _GUID.match(tenant):
+        raise DelegationRefused(SUBJECT_MISMATCH)
+    scopes = sorted(delegation.get("scopes") or ())
+    client = app_client(module, delegation, project_id)
+    key = (person["tid"].lower(), person["oid"], client[0], delegation.get("resource"), tuple(scopes),
+           f"offline:{material.ref}")
+    now = time.time()
+    hit = _cached(key, now)
+    if hit is not None:
+        return hit
+    deadline = deadline if deadline is not None else time.monotonic() + BUDGET_S
+    left = lambda: max(0.0, deadline - time.monotonic())  # noqa: E731
+    assertion = _offline_assertion(module, person, material, left, client[0])
+    if left() < MIN_CALL_S:
+        raise DelegationRefused(UNAVAILABLE)
+    outcome, token, expires_at = _exchange(
+        f"https://{AUTHORITY_HOST}/{tenant}/oauth2/v2.0/token", client, assertion, scopes, left())
+    if outcome != "ok":   # a freshly redeemed assertion: nothing to renew
+        raise DelegationRefused(EXCHANGE_FAILED)
+    _keep(key, token, expires_at, None, now)
     return token, expires_at
 
 

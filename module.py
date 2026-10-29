@@ -763,6 +763,17 @@ class Module(module.ModuleModel):
                              len(migrated), len(failed))
             except Exception:  # pylint: disable=W0703
                 log.exception("binding operations schema: auto-migration failed")
+            try:
+                from .utils.mandate_identity_schema import (  # pylint: disable=C0415
+                    apply_identity_columns, project_ids_missing_identity_columns,
+                )
+                pending = project_ids_missing_identity_columns()
+                if pending:
+                    migrated, failed = apply_identity_columns(pending)
+                    log.info("mandate identity schema: columns added (migrated=%s failed=%s)",
+                             len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("mandate identity schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
 

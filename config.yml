@@ -110,3 +110,13 @@ entra_obo_custody_key_env: ELITEA_OBO_CUSTODY_KEY
 # realm must map Entra's tid/oid into its tokens (the identity verifier's subject_claims). Empty: such a login is
 # refused DENIED_ASSERTION_SOURCE_UNSUPPORTED.
 entra_obo_broker_issuers: []
+
+# Which identity an autonomous mandate (schedules, webhooks) may name for its runs (#7131): a list of
+#   owner_delegated  the runs act with the mandate owner's Microsoft sign-in, through the owner's one-time offline
+#                    consent (Governance -> Mandates -> Consent; needs the custody of entra_obo_custody_key_env)
+#   application      named for the record: the runs use the application credentials the mandate is granted (SharePoint
+#                    App-only, client secret or certificate, with admin-consented application permissions and
+#                    Sites.Selected site grants), exactly as a mandate without an identity does
+# Empty (the default): no mandate names an identity, nothing about one is read, and a delegated credential in a mandate
+# run is refused DENIED_MANDATE_DELEGATION_UNSUPPORTED, as before.
+mandate_identity_sources: []
