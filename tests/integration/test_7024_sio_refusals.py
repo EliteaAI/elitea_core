@@ -64,7 +64,8 @@ def test_a_non_member_is_refused_with_the_code_the_client_acts_on(guards, utils)
     assert raised.value.code == 'socket_unauthenticated'
 
 
-@pytest.mark.parametrize('event', ['chat_predict', 'chat_continue_predict', 'application_predict', 'test_mcp_connection'])
+@pytest.mark.parametrize('event', ['chat_predict', 'chat_continue_predict', 'application_predict',
+                                    'application_continue_message', 'test_mcp_connection'])
 def test_the_refusal_names_the_event_it_answers(guards, utils, event):
     guards.auth.is_sio_user_in_project.return_value = False
     sio = MagicMock()

@@ -616,6 +616,11 @@ class SIO:
     @web.sio(SioEvents.application_continue_message)
     def application_continue_message(self, sid: str, data: dict):
         """ Event handler for application continue prediction """
+        ensure_sio_user_in_project(
+            self.context.sio, sid, data.get("project_id"),
+            SioEvents.application_continue_message.value,
+            stream_id=data.get("message_id"), message_id=data.get("message_id"),
+        )
         return continue_message(sid, data)
 
     @web.sio("test_toolkit_tool")

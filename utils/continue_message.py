@@ -5,8 +5,7 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.enums.all import ParticipantTypes
 from ..models.pd.message import MessageGroupDetail
 
-from tools import db, context, serialize, auth
-from pylon.core.tools import log
+from tools import db, context, serialize
 
 from ..rpc.chat_all import CHAT_PREDICT_MAPPER
 
@@ -17,10 +16,6 @@ SKILL_CONTINUE_UNSUPPORTED_ERROR = 'Skill answers are continued through the chat
 def continue_message(sid: str, payload: dict):
     message_group_uuid = payload['message_id']
     project_id = payload['project_id']
-
-    if not auth.is_sio_user_in_project(sid, project_id):
-        log.warning("Sid %s is not in project %s", sid, project_id)
-        return  # FIXME: need some proper error?
 
     with db.get_session(project_id) as session:
         msg_group = session.query(ConversationMessageGroup).options(

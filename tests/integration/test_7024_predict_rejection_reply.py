@@ -161,3 +161,21 @@ def test_a_guardrail_refusal_is_reported_once(sio_all, handler, parsed_payload):
 
     assert raised.value is reported
     handler.context.sio.emit.assert_not_called()
+
+
+def test_application_continue_message_anonymous_socket_gets_a_reply(sio_all, handler):
+    """application_continue_message used to silently return when the project-membership check failed (#7024).
+    The sender now gets a socket_validation_error frame so the client can settle the reply placeholder."""
+    sio_all.auth.is_sio_user_in_project.return_value = False
+
+    with pytest.raises(sio_all.SioValidationError):
+        sio_all.SIO.application_continue_message(handler, 'sid-1', {
+            'project_id': 1, 'message_id': 'msg-uuid-1',
+        })
+
+    emitted = _emitted(handler)
+    assert emitted['to'] == 'sid-1'
+    assert emitted['event'] == 'socket_validation_error'
+    assert emitted['data']['event'] == 'application_continue_message'
+    assert emitted['data']['code'] == 'socket_unauthenticated'
+    assert emitted['data']['message_id'] == 'msg-uuid-1'
