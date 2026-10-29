@@ -212,7 +212,7 @@ def test_a_failed_run_with_a_short_tool_error_stores_the_reason_and_sends_the_fa
     session.refresh(run)
     session.refresh(schedule)
     assert (run.status, schedule.last_run_status) == ("failed", "failed")
-    assert TOOL_ERROR in run.reason and "\n" not in run.reason
+    assert run.reason == f"The run failed: {TOOL_ERROR}"
     assert sent.notices == [(12, "schedule_run_failed", run.id)]
     assert run.events[-1]["kind"] == "finished"
     assert run.events[-1]["text"] == f"Run finished: failed ({run.reason})"
@@ -245,41 +245,51 @@ TRACEBACK = (
 )
 
 
-# BUG-37 (US-13 R6.1): one short sentence from the last line, with no stack lines or paths
-def test_el_7011_bug37_run_failure_reason_keeps_the_last_line_only(reasons):
-    reason = reasons.run_failure_reason(TRACEBACK)
-    assert reason == "The run failed: RuntimeError: Pipeline node 'printer' failed"
-    assert "Traceback" not in reason and "agent_common.py" not in reason
+GENERIC = "The run failed. Open the run log or ask an administrator for details."
+WORKER_SENTENCE = "The step 'create_issue' of GitHub could not be completed. Open the run log or ask an administrator for details."
 
 
-# BUG-37 (US-13 R6.1): an absolute path in the last line becomes <path>
-@pytest.mark.parametrize("path", ["/data/plugins/elitea_core/utils/x.py", "C:\\work\\elitea\\x.py"])
-def test_el_7011_bug37_run_failure_reason_hides_absolute_paths(reasons, path):
-    reason = reasons.run_failure_reason(f"OSError: cannot open {path} for reading")
-    assert reason == "The run failed: OSError: cannot open <path> for reading"
+@pytest.mark.parametrize("error", [
+    TRACEBACK,
+    "OSError: cannot open /data/plugins/elitea_core/utils/x.py for reading",
+    "langchain_core.tools.base.ToolException: Node `x` has tool 'y' which is not found",
+    "ValueError: bad input",
+    "see C:\\work\\elitea\\x.py",
+    "failed in agent_common.py line 4",
+])
+def test_run_failure_reason_hides_an_engineer_text_behind_a_generic_sentence(reasons, error):
+    assert reasons.run_failure_reason(error) == GENERIC
 
 
-# BUG-37 (US-13 R6.2): at most 300 characters, prefix and "..." included
-def test_el_7011_bug37_run_failure_reason_is_capped_at_300_characters(reasons):
-    reason = reasons.run_failure_reason("ValueError: " + "x" * 1000)
+def test_run_failure_reason_keeps_a_plain_sentence(reasons):
+    assert reasons.run_failure_reason(WORKER_SENTENCE) == f"The run failed: {WORKER_SENTENCE}"
+    assert reasons.run_failure_reason(TOOL_ERROR) == f"The run failed: {TOOL_ERROR}"
+
+
+def test_run_failure_reason_removes_control_and_direction_characters(reasons):
+    assert reasons.run_failure_reason("The step is bad\u202e now\x00 here\u200b") == "The run failed: The step is bad now here"
+
+
+def test_run_failure_reason_neutralises_links_and_tags(reasons):
+    reason = reasons.run_failure_reason("Click [here](https://evil.example) <img src=x onerror=alert(1)> `now`")
+    assert not any(ch in reason for ch in "[]<>`")
+
+
+def test_run_failure_reason_is_capped_at_300_characters(reasons):
+    reason = reasons.run_failure_reason("The step is slow " + "x" * 1000)
     assert len(reason) == 300
-    assert reason.startswith("The run failed: ValueError: ") and reason.endswith("...")
+    assert reason.startswith("The run failed: The step is slow ") and reason.endswith("...")
 
 
-# BUG-37 (US-13 R6.2): no error text gives the bare sentence
 @pytest.mark.parametrize("error", [None, "", "   \n  "])
-def test_el_7011_bug37_run_failure_reason_without_error_text(reasons, error):
+def test_run_failure_reason_without_error_text(reasons, error):
     assert reasons.run_failure_reason(error) == "The run failed"
 
 
-# BUG-37 review r2: only absolute file paths are hidden; URL hosts and dates stay; a query string is dropped
 @pytest.mark.parametrize(("error", "reason"), [
-    ("HTTPError: 404 for https://host/a/b", "HTTPError: 404 for https://host/a/b"),
-    ("HTTPError: 401 for https://host/a?token=x&b=2", "HTTPError: 401 for https://host/a?<query>"),
-    ("ValueError: bad date 12/05/2026", "ValueError: bad date 12/05/2026"),
-    ("FileNotFoundError: /x.py", "FileNotFoundError: <path>"),
-    ("OSError: cannot open /data/my files/x.py", "OSError: cannot open <path> files/x.py"),
-    ("KeyError: 'and/or' in /data/plugins/x.py", "KeyError: 'and/or' in <path>"),
+    ("The page https://host/a/b is gone", "The page https://host/a/b is gone"),
+    ("The call to https://host/a?token=x&b=2 was refused", "The call to https://host/a?<query> was refused"),
+    ("The date 12/05/2026 is not valid", "The date 12/05/2026 is not valid"),
 ])
-def test_el_7011_bug37_run_failure_reason_hides_only_paths_and_queries(reasons, error, reason):
+def test_run_failure_reason_hides_only_query_strings(reasons, error, reason):
     assert reasons.run_failure_reason(error) == f"The run failed: {reason}"

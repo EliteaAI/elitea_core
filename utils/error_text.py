@@ -9,6 +9,24 @@ _URL_QUERY = re.compile(r'(https?://[^\s?#]+)\?[^\s#]*')
 # and dates (12/05/2026) stay as they are
 _WINDOWS_PATH = re.compile(r'(?<![\w])[A-Za-z]:\\[\w.\-\\~]*')
 _POSIX_PATH = re.compile(r'(?:(?<=^)|(?<=[\s\'"(\[{=]))/[\w.\-/~]+')
+# The dotted module of an exception class ("langchain_core.tools.base.ToolException: ..."): people read the class
+# name and the text, not the Python package
+_MODULE_PREFIX = re.compile(r'^(?:[A-Za-z_]\w*\.)+(?=[A-Z]\w*(?:Error|Exception)\b)')
+# Control characters and the invisible or direction-changing characters that could reorder or hide text in a notice
+_INVISIBLE = re.compile(r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+')
+
+# Signs of an engineer's text: an exception class, a traceback, a source file or a file path
+_TECHNICAL = re.compile(r'\b[A-Z]\w*(?:Error|Exception)\b|Traceback|\.py\b|[A-Za-z]:\\|(?:^|[\s\'"(=])/[\w.\-]+/')
+# Characters that a notice or a log could show as a link, a tag or code
+_MARKUP = re.compile(r'[\[\]<>`]+')
+
+
+def is_technical(text) -> bool:
+    return bool(_TECHNICAL.search(str(text)))
+
+
+def without_markup(text: str) -> str:
+    return ' '.join(_MARKUP.sub(' ', text).split())
 
 
 def last_exception_line(error_text) -> str:
@@ -25,3 +43,8 @@ def hide_locations(text: str) -> str:
     text = _URL_QUERY.sub(r'\1?<query>', text)
     text = _WINDOWS_PATH.sub('<path>', text)
     return _POSIX_PATH.sub('<path>', text)
+
+
+def readable_reason(text: str) -> str:
+    """One plain line for people: no control or direction characters and no Python module before the class name."""
+    return _MODULE_PREFIX.sub('', ' '.join(_INVISIBLE.sub(' ', text).split()))
