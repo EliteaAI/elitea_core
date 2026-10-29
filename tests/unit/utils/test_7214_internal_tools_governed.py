@@ -144,3 +144,21 @@ def test_the_pat_status_endpoint_says_governed_under_enforce_only(loaded):
     assert handler.get(1, "mcp_elitea") == ({"internal": True, "state": "VALID"}, 200)
     governed(loaded)
     assert handler.get(1, "mcp_elitea") == ({"internal": True, "state": "GOVERNED"}, 200)
+
+
+# --- #7278: internal toolkits are addressed in-cluster, never at the shared public app_host ---------------------
+
+@pytest.mark.parametrize("app_host, config, base", [
+    ("https://dev.example.com", {"base_url": "http://main.internal:8080/"}, "http://main.internal:8080"),
+    ("https://dev.example.com", {}, "http://pylon_main:8080"),
+    ("http://localhost", {}, "http://pylon_main:8080"),
+])
+def test_internal_toolkits_use_base_url_else_pylon_main_not_the_public_host(loaded, app_host, config, base):
+    loaded.it.c.APP_HOST = app_host
+    loaded.it.this.descriptor = types.SimpleNamespace(config=config)
+    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp", "skill_builder"],
+                                          scope_project_id=7)
+    urls = {tool["name"]: tool["settings"]["url"] for tool in tools}
+    assert urls["Elitea Applications"] == f"{base}/app/5/mcp/elitea_core/applications?scope_project_id=7"
+    assert urls["Elitea Skills"] == f"{base}/app/1/mcp/elitea_core/skills?scope_project_id=7"
+    assert urls["Secrets"] == f"{base}/app/5/mcp/secrets"

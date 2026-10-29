@@ -599,11 +599,15 @@ def _get_user_token(user_id: int) -> str | None:
 
 
 def _get_internal_base_url() -> str:
-    """Get internal base URL for container-to-container communication."""
-    base_url = c.APP_HOST
-    if not base_url or base_url in ('http://localhost', 'http://127.0.0.1'):
-        base_url = 'http://pylon_main:8080'
-    return base_url
+    """Base URL of the internal MCP toolkits: elitea_core ``base_url`` when set, else the in-cluster pylon_main.
+
+    Never the shared public ``app_host``: through the public edge the toolkit's request is redirected to the
+    login page and every internal toolkit ends with no tools (#7278)."""
+    try:
+        configured = this.descriptor.config.get('base_url')
+    except AttributeError:  # the descriptor is not populated yet
+        configured = None
+    return (configured or 'http://pylon_main:8080').rstrip('/')
 
 
 # Internal Elitea MCP endpoints always have the shape .../app/<project_id>/mcp/<suffix>, where

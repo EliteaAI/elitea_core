@@ -281,9 +281,14 @@ def _origin(url) -> Optional[str]:
 
 
 def internal_origins() -> list:
-    """The origins the worker may send the run token to: the platform's own (``APP_HOST``) and the in-cluster one."""
+    """The origins the worker may send the run token to: the platform's own (``APP_HOST``), elitea_core ``base_url``
+    when set (the internal toolkits' base, #7278) and the in-cluster one."""
+    try:
+        base_url = this.descriptor.config.get("base_url")
+    except AttributeError:  # the descriptor is not populated yet
+        base_url = None
     found = []
-    for url in (getattr(c, "APP_HOST", None), INTERNAL_FALLBACK_URL):
+    for url in (getattr(c, "APP_HOST", None), base_url, INTERNAL_FALLBACK_URL):
         origin = _origin(url)
         if origin and origin not in found:
             found.append(origin)

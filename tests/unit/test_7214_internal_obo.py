@@ -11,6 +11,7 @@ import copy
 import json
 import sys
 import time
+import types
 import uuid
 from pathlib import Path
 
@@ -133,6 +134,16 @@ def test_admission_mints_one_token_with_the_claims_of_the_run(ns, env):
     assert abs(claims["exp"] - claims["iat"] - ns.adm.MAX_RUN_LIFETIME_S) <= 1   # the run cap (#7229); the row decides
     assert delivered["origins"] == ["http://localhost", "http://pylon_main:8080"]
     assert obo(ns).TOKEN_KWARG not in call["meta"] and "eio1." not in json.dumps(call["kwargs"]["envelope"])
+
+
+def test_the_token_origins_include_the_configured_internal_base_url(ns, env):
+    # The internal toolkits are addressed at elitea_core base_url when set (#7278); the run token must reach it.
+    ns.tools.this.descriptor = types.SimpleNamespace(config={"base_url": "http://Main.Internal:8080/"})
+    try:
+        assert obo(ns).internal_origins() == ["http://localhost", "http://main.internal:8080", "http://pylon_main:8080"]
+    finally:
+        del ns.tools.this.descriptor
+    assert obo(ns).internal_origins() == ["http://localhost", "http://pylon_main:8080"]
 
 
 def test_the_token_never_reaches_a_log_line_or_an_audit_event(ns, env):
