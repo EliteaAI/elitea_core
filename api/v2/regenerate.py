@@ -9,6 +9,7 @@ from ...models.message_group import ConversationMessageGroup
 from ...models.message_trace_step import MessageTraceStep
 from ...models.message_items.attachment import AttachmentMessageItem
 from ...models.message_items.text import TextMessageItem
+from ...models.pd.chat import build_regenerate_escalation
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items, \
@@ -131,6 +132,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {'error': str(e)}, 400
 
             regenerate_payload['is_regenerate'] = True
+            # Auto-routing escalation signal (#6722): the user rejected the previous answer.
+            regenerate_payload['escalation'] = build_regenerate_escalation(
+                parsed.payload.get('escalation'), str(msg_group.uuid),
+            )
 
             chat_history_groups, summaries, preserve_instructions = prepare_conversation_history(
                 session, self.module.context.sio,
