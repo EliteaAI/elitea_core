@@ -1049,6 +1049,10 @@ def test_a_schedule_its_owners_toolkit_mandate_covers_is_dispatched_with_the_man
     assert call.args[1]["user_id"] == OWNER   # the run acts for the mandate's owner
     assert reads == [1]   # one read of the project's toolkit mandates, none per schedule
     assert index_tick.helpers.handle_failed_index_schedule.call_count == 0 and env.denied == []
+    # the credential the schedule names travels as a reference to its row (#7305)
+    [applied] = index_tick.helpers.as_credential_reference.call_args_list
+    assert applied.args[1] == "github" and applied.args[0] is index_tick.helpers.resolve_credentials.call_args.kwargs[
+        "project_settings"]
 
 
 def test_a_secret_template_in_the_index_parameters_is_marked_for_the_refusal_at_dispatch(ns, env, index_tick, monkeypatch):
@@ -1156,6 +1160,7 @@ def test_off_reads_no_mandate_and_writes_no_audit(ns, env, index_tick, monkeypat
     run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}, "-1": {"created_by": CREATOR}},
                 governed=False)
     assert reads == [] and env.denied == [] and env.recorded == []
+    assert index_tick.helpers.as_credential_reference.call_count == 0   # the row as before
     calls = index_tick.tools_module.start_index_task.call_args_list
     assert len(calls) == 2 and all(call.kwargs["admission"] is None for call in calls)
     assert [call.args[1]["user_id"] for call in calls] == [OWNER, CREATOR]   # the schedule's author, as before

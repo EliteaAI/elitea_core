@@ -497,3 +497,38 @@ def test_the_list_names_the_toolkit_of_a_toolkit_mandate(ns, env):
     [row] = page["rows"]
     assert row["id"] == str(mandate_id) and row["toolkit"] == {"id": 1, "name": "obo-sharepoint"}
     assert row["version"] == {"id": None, "name": None} and row["operations"] == ["run:index_schedule"]
+
+
+# --- the credential a schedule names, in a governed run ---------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def as_reference():
+    """``as_credential_reference`` and ``resolve_credential_config_key`` lifted from ``utils/index_scheduling.py`` (the
+    module itself needs the Pylon runtime)."""
+    import ast  # pylint: disable=C0415
+    tree = ast.parse((PLUGIN_ROOT / "utils" / "index_scheduling.py").read_text())
+    wanted = {"as_credential_reference", "resolve_credential_config_key", "_NON_CREDENTIAL_CONFIG_KEYS"}
+    nodes = [node for node in tree.body if getattr(node, "name", None) in wanted or (
+        isinstance(node, ast.Assign) and any(getattr(t, "id", None) in wanted for t in node.targets))]
+    space = {}
+    exec(compile(ast.Module(nodes, []), "index_scheduling.py", "exec"), space)  # pylint: disable=W0122
+    return space["as_credential_reference"]
+
+
+def test_the_row_a_schedule_names_becomes_a_reference_to_it(as_reference):
+    row = {"id": 5, "uuid": "8b1d2c3e-0000-4000-8000-000000000005", "project_id": 2, "elitea_title": "qtest",
+           "type": "qtest", "section": "credentials", "data": {"qtest_api_token": "{{secret.made_up}}"}, "private": True}
+    settings = {"qtest_configuration": row, "pgvector_configuration": {"elitea_title": "pgv", "private": True}}
+    as_reference(settings, "qtest")
+    assert settings["qtest_configuration"] == {
+        "elitea_title": "qtest", "private": True, "configuration_uuid": "8b1d2c3e-0000-4000-8000-000000000005",
+        "configuration_project_id": 2}
+    assert settings["pgvector_configuration"] == {"elitea_title": "pgv", "private": True}   # untouched
+
+
+def test_a_stored_reference_is_left_as_it_is(as_reference):
+    stored = {"elitea_title": "qtest", "private": False, "configuration_uuid": "u-1"}
+    settings = {"qtest_configuration": dict(stored)}
+    as_reference(settings, "qtest")
+    assert settings == {"qtest_configuration": stored}
+    as_reference({}, "qtest")   # no slot: nothing to do

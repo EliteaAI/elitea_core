@@ -689,6 +689,20 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         return False, f"could not look up credential '{config_title}': {e.__class__.__name__}", True
 
 
+def as_credential_reference(settings: dict, toolkit_type: str) -> None:
+    """A governed run (#7305): the credential a schedule names, applied by ``resolve_credentials`` as the configuration
+    row it found, becomes a reference to that row (``elitea_title``, ``private``, ``configuration_uuid``,
+    ``configuration_project_id``), in place, as the stored toolkit settings hold one. Expanded, it is then the governed
+    configuration the credential decision and the seal recognise, with nothing of the row's own ``data`` left beside it.
+    Ungoverned runs are not touched (they keep the row, as before)."""
+    key = resolve_credential_config_key(settings, toolkit_type)
+    found = settings.get(key) if key else None
+    if not isinstance(found, dict) or "data" not in found or not found.get("uuid"):
+        return   # the stored reference, or nothing applied
+    settings[key] = {"elitea_title": found.get("elitea_title"), "private": bool(found.get("private")),
+                     "configuration_uuid": str(found["uuid"]), "configuration_project_id": found.get("project_id")}
+
+
 def schedule_credential_settings(project_id, toolkit, schedule, schedule_key, owner_user_id):
     """The settings one index schedule runs its toolkit with, as the tick builds them (its credential applied), expanded
     without secrets: what a toolkit mandate's consent covers (#7305). ``None`` when the schedule's credential cannot be
@@ -703,6 +717,7 @@ def schedule_credential_settings(project_id, toolkit, schedule, schedule_key, ow
         raise LookupError("the schedule's credential could not be looked up")
     if not ok:
         return None
+    as_credential_reference(settings, toolkit.type)   # as the governed run applies it
     return rpc_tools.RpcMixin().rpc.timeout(3).configurations_expand(
         project_id=project_id, settings=settings, user_id=owner_user_id, unsecret=False)
 

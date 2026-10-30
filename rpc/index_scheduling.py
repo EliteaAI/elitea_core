@@ -26,6 +26,7 @@ from ..utils.mandate_admission import audit_only_refusal, index_schedule_trigger
 from ..utils.trigger_principal import OPERATION_OF, covering_toolkit_mandate, latest_toolkit_mandates, principal_of
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import (
+    as_credential_reference,
     resolve_credentials,
     resolve_index_llm_settings,
     handle_failed_index_schedule,
@@ -267,6 +268,10 @@ class RPC:
                                         index_name=index_meta_id,
                                         user_id=user_id,
                                     )
+
+                                    if admission is not None and credentials_ok:
+                                        # a governed run carries the schedule's credential as a reference (#7305)
+                                        as_credential_reference(updated_settings, toolkit.type)
 
                                     # The specific reason, not a generic label: init_issue is
                                     # written to the index history and shown to whoever owns
