@@ -27,7 +27,7 @@ TRIGGER_REF = f"schedule:entity:{SCHEDULE_ID}"
 def starter(ns):
     """The real starter, its pipeline helper the harness's real ``pipeline_execution``. The stubs go straight into
     ``sys.modules``: ``ns`` saved it before and puts it back when this module's tests end."""
-    writes = types.SimpleNamespace(calls=[])
+    writes = types.SimpleNamespace(calls=[], streak=[])
     stubs = {
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
                                    "EntityScheduleRun": type("EntityScheduleRun", (), {})},
@@ -39,6 +39,8 @@ def starter(ns):
             "block_schedule_run": lambda *args: writes.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args, **kwargs: writes.calls.append(("finish", *args)),
             "run_failure_reason": lambda error: f"The run failed: {error}",
+            "count_refusal": lambda *args: writes.streak.append(("refused", *args)),   # #7254: own tests
+            "end_refusal_streak": lambda *args: writes.streak.append(("end", *args)),
             "record_run_events": lambda *args, **kwargs: None,
             "run_event": lambda *args, **kwargs: {}},
         "utils.schedule_risk": {
@@ -93,6 +95,7 @@ def run(ns, env, starter, monkeypatch):
             applications_predict_sio=predict_as_main(ns))))))
     monkeypatch.setattr(starter, "_link_conversation", lambda *args: True)
     starter.writes.calls.clear()
+    starter.writes.streak.clear()
 
     def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None):
         version = version or FakeVersion()
@@ -308,7 +311,8 @@ def test_audit_only_a_failure_of_the_evaluation_never_stops_the_run(ns, env, run
 
 # --- off ------------------------------------------------------------------------------------------
 
-def test_off_the_predict_call_is_exactly_mains_and_nothing_is_read_or_minted(ns, env, agent, run, monkeypatch):
+def test_off_the_predict_call_is_exactly_mains_and_nothing_is_read_or_minted(ns, env, agent, run, starter,
+                                                                              monkeypatch):
     module = arm(ns, env, governed=False)
     module._mandate_tickets = mock.Mock(spec=[])   # any use fails   # pylint: disable=W0212
     reads = counted(ns, monkeypatch)
@@ -326,6 +330,94 @@ def test_off_the_predict_call_is_exactly_mains_and_nothing_is_read_or_minted(ns,
         "await_task_timeout": -1, "user_id": OWNER, "is_system_user": False, "non_interactive": True,
         "trigger_source": "scheduled", "auto_approve_sensitive_actions": False}
     assert reads == [] and sessions == [] and writes == [] and env.denied == []
+    assert starter.writes.streak == []   # #7254: off neither counts nor ends a refusal streak
+
+
+# --- #7254: the refusal streak per mode, and the mandate notice of a saved schedule ---------------
+
+def test_enforce_a_refused_run_counts_one_refusal_with_its_reason(ns, env, run, starter):
+    arm(ns, env)
+    run(trigger="manual")   # Run now counts like a cron firing
+    [(kind, project_id, schedule, run_id, reason)] = starter.writes.streak
+    assert (kind, project_id, schedule.id, run_id) == ("refused", PROJECT_ID, SCHEDULE_ID, RUN_ID)
+    assert reason == f"The run failed: {ns.adm.MESSAGES['MANDATE_REQUIRED']}"
+
+
+def test_enforce_an_admitted_run_ends_the_streak(ns, env, agent, run, starter):
+    arm(ns, env)
+    run()
+    assert starter.writes.streak == [("end", PROJECT_ID, SCHEDULE_ID)]
+
+
+def test_audit_only_a_run_is_never_counted_as_refused(ns, env, run, starter):
+    arm(ns, env, governed=False, audit=True)
+    run()   # uncovered: a would-deny row, and the run goes on
+    assert starter.writes.streak == [("end", PROJECT_ID, SCHEDULE_ID)]
+
+
+@pytest.fixture
+def notice(ns):
+    return load_module_with_stubs(PLUGIN_ROOT / "utils" / "trigger_governance.py", f"{PKG}.utils.trigger_governance")
+
+
+def save_notice(ns, env, notice, owner=OWNER, saver=None):
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return notice.schedule_governance_notice(
+            ns.tools.this.module, session, PROJECT_ID, 7, 70, owner, owner if saver is None else saver)
+
+
+def no_mandate_text(notice, whom="you"):
+    return notice.NO_MANDATE_NOTICE.format(whom=whom)
+
+
+def test_save_notice_enforce_the_owners_active_mandate_needs_no_notice_in_one_read(ns, env, agent, notice, monkeypatch):
+    arm(ns, env)
+    reads = counted(ns, monkeypatch)
+    assert save_notice(ns, env, notice) is None and len(reads) == 1
+
+
+@pytest.mark.parametrize("how", ["no_mandate", "another_owner", "revoked", "not_for_schedules"])
+def test_save_notice_enforce_says_the_owner_needs_a_mandate(ns, env, agent, notice, how):
+    arm(ns, env)
+    owner = CREATOR if how == "another_owner" else OWNER
+    if how == "no_mandate":
+        with ns.sa_orm.Session(env.engine(1)) as session:
+            session.execute(ns.sa.delete(ns.Mandate))
+            session.commit()
+    elif how == "revoked":
+        set_mandate(env, ns, agent.mandate, state="revoked")
+    elif how == "not_for_schedules":
+        set_mandate(env, ns, agent.mandate, allowed_operations=["run:webhook"])
+    assert save_notice(ns, env, notice, owner=owner) == (
+        "Scheduled runs need an approved mandate for you on this version; ask a project admin "
+        "(Admin → Governance → Mandates).")
+
+
+def test_save_notice_an_admin_saving_another_owners_schedule_reads_of_the_owner(ns, env, agent, notice):
+    arm(ns, env)
+    set_mandate(env, ns, agent.mandate, state="revoked")
+    assert save_notice(ns, env, notice, saver=CREATOR) == no_mandate_text(notice, "the schedule owner")
+
+
+def test_save_notice_audit_only_adds_the_would_deny_sentence(ns, env, agent, notice):
+    arm(ns, env, governed=False, audit=True)
+    set_mandate(env, ns, agent.mandate, state="revoked")
+    assert save_notice(ns, env, notice) == no_mandate_text(notice) + " Until then each run is recorded as 'would deny'."
+    set_mandate(env, ns, agent.mandate, state="active")
+    assert save_notice(ns, env, notice) is None
+
+
+def test_save_notice_an_unbound_version_keeps_the_unbound_notice_only(ns, env, notice, monkeypatch):
+    arm(ns, env)
+    reads = counted(ns, monkeypatch)
+    assert save_notice(ns, env, notice) == notice.UNBOUND_NOTICE and reads == []
+
+
+def test_save_notice_off_asks_nothing_of_the_database(ns, env, notice):
+    arm(ns, env, governed=False)
+    untouchable = mock.Mock(spec=[])   # any use of the session fails
+    assert notice.schedule_governance_notice(
+        ns.tools.this.module, untouchable, PROJECT_ID, 7, 70, OWNER, OWNER) is None
 
 
 # --- predict_sio: the request an unattended run gets (the real function) --------------------------

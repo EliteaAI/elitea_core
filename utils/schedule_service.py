@@ -251,6 +251,7 @@ def update_schedule(
     if resuming:
         check_enabled_cap(session)
         row.disabled_reason = None
+        row.refusal_streak = 0  # a resume starts the governance refusal count again (#7254)
     for key, value in changes.items():
         setattr(row, key, value)
     row.updated_by = scope.user_id

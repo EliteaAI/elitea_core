@@ -41,7 +41,7 @@ from .schedule_service import (
     update_schedule,
 )
 from .schedule_timing import ScheduleLimitError
-from .trigger_governance import governance_notice_for
+from .trigger_governance import schedule_governance_notice
 
 MAX_RUNS_LIMIT = 100
 RUN_FIELDS = (
@@ -174,7 +174,8 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
     """Details of a saved row, with every finding of the risk review as the save `warnings` (R2.4).
 
     `review` is the scan the save already ran; a pause or a resume scans here. `notice` is the governance
-    notice of a create or an edit: the schedule is saved, but its version has no active binding.
+    notice of a create or an edit: the schedule is saved, but its version has no active binding or its owner
+    no mandate.
     """
     if review is None:
         from .schedule_risk import scan_schedule
@@ -225,8 +226,9 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
                     body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row),
                 )
             row = update_schedule(session, project_id, row, body, scope, confirmed)
-            notice = governance_notice_for(
-                module, session, project_id, row.application_id, row.version_id, "schedule") if reviewed else None
+            notice = schedule_governance_notice(
+                module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id,
+            ) if reviewed else None
             return _saved(row, scope, project_id, review, notice), 200
         except ScheduleError as e:
             return e.response
@@ -321,8 +323,8 @@ class ScheduleItemHandlers:
                 return e.response
             except ScheduleLimitError as e:
                 return refusal(LIMIT_REACHED, str(e), 409)
-            notice = governance_notice_for(
-                self.module, session, project_id, row.application_id, row.version_id, "schedule")
+            notice = schedule_governance_notice(
+                self.module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id)
             return _saved(row, scope, project_id, review, notice), 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))

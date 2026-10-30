@@ -22,6 +22,8 @@ from .pipeline_execution import (
 from .schedule_prerun import run_prerun_check
 from .schedule_runs import (
     block_schedule_run,
+    count_refusal,
+    end_refusal_streak,
     fail_schedule_run,
     finish_schedule_run,
     record_run_events,
@@ -230,7 +232,11 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)
     else:
         if is_trigger_refusal(result):  # governance refused it (C-1009): it ends now, readably, and the owner is told
+            reason = run_failure_reason(result.get('error'))
             try:  # ended first, so the chat stream-end hook finds it ended and sends no second notice
-                finish_schedule_run(project_id, run_id, 'failed', run_failure_reason(result.get('error')))
+                finish_schedule_run(project_id, run_id, 'failed', reason)
             finally:
                 finish_trigger_run_refused(project_id, response_id, result, source)
+            count_refusal(project_id, loaded.schedule, run_id, reason)  # the third in a row pauses it (#7254)
+        elif governance:  # admitted under governance: a refusal streak ends (off writes nothing)
+            end_refusal_streak(project_id, schedule_id)

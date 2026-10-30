@@ -53,6 +53,7 @@ class Harness:
         self.risk_warnings = []
         self.governance_notice = None
         self.governance_calls = []
+        self.governance_owners = []  # (owner, saver) of each schedule notice (#7254)
         self.fingerprint = 'fp-1'
         self.run_without_asking_allowed = False
         self.scans = []
@@ -82,6 +83,11 @@ class Harness:
     def row(self, schedule_id):
         with self.session_factory() as session:
             return session.get(self.EntitySchedule, schedule_id)
+
+    def streak(self, schedule_id):
+        """The deferred refusal count (#7254), read inside a session."""
+        with self.session_factory() as session:
+            return session.get(self.EntitySchedule, schedule_id).refusal_streak
 
     def call(self, verb, body=None, schedule_id=None, suffix='', query=None):
         """Call a handler verb; `suffix` is the URL tail the router matched, such as `/run`."""
@@ -189,7 +195,12 @@ def harness(isolated_sys_modules, monkeypatch):
         harness.governance_calls.append((project_id, application_id, version_id, trigger_type))
         return harness.governance_notice
 
+    def schedule_governance_notice(module, session, project_id, application_id, version_id, owner_id, saver_id):
+        harness.governance_owners.append((owner_id, saver_id))
+        return governance_notice_for(module, session, project_id, application_id, version_id, 'schedule')
+
     governance.governance_notice_for = governance_notice_for
+    governance.schedule_governance_notice = schedule_governance_notice
     sys.modules[governance.__name__] = governance
     sys.modules[notifications.__name__] = notifications
 
@@ -344,6 +355,42 @@ def test_pause_does_not_ask_for_a_governance_notice(harness):
     assert status == 200
     assert body['governance_notice'] is None
     assert harness.governance_calls == []
+
+
+# --- #7254: a schedule saved from an AI draft is the saver's; the mandate notice names the owner; resume resets
+
+def test_7254_a_schedule_saved_from_an_ai_draft_is_owned_and_updated_by_the_saver(harness):
+    """The draft endpoint saves nothing; the form posts the draft as an ordinary create, owner fields ignored."""
+    harness.request_as(OTHER_ID, EDITOR)
+    draft = agent_body(name='Drafted by AI', created_by=ADMIN_ID, updated_by=ADMIN_ID,
+                       principal={'kind': 'mandate', 'ref': 1})
+    body, status = harness.call('post', draft)
+    row = harness.row(body['id'])
+    assert status == 201
+    assert (row.created_by, row.updated_by, row.principal) == (OTHER_ID, OTHER_ID, {'kind': 'delegation', 'ref': OTHER_ID})
+    assert harness.governance_owners == [(OTHER_ID, OTHER_ID)]   # the mandate is looked up for the saver
+
+
+def test_7254_an_admin_edit_asks_the_mandate_notice_of_the_owner_not_of_the_admin(harness):
+    schedule_id = harness.seed()
+    harness.request_as(ADMIN_ID, ADMIN)
+    _, status = harness.call('put', {'name': 'Renamed'}, schedule_id)
+    assert status == 200
+    assert harness.governance_owners == [(OWNER_ID, ADMIN_ID)]
+
+
+def test_7254_resume_starts_the_refusal_count_again(harness):
+    schedule_id = harness.seed(enabled=False, disabled_reason='governance_refused', refusal_streak=3)
+    body, status = harness.call('post', None, schedule_id, suffix='/resume')
+    row = harness.row(schedule_id)
+    assert status == 200 and body['governance_notice'] is None and harness.governance_owners == []
+    assert (row.enabled, row.disabled_reason, harness.streak(schedule_id)) == (True, None, 0)
+
+
+def test_7254_pause_keeps_the_refusal_count(harness):
+    schedule_id = harness.seed(refusal_streak=2)
+    _, status = harness.call('post', None, schedule_id, suffix='/pause')
+    assert status == 200 and harness.streak(schedule_id) == 2
 
 
 # --- Owner CR 2026-10-21: PUT edits fields only; pause and resume are their own actions

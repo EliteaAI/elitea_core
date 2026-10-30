@@ -120,9 +120,9 @@ long after sign-in a governed run can start.
    in the last 24 hours enforcement would have refused, with the top reasons.
 6. **Switch to Enforce** when the would-deny list holds nothing unexpected.
 
-The Admin UI text of the Audit only mode still says that runs started by schedules are not evaluated. Owner
-schedule runs now leave the mandate `would_deny` row described in section 1. Webhooks and legacy cron triggers are
-still not evaluated, so check them with `report_trigger_principals` (section 6) before enforcing.
+Under Audit only, owner schedule runs leave the mandate `would_deny` row described in section 1, and sub-agents are
+evaluated with their parent run. Webhooks, legacy cron triggers and scheduled indexing are not evaluated, so check
+them with `report_trigger_principals` (section 6) before enforcing. The Admin UI text of the mode says the same.
 
 ## 4. Bind an agent
 
@@ -286,17 +286,49 @@ The text the schedule owner sees is the fixed `MANDATE_REQUIRED` message:
 
 Consequences:
 
-- Every firing of a refused schedule creates a conversation and a failure notice. The minimum interval is one day
-  in the UI and five minutes through the API. Pause the schedule or fix the mandate. *(Auto-pause after repeated
-  refusals is planned.)*
-- **Run now** and **Test run** work for the schedule's owner only. For anyone else, including an administrator, the
-  API answers 403 `not_owner`.
+- Every firing of a refused schedule creates a conversation and a failure notice, until the schedule pauses itself
+  after three refusals in a row (below).
+- **Run now** and **Test run** work for the schedule's owner only (below).
 - An administrator who changes a schedule's owner, or edits it, can leave the new owner without a covering
   mandate. Check the mandate after such a change. *(Owner re-confirmation before a schedule runs on a mandate is
   planned with #7131.)*
 - If you want one mandate to cover several people's schedules on the same version, that is not possible today.
   *Planned, not promised:* #7131 will decide the sharing model (one mandate per owner and version, or one mandate
   naming the allowed schedule owners).
+
+### Scheduled runs
+
+A schedule on the Schedules page (agent or pipeline) belongs to the person who saved it first, its **owner**. A
+schedule made with "Build with AI" is no different: the draft is not saved, and the person who saves the form is the
+owner.
+
+**Who needs the mandate.** The schedule owner, on the schedule's version: one current mandate per version (its
+latest revision), made for the owner (`owner` = the schedule owner), active, allowing `run:schedule`. Cron firings,
+**Run now** and **Test run** all need it.
+
+| Mode | A scheduled run |
+|---|---|
+| Off | Runs as before. Nothing is read or recorded. |
+| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. |
+| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). |
+
+**Run now and Test run.** Only the owner can start them. An administrator sees the controls disabled, with the
+hint "Only the schedule owner, <owner name>, can run it."; the API answers 403 `not_owner`.
+
+**Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
+mandate a run could use, the schedule is saved and the save shows:
+"Scheduled runs need an approved mandate for you on this version; ask a project admin (Admin → Governance →
+Mandates)." Under audit only it adds "Until then each run is recorded as 'would deny'." When an administrator saves
+another person's schedule the text says "for the schedule owner". An unbound version shows the binding notice
+instead. Off: no notice, no read.
+
+**Auto-pause.** Under enforce, the third governance refusal in a row pauses the schedule (`disabled_reason =
+governance_refused`, shown as "Paused: runs were refused by credential governance") and the owner gets one notice:
+`Schedule "<name>" was switched off: 3 runs in a row were refused (<last refusal text>). Fix the mandate and resume
+it`. Cron firings, Run now and Test run all count. Each refused run keeps its own reason in the run list. An admitted
+start under governance ends the streak; so does **Resume**. Pausing by hand keeps the count. Off and audit only
+refuse nothing, so nothing pauses there. To resume: fix the mandate (create, approve or renew it for the owner on
+the schedule's version), then press **Resume** on the schedule. The count starts again from zero.
 
 ### Steps
 

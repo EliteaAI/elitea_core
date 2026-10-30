@@ -594,6 +594,7 @@ class Module(module.ModuleModel):
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
+        self._ensure_schedule_streak_column()
         self._ensure_agent_identity_schema()
         self._start_governance()
         self._start_internal_obo()
@@ -808,6 +809,23 @@ class Module(module.ModuleModel):
                     )
             except Exception:  # pylint: disable=W0703
                 log.exception("share token schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
+    def _ensure_schedule_streak_column(self):
+        """Startup safety net: add ``entity_schedules.refusal_streak`` (#7254) to the project schemas that predate it.
+        Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL."""
+        def _run():
+            try:
+                from .utils.schedule_streak_schema import (  # pylint: disable=C0415
+                    apply_streak_column, project_ids_missing_streak_column,
+                )
+                pending = project_ids_missing_streak_column()
+                if pending:
+                    migrated, failed = apply_streak_column(pending)
+                    log.info("schedule streak schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("schedule streak schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
 

@@ -57,6 +57,8 @@ ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_confirmed_b
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_confirmed_at TIMESTAMPTZ NULL;
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_fingerprint TEXT NULL;
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS original_trigger JSONB NULL;
+# Governance refusals in a row of a schedule's runs (#7254); the startup safety net adds it too
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS refusal_streak SMALLINT DEFAULT 0;
 # Revert by hand: set scheduler.schedules.legacy_step_enabled to false, call the RPC schedules_restore_legacy_triggers(project_id)
 # for each project (rows with NULL original_trigger cannot be restored; the RPC counts them), then drop the
 # column (DROP COLUMN IF EXISTS original_trigger) and the index (DROP INDEX IF EXISTS ix_entity_schedule_runs_conversation)
@@ -530,3 +532,8 @@ Run admin task seed_eval_trajectory_dimensions
 # net adds them (one catalog query, ADD COLUMN IF NOT EXISTS per schema that lacks them). They are read only where the
 # plugin config allows an identity (mandate_identity_sources, default []: nothing changes). The secrets plugin creates
 # its credential_offline_material table the same way (startup safety net / create_credential_governance_tables).
+
+# Issue #7254 (C-1009): a schedule pauses itself after three governance refusals in a row. entity_schedules gains the
+# nullable column refusal_streak (SMALLINT DEFAULT 0) in every project schema. No task: the startup safety net adds it
+# (one catalog query, ADD COLUMN IF NOT EXISTS per schema that lacks it), and the R-2.0.8 block above has the same line.
+# Until then, in that schema, a refused schedule run is still ended and reported but not counted, and Resume fails.

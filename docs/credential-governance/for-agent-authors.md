@@ -110,18 +110,27 @@ typed value, or a `{{secret.*}}` outside a registered credential, is refused wit
 Creating a credential **from the chat**, through a secure form that never passes the value through the model, is
 *planned* (#7228) and not built.
 
-## Scheduling under governance
+## Scheduled runs
 
-A schedule is yours: it runs as you. Under Enforce it needs an **active mandate for the same agent version, made
+A schedule is yours: you are its owner, also when you made it with "Build with AI" and saved it. It runs as you. Under Enforce it needs an **active mandate for the same agent version, made
 for you as owner**.
 
 - Ask an operator for a mandate for that version with you as its owner and `run:schedule` allowed. It must be
   approved by a second person.
 - A mandate made for **someone else** does not cover your schedule, even on the same version. You get
   `MANDATE_REQUIRED`.
-- **Run now** and **Test run** are for the schedule's owner only. Another person, including an administrator, is
-  told "Only the owner of this schedule can run it".
-- Create the schedule when the mandate is active. A mandate that is suspended, revoked or expired stops the run.
+- **Run now** and **Test run** are for the schedule's owner only. An administrator sees them disabled with
+  "Only the schedule owner, <owner name>, can run it."
+- When you save a schedule while governance is on and you have no mandate for its version, the schedule is saved
+  and you see: "Scheduled runs need an approved mandate for you on this version; ask a project admin (Admin →
+  Governance → Mandates)." Under audit only it adds "Until then each run is recorded as 'would deny'."
+- A mandate that is suspended, revoked or expired stops the run.
+
+| Mode | Your scheduled run |
+|---|---|
+| Off | Runs as before. |
+| Audit only | Runs. A missing or unusable mandate is recorded as "would deny" for the operators. |
+| Enforce | Runs on your mandate, or is refused (below). |
 
 **What a failure looks like.** The run is marked **failed** at once (in under a second); it never sits in
 *running*. The schedule's run list shows the reason:
@@ -134,8 +143,11 @@ or ids. Other reasons you may see are `MANDATE_INACTIVE` (suspended or revoked),
 `DENIED_OPERATION` (the mandate does not allow schedules) and `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` (a sub-agent
 with credentials is not admitted in a scheduled run yet).
 
-Every firing of a refused schedule creates a failed run and a notice. Pause the schedule until the mandate is in
-place. A mandate run uses the run's own short-lived identity, not your personal token.
+After **three refused runs in a row** (cron, Run now and Test run all count) the schedule pauses itself. Its row
+says "Paused: runs were refused by credential governance" and you get one notice: `Schedule "<name>" was switched
+off: 3 runs in a row were refused (<reason>). Fix the mandate and resume it`. Once the mandate is in place, press
+**Resume**; the count starts again. A run that is admitted also starts the count again. A mandate run uses the run's
+own short-lived identity, not your personal token.
 
 If an administrator changes the owner of a schedule, the new owner needs a mandate of their own.
 
