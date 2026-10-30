@@ -70,6 +70,7 @@ def pu():
             'apply_category_to_tag_dicts': None, 'is_valid_category': None},
         'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': None},
         'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': None},
+        'plugins.elitea_core.utils.skill_frontmatter': {'FRONTMATTER_META_KEY': 'frontmatter'},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': None},
         'plugins.elitea_core.utils.export_import': {
             'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': None,

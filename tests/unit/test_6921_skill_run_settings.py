@@ -76,6 +76,7 @@ def env(isolated_sys_modules):
     sys.modules.setdefault('sqlalchemy.orm', types.ModuleType('sqlalchemy.orm'))
     if not hasattr(sys.modules['sqlalchemy.orm'], 'selectinload'):
         sys.modules['sqlalchemy.orm'].selectinload = lambda *a, **k: None
+    _load('utils/skill_frontmatter.py', f'{PKG}.utils.skill_frontmatter')
     export_import = _load('utils/skill_export_import.py', f'{PKG}.utils.skill_export_import')
 
     return types.SimpleNamespace(
@@ -214,30 +215,39 @@ class TestSkillMd:
             'version_details': {'name': 'base', 'instructions': 'Review it.', 'run_settings': run_settings},
         }
 
+    @staticmethod
+    def imported_frontmatter(env, markdown):
+        frontmatter = env.md.parse_skill_md(markdown)['frontmatter']
+        return {**frontmatter, **env.md.decode_elitea_metadata(frontmatter.get('metadata') or {})}
+
     def test_run_settings_round_trip_by_model_name(self, env):
         run_settings = {
             'llm_settings': fixed('gpt-4.1', 2, temperature=0.3, max_tokens=4096),
             'ignore_project_context': True,
         }
-        parsed = env.md.parse_skill_md(env.md.skill_to_md(self.skill(run_settings)))
-        env.md.validate_skill_frontmatter(parsed['frontmatter'])
-        assert parsed['frontmatter']['elitea_run_settings'] == {
-            'model_name': 'gpt-4.1', 'temperature': 0.3, 'max_tokens': 4096, 'ignore_project_context': True,
+        markdown = env.md.skill_to_md(self.skill(run_settings))
+        assert env.md.parse_skill_md(markdown)['frontmatter']['metadata'] == {
+            'elitea-model': 'gpt-4.1',
+            'elitea-temperature': '0.3',
+            'elitea-max-tokens': '4096',
+            'elitea-ignore-project-context': 'true',
         }
-        assert env.md.run_settings_from_frontmatter(parsed['frontmatter']) == {
+        frontmatter = self.imported_frontmatter(env, markdown)
+        env.md.validate_skill_frontmatter(frontmatter)
+        assert env.md.run_settings_from_frontmatter(frontmatter) == {
             'llm_settings': {'model_name': 'gpt-4.1', 'temperature': 0.3, 'max_tokens': 4096},
             'ignore_project_context': True,
         }
 
     def test_auto_selection_is_exported(self, env):
         markdown = env.md.skill_to_md(self.skill({'llm_settings': {'selection': AUTO}}))
-        frontmatter = env.md.parse_skill_md(markdown)['frontmatter']
-        assert env.md.run_settings_from_frontmatter(frontmatter)['llm_settings'] == {'selection': AUTO}
+        frontmatter = self.imported_frontmatter(env, markdown)
+        assert env.md.run_settings_from_frontmatter(frontmatter)['llm_settings'] == {'selection': AUTO, 'max_tokens': -1}
 
     def test_skill_without_run_settings_exports_plain_frontmatter(self, env):
         markdown = env.md.skill_to_md(self.skill(None))
-        assert 'elitea_run_settings' not in markdown
-        assert env.md.run_settings_from_frontmatter(env.md.parse_skill_md(markdown)['frontmatter']) is None
+        assert 'elitea' not in markdown
+        assert env.md.run_settings_from_frontmatter(self.imported_frontmatter(env, markdown)) is None
 
     @pytest.mark.parametrize('block, message', [
         ('gpt-4.1', 'must be a YAML mapping'),

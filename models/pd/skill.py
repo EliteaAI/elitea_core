@@ -21,7 +21,7 @@ from ...models.enums.all import PublishStatus, SkillEntityTypes
 from ...utils.authors import get_authors_data
 from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API
 
-SKILL_NAME_RE = re.compile(r'^[a-z0-9]$|^[a-z0-9][a-z0-9-]*[a-z0-9]$')
+SKILL_NAME_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 
 
 RESERVED_NAME_WORDS = ('claude', 'anthropic')
@@ -29,7 +29,7 @@ RESERVED_NAME_WORDS = ('claude', 'anthropic')
 
 def validate_skill_name(value: str) -> str:
     if len(value) > 64 or not SKILL_NAME_RE.match(value):
-        raise ValueError('name must be <=64 chars, lowercase letters/digits/hyphens only')
+        raise ValueError('name must be <=64 chars, lowercase letters/digits/hyphens only, no consecutive hyphens')
     if any(word in value for word in RESERVED_NAME_WORDS):
         raise ValueError(f'name cannot contain {" or ".join(RESERVED_NAME_WORDS)}')
     return value

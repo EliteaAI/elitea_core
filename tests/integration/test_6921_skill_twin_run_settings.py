@@ -54,7 +54,7 @@ def test_twin_is_stamped_with_the_run_settings_digest(pu, monkeypatch):
 
 class FakeMapping:
     def __init__(self, run_settings):
-        self.skill_version = types.SimpleNamespace(run_settings=run_settings)
+        self.skill_version = types.SimpleNamespace(run_settings=run_settings, meta={})
 
 
 def test_attached_skill_run_settings_reach_the_twin_resolver(pu, monkeypatch):

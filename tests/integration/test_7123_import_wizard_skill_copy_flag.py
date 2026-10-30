@@ -122,7 +122,11 @@ def skill_rpc():
         detach_skill_from_agent=None, get_available_skills_for_agent=None,
         import_skill=lambda **kwargs: calls.append(kwargs) or types.SimpleNamespace(id=7, reused=False, versions={}),
     )
-    _module(f'{pkg}.utils.skill_export_import', ensure_base_version=lambda versions: versions)
+    _module(
+        f'{pkg}.utils.skill_export_import',
+        ensure_base_version=lambda versions: versions,
+        unpack_embedded_skill_frontmatter=lambda version: version,
+    )
     _module(f'{pkg}.utils.skill_publish_utils', get_default_skill_validation_rules=None)
     _module('sqlalchemy', and_=None)
     _module('tools', db=types.SimpleNamespace(), serialize=None)

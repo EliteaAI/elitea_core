@@ -15,6 +15,7 @@ from ..models.enums.all import NotificationEventTypes, PublishStatus
 from ..models.enums.events import ApplicationEvents
 from ..models.pd.collection_base import TagBaseModel
 from ..models.pd.publish import VERSION_NAME_PATTERN
+from ..models.pd.skill import SKILL_NAME_RE
 from ..models.pd.skill_publish import SkillPublishAIResult
 from ..models.pd.skill_version import SkillVersionCreateModel
 from ..models.skill import Skill, SkillVersion
@@ -36,6 +37,7 @@ from .publish_utils import (
     verify_validation_token,
 )
 from .constants import DEFAULT_FALLBACK_CATEGORY
+from .skill_frontmatter import FRONTMATTER_META_KEY
 from .skill_run_settings import SHARED_MODEL_REQUIRED, unshared_model_issue
 from .utils import get_public_project_id
 from .skill_category_utils import (
@@ -101,6 +103,12 @@ class SkillNameChecker(BaseChecker):
                 'Provide a descriptive name', context,
             )
             return
+        if not SKILL_NAME_RE.match(name):
+            result.issue(
+                'critical', 'name',
+                'Name must be lowercase letters, digits and single hyphens',
+                'Rename the skill, e.g. replace "--" with "-"', context,
+            )
         if len(name) < 3 or len(name) > 32:
             result.issue(
                 'warnings', 'name',
@@ -730,7 +738,10 @@ def create_skill_publish_snapshot(
                 'name': version.name,
                 'instructions': version.instructions or '',
                 'tags': [t.name for t in (version.tags or [])],
-                'meta': {'icon_meta': meta.get('icon_meta')},
+                'meta': {
+                    'icon_meta': meta.get('icon_meta'),
+                    FRONTMATTER_META_KEY: meta.get(FRONTMATTER_META_KEY),
+                },
                 'run_settings': version.run_settings,
             },
             'source': {
@@ -778,6 +789,7 @@ def _build_published_skill_meta(
         'source_author_id': src['author_id'],
         'published_by': user_id,
         'icon_meta': ver_meta.get('icon_meta'),
+        FRONTMATTER_META_KEY: ver_meta.get(FRONTMATTER_META_KEY),
     }
 
 

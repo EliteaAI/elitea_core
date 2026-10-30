@@ -14,6 +14,10 @@ from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from .folder_access import folder_exclusion_clause
 from .skill_run_settings import portable_run_settings
+from .skill_frontmatter import (
+    FRONTMATTER_META_KEY,
+    extract_non_elitea_frontmatter,
+)
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
@@ -166,6 +170,25 @@ class SkillInstructionsTooLongError(SkillError):
         )
         self.length = length
         self.max_allowed = max_allowed
+
+
+class SkillSpecViolationError(SkillError):
+    """Raised when a new or changed value breaks the Agent Skills spec."""
+    http_status = 400
+
+
+def clean_stored_frontmatter(meta: Optional[dict]) -> Optional[dict]:
+    """Validate the frontmatter a version stores and drop the keys ELITEA owns, so export never repeats them."""
+    if not meta or FRONTMATTER_META_KEY not in meta:
+        return meta
+    frontmatter = meta[FRONTMATTER_META_KEY] or {}
+    if not isinstance(frontmatter, dict):
+        raise SkillSpecViolationError(f'"meta.{FRONTMATTER_META_KEY}" must be a mapping')
+    try:
+        passthrough = extract_non_elitea_frontmatter(frontmatter)
+    except ValueError as exc:
+        raise SkillSpecViolationError(str(exc)) from exc
+    return {**meta, FRONTMATTER_META_KEY: passthrough}
 
 
 def validate_instructions_length(instructions: str) -> None:
@@ -1945,7 +1968,10 @@ def _update_version_fields(session, version: SkillVersion, update_data: SkillVer
         validate_instructions_length(update_data.instructions)
         version.instructions = update_data.instructions
     if update_data.meta is not None:
-        version.meta = {**(version.meta or {}), **update_data.meta}
+        meta_update = update_data.meta
+        if meta_update.get(FRONTMATTER_META_KEY) != (version.meta or {}).get(FRONTMATTER_META_KEY):
+            meta_update = clean_stored_frontmatter(meta_update)
+        version.meta = {**(version.meta or {}), **meta_update}
     if 'run_settings' in update_data.model_fields_set:
         version.run_settings = dump_run_settings(update_data.run_settings)
 

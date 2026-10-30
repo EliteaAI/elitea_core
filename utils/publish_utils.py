@@ -44,6 +44,7 @@ from .utils import get_public_project_id
 from .category_utils import apply_category_to_tag_dicts, is_valid_category
 from .application_utils import build_skill_mappings_list
 from .skill_export_import import build_skill_fork_payload
+from .skill_frontmatter import FRONTMATTER_META_KEY
 from .skill_utils import attach_skill_to_public_copy
 
 
@@ -1738,13 +1739,16 @@ _TWIN_PARENT_VERSION_ID = 'agent_publish_parent_version_id'
 _TWIN_PARENT_AUTHOR_ID = 'agent_publish_parent_author_id'
 
 
-def _skill_content_sha(instructions: str, run_settings: Optional[dict] = None) -> str:
-    if not run_settings:
+def _skill_content_sha(
+    instructions: str, run_settings: Optional[dict] = None, frontmatter: Optional[dict] = None,
+) -> str:
+    """Fingerprint a skill version's content so publishing reuses a catalog copy only when nothing changed."""
+    if not run_settings and not frontmatter:
         return hashlib.sha256((instructions or '').encode()).hexdigest()
-    raw = json.dumps(
-        {'instructions': instructions or '', 'run_settings': run_settings},
-        sort_keys=True, separators=(',', ':'),
-    )
+    content = {'instructions': instructions or '', 'run_settings': run_settings}
+    if frontmatter:
+        content['frontmatter'] = frontmatter
+    raw = json.dumps(content, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -1765,7 +1769,9 @@ def _resolve_or_fork_skill_twin(
     duplicate until its mappings are unpublished, then GC collects it —
     harmless, same self-healing stance as attach_public_skill_to_agents.
     """
-    content_sha = _skill_content_sha(skill_info.get('instructions'), skill_info.get('run_settings'))
+    content_sha = _skill_content_sha(
+        skill_info.get('instructions'), skill_info.get('run_settings'), skill_info.get('frontmatter'),
+    )
     with db.get_session(public_project_id) as session:
         twin = (
             session.query(SkillVersion.skill_id, SkillVersion.id)
@@ -1863,7 +1869,14 @@ def publish_attached_skills(
             )
             # skill/skill_version are lazy='joined' — loaded in-session.
             source_skills = [
-                {**entry, 'run_settings': mapping.skill_version.run_settings if mapping.skill_version else None}
+                {
+                    **entry,
+                    'run_settings': mapping.skill_version.run_settings if mapping.skill_version else None,
+                    'frontmatter': (
+                        (mapping.skill_version.meta or {}).get(FRONTMATTER_META_KEY)
+                        if mapping.skill_version else None
+                    ),
+                }
                 for entry, mapping in zip(build_skill_mappings_list(mappings), mappings)
             ]
     except Exception as exc:
