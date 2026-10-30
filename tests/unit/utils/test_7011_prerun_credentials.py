@@ -109,3 +109,9 @@ def test_7011_r2_4_credential_errors_are_read_from_a_real_validation_error_witho
     found = prerun.credential_errors_of(error)
     assert found == [{"error_type": "credential_not_found", "credential_id": 'jira "main"'}]
     assert "s3cret-token" not in json.dumps(found)
+
+
+def test_a_missing_credential_reason_carries_the_credential_title(check):
+    errors = [{"error_type": "credential_not_found", "credential_id": "qa_missing"}]
+    reason = check(FakeHelpers(expanded={"error": "x", "credential_errors": errors}))
+    assert reason == "credential qa_missing not found" and reason.credential == "qa_missing"

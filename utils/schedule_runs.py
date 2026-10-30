@@ -216,12 +216,14 @@ def _park_run(project_id: int, run_id: int, event: dict, conditions: list) -> bo
     return True
 
 
-def park_for_credentials(project_id: int, run_id: int, reason: str) -> bool:
+def park_for_credentials(project_id: int, run_id: int, reason: str, toolkit: str | None = None,
+                         credential: str | None = None) -> bool:
     """Make a run that cannot start for a missing credential wait for the owner, once.
 
     Only under "Pause and ask me", and only before the owner approved this run: after an approval the credential
     is still missing, and the run fails with the reason. The run has no conversation; the owner decides it
-    through the run decision route. True when the run now waits.
+    through the run decision route. True when the run now waits. The event names the toolkit and the credential
+    title when known, so a client can show what to add; never a secret.
     """
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
@@ -230,7 +232,8 @@ def park_for_credentials(project_id: int, run_id: int, reason: str) -> bool:
     if _approval_rule(project_id, run_id) != 'pause_and_ask':
         return False
     return _park_run(project_id, run_id, run_event(
-        'paused', f'Paused for approval: {reason}. Add the credentials, then approve', 'warning'), [])
+        'paused', f'Paused for approval: {reason}. Add the credentials, then approve', 'warning', need='credential',
+        toolkit=toolkit and str(toolkit)[:NAME_LIMIT], credential=credential and str(credential)[:NAME_LIMIT]), [])
 
 
 def _is_sign_in(item: dict) -> bool:
@@ -263,7 +266,8 @@ def _paused_event(item: dict, more: int = 0) -> dict:
 def _sign_in_event(item: dict) -> dict:
     """The pause line for a sign-in: the toolkit only, never a URL or a token."""
     toolkit = str(item.get('toolkit_name') or '?')[:NAME_LIMIT]
-    return run_event('paused', f'Paused for approval: a sign-in is needed for {toolkit}', 'warning', toolkit=toolkit)
+    return run_event('paused', f'Paused for approval: a sign-in is needed for {toolkit}', 'warning', need='sign_in',
+                     toolkit=toolkit)
 
 
 def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:

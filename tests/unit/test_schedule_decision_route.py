@@ -53,6 +53,11 @@ def decisions(harness, monkeypatch):
     runs.check_schedule_decision, runs.apply_schedule_decision = state.check, state.apply
     monkeypatch.setitem(sys.modules, runs.__name__, runs)
     state.started = []
+    prerun = types.ModuleType(f'{PACKAGE}.utils.schedule_prerun')
+    state.missing = None
+    prerun.check_owner_credentials = lambda project_id, schedule: state.missing
+    prerun.credential_wait = lambda reason: reason is not None
+    monkeypatch.setitem(sys.modules, prerun.__name__, prerun)
     harness.module.start_schedule_run = lambda *args: state.started.append(args) or state.start_ok
     state.start_ok = True
     return state
@@ -90,6 +95,28 @@ def test_the_owner_approves_and_the_run_starts(harness, decisions):
     assert decisions.applied == [(run_id, 'approve')]
     assert decisions.started == [('agent', PROJECT_ID, schedule_id, run_id)]
     assert decisions.checks == [(run_id, OWNER_ID, ['approve'])]
+
+
+def test_approve_while_the_credential_is_missing_is_409_and_the_run_keeps_waiting(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+    decisions.missing = 'credential qa_missing not found'
+
+    body, status = decide(harness, schedule_id, run_id)
+
+    assert (status, body['code']) == (409, 'credential_missing')
+    assert body['error'] == 'The credential is still missing. Add it, then approve again.'
+    assert decisions.applied == [] and decisions.started == []
+    assert run_status(harness, run_id) == ('waiting_for_approval', None)
+
+
+def test_reject_does_not_check_the_credential(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+    decisions.missing = 'credential qa_missing not found'
+
+    assert decide(harness, schedule_id, run_id, 'reject') == ({'run_id': run_id, 'status': 'failed'}, 200)
+    assert decisions.applied == [(run_id, 'reject')]
 
 
 def test_the_owner_rejects_and_the_run_does_not_start(harness, decisions):

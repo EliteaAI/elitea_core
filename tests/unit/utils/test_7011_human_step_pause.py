@@ -82,6 +82,13 @@ def test_a_sign_in_pause_waits_for_approval_and_names_the_toolkit(runs, session,
     assert sent.notices == [(12, "schedule_approval_needed", run.id)]
 
 
+def test_a_sign_in_event_has_the_sign_in_need(runs, session, sent):
+    run, _ = _pause(runs, session, SIGN_IN)
+
+    event = next(event for event in run.events if event["kind"] == "paused")
+    assert (event["need"], event["toolkit"]) == ("sign_in", "SharePoint")
+
+
 def test_a_sign_in_pause_under_run_without_asking_fails_the_run_with_the_toolkit(runs, session, sent):
     schedule = _schedule(runs, session, created_by=12, approval_rule="run_without_asking")
     run = _run(runs, session, schedule)
@@ -166,6 +173,23 @@ def test_a_missing_credential_waits_for_the_owner_without_a_chat(runs, session, 
     assert [event["text"] for event in run.events if event["kind"] == "paused"] == [
         f"Paused for approval: {CREDENTIAL_REASON}. Add the credentials, then approve"]
     assert sent.notices == [(12, "schedule_approval_needed", run.id)]
+
+
+def test_a_credential_wait_event_names_the_need_the_toolkit_and_the_credential(runs, session, sent):
+    schedule = _schedule(runs, session, created_by=12, approval_rule="pause_and_ask")
+    run = _run(runs, session, schedule)
+    runs.park_for_credentials(1, run.id, CREDENTIAL_REASON, toolkit="Jira" + "x" * 200, credential="qa_missing")
+    session.refresh(run)
+
+    event = next(event for event in run.events if event["kind"] == "paused")
+    assert (event["need"], event["credential"], event["toolkit"]) == ("credential", "qa_missing", ("Jira" + "x" * 200)[:100])
+
+
+def test_a_credential_wait_event_leaves_out_an_unknown_toolkit_and_credential(runs, session, sent):
+    _, run, _ = _park(runs, session)
+
+    event = next(event for event in run.events if event["kind"] == "paused")
+    assert event["need"] == "credential" and "toolkit" not in event and "credential" not in event
 
 
 def test_a_missing_credential_under_run_without_asking_does_not_wait(runs, session, sent):

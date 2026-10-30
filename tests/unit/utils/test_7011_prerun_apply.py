@@ -28,8 +28,9 @@ class Recorder:
     def fail_schedule_run(self, project_id, run_id, reason):
         self.calls.append(("fail", project_id, run_id, reason))
 
-    def park_for_credentials(self, project_id, run_id, reason):
+    def park_for_credentials(self, project_id, run_id, reason, toolkit=None, credential=None):
         self.calls.append(("park", project_id, run_id, reason))
+        self.named = (toolkit, credential)
         return self.parks
 
     def disable_schedule(self, project_id, schedule_id, reason):
@@ -170,3 +171,10 @@ def test_an_access_failure_never_waits(apply, answers):
     recorder = Recorder(parks=True, **answers)
     apply(recorder)
     assert "park" not in recorder.effects()
+
+
+def test_the_parked_run_gets_the_credential_title_of_the_reason(apply):
+    reason = type("Reason", (str,), {"credential": "qa_missing", "toolkit": None})("credential qa_missing not found")
+    recorder = Recorder(credentials=reason, parks=True)
+    apply(recorder)
+    assert recorder.named == (None, "qa_missing")

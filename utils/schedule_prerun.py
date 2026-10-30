@@ -23,6 +23,21 @@ CREDENTIAL_REASONS = {
 }
 
 
+class MissingCredential(str):
+    """The reason text of a missing credential; `credential` is the title of the first one.
+
+    The expansion error names no toolkit, so `toolkit` stays None.
+    """
+
+    credential: str | None = None
+    toolkit: str | None = None
+
+
+def credential_wait(reason: str | None) -> bool:
+    """True when the reason is a missing credential, which the owner can fix; a lost token or a broken version is not."""
+    return reason not in (None, NO_TOKEN, VERSION_NOT_EXPANDED)
+
+
 def credential_errors_of(error) -> list[dict]:
     """The credential entries of an expansion ValidationError: type and name only, never the input values."""
     found = []
@@ -100,17 +115,20 @@ def check_owner_credentials(project_id: int, schedule) -> str | None:
     expanded = expand_version_for_runtime(project_id, schedule.application_id, schedule.version_id, owner_id)
     if 'error' not in expanded:
         return None
-    reasons = [
-        CREDENTIAL_REASONS[entry['error_type']].format(entry['credential_id'])
-        for entry in expanded.get('credential_errors') or []
-    ]
-    return '; '.join(reasons) or VERSION_NOT_EXPANDED
+    errors = expanded.get('credential_errors') or []
+    reasons = [CREDENTIAL_REASONS[entry['error_type']].format(entry['credential_id']) for entry in errors]
+    if not reasons:
+        return VERSION_NOT_EXPANDED
+    reason = MissingCredential('; '.join(reasons))
+    reason.credential = str(errors[0]['credential_id'])
+    return reason
 
 
 def _park(project_id: int, run_id: int, reason: str) -> bool:
     """Make the run wait for the owner to add the credentials; False when it must fail."""
     from .schedule_runs import park_for_credentials  # late, as the writers in run_prerun_check
-    return park_for_credentials(project_id, run_id, reason)
+    return park_for_credentials(project_id, run_id, reason, toolkit=getattr(reason, 'toolkit', None),
+                                credential=getattr(reason, 'credential', None))
 
 
 class PreRunResult(NamedTuple):
@@ -138,7 +156,7 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
         if reason is None:
             reason = check_owner_credentials(project_id, schedule)
             # Only a missing credential can wait for the owner; a lost token or a broken version cannot
-            waits_for_owner = reason not in (None, NO_TOKEN, VERSION_NOT_EXPANDED)
+            waits_for_owner = credential_wait(reason)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
         reason = PRERUN_FAILED

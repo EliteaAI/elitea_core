@@ -2,6 +2,8 @@
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
+from types import SimpleNamespace
+
 from flask import request
 from pydantic import BaseModel, Field, ValidationError
 from pylon.core.tools import log
@@ -56,6 +58,7 @@ ENABLED_NOT_EDITABLE = refusal(
 LIMIT_REACHED = "schedule_limit_reached"
 RUN_WITHOUT_ASKING = "run_without_asking"
 # The human texts of the save refusals (owner CR 2026-10-21, risk review)
+CREDENTIAL_STILL_MISSING = "The credential is still missing. Add it, then approve again."
 RULE_NOT_ALLOWED = 'This project does not allow "Run without asking"'
 BLOCKED = "You can't save this schedule: a scheduled run cannot do what the blocking findings need"
 SCAN_INCOMPLETE = 'Some tools could not be checked, so "Run without asking" is not allowed; use "Pause and ask me"'
@@ -186,6 +189,16 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
     from .schedule_settings import is_run_without_asking_allowed
     return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
+
+
+def _credential_still_missing(project_id: int, owner) -> bool:
+    """True when the same credential check as the pre-run step finds a missing credential for `owner`'s schedule."""
+    from .schedule_prerun import check_owner_credentials, credential_wait  # late, as the other pre-run helpers
+    try:
+        return credential_wait(check_owner_credentials(project_id, owner))
+    except Exception:  # noqa: BLE001 -- an unreadable check must not block the owner; the restart runs it again
+        log.exception("Project %s: the credential check before an approval failed", project_id)
+        return False
 
 
 def _parse_body(model):
@@ -434,10 +447,10 @@ class ScheduleItemHandlers:
     def _decide_run(self, project_id: int, schedule_id: int, run_id: int):
         """Approve or reject a waiting run that has no chat to answer in (it waits for credentials).
 
-        Approve starts the run again: its pre-run check runs once more and ends the run as failed, with the
-        reason, while a credential is still missing. A run with a chat is decided in that chat.
+        Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
+        Otherwise approve starts the run again. A run with a chat is decided in that chat.
         Who may call: the owner with `schedules.run`; an admin cannot decide.
-        Errors: 400 invalid action; 403 not the owner; 404; 409 the run is not waiting, or has a chat.
+        Errors: 400 invalid action; 403 not the owner; 404; 409 the run is not waiting, has a chat, or a credential is still missing.
         """
         body, error = _parse_body(ScheduleRunDecision)
         if error:
@@ -461,8 +474,12 @@ class ScheduleItemHandlers:
             if run.conversation_id is not None:
                 return refusal("run_has_chat", "Decide this run in its chat", 409)
             entity_type = row.entity_type
+            owner = SimpleNamespace(created_by=row.created_by, application_id=row.application_id,
+                                    version_id=row.version_id)
         try:
             decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
+            if decision == "approve" and _credential_still_missing(project_id, owner):
+                return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
             apply_schedule_decision(project_id, run_id, decision)
         except ScheduleDecisionForbidden:
             return refusal("not_owner", "Only the schedule owner can approve or reject this run", 403)
