@@ -145,6 +145,7 @@ def spu(pu):
             'PublishAIResult': object, 'VERSION_NAME_PATTERN': version_pattern,
         },
         'plugins.elitea_core.models.pd.skill_publish': {'SkillPublishAIResult': object},
+        'plugins.elitea_core.models.pd.skill': {'SKILL_NAME_RE': types.SimpleNamespace(match=lambda name: True)},
         'plugins.elitea_core.models.pd.skill_version': {'SkillVersionCreateModel': object},
         'plugins.elitea_core.utils.constants': {'DEFAULT_FALLBACK_CATEGORY': 'Other'},
         'plugins.elitea_core.utils.skill_run_settings': {

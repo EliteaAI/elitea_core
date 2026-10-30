@@ -15,6 +15,7 @@ from ..models.enums.all import NotificationEventTypes, PublishStatus
 from ..models.enums.events import ApplicationEvents
 from ..models.pd.collection_base import TagBaseModel
 from ..models.pd.publish import VERSION_NAME_PATTERN
+from ..models.pd.skill import SKILL_NAME_RE
 from ..models.pd.skill_publish import SkillPublishAIResult
 from ..models.pd.skill_version import SkillVersionCreateModel
 from ..models.skill import Skill, SkillVersion
@@ -102,6 +103,12 @@ class SkillNameChecker(BaseChecker):
                 'Provide a descriptive name', context,
             )
             return
+        if not SKILL_NAME_RE.match(name):
+            result.issue(
+                'critical', 'name',
+                'Name must be lowercase letters, digits and single hyphens',
+                'Rename the skill, e.g. replace "--" with "-"', context,
+            )
         if len(name) < 3 or len(name) > 32:
             result.issue(
                 'warnings', 'name',

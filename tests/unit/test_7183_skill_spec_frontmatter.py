@@ -434,7 +434,7 @@ class RecordedEntity(types.SimpleNamespace):
 
 
 @pytest.fixture
-def publish(monkeypatch):
+def publish(monkeypatch, skill_models):
     _install_packages(monkeypatch)
     for name in (
         'tools', 'pylon', 'pylon.core', 'pylon.core.tools', 'sqlalchemy', 'sqlalchemy.exc',
@@ -445,6 +445,7 @@ def publish(monkeypatch):
         f'{PKG}.utils.skill_category_utils', f'{PKG}.utils.skill_utils',
     ):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    sys.modules[f'{PKG}.utils.publish_utils'].BaseChecker = object
     publish_models = types.ModuleType(f'{PKG}.models.pd.publish')
     publish_models.VERSION_NAME_PATTERN = r'.+'
     monkeypatch.setitem(sys.modules, publish_models.__name__, publish_models)
@@ -738,3 +739,21 @@ def test_the_skill_name_validator_rejects_names_the_spec_forbids(skill_models, n
 @pytest.mark.parametrize('name', ['a', 'release-notes', 'pdf-to-docx-v2'])
 def test_the_skill_name_validator_accepts_spec_names(skill_models, name):
     assert skill_models.validate_skill_name(name) == name
+
+
+class RecordingResult:
+    def __init__(self):
+        self.issues = []
+
+    def issue(self, level, field, message, fix, context):
+        self.issues.append((level, field, message))
+
+
+@pytest.mark.parametrize('name, is_blocked', [('my--skill', True), ('release-notes', False)])
+def test_publishing_blocks_a_name_with_consecutive_hyphens(publish, name, is_blocked):
+    result = RecordingResult()
+
+    publish.SkillNameChecker().check({'name': name}, result)
+
+    blocked = ('critical', 'name', 'Name must be lowercase letters, digits and single hyphens')
+    assert (blocked in result.issues) is is_blocked
