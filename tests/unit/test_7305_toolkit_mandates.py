@@ -712,3 +712,26 @@ def test_a_toolkit_update_keeps_the_stored_schedules():
     locked = put.index(".with_for_update().first()")
     kept = put.index("update_data.meta = keep_stored_index_schedules(update_data.meta, current.meta")
     assert locked < kept < put.index("tool_query.update(")   # under the row lock, before the write
+
+
+def test_resuming_after_a_toolkit_change_needs_a_second_person(ns, env):
+    """C9-SEC-73 (delta D2): a resume that records a changed toolkit approves it, so it follows the approve rule."""
+    seed_toolkit(env)
+    mandate_id = run(ns, env, CREATE)["mandate_ref"]
+    run(ns, env, f"project_id=1;action=submit;mandate={mandate_id}")
+    run(ns, env, f"project_id=1;action=approve;mandate={mandate_id};{APPROVE}", APPROVER)
+    run(ns, env, f"project_id=1;action=suspend;mandate={mandate_id}")
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}")["state"] == "active"   # unchanged: as before
+    run(ns, env, f"project_id=1;action=suspend;mandate={mandate_id}")   # the creator suspends ...
+    approved = digest_of(env, ns, uuid.UUID(mandate_id))
+    with env.get_session(1) as session:   # ... the toolkit changes ...
+        session.execute(ns.sa.update(ns.EliteATool).where(ns.EliteATool.id == 1).values(settings={"url": "https://x"}))
+        session.commit()
+    refused = run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}")   # ... and the creator resumes
+    assert refused["code"] == "TOOLKIT_CHANGED" and "neither its creator nor its owner" in refused["error"]
+    row = mandate_row(env, ns, uuid.UUID(mandate_id))
+    assert row.state == "suspended" and digest_of(env, ns, uuid.UUID(mandate_id)) == approved
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", OWNER)["code"] == "SELF_APPROVAL"
+    third = 8
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", third)["state"] == "active"
+    assert digest_of(env, ns, uuid.UUID(mandate_id)) == stored_digest(env, ns, 1) != approved

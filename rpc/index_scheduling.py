@@ -16,6 +16,7 @@ from ..utils.application_tools import (DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC, ge
                                       should_trigger_scheduled_index, start_index_task,
                                       update_toolkit_index_meta_history_with_failed_state)
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
+from ..utils.admission import _expire_mandate as expire_mandate  # pylint: disable=W0212
 from ..utils.admission import (index_schedule_refusal_code, index_schedule_refusal_text,
                                record_index_schedule_refusal, record_index_schedule_would_deny)
 from ..utils.credential_slots import has_free_form_secret, has_secret_template, mark_free_form_secret
@@ -229,6 +230,8 @@ class RPC:
                                             toolkit_mandates, toolkit.id, user_id, creator_id)
                                         if governed and mandate is not None and code is not None:
                                             refused_by = mandate.id   # its row refuses already: nothing is resolved
+                                            if code == "MANDATE_EXPIRED":   # past its end: expired on the spot
+                                                expire_mandate(project_id, mandate.id)
                                         elif governed and mandate is not None:
                                             admission = toolkit_mandate_request(
                                                 project_id=project_id, toolkit_id=toolkit.id, mandate=mandate,

@@ -371,13 +371,15 @@ consent as an agent mandate. One live toolkit mandate per toolkit and owner; a n
 | Team (key `-1`) | The person who saved it last. |
 
 As for agent schedules, a mandate made for someone else never covers the schedule. Index schedules are written only
-by the schedule endpoints (which record the saver); a toolkit update keeps the stored schedules as they are.
+by the schedule endpoints (which record the saver): a created or imported toolkit carries none, and a toolkit update
+keeps the stored schedules as they are.
 
 **The toolkit as approved.** Approval (and Resume) records the toolkit as it is then (its type and settings). A run is
 admitted only on that toolkit: after a change of the toolkit's settings (its target, vector store or credential
 reference) the runs are refused with `TOOLKIT_CHANGED` ("The toolkit changed after its index-schedule mandate was
 approved; approve a new revision of the mandate …"), at admission and at the worker. Suspend and resume it (resume
-records the toolkit again, under the approver's four-eyes rule) or revoke it and approve a new revision.
+records the toolkit again; when the toolkit changed, only an operator who is neither the mandate's creator nor its
+owner may resume it, as for an approval: `TOOLKIT_CHANGED` otherwise) or revoke it and approve a new revision.
 
 **What the run is allowed.** The firing is admitted on the mandate (entry point `index_schedule`, subject
 `mandate:<id>`, caller `index_schedule:<toolkit>:<index>:<key>`), on the toolkit runner, held to the stored toolkit

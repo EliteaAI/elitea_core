@@ -408,6 +408,10 @@ class ToolCreateModel(ToolCopyModel):
     @model_validator(mode='before')
     @classmethod
     def validate_settings(cls, values):
+        # Index schedules are written only by the schedule endpoints, which record who saved each one (#7305,
+        # C9-SEC-72): a created or imported toolkit carries none, and an update keeps the stored ones (the PUT)
+        if isinstance(values, dict) and isinstance(values.get('meta'), dict) and 'indexes_meta' in values['meta']:
+            values = {**values, 'meta': {k: v for k, v in values['meta'].items() if k != 'indexes_meta'}}
         from ...utils.application_tools import (
             expand_toolkit_settings,
             ValidatorNotSupportedError,

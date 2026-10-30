@@ -65,6 +65,9 @@ MESSAGES = {
     "BINDING_NOT_ACTIVE": "The identity binding this mandate was made for is no longer active.",
     "OWNER_NOT_FOUND": "The owner does not exist.",
     "TOOLKIT_NOT_FOUND": "The toolkit does not exist in this project.",
+    "TOOLKIT_CHANGED": "The toolkit changed after the mandate was approved: resuming it approves the toolkit as it is now, "
+                       "which only an operator who is neither its creator nor its owner can do; or approve a new "
+                       "revision of the mandate.",
     "DEPENDENCY_UNAVAILABLE": "The identity service did not answer; try again.",
     "OWNER_NOT_LINKED": "The owner has no linked identity-provider subject.",
     "OWNER_INACTIVE": "The owner is not active.",
@@ -339,6 +342,8 @@ def _guard_change(session, mandate, action, actor):
     digest = None
     if mandate.agent_binding_ref is None:   # a toolkit mandate (#7305): its toolkit as it is now is what is approved
         digest = _toolkit_digest_now(session, mandate.toolkit_id)
+        if action == "resume" and digest != mandate.toolkit_digest and actor == mandate.created_by:
+            raise MandateTaskError("TOOLKIT_CHANGED")   # a changed toolkit is approved by a second person (C9-SEC-73)
     else:
         state = session.execute(
             select(AgentIdentityBinding.state).where(AgentIdentityBinding.id == mandate.agent_binding_ref)
