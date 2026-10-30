@@ -1141,6 +1141,31 @@ def test_a_batch_probe_verifies_the_person_once_on_the_requests_own_greenlet(ns,
     assert answers == [{"success": True}, {"success": True}] and len(calls) == 1
 
 
+def test_the_custodian_without_credentials_probe_tests_their_delegated_credential_with_their_own_sign_in(
+        ns, env, monkeypatch):
+    """#7290: the custodian rule composes with the tester's own Microsoft sign-in (#7281) unchanged."""
+    ns.need_transport()
+    probe = Probe(ns, env, monkeypatch)
+    env.permissions[42] = {"credentials.use"}
+    assert probe.check() == {"success": True}
+    _, ticket = probe.ticket()
+    assert ticket["person"] == {"issuer": ENTRA, "tid": TID, "oid": OID} and ticket["user_id"] == 42
+    reply, _ = probe.release()
+    assert reply["ok"] is True, reply
+    assert env.custody.calls == [(TID, OID, False)]
+
+
+def test_a_batch_without_the_permission_verifies_no_person_for_a_delegated_team_credential(ns, env, monkeypatch):
+    """#7290: the team credential is refused DENIED_RBAC; nothing is asked of the identity service for it."""
+    probe = Probe(ns, env, monkeypatch, personal=False)
+    env.permissions[42] = {"credentials.use"}
+    calls = []
+    monkeypatch.setattr(ns.credential_probe, "_probe_person", lambda *a: calls.append(a))
+    answers = ns.credential_probe.governed_check_connection_many(
+        env.module(), 1, [{"configuration_uuid": probe.cred.uuid, "config_type": "sharepoint"}], 42)
+    assert [answer["code"] for answer in answers] == ["DENIED_RBAC"] and calls == [] and env.started == []
+
+
 # --- #7281 A3: a token minted from a custody never outlives it --------------------------------------------------------
 
 def test_a_cached_token_is_not_served_past_the_end_of_the_custody_it_came_from(ns, env):
