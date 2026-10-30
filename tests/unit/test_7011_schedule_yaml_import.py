@@ -406,8 +406,8 @@ def test_el7011_cr_an_item_is_scanned_as_the_owner_who_will_run_it(env):
         session.query(env.EntitySchedule).one().created_by = 42
         session.commit()
     env.import_items(item(cron='0 7 * * *'), item(name='New one'))
-    assert [owner for _, _, owner in env.risk_scans] == [ADMIN_ID, 42, ADMIN_ID]
-    assert {version for _, version, _ in env.risk_scans} == {10}
+    assert [scan[2] for scan in env.risk_scans] == [ADMIN_ID, 42, ADMIN_ID]
+    assert {scan[1] for scan in env.risk_scans} == {10}
 
 
 # --- R2.6: the report

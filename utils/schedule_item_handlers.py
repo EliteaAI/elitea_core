@@ -149,7 +149,7 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
             `approval_rule_not_allowed` (incomplete scan) or `risk_name_mismatch` (`field: risk_ack`).
     """
     from .schedule_risk import scan_complete, scan_schedule
-    review = scan_schedule(project_id, version_id, owner_id)
+    review = scan_schedule(project_id, version_id, owner_id, rule)
     without_asking = rule == RUN_WITHOUT_ASKING
     if review["blocking"]:
         raise ScheduleError("schedule_blocked", BLOCKED, 409, **review)
@@ -178,7 +178,7 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
     """
     if review is None:
         from .schedule_risk import scan_schedule
-        review = scan_schedule(project_id, row.version_id, row.created_by)
+        review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
     warnings = review["blocking"] + review["sensitive"] + review["notices"]
     return {**_read_answer(row, scope, project_id), "warnings": warnings, "governance_notice": notice}
 
@@ -284,7 +284,7 @@ class ScheduleItemHandlers:
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response
-        review = scan_schedule(project_id, body.version_id, owner_id)
+        review = scan_schedule(project_id, body.version_id, owner_id, getattr(body, 'approval_rule', None))
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
         answer = {**review, "run_without_asking_allowed": allowed}
         if body.schedule_id is not None:

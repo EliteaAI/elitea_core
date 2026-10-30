@@ -17,6 +17,9 @@ from .pipeline_utils import validate_yaml_from_str
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
 BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+# The owner can fix these while the run waits, so "Pause and ask me" saves and starts with them
+WAIT_FOR_OWNER_CODES = {'personal_signin_required', 'missing_credential'}
+WAIT_HINT = 'Sign in or add the credentials before the run; otherwise the run waits for you.'
 SENSITIVE_CODE = 'sensitive_action'
 PERSONAL_CODE = 'personal_credential'
 SENSITIVE_CODES = {SENSITIVE_CODE, PERSONAL_CODE}
@@ -163,17 +166,20 @@ def _fingerprint(version_id: int | None, sensitive: list, digest: str | None) ->
     return hashlib.sha256(json.dumps([version_id, pairs, digest]).encode()).hexdigest()
 
 
-def scan_schedule(project_id: int, version_id: int | None, owner_id: int) -> dict:
+def scan_schedule(project_id: int, version_id: int | None, owner_id: int, approval_rule: str | None = None) -> dict:
     """The risk review of one version run by one owner: `blocking`, `sensitive`, `notices`, `fingerprint`.
 
-    A blocking finding carries `fix`, the agent or pipeline version to open. `sensitive` holds the
+    A blocking finding carries `fix`, the agent or pipeline version to open. With the rule `pause_and_ask`,
+    a missing credential or a personal sign-in is a notice with `fix` and a hint, not a block. `sensitive` holds the
     `sensitive_action` tools and the `personal_credential` toolkits (`tool` null). Never raises: a
     failure is a `scan_incomplete` notice.
     """
     findings, fix, digest = _findings(project_id, version_id, owner_id)
-    blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES]
+    waits = WAIT_FOR_OWNER_CODES if approval_rule == 'pause_and_ask' else set()
+    blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES - waits]
     sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES]
-    notices = [item for item in findings if item['code'] not in BLOCKING_CODES | SENSITIVE_CODES]
+    notices = [{**item, 'fix': fix, 'hint': WAIT_HINT} if item['code'] in waits else item
+               for item in findings if item['code'] not in BLOCKING_CODES - waits | SENSITIVE_CODES]
     return {'blocking': blocking, 'sensitive': sensitive, 'notices': notices,
             'fingerprint': _fingerprint(version_id, sensitive, digest)}
 

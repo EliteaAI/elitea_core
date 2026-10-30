@@ -30,7 +30,7 @@ def clean_review():
 
 
 def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, fail=_ignore, block=_ignore,
-                 budget_scope=_ignore, budget_error=None, review=None):
+                 budget_scope=_ignore, budget_error=None, review=None, finish=_ignore):
     """The real starter on faked neighbours; also used by test_7011_no_system_user_runs and _budget.
 
     `review(project_id, version_id, owner_id)` answers the risk review of the run (owner CR 2026-10-21);
@@ -53,7 +53,7 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
         "utils.mandate_admission": {"prepare_schedule_run": lambda **_kwargs: {}},  # off: no extra predict argument
         "utils.schedule_prerun": {"run_prerun_check": prerun},
         "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block,
-                                "finish_schedule_run": _ignore, "run_failure_reason": str,
+                                "finish_schedule_run": finish, "run_failure_reason": str,
                                 "record_run_events": lambda *args, **kwargs: None, "run_event": lambda *args, **kwargs: {}},
         "utils.budget_door": {"closed_budget_scope": budget_scope},
         "utils.exceptions": {

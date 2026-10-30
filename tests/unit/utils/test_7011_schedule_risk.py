@@ -380,3 +380,36 @@ class TestEL7011CrPersonalCredential:
         scan.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
         review = scan.review()
         assert _codes(review['blocking']) == ['missing_credential'] and review['sensitive'] == []
+
+
+class TestWaitingForTheOwner:
+    """Under "Pause and ask me" a missing credential or sign-in is a notice the owner can fix while the run waits."""
+
+    def _review(self, scan, rule):
+        return scan.module.scan_schedule(12, VERSION_ID, 42, rule)
+
+    def test_a_sign_in_is_a_notice_with_a_fix_and_a_hint_under_pause_and_ask(self, scan):
+        scan.version = _version(tools=[_personal('sharepoint', 'Docs')])
+        scan.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
+        review = self._review(scan, 'pause_and_ask')
+        assert review['blocking'] == []
+        assert _codes(review['notices']) == ['personal_signin_required']
+        assert review['notices'][0]['fix'] and review['notices'][0]['hint']
+
+    def test_a_missing_credential_is_a_notice_under_pause_and_ask(self, scan):
+        scan.version = _version(tools=[_personal('jira', 'Jira')])
+        scan.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
+        review = self._review(scan, 'pause_and_ask')
+        assert review['blocking'] == [] and _codes(review['notices']) == ['missing_credential']
+
+    @pytest.mark.parametrize('rule', ['run_without_asking', None])
+    def test_both_still_block_without_the_pause_rule(self, scan, rule):
+        scan.version = _version(tools=[_personal('jira', 'Jira')])
+        scan.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
+        review = self._review(scan, rule)
+        assert _codes(review['blocking']) == ['missing_credential'] and review['notices'] == []
+
+    def test_a_human_input_step_blocks_under_pause_and_ask(self, scan):
+        scan.version = _version(agent_type='pipeline', instructions=PIPELINE)
+        review = self._review(scan, 'pause_and_ask')
+        assert set(_codes(review['blocking'])) == {'human_input_step'}

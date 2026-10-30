@@ -143,6 +143,7 @@ _SCHEDULE_REFUSALS = {
     },
     ScheduleRunNotWaiting: {"error": "This schedule run is not waiting for approval", "status": 409},
 }
+_SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field": "mcp_auth_action", "status": 400}
 
 
 def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
@@ -150,7 +151,8 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
 
     The (run id, decision) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
     """
-    if not parsed.hitl_resume:
+    sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
+    if not (parsed.hitl_resume or sign_in):
         return None, None
     with db.get_session(parsed.project_id) as session:
         meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
@@ -163,9 +165,13 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         [item.get('action') if isinstance(item, dict) else None for item in decisions]
         if decisions else [parsed.hitl_action]
     )
+    if sign_in:
+        actions = [parsed.mcp_auth_action]
     try:
         decision = check_schedule_decision(
-            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id))
+            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in)
+    except ScheduleDecisionInvalid:
+        return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
     return ((run_id, decision) if decision else None), None

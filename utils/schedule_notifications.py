@@ -5,13 +5,15 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.enums.all import NotificationEventTypes as Types
 from .sio_utils import SioEvents, get_event_room
 
+DEFAULT_APPROVAL_HOURS = 24
+
 # One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
 # only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
 MESSAGES = {
     Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
     Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
     Types.schedule_approval_needed: 'Schedule "{link}" waits for your approval',
-    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in 24 hours and the run stopped',
+    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in {hours} hours and the run stopped',
     Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
     Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
     Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
@@ -20,6 +22,15 @@ MESSAGES = {
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
 _NAME_BRACKETS = str.maketrans('[]', '［］')
+
+
+def _approval_hours() -> int:
+    """The approval window in hours, as the run was parked with it; 24 when the setting cannot be read."""
+    try:
+        from .schedule_runs import approval_wait_hours  # late: schedule_runs sends notices through this module
+        return approval_wait_hours()
+    except Exception:  # noqa: BLE001 -- a notice must not fail on a settings read
+        return DEFAULT_APPROVAL_HOURS
 
 
 def _schedule_link(schedule) -> str:
@@ -49,6 +60,7 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
+                hours=_approval_hours(),
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,

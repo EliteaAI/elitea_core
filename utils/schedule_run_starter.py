@@ -169,13 +169,18 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         return
     # late: the scan pulls in the toolkit expansion
     from .schedule_risk import scan_schedule
-    review = scan_schedule(project_id, loaded.version.id, check.owner_id)
+    review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule)
     auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
     approved = _confirmed_pairs(review) if auto_approve else False
     outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved))
     record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
     if review['blocking']:  # a scheduled run cannot sign in or answer a person
-        block_schedule_run(project_id, run_id, '; '.join(item['message'] for item in review['blocking']), 'error')
+        reasons = '; '.join(item['message'] for item in review['blocking'])
+        if all(item['code'] != 'human_input_step' for item in review['blocking']):
+            # "Run without asking" never waits: a missing sign-in or credential is a failure with a clear reason
+            finish_schedule_run(project_id, run_id, 'failed', reasons)
+        else:
+            block_schedule_run(project_id, run_id, reasons, 'error')
         return
     source = loaded.schedule.entity_type
     if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
