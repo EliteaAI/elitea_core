@@ -19,7 +19,7 @@ from ..models.pd.entity_schedule import (
     ScheduleRiskCheck,
     ScheduleUpdate,
 )
-from ..models.pd.schedule_list import RunStatus
+from ..models.pd.schedule_list import DbId, RunStatus
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .error_text import public_event, public_reason
 from .schedule_access import (
@@ -67,7 +67,7 @@ CHANGED = "The sensitive tools changed since you reviewed them; review them agai
 NAME_MISMATCH = 'Type the schedule name exactly to confirm "Run without asking"'
 
 
-def _started(entity_type: str, project_id: int, schedule_id: int, run_id: int) -> bool:
+def _started(entity_type: str, project_id: int, schedule_id: DbId, run_id: int) -> bool:
     """Start an approved run; an error counts as "not started", so the caller fails the run with a reason.
 
     The decision is already committed and the run is running. An error that escaped would leave it running

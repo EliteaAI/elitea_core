@@ -10,7 +10,6 @@ import pytest
 from unit.test_7011_schedule_crud_api import (
     ADMIN,
     ADMIN_ID,
-    NOT_FOUND,
     OWNER_ID,
     PACKAGE,
     PROJECT_ID,

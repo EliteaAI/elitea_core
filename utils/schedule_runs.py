@@ -207,7 +207,7 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
                 approval_expires_at=datetime.now(UTC) + timedelta(hours=approval_wait_hours()))
     ).rowcount
     if paused:
-        _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait (R1.6)
+        _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait
         append_run_events(session, run_id, event)
     session.commit()
     if not paused:  # a run that is not running stays as it is, with no notice
@@ -216,7 +216,7 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
         run = session.get(EntityScheduleRun, run_id)
         schedule = session.get(EntitySchedule, run.schedule_id)
         notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
-    except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
+    except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it
         log.exception('Schedule run %s: cannot send the approval notice', run_id)
     return True
 
