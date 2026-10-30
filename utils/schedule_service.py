@@ -6,10 +6,10 @@ from uuid import UUID
 
 from opentelemetry import trace as otel_trace
 from pylon.core.tools import log
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..models.all import Application, ApplicationVersion
-from ..models.entity_schedule import EntitySchedule
+from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule
 from ..models.enums.all import AgentTypes, NotificationEventTypes
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
 from .folder_access import entity_access_error
@@ -251,6 +251,8 @@ def update_schedule(
     if resuming:
         check_enabled_cap(session)
         row.disabled_reason = None
+        # a resume starts the governance refusal count again (#7254); the column is not mapped
+        session.execute(update(EntitySchedule).where(EntitySchedule.id == row.id).values({REFUSAL_STREAK: 0}))
     for key, value in changes.items():
         setattr(row, key, value)
     row.updated_by = scope.user_id

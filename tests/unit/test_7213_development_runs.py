@@ -192,7 +192,9 @@ def test_the_governed_path_reads_nothing_more_than_before_the_profile_is_decided
     assert len(env.sessions) == opened and env.permission_calls == []
     text = (PLUGIN_ROOT / "utils" / "admission.py").read_text()
     body = text[text.index("def _admit("):text.index("def _is_development(")]
-    assert body.index("_is_development(request, settings)") < body.index("_find_binding(request, settings)")
+    # the governed path's binding read comes after the development decision (an owner's Run now of a schedule reads its
+    # binding first on purpose, #7254: a bound version runs on it)
+    assert body.index("elif _is_development(request, settings):") < body.rindex("_find_binding(request, settings)")
 
 
 def test_a_system_user_or_a_token_cannot_author(ns, env):

@@ -346,7 +346,7 @@ def test_a_run_with_no_person_behind_it_is_not_evaluated_and_never_a_would_deny(
     assert env.denied == [] and env.recorded == [] and env.verify_calls == []
     assert ns.adm.ADMISSION_DECISION.total("would_deny", "MANDATE_REQUIRED") == before
     text = (PLUGIN_ROOT / "utils" / "governance_settings.py").read_text()
-    assert "Sub-agent runs and runs started by schedules or webhooks are not evaluated in this mode." in text
+    assert "Webhook runs, legacy cron triggers and scheduled indexing are not evaluated in this mode." in text
 
 
 def test_a_mandate_request_or_a_dispatch_without_a_request_is_not_evaluated(ns, env):

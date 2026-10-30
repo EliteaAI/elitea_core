@@ -83,7 +83,7 @@ finds the event in the audit trail. The texts below are the fixed texts of the p
 | `DENIED_RBAC` | You do not have permission to use this agent's credentials. | Ask for the permission to use credentials in the project. |
 | `DENIED_DEVELOPMENT_CREDENTIAL` | This credential needs a grant before a draft can use it. | Ask for a grant on that credential, or use a personal one. |
 | `DENIED_DEVELOPMENT_CHILD` | A sub-agent of this draft asked for a credential that was not checked for it when the draft started (only the sub-agents the draft calls are checked, each on its own); the run was not started. | Call the sub-agent directly from the draft, or bind it. |
-| `DEVELOPMENT_RUNS_DISABLED` | Development runs (the editor's test chat, toolkit tests, on-demand indexing and toolkits with credentials in a chat) are switched off on this platform; an administrator can switch them on in Admin → Governance. The run was not started. | Ask an administrator. |
+| `DEVELOPMENT_RUNS_DISABLED` | Development runs (the editor's test chat, toolkits with credentials in a chat, and Run now / Test run of a schedule on an unbound version) are switched off on this platform; an administrator can switch them on in Admin → Governance. The run was not started. | Ask an administrator. |
 | `CREDENTIAL_REFERENCE_REQUIRED` | This agent uses a credential that is not registered for governed use; the run was not started. | Select the saved credential in the toolkit (not a title or a typed value), and ask for it to be registered. |
 | `CREDENTIAL_REFERENCE_INACTIVE` | A credential this agent uses is suspended or retired; the run was not started. | Ask the operator. Your personal credential may still be pending approval. |
 | `CREDENTIAL_CLASS_NOT_ALLOWED` | This agent uses a personal credential that belongs to someone else; the run was not started. | Use a credential of your own. |
@@ -110,18 +110,33 @@ typed value, or a `{{secret.*}}` outside a registered credential, is refused wit
 Creating a credential **from the chat**, through a secure form that never passes the value through the model, is
 *planned* (#7228) and not built.
 
-## Scheduling under governance
+## Scheduled runs
 
-A schedule is yours: it runs as you. Under Enforce it needs an **active mandate for the same agent version, made
-for you as owner**.
+A schedule is yours: you are its owner, also when you made it with "Build with AI" and saved it. It runs as you. Under
+Enforce its cron firings need an **active mandate for the same agent version, made for you as owner**. **Run now**
+and **Test run** act as you, with your sign-in and no mandate or admin role; an unbound version needs development
+runs on and the edit right. A bound version runs its approved definition (on its binding, with your grants); an
+unbound one runs the draft, as the editor's test chat, and is refused with `DEVELOPMENT_RUNS_DISABLED` while
+development runs are off.
 
 - Ask an operator for a mandate for that version with you as its owner and `run:schedule` allowed. It must be
   approved by a second person.
 - A mandate made for **someone else** does not cover your schedule, even on the same version. You get
   `MANDATE_REQUIRED`.
-- **Run now** and **Test run** are for the schedule's owner only. Another person, including an administrator, is
-  told "Only the owner of this schedule can run it".
-- Create the schedule when the mandate is active. A mandate that is suspended, revoked or expired stops the run.
+- **Run now** and **Test run** are for the schedule's owner only. An administrator sees them disabled with
+  "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has no
+  name): a hover tooltip on Run now in the row menu, a line next to Run test on the edit page.
+- When you save a schedule while governance is on and you have no mandate for its version, the schedule is saved
+  and you see: "Scheduled (cron) runs need an approved mandate for you on this version; Run now and Test run act as
+  you. Ask a project admin (Admin → Governance → Mandates)." Under audit only it adds "Until then each run is
+  recorded as 'would deny'."
+- A mandate that is suspended, revoked or expired stops the run.
+
+| Mode | A cron firing | Run now / Test run |
+|---|---|---|
+| Off | Runs as before. | Runs as before. |
+| Audit only | Runs. A missing or unusable mandate is recorded as "would deny" for the operators. | Runs; evaluated as your own run. |
+| Enforce | Runs on your mandate, or is refused (below). | Acts as you: a bound version runs its approved definition; an unbound version needs development runs on and the edit right and runs the draft (your own credentials and project ones granted to you, as the editor's test chat; `DEVELOPMENT_RUNS_DISABLED` while they are off). Microsoft credentials on your current sign-in. No mandate. Not from an API token. |
 
 **What a failure looks like.** The run is marked **failed** at once (in under a second); it never sits in
 *running*. The schedule's run list shows the reason:
@@ -134,8 +149,13 @@ or ids. Other reasons you may see are `MANDATE_INACTIVE` (suspended or revoked),
 `DENIED_OPERATION` (the mandate does not allow schedules) and `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` (a sub-agent
 with credentials is not admitted in a scheduled run yet).
 
-Every firing of a refused schedule creates a failed run and a notice. Pause the schedule until the mandate is in
-place. A mandate run uses the run's own short-lived identity, not your personal token.
+After **three refused cron firings in a row** the schedule pauses itself (Run now and Test run do not count). Its Enabled
+switch shows, on hover, "Paused: runs were refused by credential governance" and you get one notice: `Schedule
+"<name>" was switched off: 3 runs in a row were refused (<reason>). Fix the cause and resume it.` A refusal because
+a platform service is unavailable ("Try again later") does not count. Once the cause is fixed (for example, the
+mandate is in place), press **Resume**; the count starts again. A run that is admitted while governance is on also
+starts the count again; while governance is off the count is kept as it was, and counting goes on when governance is
+on again. A mandate run uses the run's own short-lived identity, not your personal token.
 
 If an administrator changes the owner of a schedule, the new owner needs a mandate of their own.
 

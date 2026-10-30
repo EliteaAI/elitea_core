@@ -28,10 +28,16 @@ def _slot_pool() -> threading.BoundedSemaphore:
         return _slots
 
 
-def _start_owner_run(project_id: int, schedule_id: int, run_id: int) -> None:
+def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None) -> None:
     # Imported here, so the wrapper is needed: the starter map loads without the database layer
     from .schedule_run_starter import run_owner_schedule
-    run_owner_schedule(project_id, schedule_id, run_id)
+    run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request))
+
+
+def _extra(owner_request) -> tuple:
+    """The owner's run request as an extra argument, or none: a cron firing (and every run with governance off) is
+    started with exactly the arguments it had before #7254."""
+    return () if owner_request is None else (owner_request,)
 
 
 # entity type -> starter(project_id, schedule_id, run_id); one starter runs both types
@@ -55,9 +61,10 @@ def _close_unstarted_run(project_id: int, schedule_id: int, run_id: int) -> None
         log.exception("Schedule %s run %s: cannot mark the run failed", schedule_id, run_id)
 
 
-def _run_starter(starter: Callable[[int, int, int], None], project_id: int, schedule_id: int, run_id: int) -> None:
+def _run_starter(starter: Callable[..., None], project_id: int, schedule_id: int, run_id: int,
+                 owner_request=None) -> None:
     try:
-        starter(project_id, schedule_id, run_id)
+        starter(project_id, schedule_id, run_id, *_extra(owner_request))
     except Exception:  # noqa: BLE001 -- a failed starter must not stop the tick thread (R3.5)
         log.exception("Schedule %s run %s of project %s: the starter failed", schedule_id, run_id, project_id)
         _close_unstarted_run(project_id, schedule_id, run_id)
@@ -65,8 +72,12 @@ def _run_starter(starter: Callable[[int, int, int], None], project_id: int, sche
         _slot_pool().release()
 
 
-def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_id: int) -> bool:
-    """Start the run in a daemon thread and return at once; False when the type has no starter or no thread starts."""
+def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_id: int,
+                       owner_request=None) -> bool:
+    """Start the run in a daemon thread and return at once; False when the type has no starter or no thread starts.
+
+    ``owner_request``: the admission request of the owner's Run now or Test run (#7254), built by the run endpoint; it
+    stays in this process."""
     starter = RUN_STARTERS.get(entity_type)
     if starter is None:
         return False
@@ -74,7 +85,8 @@ def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_
         log.warning("Schedule %s run %s: no free run slot, the run is refused; raise max_parallel_runs", schedule_id, run_id)
         return False
     try:
-        threading.Thread(target=_run_starter, args=(starter, project_id, schedule_id, run_id), daemon=True).start()
+        threading.Thread(target=_run_starter, args=(starter, project_id, schedule_id, run_id, *_extra(owner_request)),
+                         daemon=True).start()
     except RuntimeError:  # no thread left in the process; the tick closes the run
         _slot_pool().release()
         log.exception("Schedule %s run %s: cannot start the run thread", schedule_id, run_id)
