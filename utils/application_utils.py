@@ -1258,21 +1258,12 @@ def validate_application_version_details(
                                 'ctx': {'error': refusal},
                             })
                         elif connection_errors is not None:
-                            # 'connection_error' is not a valid Pydantic error type for
-                            # from_exception_data, and ctx must be a dict, not a list.
-                            # Use 'value_error' so the entry lands in toolkit_errors (which
-                            # the frontend reads) and embed the details as JSON in ctx.error.
-                            first = connection_errors[0] if connection_errors else {}
+                            # 'connection_error' is not a valid pydantic type and ctx must be a dict
                             application_toolkit_errors.append({
                                 'type': 'value_error',
                                 'loc': ('tools', tool['id'], '__root__'),
                                 'input': err.get('input'),
-                                'ctx': {'error': json.dumps({
-                                    'error_type': 'connection_error',
-                                    'configuration_type': first.get('configuration_type', ''),
-                                    'configuration_title': first.get('configuration_title', ''),
-                                    'message': first.get('message', 'Connection error'),
-                                })},
+                                'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})},
                             })
                         else:
                             application_toolkit_errors.append({
