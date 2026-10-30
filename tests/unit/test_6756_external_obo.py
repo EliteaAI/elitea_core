@@ -690,6 +690,29 @@ def test_a_failed_exchange_is_not_asked_again_for_a_few_seconds(ns, env, monkeyp
     assert len(env.entra.posts) == 5
 
 
+def test_a_timeout_of_a_short_budget_is_not_remembered(ns, env, monkeypatch):
+    """#7294 review S2: only answers Entra gave are remembered. A timeout (here: the request had 2.5 s left) leaves no
+    negative entry, so an immediate retry with a full budget posts again and gets its token."""
+    person = {"issuer": ENTRA, "tid": TID, "oid": OID}
+    delegation = {**descriptor(), "ownership_class": "project_shared", "custodian_subject_ref": None}
+    module = env.module()
+    real = env.entra.__call__
+    timeouts = []
+
+    def slow_once(url, data, timeout=None):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            raise ns.entra_obo.requests.exceptions.Timeout()
+        return real(url, data, timeout)
+
+    monkeypatch.setattr(ns.entra_obo, "_post", slow_once)
+    with pytest.raises(ns.entra_obo.DelegationRefused) as refused:
+        ns.entra_obo.acquire(module, person, delegation, 1, deadline=ns.entra_obo.time.monotonic() + 2.5)
+    assert refused.value.code == "DEPENDENCY_UNAVAILABLE" and ns.entra_obo._FAILED == {}   # pylint: disable=W0212
+    token, _ = ns.entra_obo.acquire(module, person, delegation, 1)
+    assert token == GRAPH_TOKEN and len(timeouts) == 2 and timeouts[0][1] <= 2.5 < timeouts[1][1]
+
+
 @pytest.mark.parametrize("aud", ["https://graph.microsoft.com", "another-client", None])
 def test_an_assertion_for_another_app_is_never_exchanged(ns, env, aud):
     env.custody.answer = {"ok": True, "assertion": jwt(tid=TID, oid=OID, aud=aud)}
@@ -745,6 +768,49 @@ def test_two_delegated_slots_are_asked_at_once_within_one_budget_of_the_workers_
         assert reply["ok"] is True and clock[0] - started == answers_in
     else:
         assert reply["reason_code"] == "DEPENDENCY_UNAVAILABLE" and reply["toolkit_instance_id"] == "1"
+
+
+def test_two_slots_of_one_descriptor_share_one_exchange(ns, env, monkeypatch):
+    """#7294 review M1: two toolkits on the same Entra app and scopes ask for one token: the first slot exchanges, the
+    second is served from the cache it filled (main: 1 custody call + 1 POST; asked at once they would race to 2 + 2)."""
+    ns.need_transport()
+    binding = env.seed_agent()
+    run = admitted(ns, env, Delegated(env, binding), Delegated(env, binding, tool_id=2, config_id=6))
+    real = env.entra.__call__
+    monkeypatch.setattr(ns.entra_obo, "_post", lambda *a, **k: time.sleep(0.05) or real(*a, **k))   # real latency
+    for _ in range(6):   # the race needs no luck to show: each round starts cold
+        ns.entra_obo.forget()
+        env.custody.calls.clear()
+        env.entra.posts.clear()
+        reply = run.release()
+        assert reply["ok"] is True and len(reply["releases"]) == 2
+        assert (len(env.custody.calls), len(env.entra.posts)) == (1, 1)
+
+
+def test_a_stored_slot_without_its_fields_stops_the_scan_before_later_delegated_slots(ns, env, monkeypatch):
+    """#7294 review S4: the prefilter stops where the loop stops (a stored slot whose fields the store does not hold),
+    so no delegated slot after it is exchanged."""
+    ns.need_transport()
+    binding = env.seed_agent()
+    asked = []
+    real = ns.credential_release._delegated
+    monkeypatch.setattr(ns.credential_release, "_delegated",
+                        lambda module, request, *a, **k: asked.append(request.slot["credential_ref"]) or real(
+                            module, request, *a, **k))
+    values = {"a": types.SimpleNamespace(generation=1, delegation=None, fields={"token": 1}),
+              "b": types.SimpleNamespace(generation=1, delegation=descriptor(), fields={}),
+              "c": types.SimpleNamespace(generation=1, delegation=descriptor(scopes=[f"{GRAPH}/Files.Read.All"]),
+                                         fields={})}
+    request = lambda ref, fields: types.SimpleNamespace(   # noqa: E731
+        slot={"credential_ref": ref, "credential_generation": 1, "fields": fields})
+    scope = types.SimpleNamespace(person=({"kind": "delegation"}, TID, {"kind": "user"}))
+    found = ns.credential_release._delegated_at_once(
+        env.module(), [request("a", ["password"]), request("b", ["access_token"]), request("c", ["access_token"])],
+        values, scope, deadline=0)
+    assert found == {} and asked == []   # slot a lacks "password": the loop refuses there, nothing is exchanged
+    mandate = types.SimpleNamespace(person=({"kind": "mandate", "ref": "mandate:m"}, TID, {"kind": "trigger"}))
+    assert ns.credential_release._delegated_at_once(
+        env.module(), [request("b", ["access_token"]), request("c", ["access_token"])], values, mandate, 0) == {}
 
 
 def test_the_first_failing_delegated_slot_in_order_is_the_one_named(ns, env):

@@ -391,6 +391,23 @@ def test_an_expired_token_used_again_is_refused_and_counted_every_time_and_audit
     assert len(env.denied) == 3
 
 
+def test_an_expired_token_whose_first_audit_failed_is_audited_by_the_next_refusal(ns, env, monkeypatch):
+    """#7294 review S3: the (ctx, jti) counts as audited only once its row was written."""
+    token, claims = mint(ns, exp=int(time.time()) + 1)
+    real, calls = obo(ns)._audit, []   # pylint: disable=W0212
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("outbox down")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(obo(ns), "_audit", flaky)
+    for _ in range(3):
+        assert verify(ns, env, token, now=int(time.time()) + 5)["code"] == "INTERNAL_TOKEN_EXPIRED"
+    assert len(calls) == 2 and [e["runtime_identity_ref"] for e in env.denied] == [f"context:{claims['ctx']}"]
+
+
 def test_a_bad_signature_is_counted_not_audited(ns, env):
     obo(ns)._UNVERIFIED_LOG.update(at=0.0, suppressed=0)   # pylint: disable=W0212
     token, _ = mint(ns)

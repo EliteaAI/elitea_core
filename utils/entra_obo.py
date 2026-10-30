@@ -51,8 +51,9 @@ MIN_CUSTODY_KEY_CHARS = 32
 SLOT_MARGIN_S = 60                         # the slot stops being usable this long before the token does
 MAX_CACHE_ENTRIES = 1024
 PROBE_TTL_S = 60
-# An exchange Entra refused (or could not answer) is not asked again for the same key this long (#7294 P-04): a run that
-# retries at once gets the same refusal without a second assertion RPC and token POST. A cached token still wins
+# An exchange Entra refused (a status-coded answer of its token endpoint) is not asked again for the same key this long
+# (#7294 P-04): a run that retries at once gets the same refusal without a second assertion RPC and token POST. A
+# transport error or a timeout is not remembered. A cached token still wins
 NEGATIVE_TTL_S = 5
 MAX_TOKEN_CHARS = 16_384
 ENTRA_ISSUER = re.compile(r"^https://(login\.microsoftonline\.com|sts\.windows\.net)/[0-9a-fA-F-]{36}(/v2\.0)?/?$")
@@ -88,11 +89,13 @@ OFFLINE_RPC = "auth_oidc_obo_offline_assertion"
 
 
 class DelegationRefused(Exception):
-    """The delegated value cannot be produced; ``code`` says why (no secret, no dependency text)."""
+    """The delegated value cannot be produced; ``code`` says why (no secret, no dependency text). ``answered``: Entra's
+    token endpoint itself gave this answer (a status-coded refusal), not a transport error or this request's timeout."""
 
-    def __init__(self, code):
+    def __init__(self, code, answered=False):
         super().__init__(code)
         self.code = code
+        self.answered = answered
 
 
 # --- the subject of the run ------------------------------------------------------------------
@@ -340,19 +343,19 @@ def _exchange(url, client, assertion, scopes, left) -> tuple:
             expires_in = 0
         if not isinstance(token, str) or not token or expires_in <= 0 or \
                 str(body.get("token_type", "")).lower() != "bearer":
-            raise DelegationRefused(EXCHANGE_FAILED)
+            raise DelegationRefused(EXCHANGE_FAILED, answered=True)
         return "ok", token, time.time() + expires_in
     error = body.get("error") if isinstance(body.get("error"), str) else None
     codes = [code for code in body.get("error_codes") or [] if isinstance(code, int)][:4]
     log.warning("entra obo: the exchange was refused (status=%s error=%s codes=%s)", response.status_code,
                 error if error and re.fullmatch(r"[a-z_]{1,40}", error) else "other", codes)
     if response.status_code >= 500 or response.status_code in (408, 429):
-        raise DelegationRefused(UNAVAILABLE)
+        raise DelegationRefused(UNAVAILABLE, answered=True)
     if error == "invalid_grant":
         return "invalid_grant", None, None
     if error in ("invalid_client", "unauthorized_client"):
-        raise DelegationRefused(APP_UNAVAILABLE)
-    raise DelegationRefused(EXCHANGE_FAILED)
+        raise DelegationRefused(APP_UNAVAILABLE, answered=True)
+    raise DelegationRefused(EXCHANGE_FAILED, answered=True)
 
 
 # (tid, oid, client id, resource, scopes[, "offline:<consent>"]) -> (token, expires_at, custody end or None): this
@@ -391,11 +394,13 @@ def _remember_failure(key, code) -> None:
 
 
 def _exchange_once(key, url, client, assertion, scopes, timeout_s) -> tuple:
-    """``_exchange``, its refusal remembered for the key (``NEGATIVE_TTL_S``)."""
+    """``_exchange``, a refusal Entra gave remembered for the key (``NEGATIVE_TTL_S``). A transport error or a timeout
+    (bounded by this request's own time left) is not remembered: the next request, with its own budget, asks again."""
     try:
         return _exchange(url, client, assertion, scopes, timeout_s)
     except DelegationRefused as refused:
-        _remember_failure(key, refused.code)
+        if refused.answered:
+            _remember_failure(key, refused.code)
         raise
 
 

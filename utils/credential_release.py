@@ -756,19 +756,39 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
 DELEGATED_PARALLEL = 4   # delegated slots of one release request asked at the same time
 
 
+def _token_key(delegation) -> tuple:
+    """What tells two delegated slots of one request apart for ``entra_obo``'s token cache: the same person, so the
+    app, the tenant, the resource and the scopes (two slots with the same key share one exchange)."""
+    return (delegation.get("oauth_app_id"), str(delegation.get("tenant_id", "")).lower(), delegation.get("resource"),
+            tuple(sorted(delegation.get("scopes") or ())))
+
+
 def _delegated_at_once(module, requests, values, scope, deadline) -> dict:
-    """``{index: (fields, expires_at) | AdmissionDenied}`` of the delegated slots of a request with two or more (#7294
-    P-03): their tokens are asked at the same time, within the request's one deadline, instead of one after the other
-    (two cold slots cost one exchange's time). Only the slots the loop would reach are asked (it stops at the first
-    slot that fails its store checks); the loop still refuses at the first failing slot in order, so the answer is the
-    one the sequential loop gave. One delegated slot, or none: ``{}`` (the loop asks it itself, as before)."""
-    wanted = []
+    """``{index: (fields, expires_at) | AdmissionDenied}`` of the delegated slots of a request with two or more token
+    keys (#7294 P-03): the first slot of each key is asked at the same time as the others, within the request's one
+    deadline, instead of one after the other (two cold keys cost one exchange's time). A later slot of the same key is
+    left to the loop, which answers it from the cache the first one filled (as the sequential loop did: one exchange
+    per key). Only the slots the loop would reach are asked: the scan stops at the first slot that fails its store
+    checks (missing value, other generation, a stored slot without its fields). The loop still refuses at the first
+    failing slot in order, so the answer is the one the sequential loop gave; a refusal does wait for the exchanges
+    already in flight (each bounded by the deadline). A mandate run (#7131: its slots redeem one consent) and a request
+    with one key: ``{}`` (the loop asks every slot itself, as before)."""
+    person = scope.person[0] if scope.person else None
+    if isinstance(person, dict) and person.get("kind") == "mandate":
+        return {}
+    wanted, keys = [], set()
     for index, request in enumerate(requests):
         value = values.get(request.slot["credential_ref"])
         if value is None or value.generation != request.slot["credential_generation"]:
             break
         delegation = getattr(value, "delegation", None)
-        if delegation is not None:
+        if delegation is None:
+            if not set(request.slot["fields"]) <= set(value.fields):
+                break
+            continue
+        key = _token_key(delegation)
+        if key not in keys:
+            keys.add(key)
             wanted.append((index, request, delegation))
     if len(wanted) < 2:
         return {}

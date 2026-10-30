@@ -242,3 +242,104 @@ def test_the_version_validation_opens_and_always_closes_the_batch_and_skips_the_
                                                and node.name == "_validate_version_toolkits"))
     # an empty authors map: ToolDetails.add_author_data skips its per-toolkit identity-service call
     assert "'authors_map': {}" in loop
+
+
+def _validator(module):
+    """The real ``validate_application_version_details`` and its toolkit loop, over a fake session that holds one
+    version with ``tools``, and a ToolValidatedDetails with the real connection-check hook (review S1)."""
+    import pydantic
+    from typing import ClassVar
+
+    check = load(module, Rpc())   # also fills LOADED with the helpers the loop calls
+    namespace = dict(LOADED)
+
+    class ToolValidatedDetails(pydantic.BaseModel):
+        CONNECTION_ERROR_SENTINEL: ClassVar[str] = "__connection_errors__"
+        settings: dict
+        project_id: int
+        user_id: int
+
+        @pydantic.model_validator(mode="after")
+        def check_connection(self, info):
+            if info.context and info.context.get("check_connection"):
+                errors = check(self.settings, {}, project_id=self.project_id, user_id=self.user_id)
+                if errors:
+                    raise ValueError({self.CONNECTION_ERROR_SENTINEL: errors})
+            return self
+
+    class Version:
+        tools = tool_mappings = variables = tags = skill_mappings = id = application_id = None
+
+        def __init__(self, tools):
+            self._tools = tools
+
+        def to_dict(self):
+            return {"tools": [dict(tool) for tool in self._tools]}
+
+    class Query:
+        def __init__(self, version):
+            self.version = version
+
+        def filter(self, *a):
+            return self
+
+        def options(self, *a):
+            return self
+
+        def first(self):
+            return self.version
+
+    class Session:
+        def __init__(self, version):
+            self.version = version
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def query(self, _model):
+            return Query(self.version)
+
+    state = types.SimpleNamespace(tools=[])
+    namespace.update({
+        "ValidationError": pydantic.ValidationError, "ToolValidatedDetails": ToolValidatedDetails,
+        "ApplicationVersion": Version, "selectinload": lambda x: x,
+        "ApplicationVersionDetailToolValidatedModel": types.SimpleNamespace(model_validate=lambda d: d),
+        "ApplicationVersionNonFoundError": RuntimeError,
+        "db": types.SimpleNamespace(get_session=lambda pid: Session(Version(state.tools))),
+    })
+    for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "validate_application_version_details", "_validate_version_toolkits", "connection_errors_from"):
+            exec(textwrap.dedent(ast.get_source_segment(SOURCE, node)), namespace)  # noqa: S102
+    return namespace["validate_application_version_details"], state
+
+
+def _credential_toolkit(index):
+    return {"id": index, "type": "github", "settings": {"github_configuration": configuration(index)}}
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_version_validation_asks_its_governed_probes_in_one_batch_only_under_enforce(enabled):
+    """#7294 review S1: the gate itself. Two credential toolkits under enforce: no single probe, one batch call.
+    Off: neither (the old connection-check path)."""
+    module = Module(enabled=enabled)
+    validate, state = _validator(module)
+    state.tools = [_credential_toolkit(1), _credential_toolkit(2)]
+    assert validate(5, 7, 70, 9, _visited=set()) is True
+    assert module.probes == []
+    assert module.batches == ([(2, ["uuid-1", "uuid-2"], 9)] if enabled else [])
+
+
+def test_a_refused_batch_answer_is_the_toolkits_validation_error():
+    module = Module(enabled=True)
+    module.answers = {"uuid-2": {"success": False, "code": "DENIED_GRANT", "message": "You hold no grant."}}
+    validate, state = _validator(module)
+    state.tools = [_credential_toolkit(1), _credential_toolkit(2)]
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as err:
+        validate(5, 7, 70, 9, _visited=set())
+    [entry] = err.value.errors()
+    assert entry["loc"] == ("tools", 2, "__root__") and "DENIED_GRANT" in entry["msg"]

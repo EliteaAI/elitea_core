@@ -579,6 +579,9 @@ def _refuse_verified(module, claims, code):
         _audit(claims, "token", "-", "-", "deny", code, module=module)
     except Exception as exc:  # pylint: disable=W0703
         log.error("internal_obo: a token refusal was not recorded (%s)", type(exc).__name__)
+        if code == INTERNAL_TOKEN_EXPIRED:   # not audited after all: the next refusal of this token writes the row
+            with _VERDICTS_LOCK:
+                _EXPIRED_AUDITED.pop((claims["ctx"], claims["jti"]), None)
     return _refusal(code)
 
 
