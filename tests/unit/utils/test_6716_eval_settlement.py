@@ -330,3 +330,53 @@ def test_poll_lets_a_fetch_error_through(orch):
         raise RuntimeError('rpc down')
     with pytest.raises(RuntimeError):
         orch.poll_ledger_breakdown(fetch, sleep=lambda s: None, clock=lambda: 0.0)
+
+
+# --- #7300: settled input counts cache, as the runtime and the budget stop do -------------------
+
+def _cached_ledger(index, *, billable, cache_read, cache_creation, inp, out=300):
+    return {**_ledger('agent', index, inp=inp, out=out), 'billable_input_tokens': billable,
+            'cache_read_tokens': cache_read, 'cache_creation_tokens': cache_creation}
+
+
+def test_settled_input_adds_cache_back_for_an_exclusive_provider(usage):
+    """Anthropic/Bedrock keep cache out of the ledger's input_tokens; settlement puts it back."""
+    rows, _ = usage.settle_usage_rows(
+        [_row(usage, 0, 'agent', tokens=(15_838, 300))],
+        [_cached_ledger(0, inp=2_622, billable=2_622, cache_read=9_912, cache_creation=3_304)], PRID)
+    assert (rows[0]['input_tokens'], rows[0]['cache_read_tokens'], rows[0]['cache_creation_tokens']) == \
+        (15_838, 9_912, 3_304)
+
+
+def test_settled_input_is_unchanged_for_an_inclusive_provider(usage):
+    rows, _ = usage.settle_usage_rows(
+        [_row(usage, 0, 'agent')],
+        [_cached_ledger(0, inp=1_000, billable=600, cache_read=400, cache_creation=0)], PRID)
+    assert rows[0]['input_tokens'] == 1_000
+
+
+def test_breakdown_without_billable_input_keeps_its_input(usage):
+    rows, _ = usage.settle_usage_rows([_row(usage, 0, 'agent')], [_ledger('agent', 0)], PRID)
+    assert rows[0]['input_tokens'] == 120
+
+
+@pytest.mark.parametrize('billable', [0, None])
+def test_a_zero_or_null_billable_input_never_lowers_settled_input(usage, billable):
+    """A row whose billable_input_tokens is 0 or NULL keeps the ledger's input, not cache alone."""
+    rows, _ = usage.settle_usage_rows(
+        [_row(usage, 0, 'agent')],
+        [_cached_ledger(0, inp=1_000, billable=billable, cache_read=400, cache_creation=0)], PRID)
+    assert rows[0]['input_tokens'] == 1_000
+
+
+def test_a_run_stopped_for_its_token_budget_stays_over_it_once_settled(usage):
+    """Run #58 of #7300: stopped at 32,207 runtime tokens against 30,000, read 5,775 once settled."""
+    budget = {'per_run': {'tokens': 30_000, 'on_breach': 'stop'}}
+    runtime = [_row(usage, 0, 'agent', tokens=(15_838, 283)), _row(usage, 1, 'agent', tokens=(15_803, 283))]
+    assert usage.run_tokens(runtime[0]) + usage.run_tokens(runtime[1]) == 32_207
+    rows, _ = usage.settle_usage_rows(runtime, [
+        _cached_ledger(0, inp=2_622, billable=2_622, cache_read=9_912, cache_creation=3_304, out=283),
+        _cached_ledger(1, inp=2_587, billable=2_587, cache_read=13_216, cache_creation=0, out=283),
+    ], PRID)
+    check = usage.budget_verdict(rows, budget)['per_run']['tokens']
+    assert (check['value'], check['verdict']) == (32_207, 'breached')
