@@ -54,6 +54,7 @@ def env(ns):
     ns.tools.this.module = ns.env.module()
     ns.tools.auth.epoch_ttl = 5.0
     ns.internal_obo._VERDICTS.clear()   # pylint: disable=W0212
+    ns.internal_obo._EXPIRED_AUDITED.clear()   # pylint: disable=W0212
     yield ns.env
     for name in ("SECRETS_MASTER_KEY", "APP_HOST"):
         vars(ns.tools.config).pop(name, None)
@@ -306,6 +307,46 @@ def test_a_child_with_no_platform_token_gets_a_client_token_of_its_context(ns, e
     kept = call_kwargs(with_tokens({"application": {"version_details": {"tools": []}}}), context_ref=ref)
     ns.adm.admit_dispatch(env.module(), "indexer_agent", kept, None)
     assert "internal_run_token" not in kept["kwargs"]
+
+
+def _context_reads(env):
+    """Statements that read ``execution_security_context`` from now on, and the function that stops counting."""
+    seen = []
+    engine = env.engine(1)
+    listener = lambda conn, cursor, statement, params, context, many: seen.append(statement)   # noqa: E731
+    env.ns.sa.event.listen(engine, "before_cursor_execute", listener)
+    stop = lambda: env.ns.sa.event.remove(engine, "before_cursor_execute", listener)   # noqa: E731
+    return seen, stop
+
+
+def test_a_credential_child_mints_its_token_from_the_read_its_seal_made(ns, env):
+    """#7294 P-11: the seal of a child that carries a credential reads the parent context; its run token is minted from
+    that row, so the child reads the context once (main: twice, one session each). In a fan-out, once for all."""
+    cred = Credential(env, env.seed_agent())
+    call = call_kwargs(payload_of(cred))
+    ref = ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
+    seen, stop = _context_reads(env)
+    before = len(env.sessions)
+    child = call_kwargs(payload_of(cred), context_ref=ref)
+    assert ns.adm.admit_dispatch(env.module(), "indexer_agent", child, None) is None
+    assert len(env.sessions) - before == 1
+    assert len([text for text in seen if "execution_security_context" in text]) == 1
+    claims = claims_of(token_of(child))
+    assert (claims["ctx"], claims["uid"], claims["sub"], claims["run"]) == (ref, 42, SUBJECT, RUN)
+    assert claims["exp"] == claims_of(token_of(call))["exp"] or claims["exp"] > time.time()
+    before = len(env.sessions)
+    with ns.adm.parent_entries_scope():
+        children = [call_kwargs(payload_of(cred), context_ref=ref) for _ in range(4)]
+        for item in children:
+            ns.adm.admit_dispatch(env.module(), "indexer_agent", item, None)
+    stop()
+    assert len(env.sessions) - before == 1
+    assert {claims_of(token_of(item))["ctx"] for item in children} == {ref}
+    # a credential-free child is not sealed against the parent: its token still reads the context row itself
+    before = len(env.sessions)
+    free = call_kwargs({"application": {"version_details": {"tools": []}}}, context_ref=ref)
+    ns.adm.admit_dispatch(env.module(), "indexer_agent", free, None)
+    assert len(env.sessions) - before == 1 and claims_of(token_of(free))["ctx"] == ref
 
 
 def test_without_a_signing_key_the_payload_keeps_its_token_and_nothing_is_minted(ns, env):
