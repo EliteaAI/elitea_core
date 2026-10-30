@@ -26,7 +26,7 @@ CREDENTIAL_REASONS = {
 class MissingCredential(str):
     """The reason text of a missing credential; `credential` is the title of the first one.
 
-    The expansion error names no toolkit, so `toolkit` stays None.
+    The expansion error names no toolkit; `toolkit` comes from a lookup in the version and may stay None.
     """
 
     credential: str | None = None
@@ -101,6 +101,29 @@ def check_owner_rights(project_id: int, owner_id: int, entity_type: str | None =
     return None
 
 
+def toolkit_using_credential(project_id: int, version_id: int, credential: str) -> str | None:
+    """The name of the first toolkit of the version whose settings reference the credential title; None if unknown.
+
+    The expansion error names only the credential, and the owner needs the toolkit to know what to fix.
+    Never raises: the name only improves the message.
+    """
+    try:
+        # Late, as the other DB users here: the models pull the whole plugin into every importer
+        from tools import db
+
+        from ..models.all import ApplicationVersion
+        with db.get_session(project_id) as session:
+            version = session.get(ApplicationVersion, version_id)
+            for tool in (version.tools if version else []):
+                references = (value for value in (tool.settings or {}).values() if isinstance(value, dict))
+                if any(str(value.get('elitea_title')) == credential for value in references):
+                    return tool.name or tool.type
+    except Exception:  # noqa: BLE001 - a lookup failure must not change the pre-run result
+        log.exception('Version %s of project %s: the toolkit of credential %s was not found',
+                      version_id, project_id, credential)
+    return None
+
+
 def check_owner_credentials(project_id: int, schedule) -> str | None:
     """None when a token resolves for the owner with no socket and the version expands as the owner (R2.1-R2.4)."""
     # Imported here: predict_utils pulls flask and the payload models into every importer
@@ -121,6 +144,7 @@ def check_owner_credentials(project_id: int, schedule) -> str | None:
         return VERSION_NOT_EXPANDED
     reason = MissingCredential('; '.join(reasons))
     reason.credential = str(errors[0]['credential_id'])
+    reason.toolkit = toolkit_using_credential(project_id, schedule.version_id, reason.credential)
     return reason
 
 

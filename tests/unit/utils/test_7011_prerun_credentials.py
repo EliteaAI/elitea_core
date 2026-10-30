@@ -37,6 +37,8 @@ class FakeHelpers:
 @pytest.fixture
 def check(monkeypatch):
     prerun = load(PRERUN, fresh=True)
+    # The lookup reads the version from the database; these tests cover the reasons, not the lookup
+    monkeypatch.setattr(prerun, "toolkit_using_credential", lambda *args: None, raising=False)
 
     def run(helpers):
         monkeypatch.setitem(sys.modules, f"{UTILS}.predict_utils", SimpleNamespace(
@@ -46,6 +48,7 @@ def check(monkeypatch):
             expand_version_for_runtime=helpers.expand_version_for_runtime))
         schedule = SimpleNamespace(created_by=OWNER, application_id=5, version_id=7)
         return prerun.check_owner_credentials(34, schedule)
+    run.prerun = prerun
     return run
 
 
@@ -115,3 +118,18 @@ def test_a_missing_credential_reason_carries_the_credential_title(check):
     errors = [{"error_type": "credential_not_found", "credential_id": "qa_missing"}]
     reason = check(FakeHelpers(expanded={"error": "x", "credential_errors": errors}))
     assert reason == "credential qa_missing not found" and reason.credential == "qa_missing"
+
+
+def test_credential_reason_names_the_toolkit_found_in_the_version(check):
+    helpers = FakeHelpers(expanded=_expansion_error("credential_not_found"))
+    seen = {}
+
+    def lookup(project_id, version_id, credential):
+        seen["args"] = (project_id, version_id, credential)
+        return "Team GitHub"
+
+    check.prerun.toolkit_using_credential = lookup
+    reason = check(helpers)
+    assert reason == "credential jira-main not found"
+    assert reason.toolkit == "Team GitHub"
+    assert seen["args"] == (34, 7, "jira-main")
