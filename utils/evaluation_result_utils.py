@@ -129,6 +129,10 @@ def _execution_row(row, include_trajectory: bool) -> dict:
         agents = agent_breakdown(row.trajectory)
         if agents:
             metrics = {**metrics, 'agents': agents}
+    elif include_trajectory:
+        # ... and those written before each agent listed its models (#7297) get those.
+        from .evaluation_execution import with_agent_models
+        metrics = {**metrics, 'agents': with_agent_models(metrics['agents'], row.trajectory)}
     return {
         'id': row.id,
         'run_id': row.run_id,

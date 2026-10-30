@@ -319,3 +319,27 @@ def test_ledger_agents_count_cache_inside_input(usage):
              'cache_read_tokens': 8_000, 'cache_creation_tokens': 500}
     ledger = usage.ledger_agents([entry, _row(0, EVAL, 10, 1, 1, 1)], PRID)
     assert ledger[0][53]['input_tokens'] == 10_500
+
+
+# --- models per agent (#7297) -----------------------------------------------------------------
+
+def test_each_agent_lists_the_models_its_llm_steps_ran_on(execution):
+    sonnet = {**_llm((50, 5), ORDER), 'model': 'sonnet'}
+    trajectory = {'steps': [_llm(), _llm((5, 1), ORDER), sonnet, _llm((5, 1), ORDER),
+                            {**_llm(None, DECISION), 'model': None}, _tool('read_file', DECISION)]}
+    parent, order, decision = execution.agent_breakdown(trajectory)
+    assert (parent['models'], order['models'], decision['models']) == (['haiku'], ['haiku', 'sonnet'], [])
+
+
+def test_settled_agents_keep_their_models(usage, execution):
+    agents = execution.agent_breakdown(_fanout())
+    settled = usage.settle_agents(agents, usage.ledger_agents(LEDGER_219, PRID)[0])
+    assert [a['models'] for a in settled][:3] == [['haiku']] * 3
+
+
+def test_agents_stored_without_models_get_them_from_the_trajectory(execution):
+    stored = [{k: v for k, v in a.items() if k != 'models'} for a in execution.agent_breakdown(_fanout())]
+    assert [a['models'] for a in execution.with_agent_models(stored, _fanout())] == [['haiku']] * 3
+    current = execution.agent_breakdown(_fanout())
+    assert execution.with_agent_models(current, None) is current
+    assert execution.with_agent_models(None, _fanout()) is None

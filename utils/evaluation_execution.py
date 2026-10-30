@@ -437,7 +437,11 @@ def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
 
     A dispatched sub-agent also gets its ``application_id`` (from the trajectory's
     ``dispatched_agents``): its steps name it by display name, the ledger by its application, and
-    the id is what ties the two."""
+    the id is what ties the two.
+
+    Each agent also lists the ``models`` its LLM steps ran on, in the order first seen (#7297): a
+    sub-agent can run on another model than the agent under test, which is what its cost is priced
+    at."""
     steps = [s for s in (trajectory or {}).get('steps') or [] if isinstance(s, dict)]
     if not any(s.get('parent_agent') for s in steps):
         return None
@@ -457,13 +461,15 @@ def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
         if entry is None:
             entry = agents[name] = {'agent': name, 'llm_calls': 0, 'tool_calls': 0,
                                     'input_tokens': 0, 'output_tokens': 0, 'cost': None,
-                                    'source': AGENT_SOURCE_TRAJECTORY}
+                                    'models': [], 'source': AGENT_SOURCE_TRAJECTORY}
             if ids.get(name) is not None:
                 entry['application_id'] = ids[name]
         if kind == 'tool':
             entry['tool_calls'] += 1
             continue
         entry['llm_calls'] += 1
+        if step.get('model') and step['model'] not in entry['models']:
+            entry['models'].append(step['model'])
         tokens = step.get('tokens')
         if not isinstance(tokens, dict) or entry['input_tokens'] is None:
             entry['input_tokens'] = entry['output_tokens'] = None
@@ -471,6 +477,16 @@ def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
         entry['input_tokens'] += tokens.get('in') or 0
         entry['output_tokens'] += tokens.get('out') or 0
     return [entry for entry in agents.values() if entry is not None]
+
+
+def with_agent_models(agents: Optional[List[dict]], trajectory: Optional[dict]) -> Optional[List[dict]]:
+    """``metrics.agents`` stored before agents listed their ``models`` (#7297), with each agent's
+    models read from its trajectory. Agents that already list them are kept as they are."""
+    if not agents or all('models' in agent for agent in agents):
+        return agents
+    models = {entry['agent']: entry['models'] for entry in agent_breakdown(trajectory) or []}
+    return [agent if 'models' in agent else {**agent, 'models': models.get(agent.get('agent'), [])}
+            for agent in agents]
 
 
 def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] = None,
