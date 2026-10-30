@@ -84,10 +84,16 @@ class Harness:
         with self.session_factory() as session:
             return session.get(self.EntitySchedule, schedule_id)
 
-    def streak(self, schedule_id):
-        """The deferred refusal count (#7254), read inside a session."""
+    def streak(self, schedule_id, value=None):
+        """The unmapped refusal count (#7254): set it when `value` is given, then read it."""
+        column = self.EntitySchedule.__table__.c.refusal_streak
+        sa = sqlite_db.REAL_SQLALCHEMY['sqlalchemy']
         with self.session_factory() as session:
-            return session.get(self.EntitySchedule, schedule_id).refusal_streak
+            if value is not None:
+                session.execute(sa.update(self.EntitySchedule.__table__).where(
+                    self.EntitySchedule.__table__.c.id == schedule_id).values({column: value}))
+                session.commit()
+            return session.execute(sa.select(column).where(self.EntitySchedule.__table__.c.id == schedule_id)).scalar()
 
     def call(self, verb, body=None, schedule_id=None, suffix='', query=None):
         """Call a handler verb; `suffix` is the URL tail the router matched, such as `/run`."""
@@ -150,6 +156,7 @@ def harness(isolated_sys_modules, monkeypatch):
     sqlite_db.install_trace_span(harness.span, harness.audit)
 
     engine = sqlite_db.sqlite_engine()
+    harness.engine = engine
 
     class _Session(sqlite_db.orm.Session):
         def __exit__(self, *exc):
@@ -379,8 +386,39 @@ def test_7254_an_admin_edit_asks_the_mandate_notice_of_the_owner_not_of_the_admi
     assert harness.governance_owners == [(OWNER_ID, ADMIN_ID)]
 
 
+def test_7254_a_create_names_no_refusal_streak_so_a_schema_without_the_column_still_creates(harness):
+    """#7254 review M2: the column is not mapped, so the INSERT neither sets nor RETURNs it."""
+    statements = []
+    event = sqlite_db.REAL_SQLALCHEMY['sqlalchemy'].event
+    listener = lambda conn, cursor, statement, *args: statements.append(statement)  # noqa: E731
+    event.listen(harness.engine, 'before_cursor_execute', listener)
+    try:
+        _, status = harness.call('post', agent_body())
+    finally:
+        event.remove(harness.engine, 'before_cursor_execute', listener)
+    inserts = [sql for sql in statements if sql.lstrip().upper().startswith('INSERT INTO') and 'entity_schedules' in sql]
+    assert status == 201 and len(inserts) == 1
+    assert 'refusal_streak' not in inserts[0]
+
+
+def test_7254_a_row_reads_without_the_refusal_count(harness):
+    """The unmapped column is in no ORM read and not in the answer."""
+    statements = []
+    event = sqlite_db.REAL_SQLALCHEMY['sqlalchemy'].event
+    listener = lambda conn, cursor, statement, *args: statements.append(statement)  # noqa: E731
+    schedule_id = harness.seed()
+    event.listen(harness.engine, 'before_cursor_execute', listener)
+    try:
+        body, status = harness.call('get', None, schedule_id)
+    finally:
+        event.remove(harness.engine, 'before_cursor_execute', listener)
+    assert status == 200 and 'refusal_streak' not in body
+    assert not any('refusal_streak' in sql for sql in statements)
+
+
 def test_7254_resume_starts_the_refusal_count_again(harness):
-    schedule_id = harness.seed(enabled=False, disabled_reason='governance_refused', refusal_streak=3)
+    schedule_id = harness.seed(enabled=False, disabled_reason='governance_refused')
+    harness.streak(schedule_id, 3)
     body, status = harness.call('post', None, schedule_id, suffix='/resume')
     row = harness.row(schedule_id)
     assert status == 200 and body['governance_notice'] is None and harness.governance_owners == []
@@ -388,7 +426,8 @@ def test_7254_resume_starts_the_refusal_count_again(harness):
 
 
 def test_7254_pause_keeps_the_refusal_count(harness):
-    schedule_id = harness.seed(refusal_streak=2)
+    schedule_id = harness.seed()
+    harness.streak(schedule_id, 2)
     _, status = harness.call('post', None, schedule_id, suffix='/pause')
     assert status == 200 and harness.streak(schedule_id) == 2
 

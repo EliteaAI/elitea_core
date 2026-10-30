@@ -2,8 +2,10 @@
 
 New projects get the column from ``create_all``. Existing schemas get it from the startup safety net in ``module.py``:
 one catalog query, then one ``ADD COLUMN IF NOT EXISTS`` per schema that lacks it, so a steady-state boot issues no DDL.
-The column is deferred in the model; until it is added, in that schema, a governance refusal of a schedule run is
-still recorded on the run but not counted (the schedule does not pause itself), and resuming a schedule fails.
+The column is not mapped (`exclude_properties`), so no ORM read and no INSERT (create, import, the legacy migration)
+names it. Until it is added, in that schema, a governance refusal of a schedule run is still recorded on the
+run but not counted (logged; the schedule does not pause itself), an admitted run cannot end a streak (logged), and
+resuming a schedule fails.
 """
 from sqlalchemy import text
 from pylon.core.tools import log

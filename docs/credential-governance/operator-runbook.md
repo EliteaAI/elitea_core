@@ -22,7 +22,7 @@ administrators choose the mode below it in the Admin UI.
 |---|---|---|---|
 | Person's chat, editor, predict API | Unchanged. Nothing is read or recorded. | Checked as enforce would check it and recorded. Never refused. | Refused unless identity, binding and credentials pass. |
 | Schedule of a person (owner schedule) | Unchanged. | The version's mandate is looked at; if enforce would refuse it, one `would_deny` row is written (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`). The run goes ahead. | Runs only on its owner's own active mandate. Otherwise refused with `MANDATE_REQUIRED` and ended at once. |
-| Webhooks, legacy cron triggers, child dispatches, system runs | Unchanged. | Not evaluated. | Webhooks and system runs need a mandate. Child dispatches follow their parent. |
+| Webhooks, legacy cron triggers, scheduled indexing, child dispatches, system runs | Unchanged. | Not evaluated. A child dispatch is not evaluated on its own: the sub-agents of a person's run are evaluated within that run's admission (#7227). | Webhooks and system runs need a mandate. Child dispatches follow their parent. |
 | Platform identity of the run | The user's own token, as before. | As before. A built-in Elitea tools toolkit that still uses a personal token is recorded as `LEGACY_PAT_INTERNAL_MCP` (`would_deny`). | The run token only (section 7). |
 | Development runs (section 5a) | Not needed. | On by default. | Off by default for a deployment already in Enforce. On when the switch to Enforce turns it on (see 5a). |
 | Context row, sealed payload, credential release | No | No | Yes |
@@ -120,8 +120,9 @@ long after sign-in a governed run can start.
    in the last 24 hours enforcement would have refused, with the top reasons.
 6. **Switch to Enforce** when the would-deny list holds nothing unexpected.
 
-Under Audit only, owner schedule runs leave the mandate `would_deny` row described in section 1, and sub-agents are
-evaluated with their parent run. Webhooks, legacy cron triggers and scheduled indexing are not evaluated, so check
+Under Audit only, owner schedule runs (Schedules page) leave the mandate `would_deny` row described in section 1, and
+the sub-agents of a person's run are evaluated within that run's admission. A scheduled run's own sub-agents are not
+rehearsed (only its mandate row is). Webhooks, legacy cron triggers and scheduled indexing are not evaluated, so check
 them with `report_trigger_principals` (section 6) before enforcing. The Admin UI text of the mode says the same.
 
 ## 4. Bind an agent
@@ -313,7 +314,9 @@ latest revision), made for the owner (`owner` = the schedule owner), active, all
 | Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). |
 
 **Run now and Test run.** Only the owner can start them. An administrator sees the controls disabled, with the
-hint "Only the schedule owner, <owner name>, can run it."; the API answers 403 `not_owner`.
+hint "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has
+no name); the API answers 403 `not_owner`. In the row menu the hint is the hover tooltip of the disabled Run now; on
+the edit page it is a line next to the disabled Run test.
 
 **Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
 mandate a run could use, the schedule is saved and the save shows:
@@ -323,11 +326,16 @@ another person's schedule the text says "for the schedule owner". An unbound ver
 instead. Off: no notice, no read.
 
 **Auto-pause.** Under enforce, the third governance refusal in a row pauses the schedule (`disabled_reason =
-governance_refused`, shown as "Paused: runs were refused by credential governance") and the owner gets one notice:
-`Schedule "<name>" was switched off: 3 runs in a row were refused (<last refusal text>). Fix the mandate and resume
-it`. Cron firings, Run now and Test run all count. Each refused run keeps its own reason in the run list. An admitted
-start under governance ends the streak; so does **Resume**. Pausing by hand keeps the count. Off and audit only
-refuse nothing, so nothing pauses there. To resume: fix the mandate (create, approve or renew it for the owner on
+governance_refused`; the Enabled switch shows, on hover, "Paused: runs were refused by credential governance") and the
+owner gets one notice: `Schedule "<name>" was switched off: 3 runs in a row were refused (<last refusal text>). Fix
+the mandate and resume it`. Cron firings, Run now and Test run all count. Each refused run keeps its own reason in the
+run list. A refusal for a platform outage (`DEPENDENCY_UNAVAILABLE`, `AUDIT_UNAVAILABLE`,
+`WORKER_CAPABILITY_UNAVAILABLE`, `INTERNAL_TOKEN_UNAVAILABLE`, `STORE_UNAVAILABLE`, `DENIED_ASSERTION_UNAVAILABLE`,
+`DENIED_OAUTH_APP_UNAVAILABLE`) neither counts nor ends the streak. A schedule that is already off (paused by hand,
+expired) keeps its own reason and gets no pause notice. An admitted start ends the streak only while governance is on
+(audit only or enforce); so does **Resume**. A count left from before an off period is kept until the next governed
+run or a Resume, and counting goes on when governance is on again. Pausing by hand keeps the count. Off and audit
+only refuse nothing, so nothing pauses there. To resume: fix the mandate (create, approve or renew it for the owner on
 the schedule's version), then press **Resume** on the schedule. The count starts again from zero.
 
 ### Steps

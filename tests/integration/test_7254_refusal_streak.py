@@ -20,6 +20,7 @@ _sa = REAL_SQLALCHEMY["sqlalchemy"]
 from unit._tool_spend_loader import load
 
 REFUSED = {"code": "MANDATE_REQUIRED", "error": "This scheduled run needs an approved mandate."}
+OUTAGE = {"code": "DEPENDENCY_UNAVAILABLE", "error": "A required service is unavailable. Try again later."}
 ADMITTED = {"task_id": "task-1"}
 
 
@@ -60,15 +61,15 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
         return run_id
 
     def schedule():
-        """(refusal_streak, enabled, disabled_reason) of schedule 1; the streak is deferred, so read as columns."""
+        """(refusal_streak, enabled, disabled_reason) of schedule 1; the streak is a table column only."""
         S = schedules.EntitySchedule
         with tools.db.get_session(PROJECT_ID) as session:
             return tuple(session.execute(
-                _sa.select(S.refusal_streak, S.enabled, S.disabled_reason).where(S.id == 1)).one())
+                _sa.select(schedules.REFUSAL_STREAK, S.enabled, S.disabled_reason).where(S.id == 1)).one())
 
     def set_streak(value):
         with tools.db.get_session(PROJECT_ID) as session:
-            session.execute(_sa.update(schedules.EntitySchedule).values(refusal_streak=value))
+            session.execute(_sa.update(schedules.EntitySchedule).values({schedules.REFUSAL_STREAK: value}))
             session.commit()
 
     def run_reason(run_id):
@@ -76,8 +77,46 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
             run = session.get(schedules.EntityScheduleRun, run_id)
             return run.status, run.reason
 
+    def set_off(reason):
+        """The schedule switched off by something else first (by hand: reason None; or `expired`)."""
+        with tools.db.get_session(PROJECT_ID) as session:
+            session.execute(_sa.update(schedules.EntitySchedule).values(enabled=False, disabled_reason=reason))
+            session.commit()
+
+    def resume():
+        """Resume through the schedule service, as the resume action does (owner scope)."""
+        service = _service(monkeypatch)
+        with tools.db.get_session(PROJECT_ID) as session:
+            row = session.get(schedules.EntitySchedule, 1)
+            service.update_schedule(session, PROJECT_ID, row, _update_model().ScheduleUpdate(enabled=True),
+                                    service.ScheduleScope(user_id=OWNER, is_admin=False, permissions=frozenset()))
+
     return types.SimpleNamespace(fire=fire, schedule=schedule, set_streak=set_streak, run_reason=run_reason,
-                                 notices=world.notices)
+                                 notices=world.notices, set_off=set_off, resume=resume)
+
+
+def _update_model():
+    if f"{PKG}.models.pd.entity_schedule" not in sys.modules:
+        load("models/pd/index.py")
+        load("models/pd/entity_schedule.py")
+    return sys.modules[f"{PKG}.models.pd.entity_schedule"]
+
+
+def _service(monkeypatch):
+    """The real schedule service on the US-11 world; its permission and folder neighbours are inert here."""
+    tools = sys.modules["tools"]
+    monkeypatch.setattr(tools, "auth", types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(tools, "config", types.SimpleNamespace(ADMINISTRATION_MODE="administration",
+                                                               DEFAULT_MODE="default"), raising=False)
+    folder = types.ModuleType(f"{PKG}.utils.folder_access")
+    folder.entity_access_error = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, folder.__name__, folder)
+    monkeypatch.setattr(sys.modules[f"{PKG}.models.enums.all"], "AgentTypes", types.SimpleNamespace(), raising=False)
+    _update_model()
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_timing"], "this", types.SimpleNamespace(
+        module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={}))))   # default limits
+    load("utils/schedule_access.py")
+    return load("utils/schedule_service.py", fresh=True)
 
 
 def test_three_refusals_in_a_row_pause_the_schedule_and_tell_the_owner_once(firing):
@@ -121,3 +160,38 @@ def test_off_an_admitted_start_writes_no_streak(firing):
     assert firing.schedule() == (2, True, None)
 
 
+def test_an_outage_refusal_neither_counts_nor_ends_the_streak(firing):
+    """#7254 review M1: a platform outage (``*_UNAVAILABLE``) is not a mandate problem."""
+    firing.fire(REFUSED)
+    firing.fire(OUTAGE)
+    firing.fire(REFUSED)
+    assert firing.schedule() == (2, True, None)
+    for _ in range(3):
+        firing.fire(OUTAGE)
+    assert firing.schedule() == (2, True, None)
+    assert all(notice[1] != "schedule_disabled" for notice in firing.notices)
+
+
+@pytest.mark.parametrize("reason", [None, "expired"])
+def test_refusals_of_a_schedule_already_off_keep_its_reason_and_send_no_pause_notice(firing, reason):
+    """#7254 review S1: Run now of a paused (or expired) schedule is refused three times."""
+    firing.set_off(reason)
+    for _ in range(3):
+        firing.fire(REFUSED)
+    assert firing.schedule() == (3, False, reason)
+    assert all(notice[1] != "schedule_disabled" for notice in firing.notices)
+
+
+def test_the_whole_sequence_pause_resume_one_more_refusal(firing):
+    """#7254 review S3: on the same rows, in order, with an outage inside the streak."""
+    firing.fire(REFUSED)
+    firing.fire(OUTAGE)   # not counted
+    firing.fire(REFUSED)
+    firing.fire(REFUSED)
+    assert firing.schedule() == (3, False, "governance_refused")
+    assert [notice[1] for notice in firing.notices].count("schedule_disabled") == 1
+    firing.resume()
+    assert firing.schedule() == (0, True, None)
+    firing.fire(REFUSED)
+    assert firing.schedule() == (1, True, None)
+    assert [notice[1] for notice in firing.notices].count("schedule_disabled") == 1

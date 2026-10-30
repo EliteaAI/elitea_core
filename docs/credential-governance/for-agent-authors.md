@@ -120,7 +120,8 @@ for you as owner**.
 - A mandate made for **someone else** does not cover your schedule, even on the same version. You get
   `MANDATE_REQUIRED`.
 - **Run now** and **Test run** are for the schedule's owner only. An administrator sees them disabled with
-  "Only the schedule owner, <owner name>, can run it."
+  "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has no
+  name): a hover tooltip on Run now in the row menu, a line next to Run test on the edit page.
 - When you save a schedule while governance is on and you have no mandate for its version, the schedule is saved
   and you see: "Scheduled runs need an approved mandate for you on this version; ask a project admin (Admin →
   Governance → Mandates)." Under audit only it adds "Until then each run is recorded as 'would deny'."
@@ -143,10 +144,12 @@ or ids. Other reasons you may see are `MANDATE_INACTIVE` (suspended or revoked),
 `DENIED_OPERATION` (the mandate does not allow schedules) and `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` (a sub-agent
 with credentials is not admitted in a scheduled run yet).
 
-After **three refused runs in a row** (cron, Run now and Test run all count) the schedule pauses itself. Its row
-says "Paused: runs were refused by credential governance" and you get one notice: `Schedule "<name>" was switched
-off: 3 runs in a row were refused (<reason>). Fix the mandate and resume it`. Once the mandate is in place, press
-**Resume**; the count starts again. A run that is admitted also starts the count again. A mandate run uses the run's
+After **three refused runs in a row** (cron, Run now and Test run all count) the schedule pauses itself. Its Enabled
+switch shows, on hover, "Paused: runs were refused by credential governance" and you get one notice: `Schedule
+"<name>" was switched off: 3 runs in a row were refused (<reason>). Fix the mandate and resume it`. A refusal because
+a platform service is unavailable ("Try again later") does not count. Once the mandate is in place, press
+**Resume**; the count starts again. A run that is admitted while governance is on also starts the count again; while
+governance is off the count is kept as it was, and counting goes on when governance is on again. A mandate run uses the run's
 own short-lived identity, not your personal token.
 
 If an administrator changes the owner of a schedule, the new owner needs a mandate of their own.

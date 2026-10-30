@@ -237,6 +237,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
                 finish_schedule_run(project_id, run_id, 'failed', reason)
             finally:
                 finish_trigger_run_refused(project_id, response_id, result, source)
-            count_refusal(project_id, loaded.schedule, run_id, reason)  # the third in a row pauses it (#7254)
+            # the third in a row pauses it (#7254); an outage code is not counted
+            count_refusal(project_id, loaded.schedule, run_id, reason, result.get('code'))
         elif governance:  # admitted under governance: a refusal streak ends (off writes nothing)
             end_refusal_streak(project_id, schedule_id)

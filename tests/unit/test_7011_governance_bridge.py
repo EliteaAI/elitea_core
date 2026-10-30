@@ -338,8 +338,9 @@ def test_off_the_predict_call_is_exactly_mains_and_nothing_is_read_or_minted(ns,
 def test_enforce_a_refused_run_counts_one_refusal_with_its_reason(ns, env, run, starter):
     arm(ns, env)
     run(trigger="manual")   # Run now counts like a cron firing
-    [(kind, project_id, schedule, run_id, reason)] = starter.writes.streak
-    assert (kind, project_id, schedule.id, run_id) == ("refused", PROJECT_ID, SCHEDULE_ID, RUN_ID)
+    [(kind, project_id, schedule, run_id, reason, code)] = starter.writes.streak
+    assert (kind, project_id, schedule.id, run_id, code) == ("refused", PROJECT_ID, SCHEDULE_ID, RUN_ID,
+                                                             "MANDATE_REQUIRED")   # the code decides an outage
     assert reason == f"The run failed: {ns.adm.MESSAGES['MANDATE_REQUIRED']}"
 
 
