@@ -25,15 +25,17 @@ _NAME_BRACKETS = str.maketrans('[]', '［］')
 
 
 def _approval_hours(run) -> int:
-    """The approval window in hours the run was parked with: the last `paused` event of the run holds it.
+    """The approval window in hours the run was parked with, read from its `paused` events.
 
-    The setting may have changed since; the event keeps the value the run was given. 24 when no event has it.
+    The setting may have changed since; the run keeps the value it was given. A run parked before the value
+    was saved, or whose event was cut from the log, gets the current setting.
     """
     for event in reversed(getattr(run, 'events', None) or []):
         hours = event.get('wait_hours') if isinstance(event, dict) and event.get('kind') == 'paused' else None
         if isinstance(hours, int) and not isinstance(hours, bool) and hours > 0:
             return hours
-    return DEFAULT_APPROVAL_HOURS
+    from .schedule_runs import approval_wait_hours  # late: the run writers import this module
+    return approval_wait_hours()
 
 
 def _schedule_link(schedule) -> str:
