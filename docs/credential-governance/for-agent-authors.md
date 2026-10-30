@@ -165,13 +165,17 @@ An index schedule of a toolkit runs, under Enforce, only on a **toolkit mandate*
 toolkit (Admin → Governance → Mandates → Create mandate → Covers: Toolkit index schedules; another operator approves
 it). What the schedule owner needs:
 
-- **Own the schedule.** A personal schedule is yours while you saved it last: if someone else saved it for you, save
-  it again yourself. A team schedule is the person's who saved it last.
+- **Own the schedule.** A personal schedule is yours while you saved it last: if someone else saved it for you, or
+  it was saved before the platform recorded who saves it (an old schedule), save it again yourself. A team schedule is
+  the person's who saved it last.
 - **An approved toolkit mandate for you on the toolkit**, in force (not suspended, revoked or past its end date).
 - **The right to index the toolkit and to use credentials** in the project (as for Reindex).
 - **The toolkit's credential usable by you**: your own personal credential, or a project credential granted to you.
 - **For a Microsoft sign-in credential**: the mandate names your sign-in and you gave consent (Give consent in the
   Mandates tab). Changing the credential, or the credential the schedule names, needs a new consent.
+- **The toolkit as approved.** Changing the toolkit's settings after the mandate was approved stops its scheduled runs
+  ("The toolkit changed after its index-schedule mandate was approved; approve a new revision of the mandate …") until
+  an operator approves it again.
 
 Without a mandate the index history says: "This schedule runs on its owner's behalf, which needs an approved
 index-schedule mandate for the schedule owner on this toolkit (Admin → Governance → Mandates); it was not started."

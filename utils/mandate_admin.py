@@ -11,12 +11,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from pylon.core.tools import log
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from tools import auth, db, this
 
 from ..models.agent_identity import LIVE_MANDATE_STATES, AgentIdentityBinding, AutonomousMandate
-from .admission import revoke_mandate_contexts, version_application_id
+from .admission import revoke_mandate_contexts, toolkit_digest, version_application_id
 from .binding_state import InvalidTransition
 from .definition_digest import DigestError, digest_for_version
 from .mandate_identity import IDENTITY_SOURCES, allowed_sources, retire_consent
@@ -237,6 +237,15 @@ def _toolkit_exists(session, toolkit_id) -> bool:
     return session.execute(select(EliteATool.id).where(EliteATool.id == toolkit_id)).first() is not None
 
 
+def _toolkit_digest_now(session, toolkit_id):
+    """The digest of the toolkit as it is now (C9-SEC-73): what an approval or a resume holds the mandate's runs to."""
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    tool = session.execute(select(EliteATool.type, EliteATool.settings).where(EliteATool.id == toolkit_id)).first()
+    if tool is None:
+        raise MandateTaskError("TOOLKIT_NOT_FOUND")
+    return toolkit_digest(toolkit_id, tool)
+
+
 def _overdue(mandate, now):
     return mandate.state in ("active", "suspended") and _aware(mandate.valid_until) <= now
 
@@ -319,16 +328,17 @@ def _read(session, values):
 
 
 def _guard_change(session, mandate, action, actor):
-    """The refusals that need more than the row's state; the conditional UPDATE repeats the ones that race."""
+    """The refusals that need more than the row's state; the conditional UPDATE repeats the ones that race. For an
+    approval or a resume of a toolkit mandate, the digest of its toolkit as it is now (stamped with the change)."""
     if action == "approve" and actor in (mandate.created_by, mandate.owner_user_id):
         raise MandateTaskError("SELF_APPROVAL")
     if action == "resume" and actor == mandate.owner_user_id:
         raise MandateTaskError("SELF_APPROVAL")
     if action not in ("approve", "resume"):
-        return
-    if mandate.agent_binding_ref is None:   # a toolkit mandate (#7305): its toolkit must still exist
-        if not _toolkit_exists(session, mandate.toolkit_id):
-            raise MandateTaskError("TOOLKIT_NOT_FOUND")
+        return None
+    digest = None
+    if mandate.agent_binding_ref is None:   # a toolkit mandate (#7305): its toolkit as it is now is what is approved
+        digest = _toolkit_digest_now(session, mandate.toolkit_id)
     else:
         state = session.execute(
             select(AgentIdentityBinding.state).where(AgentIdentityBinding.id == mandate.agent_binding_ref)
@@ -342,6 +352,7 @@ def _guard_change(session, mandate, action, actor):
             raise MandateTaskError("DEPENDENCY_UNAVAILABLE") from None
         if not isinstance(verdict, dict) or verdict.get("active") is not True:
             raise MandateTaskError("OWNER_INACTIVE")
+    return digest
 
 
 def _change(module, session, tracing, values, actor):
@@ -361,7 +372,7 @@ def _change(module, session, tracing, values, actor):
         starts, target = MOVES[action]
     if mandate.state not in starts:
         raise MandateTaskError("INVALID_STATE")
-    _guard_change(session, mandate, action, actor)
+    digest = _guard_change(session, mandate, action, actor)
     source, mandate_id = mandate.state, mandate.id
     if values["dry_run"]:
         return {"dry_run": True, "action": action, "mandate_ref": str(mandate_id), "from": source, "to": target}
@@ -373,6 +384,9 @@ def _change(module, session, tracing, values, actor):
     if not changed:
         session.rollback()
         raise MandateTaskError("CONCURRENT_CHANGE")
+    if digest is not None:   # the toolkit the runs are held to, in the same transaction (C9-SEC-73)
+        session.execute(update(AutonomousMandate).where(AutonomousMandate.id == mandate_id)
+                        .values(toolkit_digest=digest).execution_options(synchronize_session=False))
     session.expire(mandate)  # the UPDATE bypassed the instance
     if target in BUMPS_EPOCH:
         revoke_mandate_contexts(session, mandate_id)

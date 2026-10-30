@@ -3,7 +3,8 @@
 A mandate covers an agent version or the index schedules of one toolkit (``toolkit_id``; the three version columns
 NULL). New projects get the column, the check and the partial unique index from ``create_all``. Existing schemas get them
 from the startup safety net in ``module.py``: one catalog query, then, per schema that lacks any of them, one
-transaction under a 5 s ``lock_timeout`` (tried again a few times): ``ADD COLUMN IF NOT EXISTS toolkit_id``, ``DROP NOT
+transaction under a 5 s ``lock_timeout`` (tried again a few times): ``ADD COLUMN IF NOT EXISTS toolkit_id`` and
+``toolkit_digest`` (the toolkit as approved, C9-SEC-73), ``DROP NOT
 NULL`` on ``application_id``, ``agent_version`` and ``agent_binding_ref``, the check ``autonomous_mandate_kind_ck`` when
 the catalog does not have it (every existing row is an agent mandate, so it holds), and ``CREATE UNIQUE INDEX IF NOT
 EXISTS`` for one live toolkit mandate per toolkit and owner. Until then, in that schema, creating or listing mandates
@@ -29,6 +30,8 @@ _MISSING_QUERY = text(
     "AND t.table_schema ~ '^p_[0-9]+$' AND ("
     "NOT EXISTS (SELECT 1 FROM information_schema.columns col WHERE col.table_schema = t.table_schema "
     "AND col.table_name = :table AND col.column_name = 'toolkit_id') "
+    "OR NOT EXISTS (SELECT 1 FROM information_schema.columns col WHERE col.table_schema = t.table_schema "
+    "AND col.table_name = :table AND col.column_name = 'toolkit_digest') "
     "OR EXISTS (SELECT 1 FROM information_schema.columns col WHERE col.table_schema = t.table_schema "
     "AND col.table_name = :table AND col.column_name = ANY(:nullable) AND col.is_nullable = 'NO') "
     "OR NOT EXISTS (SELECT 1 FROM pg_constraint con JOIN pg_namespace ns ON ns.oid = con.connamespace "
@@ -45,7 +48,8 @@ def project_ids_missing_toolkit_mandates():
 
 def _apply_once(pid) -> None:
     schema = f'"p_{int(pid)}"'
-    altered = ", ".join(["ADD COLUMN IF NOT EXISTS toolkit_id INTEGER"]
+    altered = ", ".join(["ADD COLUMN IF NOT EXISTS toolkit_id INTEGER",
+                         "ADD COLUMN IF NOT EXISTS toolkit_digest VARCHAR(80)"]
                         + [f"ALTER COLUMN {name} DROP NOT NULL" for name in NULLABLE])
     with db.get_session(pid) as session:
         session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))

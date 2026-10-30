@@ -236,6 +236,36 @@ def test_agent_webhooks_and_index_schedules(ns, env, report):
     assert only(rows, toolkit_id=12)["owner_user_id"] is None
 
 
+def toolkit_mandate(env, ns, toolkit_id, owner, state="active", operations=("run:index_schedule",)):
+    """A toolkit mandate row (#7305) for the report."""
+    mandate_id = uuid.uuid4()
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.add(ns.Mandate(
+            id=mandate_id, project_id=1, application_id=None, agent_version=None, agent_binding_ref=None,
+            toolkit_id=toolkit_id, owner_user_id=owner, owner_user_ref={"user_id": owner},
+            allowed_operations=list(operations), allowed_targets=["*"], max_runtime_s=600,
+            valid_until=NOW + timedelta(days=5), state=state, approval_ref="CHG-1", policy_revision="rev-1",
+            created_by=3, approved_by=1, revision=1))
+        session.commit()
+    return mandate_id
+
+
+def test_index_schedules_covered_by_their_owners_toolkit_mandate(ns, env, report):
+    covered = toolkit_mandate(env, ns, 11, 7)
+    suspended = toolkit_mandate(env, ns, 12, 3, state="suspended")
+    report.indexes = [(11, "docs", "7", True, 7), (11, "docs", "8", True, 8), (12, "wiki", "-1", True, 3),
+                      (11, "old", "7", True, None)]
+    rows, _ = report.run()
+    mine = only(rows, toolkit_id=11, index_name="docs", owner_user_id=7)
+    assert (mine["principal"], mine["mandate_ref"], mine["governed_outcome"]) == ("mandate", str(covered), "ADMISSIBLE")
+    other = only(rows, toolkit_id=11, owner_user_id=8)   # another person's schedule: not covered
+    assert (other["principal"], other["governed_outcome"]) == ("delegation", "AUTHORIZATION_REQUIRED")
+    team = only(rows, toolkit_id=12)
+    assert (team["mandate_ref"], team["governed_outcome"]) == (str(suspended), "MANDATE_INACTIVE")
+    legacy = only(rows, index_name="old")   # saved before the saver was recorded: saved again first (C9-SEC-72)
+    assert legacy["governed_outcome"] == "AUTHORIZATION_REQUIRED"
+
+
 def test_rows_have_exactly_the_documented_fields(ns, env, report):
     report.pipelines = [(70, 7, "schedule", "3")]
     report.indexes = [(11, "docs", "7", True, 7)]

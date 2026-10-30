@@ -54,10 +54,20 @@ def env(ns):
     return env
 
 
+def stored_digest(env, ns, toolkit_id):
+    """The digest of the toolkit row as it is now (what an approval stamps), or None when there is no such row."""
+    [tool] = env.query(1, ns.EliteATool, ns.EliteATool.id == toolkit_id) or [None]
+    return None if tool is None else ns.adm.toolkit_digest(toolkit_id, tool)
+
+
 def add_toolkit_mandate(env, ns, *, toolkit_id=1, owner=OWNER, state="active", created_by=CREATOR, approved_by=None,
-                        operations=("run:index_schedule",), valid_until=None, revision=1, runtime=600, identity=None):
+                        operations=("run:index_schedule",), valid_until=None, revision=1, runtime=600, identity=None,
+                        digest="now"):
+    """One toolkit mandate row; ``digest`` "now" stamps the toolkit as it is (as an approval does)."""
     if state in ("active", "suspended") and approved_by is None:
         approved_by = APPROVER
+    if digest == "now":
+        digest = stored_digest(env, ns, toolkit_id)
     mandate_id = uuid.uuid4()
     row = ns.Mandate(
         id=mandate_id, project_id=1, application_id=None, agent_version=None, agent_binding_ref=None,
@@ -66,7 +76,8 @@ def add_toolkit_mandate(env, ns, *, toolkit_id=1, owner=OWNER, state="active", c
         allowed_operations=list(operations), allowed_targets=["*"], max_runtime_s=runtime,
         valid_until=valid_until or NOW + timedelta(days=30), state=state,
         approval_ref="CHG-1" if approved_by else None, policy_revision="rev-1" if approved_by else None,
-        created_by=created_by, approved_by=approved_by, revision=revision, identity_source=identity)
+        created_by=created_by, approved_by=approved_by, revision=revision, identity_source=identity,
+        toolkit_digest=digest)
     with ns.sa_orm.Session(env.engine(1)) as session:
         session.add(row)
         session.commit()
@@ -104,8 +115,9 @@ def owner_credential(env, *, tool_id=1, granted=True, personal=False, custodian=
 
 def request(ns, mandate_id, **over):
     values = dict(project_id=1, binding_project_id=1, run_kind="mandate", entry_point="index_schedule",
-                  caller_type="trigger", caller_id=None, mandate_ref=str(mandate_id), trigger_ref=TRIGGER, toolkit_id=1)
+                  caller_type="trigger", caller_id=None, mandate_ref=str(mandate_id), toolkit_id=1)
     values.update(over)
+    values.setdefault("trigger_ref", f"index_schedule:{values['toolkit_id']}:idx:{OWNER}")
     return ns.AdmissionRequest(**values)
 
 
@@ -421,7 +433,7 @@ def test_a_mandate_suspended_after_admission_stops_the_run_at_the_worker(ns, env
 # --- coverage, the readable refusal and the consent scope ------------------------------------------------------------
 
 @pytest.mark.parametrize("key, created_by, owner", [
-    (str(OWNER), OWNER, OWNER), (str(OWNER), None, OWNER), (str(OWNER), 77, None),
+    (str(OWNER), OWNER, OWNER), (str(OWNER), None, None), (str(OWNER), 77, None),   # NULL: saved again first (C9-SEC-72)
     ("-1", OWNER, OWNER), ("-1", None, None), ("x", OWNER, None),
 ])
 def test_whose_index_schedule_it_is(ns, key, created_by, owner):
@@ -532,3 +544,171 @@ def test_a_stored_reference_is_left_as_it_is(as_reference):
     as_reference(settings, "qtest")
     assert settings == {"qtest_configuration": stored}
     as_reference({}, "qtest")   # no slot: nothing to do
+
+
+# --- fix round: a schedule's own credential (M2), the toolkit as approved (M3, C9-SEC-73), who writes schedules (M1) --
+
+@pytest.fixture
+def schedule_lookup(ns, monkeypatch, as_reference):
+    """``utils.index_scheduling`` as admission imports it: the real ``as_credential_reference`` and a
+    ``resolve_credentials`` that answers like the configurations lookup (the row found for the schedule's title)."""
+    found, calls = {}, []
+
+    def resolve_credentials(project_settings, toolkit_type, user_config, project_id, **context):
+        calls.append((user_config.get("credentials"), context.get("creator_id")))
+        if found.get("raise"):
+            return False, "could not look up", True
+        row = found.get((user_config.get("credentials") or {}).get("elitea_title"))
+        if row is None:
+            return False, "no longer exists", False
+        project_settings[f"{toolkit_type}_configuration"] = dict(row)
+        return True, None, False
+
+    module = types.SimpleNamespace(resolve_credentials=resolve_credentials, as_credential_reference=as_reference)
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.index_scheduling", module)
+    return types.SimpleNamespace(found=found, calls=calls)
+
+
+def set_schedules(env, ns, schedules, toolkit_id=1):
+    with env.get_session(1) as session:
+        session.execute(ns.sa.update(ns.EliteATool).where(ns.EliteATool.id == toolkit_id).values(
+            meta={"indexes_meta": {"idx": {"schedules": schedules}}}))
+        session.commit()
+
+
+def two_credentials(env):
+    """The toolkit (1) stored on a project credential the owner holds a grant on; the owner's personal credential of
+    the same type (configuration 109), which a schedule can name instead."""
+    stored = Credential(env, uuid.uuid4(), tool_id=1, config_id=101, field="jira_configuration", grants=False)
+    env.grants[(1, stored.key(OWNER_REF))] = {"grant_id": stored.grant_id, "state": "active", "revocation_epoch": 4,
+                                             "valid_from": None, "valid_until": None, "operations": ["*"]}
+    mine = Credential(env, uuid.uuid4(), tool_id=9, config_id=109, field="jira_configuration", grants=False)
+    mine.reference.update(ownership_class="personal", custodian_user_id=OWNER, custodian_subject_ref=OWNER_REF)
+    return stored, mine
+
+
+def tick_built_call(stored, credential):
+    """The payload the index tick builds: the stored toolkit with ``credential`` applied and expanded."""
+    tool = stored.tool()
+    tool["settings"]["jira_configuration"] = credential.expanded()
+    payload = {"toolkit_config": tool, "tool_name": "index_data", "tool_params": {"index_name": "idx"}}
+    return call_kwargs(payload, toolkit_config=copy.deepcopy(tool))
+
+
+def test_a_schedule_on_the_owners_own_credential_is_admitted_on_a_toolkit_stored_with_another(
+        ns, env, schedule_lookup):
+    stored, mine = two_credentials(env)
+    set_schedules(env, ns, {str(OWNER): {"created_by": OWNER, "credentials": {"elitea_title": "mine"}}})
+    schedule_lookup.found["mine"] = {"id": 109, "uuid": mine.uuid, "project_id": 1, "elitea_title": "mine",
+                                     "type": "jira", "data": {"token": "{{secret.made_up}}"}, "private": False}
+    mandate_id = add_toolkit_mandate(env, ns)
+    call = tick_built_call(stored, mine)
+    ref = ns.adm.admit_dispatch(env.module(), TOOLKIT_TASK, call, request(ns, mandate_id))
+    [row] = contexts(env, ns)
+    assert str(row.id) == ref and [entry["credential_ref"] for entry in row.allowed_bindings] == [mine.ref_id]
+    assert schedule_lookup.calls == [({"elitea_title": "mine"}, OWNER)]   # read from the toolkit row, as its saver
+    assert SECRET not in dumped(call["kwargs"])
+
+
+def test_a_credential_the_schedule_does_not_name_is_still_refused(ns, env, schedule_lookup):
+    stored, mine = two_credentials(env)
+    set_schedules(env, ns, {str(OWNER): {"created_by": OWNER, "credentials": {"elitea_title": "something-else"}}})
+    mandate_id = add_toolkit_mandate(env, ns)
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:   # the lookup finds nothing: the stored one only
+        ns.adm.admit_dispatch(env.module(), TOOLKIT_TASK, tick_built_call(stored, mine), request(ns, mandate_id))
+    assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+    set_schedules(env, ns, {"-1": {"created_by": OWNER}})   # a team schedule names none: the stored one only
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_dispatch(env.module(), TOOLKIT_TASK, tick_built_call(stored, mine),
+                              request(ns, mandate_id, trigger_ref="index_schedule:1:idx:-1"))
+    assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+    assert ns.adm.admit_dispatch(env.module(), TOOLKIT_TASK, tick_built_call(stored, stored),
+                                 request(ns, mandate_id, trigger_ref="index_schedule:1:idx:-1")) is not None
+
+
+def test_a_schedule_lookup_outage_is_unavailable_and_a_foreign_trigger_is_no_mandate_run(ns, env, schedule_lookup):
+    stored, mine = two_credentials(env)
+    set_schedules(env, ns, {str(OWNER): {"created_by": OWNER, "credentials": {"elitea_title": "mine"}}})
+    schedule_lookup.found["raise"] = True
+    mandate_id = add_toolkit_mandate(env, ns)
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_dispatch(env.module(), TOOLKIT_TASK, tick_built_call(stored, mine), request(ns, mandate_id))
+    assert err.value.reason_code == "DEPENDENCY_UNAVAILABLE"
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:   # the reference names another toolkit
+        ns.adm.admit_dispatch(env.module(), TOOLKIT_TASK, tick_built_call(stored, stored),
+                              request(ns, mandate_id, trigger_ref="index_schedule:2:idx:5"))
+    assert err.value.reason_code == "MANDATE_REQUIRED"
+
+
+def test_a_toolkit_changed_after_approval_is_refused_readably(ns, env):
+    cred = owner_credential(env)
+    mandate_id = add_toolkit_mandate(env, ns)
+    with env.get_session(1) as session:
+        session.execute(ns.sa.update(ns.EliteATool).where(ns.EliteATool.id == 1).values(settings={
+            **cred.tool()["settings"], "url": "https://elsewhere.example"}))
+        session.commit()
+    error = refused(ns, env, cred, mandate_id)
+    assert error.reason_code == "TOOLKIT_CHANGED" and "approve a new revision" in error.message
+    assert contexts(env, ns) == []
+    never = add_toolkit_mandate(env, ns, toolkit_id=2, digest=None)   # approved before the digest was kept
+    other = owner_credential(env, tool_id=2)
+    assert refused(ns, env, other, never, toolkit_id=2).reason_code == "TOOLKIT_CHANGED"
+
+
+def test_the_worker_holds_the_run_to_the_toolkit_the_mandate_approved(ns, env):
+    cred = owner_credential(env)
+    mandate_id = add_toolkit_mandate(env, ns)
+    _call, ref = dispatch(ns, env, cred, mandate_id)
+    with ns.sa_orm.Session(env.engine(1)) as session:   # re-approved meanwhile for another toolkit definition
+        session.execute(ns.sa.update(ns.Mandate).where(ns.Mandate.id == mandate_id).values(toolkit_digest="adv1:other"))
+        session.commit()
+    answer = ns.adm.validate_context(env.module(), 1, ref, dict(TOOLKIT_CALLER))
+    assert (answer["ok"], answer["reason_code"]) == (False, "TOOLKIT_CHANGED")
+    assert "TOOLKIT_CHANGED" in ns.adm.REVOKE_CODES
+
+
+def digest_of(env, ns, mandate_id):
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return session.execute(ns.sa.select(ns.Mandate.toolkit_digest).where(ns.Mandate.id == mandate_id)).scalar_one()
+
+
+def test_approve_stamps_the_toolkit_and_resume_stamps_it_again(ns, env):
+    seed_toolkit(env)
+    mandate_id = run(ns, env, CREATE)["mandate_ref"]
+    assert digest_of(env, ns, uuid.UUID(mandate_id)) is None
+    run(ns, env, f"project_id=1;action=submit;mandate={mandate_id}")
+    run(ns, env, f"project_id=1;action=approve;mandate={mandate_id};{APPROVE}", APPROVER)
+    approved = digest_of(env, ns, uuid.UUID(mandate_id))
+    assert approved == stored_digest(env, ns, 1)
+    run(ns, env, f"project_id=1;action=suspend;mandate={mandate_id}")
+    with env.get_session(1) as session:
+        session.execute(ns.sa.update(ns.EliteATool).where(ns.EliteATool.id == 1).values(settings={"url": "https://x"}))
+        session.commit()
+    assert digest_of(env, ns, uuid.UUID(mandate_id)) == approved   # suspend leaves it
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", APPROVER)["state"] == "active"
+    assert digest_of(env, ns, uuid.UUID(mandate_id)) == stored_digest(env, ns, 1) != approved
+
+
+def test_whose_schedule_needs_saving_again(ns):
+    mandates = {(1, OWNER): "mine"}
+    assert ns.trigger_principal.resave_needed(mandates, 1, str(OWNER), None)
+    assert ns.trigger_principal.resave_needed(mandates, 1, str(OWNER), 77)
+    assert not ns.trigger_principal.resave_needed(mandates, 1, str(OWNER), OWNER)   # covered
+    assert not ns.trigger_principal.resave_needed(mandates, 1, "77", None)          # no mandate of 77
+    assert not ns.trigger_principal.resave_needed(mandates, 1, "-1", None)          # a team schedule
+
+
+def test_a_toolkit_update_keeps_the_stored_schedules():
+    from fixtures.helpers import load_module_with_stubs  # pylint: disable=C0415
+    meta = load_module_with_stubs(PLUGIN_ROOT / "utils" / "toolkit_meta.py", f"{PKG}.utils.toolkit_meta")
+    stored = {"indexes_meta": {"idx": {"schedules": {"5": {"created_by": 5}}}}, "shared": False}
+    planted = {"indexes_meta": {"idx": {"schedules": {"5": {"created_by": 5, "cron": "* * * * *"}}}}, "mcp": True}
+    assert meta.keep_stored_index_schedules(planted, stored) == {"mcp": True, "indexes_meta": stored["indexes_meta"]}
+    assert meta.keep_stored_index_schedules(planted, {}) == {"mcp": True}   # none stored: none planted
+    assert meta.keep_stored_index_schedules(None, None) == {}
+    assert meta.keep_stored_index_schedules({"x": 1}, stored)["indexes_meta"] is stored["indexes_meta"]   # not dropped
+    put = (PLUGIN_ROOT / "api" / "v2" / "tool.py").read_text()
+    put = put[put.index("def put("):]
+    locked = put.index(".with_for_update().first()")
+    kept = put.index("update_data.meta = keep_stored_index_schedules(update_data.meta, current.meta")
+    assert locked < kept < put.index("tool_query.update(")   # under the row lock, before the write

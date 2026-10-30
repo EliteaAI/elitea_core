@@ -367,10 +367,17 @@ consent as an agent mandate. One live toolkit mandate per toolkit and owner; a n
 
 | Schedule | Whose it is |
 |---|---|
-| Personal (key `<user id>`) | That user, while they saved it last (every save records the saver; a schedule saved for them by someone else is not covered until they save it again). |
+| Personal (key `<user id>`) | That user, while they saved it last (every save records the saver; a schedule saved for them by someone else, or one saved before the platform recorded the saver, is not covered until they save it again — the index history says so). |
 | Team (key `-1`) | The person who saved it last. |
 
-As for agent schedules, a mandate made for someone else never covers the schedule.
+As for agent schedules, a mandate made for someone else never covers the schedule. Index schedules are written only
+by the schedule endpoints (which record the saver); a toolkit update keeps the stored schedules as they are.
+
+**The toolkit as approved.** Approval (and Resume) records the toolkit as it is then (its type and settings). A run is
+admitted only on that toolkit: after a change of the toolkit's settings (its target, vector store or credential
+reference) the runs are refused with `TOOLKIT_CHANGED` ("The toolkit changed after its index-schedule mandate was
+approved; approve a new revision of the mandate …"), at admission and at the worker. Suspend and resume it (resume
+records the toolkit again, under the approver's four-eyes rule) or revoke it and approve a new revision.
 
 **What the run is allowed.** The firing is admitted on the mandate (entry point `index_schedule`, subject
 `mandate:<id>`, caller `index_schedule:<toolkit>:<index>:<key>`), on the toolkit runner, held to the stored toolkit
@@ -378,11 +385,18 @@ As for agent schedules, a mandate made for someone else never covers the schedul
 and may index the toolkit (`models.applications.tool.patch`, the permission of the on-demand index) and use
 credentials (`credentials.use`); `DENIED_RBAC` otherwise. Its credentials are decided as the owner's on-demand index
 would decide them: the owner's own personal credential, or a project credential on which **the owner** holds a grant
-(any binding; `DENIED_GRANT` otherwise). No grant to the mandate is needed or possible (a grant names a binding). A
+(any binding; `DENIED_GRANT` otherwise). No grant to the mandate is needed or possible (a grant names a binding).
+Note what this means: a grant given to the owner for an agent also lets their approved toolkit mandate use that
+credential unattended for this toolkit's index schedules; the approver of the mandate decides that.
+The credential the schedule names (each personal schedule names one) is the one the run uses, also when the toolkit is
+saved with another. A
 Microsoft sign-in credential needs the mandate to name the owner's identity and the owner's consent (section 8a);
 the consent covers the toolkit's delegated credentials and the credential the owner's schedules name instead. The run
 is stopped at the earlier of `max_runtime_s` and `valid_until`. A refusal is the index history entry of the slot (the
-slot is consumed), audited once.
+slot is consumed), audited once. A platform outage (`DEPENDENCY_UNAVAILABLE`, `AUDIT_UNAVAILABLE`,
+`WORKER_CAPABILITY_UNAVAILABLE`, `INTERNAL_TOKEN_UNAVAILABLE`, `STORE_UNAVAILABLE`) keeps the slot: it is tried again
+the next minute and reported only once it outlives the grace. A mandate that is suspended, revoked, expired or does not
+allow index schedules refuses before anything is looked up.
 
 **The index history text without a mandate.** A personal schedule: "This schedule runs on its owner's behalf, which
 needs an approved index-schedule mandate for the schedule owner on this toolkit (Admin → Governance → Mandates); it
@@ -640,7 +654,8 @@ See the table in section 7: `INTERNAL_TOKEN_INVALID`, `INTERNAL_TOKEN_EXPIRED`, 
 | `MANDATE_INACTIVE`, `MANDATE_EXPIRED` | The mandate was suspended, revoked or expired. Renew or resume it. |
 | `DENIED_OPERATION` | The mandate does not allow this trigger kind (`run:schedule`, `run:webhook` or `run:index_schedule`). |
 | `RUNTIME_LIMIT_EXCEEDED` | The run overran `max_runtime_s`. Raise it in a new mandate revision, or shorten the run. |
-| `AUTHORIZATION_REQUIRED` | A personal index schedule with no toolkit mandate of its owner on the toolkit (or saved last by someone else). Create one (section 6, Toolkit mandates). |
+| `AUTHORIZATION_REQUIRED` | A personal index schedule with no toolkit mandate of its owner on the toolkit; or the owner has one but did not save the schedule last (or saved it before the saver was recorded): the owner saves it again (section 6, Toolkit mandates). |
+| `TOOLKIT_CHANGED` | The toolkit was changed after its toolkit mandate was approved. Resume (after a suspend) or approve a new revision. |
 | `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` | A scheduled or webhook run calls a sub-agent that uses credentials. Not admitted yet. |
 
 ### Microsoft sign-in credentials *(from PR #602/#7/#21/#786, pending)*

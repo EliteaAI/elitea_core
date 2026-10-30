@@ -205,6 +205,9 @@ class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
     # Deferred like the identity columns: an agent-mandate read never selects it, so a schema that predates it (until
     # the startup safety net adds it) reads agent mandates as before.
     toolkit_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, deferred=True)
+    # The digest of the toolkit (type and settings) as it was when the mandate was approved or last resumed (C9-SEC-73): a
+    # run is admitted only on that toolkit. Set by approve and resume only; deferred like ``toolkit_id``.
+    toolkit_digest: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, deferred=True)
 
 
 @event.listens_for(AutonomousMandate, 'before_update')

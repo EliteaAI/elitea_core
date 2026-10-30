@@ -71,16 +71,25 @@ def latest_toolkit_mandates(session, project_id) -> dict:
 
 def index_schedule_owner(schedule_key, created_by):
     """Whose index schedule this is, for a toolkit mandate (#7305), or ``None`` when no mandate can cover it. A personal
-    schedule (key ``<user id>``) is that user's, but only while they made its last change (every save stamps
-    ``created_by`` with the saver, so a schedule someone else saved for them is not theirs to vouch for; a schedule from
-    before the field, ``None``, is); a team schedule (key ``-1``) is the person who saved it last."""
+    schedule (key ``<user id>``) is that user's only while they made its last change: every save of the schedule
+    endpoints stamps ``created_by`` with the saver, so a schedule someone else saved for them, or one saved before the
+    field existed (``None``), is not theirs to vouch for until they save it again (C9-SEC-72). A team schedule (key
+    ``-1``) is the person who saved it last."""
     key = str(schedule_key)
+    if not isinstance(created_by, int) or isinstance(created_by, bool) or created_by <= 0:
+        return None
     if key == TEAM_SCHEDULE_KEY:
-        return created_by if isinstance(created_by, int) and created_by > 0 else None
+        return created_by
     if not key.isdigit():
         return None
-    owner = int(key)
-    return owner if created_by in (None, owner) else None
+    return created_by if created_by == int(key) else None
+
+
+def resave_needed(mandates, toolkit_id, schedule_key, created_by) -> bool:
+    """A personal schedule whose key's user holds a toolkit mandate on it, but which they did not save last (or saved
+    before the field existed): saving it again is the remedy. Pure: no read."""
+    key = str(schedule_key)
+    return key.isdigit() and index_schedule_owner(key, created_by) is None and (toolkit_id, int(key)) in mandates
 
 
 def covering_toolkit_mandate(mandates, toolkit_id, schedule_key, created_by):

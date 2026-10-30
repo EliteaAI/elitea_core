@@ -23,7 +23,9 @@ from ..utils.cron_utils import is_cron_due
 from ..utils.exceptions import AdmissionDenied
 from ..utils.governance import is_auditing, is_governed
 from ..utils.mandate_admission import audit_only_refusal, index_schedule_trigger_ref, toolkit_mandate_request
-from ..utils.trigger_principal import OPERATION_OF, covering_toolkit_mandate, latest_toolkit_mandates, principal_of
+from ..utils.schedule_runs import OUTAGE_REFUSALS
+from ..utils.trigger_principal import (OPERATION_OF, covering_toolkit_mandate, latest_toolkit_mandates, principal_of,
+                                       resave_needed)
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import (
     as_credential_reference,
@@ -207,7 +209,7 @@ class RPC:
                                 # audited once the refusal was concluded, not on a slot that stays due. With one,
                                 # the dispatch carries the mandate's admission request. Audit only: the same
                                 # coverage is looked at, and a firing enforce would refuse leaves one would-deny.
-                                admission, would_deny = None, None
+                                admission, would_deny, refused_by, resave = None, None, None, False
                                 governed = is_governed(self)
                                 if governed or is_auditing(self):
                                     if toolkit_mandates is None:
@@ -223,7 +225,11 @@ class RPC:
                                         code = index_schedule_refusal_code(
                                             principal_of("index_schedule", schedule_key=user_id)) if mandate is None \
                                             else audit_only_refusal(mandate, OPERATION_OF["index_schedule"])
-                                        if governed and mandate is not None:
+                                        resave = mandate is None and resave_needed(
+                                            toolkit_mandates, toolkit.id, user_id, creator_id)
+                                        if governed and mandate is not None and code is not None:
+                                            refused_by = mandate.id   # its row refuses already: nothing is resolved
+                                        elif governed and mandate is not None:
                                             admission = toolkit_mandate_request(
                                                 project_id=project_id, toolkit_id=toolkit.id, mandate=mandate,
                                                 trigger_ref=trigger_ref)
@@ -233,10 +239,12 @@ class RPC:
                                     try:
                                         if handle_failed_index_schedule(
                                             project_id, deepcopy(toolkit.settings), creator_id, toolkit,
-                                            index_meta_id, index_schedule_refusal_text(code), expand_user_id=creator_id,
+                                            index_meta_id, index_schedule_refusal_text(code, resave),
+                                            expand_user_id=creator_id,
                                         ):
                                             record_index_schedule_refusal(
-                                                self, code, project_id=project_id, toolkit_id=toolkit.id)
+                                                self, code, project_id=project_id, toolkit_id=toolkit.id,
+                                                mandate_ref=refused_by)
                                             stamp_schedule_last_run(
                                                 project_session, toolkit, index_meta_id, user_id, ctx,
                                             )
@@ -302,7 +310,9 @@ class RPC:
                                         )
                                         init_issue_retryable = False
                                     elif (credentials_ok and not init_issue_retryable
-                                          and schedule_model.retry_since):
+                                          and schedule_model.retry_since and admission is None):
+                                        # (a mandate run keeps the stamp until it concludes: an admission outage
+                                        # is measured by it too, #7305)
                                         # The lookups recovered. Clear here rather than on a
                                         # cursor write: this tick may still hit contention and
                                         # never reach one, leaving a stale stamp to escalate
@@ -508,11 +518,24 @@ class RPC:
                                                     admission=admission,
                                                 )
                                             except AdmissionDenied as denied:
-                                                # refused by admission (audited there, once): ends the slot as a
-                                                # refusal without a mandate does, with the readable reason
+                                                # refused by admission (audited there): ends the slot as a refusal
+                                                # without a mandate does, with the readable reason. A platform outage
+                                                # keeps the slot and is retried next minute, reported only once it
+                                                # outlives the grace (as a credential lookup outage is)
+                                                text = index_schedule_refusal_text(denied.reason_code)
+                                                if denied.reason_code in OUTAGE_REFUSALS:
+                                                    if not retry_escalation_due(schedule_model.retry_since):
+                                                        if not schedule_model.retry_since:
+                                                            stamp_schedule_retry_since(
+                                                                project_session, toolkit, index_meta_id, user_id, ctx)
+                                                        log.warning(f"{ctx} admission unavailable "
+                                                                    f"({denied.reason_code}); retrying on the next scan")
+                                                        stats['failed'] += 1
+                                                        continue
+                                                    text = f"{text}; still failing for over {describe_grace()}"
                                                 if handle_failed_index_schedule(
                                                     project_id, updated_settings, creator_id, toolkit,
-                                                    index_meta_id, index_schedule_refusal_text(denied.reason_code),
+                                                    index_meta_id, text,
                                                     expand_user_id=creator_id,
                                                 ):
                                                     stamp_schedule_last_run(
