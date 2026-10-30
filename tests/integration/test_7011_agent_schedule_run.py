@@ -167,7 +167,6 @@ def world(monkeypatch):
 
     schedules = load("models/entity_schedule.py", fresh=True)
     claim = load("utils/schedule_claim.py", fresh=True)
-    load("utils/schedule_timing.py", fresh=True)   # schedule_runs imports it (#7294 review N4)
     load("utils/schedule_runs.py", fresh=True)
     prerun = load("utils/schedule_prerun.py", fresh=True)
     load("utils/pipeline_execution.py", fresh=True)
