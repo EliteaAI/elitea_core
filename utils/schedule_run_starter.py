@@ -114,9 +114,12 @@ def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
 def _confirmed_pairs(review: dict):
     """The confirmed (toolkit, tool) pairs a run may approve; a personal credential is (toolkit, '*'). False when none: an empty scan is no consent.
 
-    An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks.
+    An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks. An item that
+    comes from the global list is (toolkit, '*'): the SDK compares the exact runtime name, which may be spelled
+    differently from the listed one.
     """
-    pairs = [(item['toolkit'], item.get('tool') or '*') for item in review['sensitive'] if item.get('toolkit')]
+    pairs = [(item['toolkit'], '*' if item.get('from_list') else item.get('tool') or '*')
+             for item in review['sensitive'] if item.get('toolkit')]
     return pairs or False
 
 

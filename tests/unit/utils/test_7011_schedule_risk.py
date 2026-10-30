@@ -91,9 +91,15 @@ def scan(isolated_sys_modules):
     models_all.ApplicationVersion = type('ApplicationVersion', (), {})
     sys.modules[models_all.__name__] = models_all
     security = types.ModuleType(f'{PKG}.utils.toolkit_security')
-    security.is_tool_sensitive = lambda type_, tool_name: (type_, tool_name) in state.sensitive
-    security.listed_sensitive_tools = lambda type_: [name for kind, name in sorted(state.sensitive) if kind == type_]
-    security.sensitive_tool_info = lambda type_, tool_name: state.tool_info.get((type_, tool_name), DEFAULT_INFO)
+    def key(name):
+        return ''.join(ch for ch in name.lower() if ch.isalnum())
+
+    security.is_tool_sensitive = lambda type_, tool_name, toolkit_name=None: any(
+        kind in (type_, '*') and key(name) == key(tool_name) for kind, name in state.sensitive)
+    security.listed_sensitive_tools = lambda type_, toolkit_name=None, wildcard=True: [
+        name for kind, name in sorted(state.sensitive) if kind == type_ or (wildcard and kind == '*')]
+    security.sensitive_tool_info = lambda type_, tool_name, toolkit_name=None: state.tool_info.get(
+        (type_, tool_name), DEFAULT_INFO)
     sys.modules[security.__name__] = security
     app_tools = types.ModuleType(f'{PKG}.utils.application_tools')
     app_tools.ConfigurationExpandError = ConfigurationExpandError
@@ -247,6 +253,31 @@ class TestEL7011R2SensitiveActions:
         scan.version = _version(tools=[_tool(settings={})])
         [warning] = scan.run()
         assert (warning['code'], warning['tool']) == ('sensitive_action', 'delete_issue')
+
+    def test_a_listed_name_in_another_spelling_is_confirmed_as_the_whole_toolkit(self, scan):
+        scan.sensitive = {('jira', 'Delete-Issue')}
+        scan.version = _version(tools=[_tool(settings={})])
+        review = scan.review()
+        [item] = review['sensitive']
+        assert item['from_list'] is True
+        assert scan.module._fingerprint(VERSION_ID, review['sensitive'], None)
+
+    def test_a_tool_listed_for_any_toolkit_is_a_notice_and_keeps_the_fingerprint(self, scan):
+        scan.sensitive = {('*', 'delete_file')}
+        scan.version = _version(tools=[_tool(settings={})])
+        review = scan.review()
+        assert review['sensitive'] == []
+        [notice] = review['notices']
+        assert (notice['code'], notice['may_apply']) == ('sensitive_action', True)
+        assert 'may need approval' in notice['message']
+        assert review['fingerprint'] == scan.module._fingerprint(VERSION_ID, [], scan.module._findings(12, VERSION_ID, 42)[2])
+        assert scan.module.scan_complete(review)
+
+    def test_a_tool_listed_for_the_toolkit_type_stays_sensitive_when_the_selection_is_empty(self, scan):
+        scan.sensitive = {('jira', 'delete_issue'), ('*', 'delete_file')}
+        scan.version = _version(tools=[_tool(settings={})])
+        review = scan.review()
+        assert [item['tool'] for item in review['sensitive']] == ['delete_issue']
 
     def test_an_empty_selection_reports_nothing_when_no_tool_is_listed(self, scan):
         scan.sensitive = {('github', 'delete_file')}

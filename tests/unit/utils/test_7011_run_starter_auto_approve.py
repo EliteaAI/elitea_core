@@ -164,6 +164,15 @@ def test_a_sensitive_item_without_a_toolkit_name_is_left_out_of_the_pairs(run):
     assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
 
 
+def test_a_tool_from_the_global_list_is_approved_for_the_whole_toolkit(run):
+    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "Send-Email", "from_list": True}
+    run.state.review = {**clean_review(), "sensitive": [listed], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
+
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "*")]
+
+
 def test_a_confirmed_run_with_no_usable_pair_sends_false(run):
     nameless = {"code": "sensitive_action", "toolkit": "", "tool": "send_email"}
     run.state.review = {**clean_review(), "sensitive": [nameless], "fingerprint": "fp-1"}
