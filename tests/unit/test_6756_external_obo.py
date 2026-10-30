@@ -1155,6 +1155,26 @@ def test_the_custodian_without_credentials_probe_tests_their_delegated_credentia
     assert env.custody.calls == [(TID, OID, False)]
 
 
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("holder", [
+    types.SimpleNamespace(type="token", id=42, reference=None),                # an API token
+    types.SimpleNamespace(),                                                   # no request behind it
+    types.SimpleNamespace(type="user", id=43, reference="session-ref"),       # another user's session
+])
+def test_the_custodian_without_a_signed_in_session_cannot_test_their_delegated_credential(
+        ns, env, monkeypatch, holder, batch):
+    """#7290: the custodian rule admits; the tester's own verified session is still what a delegated probe acts with."""
+    probe = Probe(ns, env, monkeypatch, holder=holder)
+    env.permissions[42] = {"credentials.use"}
+    if batch:
+        [answer] = ns.credential_probe.governed_check_connection_many(
+            env.module(), 1, [{"configuration_uuid": probe.cred.uuid, "config_type": "sharepoint"}], 42)
+    else:
+        answer = probe.check()
+    assert (answer["success"], answer["code"]) == (False, "DENIED_DELEGATION_UNSUPPORTED_CALLER")
+    assert env.started == [] and env.custody.calls == []
+
+
 def test_a_batch_without_the_permission_verifies_no_person_for_a_delegated_team_credential(ns, env, monkeypatch):
     """#7290: the team credential is refused DENIED_RBAC; nothing is asked of the identity service for it."""
     probe = Probe(ns, env, monkeypatch, personal=False)

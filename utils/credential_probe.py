@@ -403,7 +403,7 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
             project_id, configuration_uuid, config_type, user_id, known, onboarding,
             None if shared is None else shared.facts)
     else:   # only the custodian's own test of their personal reference goes on (#7290); anything else is DENIED_RBAC
-        if onboarding:   # the credential onboarding's probe is an operator's: unchanged
+        if onboarding or user_id != actor_user_id:   # an operator's probe (onboarding, on behalf): before any facts
             raise _deny("DENIED_RBAC")
         facts = {}   # merged into the audit row only once admitted: a refusal names no reference, as before
         try:
@@ -509,21 +509,29 @@ def _refuse(module, code, known) -> dict:
     return refusal(code)
 
 
-def _shared_checks(module, project_id, uuids, user_id, actor_user_id) -> types.SimpleNamespace:
+def _shared_checks(module, project_id, uuids, user_id, actor_user_id, onboarding=False) -> types.SimpleNamespace:
     """What every probe of a batch needs and the batch can ask once: the actor's permission, the facts of all the
     configurations (``read_configuration_facts``) and of their references, and, when one is Entra-delegated and may be
     probed (the actor holds the permission, or it is their own personal one: #7290), the verified person (here, on the
     request's own greenlet: the probes run on others), or the code that refused it. Raises ``AdmissionDenied`` or
-    whatever the reads raise."""
+    whatever the reads raise; for an actor without the permission, ``DENIED_RBAC`` instead (as a single probe)."""
     permitted = _may_probe(actor_user_id, project_id)
-    configurations = read_configuration_facts([(item, project_id) for item in uuids])
-    ids = sorted({fact["id"] for fact in configurations.values() if isinstance(fact, dict) and "id" in fact})
-    references = {}
-    secrets = this.for_module("secrets").module
-    for start in range(0, len(ids), MAX_FACT_SELECTORS):
-        found = secrets.credential_use_facts(
-            project_id, ids[start:start + MAX_FACT_SELECTORS], [], None, personal_user_id=user_id)
-        references.update(found.get("references") or {})
+    if not permitted and (onboarding or user_id != actor_user_id):   # as a single probe: before any facts
+        raise _deny("DENIED_RBAC")
+    try:
+        configurations = read_configuration_facts([(item, project_id) for item in uuids])
+        ids = sorted({fact["id"] for fact in configurations.values() if isinstance(fact, dict) and "id" in fact})
+        references = {}
+        secrets = this.for_module("secrets").module
+        for start in range(0, len(ids), MAX_FACT_SELECTORS):
+            found = secrets.credential_use_facts(
+                project_id, ids[start:start + MAX_FACT_SELECTORS], [], None, personal_user_id=user_id)
+            references.update(found.get("references") or {})
+    except Exception as exc:  # pylint: disable=W0703
+        if permitted:
+            raise
+        log.error("governed check_connection: the batch facts could not be read (%s)", type(exc).__name__)
+        raise _deny("DENIED_RBAC") from None
     person = None
     if any(isinstance(item, dict) and item.get("auth_mode") == DELEGATED_AUTH_MODE
            and (permitted or _own_personal(item, user_id, actor_user_id)) for item in references.values()):
@@ -567,7 +575,8 @@ def governed_check_connection_many(  # pylint: disable=R0913,R0914
     try:
         if not module.governance_profile.enabled:
             raise _deny("DEPENDENCY_UNAVAILABLE")
-        shared = _shared_checks(module, project_id, sorted({item[1] for item in valid}), user_id, actor_user_id)
+        shared = _shared_checks(
+            module, project_id, sorted({item[1] for item in valid}), user_id, actor_user_id, onboarding)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703

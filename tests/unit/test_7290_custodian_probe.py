@@ -162,6 +162,13 @@ def test_a_personal_credential_without_a_custodian_is_not_anyones_own(ns, env):
     rbac_refusal(ns, env, check(ns, env, cred))
 
 
+def test_a_team_credential_that_names_the_actor_as_custodian_is_still_a_team_credential(ns, env):
+    """Only the personal class is its custodian's: a project reference naming the actor needs the permission."""
+    cred = seeded(env)   # project_shared
+    cred.reference.update(custodian_user_id=OWNER)
+    rbac_refusal(ns, env, check(ns, env, cred))
+
+
 @pytest.mark.parametrize("name, change", [
     ("no such configuration", lambda env, cred: env.configurations.clear()),
     ("no reference", lambda env, cred: env.references.clear()),
@@ -195,6 +202,7 @@ def test_an_operator_on_the_custodians_behalf_needs_the_permission(ns, env):
     cred = personal(seeded(env))
     rbac_refusal(ns, env, check(ns, env, cred, user_id=OWNER, actor_user_id=MEMBER),
                  user_id=OWNER, actor_user_id=MEMBER)
+    assert env.configuration_calls == [] and env.secrets_calls == []   # refused before any facts are read
     env.denied.clear()
     env.permissions[MEMBER] = set(OPERATOR)
     assert check(ns, env, cred, user_id=OWNER, actor_user_id=MEMBER) == {"success": True}
@@ -278,6 +286,32 @@ def test_a_batch_without_either_permission_is_refused_whole_before_any_facts(ns,
     assert [answer["code"] for answer in answers] == ["DENIED_RBAC"] * 2
     assert env.configuration_calls == [] and env.secrets_calls == [] and env.started == []
     assert len(env.permission_calls) == 1
+
+
+@pytest.mark.parametrize("unreadable", ["configurations_raises", "secrets_raises"])
+def test_a_batch_whose_facts_cannot_be_read_is_denied_rbac_without_the_permission(ns, env, unreadable):
+    """As a single probe: the actor without the permission is told DENIED_RBAC, not the facts outage."""
+    own, team, _others = _mixed(env)
+    setattr(env, unreadable, RuntimeError("down"))
+    items = [{"configuration_uuid": cred.uuid, "config_type": "jira"} for cred in (own, team)]
+    answers = ns.credential_probe.governed_check_connection_many(env.module(), 1, items, OWNER)
+    assert [answer["code"] for answer in answers] == ["DENIED_RBAC"] * 2 and env.started == []
+    assert len(env.denied) == 2
+    for event in env.denied:
+        assert "credential_ref" not in event and event["reason_code"] == "DENIED_RBAC"
+    env.denied.clear()   # with the permission, the outage is told as it is (unchanged)
+    env.permissions[OWNER] = set(OPERATOR)
+    answers = ns.credential_probe.governed_check_connection_many(env.module(), 1, items, OWNER)
+    assert [answer["code"] for answer in answers] == ["DEPENDENCY_UNAVAILABLE"] * 2
+
+
+@pytest.mark.parametrize("over", [{"actor_user_id": MEMBER}, {"onboarding": True}])
+def test_an_operators_batch_without_the_permission_is_refused_before_any_facts(ns, env, over):
+    own, team, _others = _mixed(env)
+    items = [{"configuration_uuid": cred.uuid, "config_type": "jira"} for cred in (own, team)]
+    answers = ns.credential_probe.governed_check_connection_many(env.module(), 1, items, OWNER, **over)
+    assert [answer["code"] for answer in answers] == ["DENIED_RBAC"] * 2
+    assert env.configuration_calls == [] and env.secrets_calls == [] and env.started == []
 
 
 def test_a_batch_costs_the_custodian_what_it_costs_a_permitted_actor(ns, env):
