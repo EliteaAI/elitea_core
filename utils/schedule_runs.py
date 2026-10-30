@@ -25,13 +25,14 @@ REJECT_REASON = 'rejected by the owner'
 DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
 # A schedule pauses itself at this many governance refusals in a row (#7254); an admitted start or a resume ends a streak
 REFUSAL_PAUSE_AFTER = 3
-# Admission codes of a platform outage, not of the mandate: they neither count nor end a streak (#7254 review M1)
+# Platform-side outage codes: they neither count nor end a streak (#7254 review M1). A missing sign-in or app is a
+# lasting condition a person fixes, so it counts
 OUTAGE_REFUSALS = frozenset({
     'DEPENDENCY_UNAVAILABLE', 'AUDIT_UNAVAILABLE', 'WORKER_CAPABILITY_UNAVAILABLE', 'INTERNAL_TOKEN_UNAVAILABLE',
-    'STORE_UNAVAILABLE', 'DENIED_ASSERTION_UNAVAILABLE', 'DENIED_OAUTH_APP_UNAVAILABLE',
+    'STORE_UNAVAILABLE',
 })
 GOVERNANCE_REFUSED = 'governance_refused'
-PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the mandate and resume it'
+PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the cause and resume it.'
 
 
 class ScheduleDecisionForbidden(Exception):

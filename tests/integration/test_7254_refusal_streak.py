@@ -127,7 +127,7 @@ def test_three_refusals_in_a_row_pause_the_schedule_and_tell_the_owner_once(firi
     paused = [notice for notice in firing.notices if notice[1] == "schedule_disabled"]
     assert paused == [(OWNER, "schedule_disabled",
                        "3 runs in a row were refused (The run failed: This scheduled run needs an approved mandate). "
-                       "Fix the mandate and resume it")]
+                       "Fix the cause and resume it.")]
     assert [notice[1] for notice in firing.notices].count("schedule_run_failed") == 3
 
 
@@ -195,3 +195,11 @@ def test_the_whole_sequence_pause_resume_one_more_refusal(firing):
     firing.fire(REFUSED)
     assert firing.schedule() == (1, True, None)
     assert [notice[1] for notice in firing.notices].count("schedule_disabled") == 1
+
+
+@pytest.mark.parametrize("code", ["DENIED_ASSERTION_UNAVAILABLE", "DENIED_OAUTH_APP_UNAVAILABLE"])
+def test_a_missing_sign_in_or_app_counts_like_any_refusal(firing, code):
+    """A lasting condition a person fixes is not an outage: three in a row pause the schedule."""
+    for _ in range(3):
+        firing.fire({"code": code, "error": "Not available to this run."})
+    assert firing.schedule() == (3, False, "governance_refused")

@@ -146,11 +146,11 @@ with credentials is not admitted in a scheduled run yet).
 
 After **three refused runs in a row** (cron, Run now and Test run all count) the schedule pauses itself. Its Enabled
 switch shows, on hover, "Paused: runs were refused by credential governance" and you get one notice: `Schedule
-"<name>" was switched off: 3 runs in a row were refused (<reason>). Fix the mandate and resume it`. A refusal because
-a platform service is unavailable ("Try again later") does not count. Once the mandate is in place, press
-**Resume**; the count starts again. A run that is admitted while governance is on also starts the count again; while
-governance is off the count is kept as it was, and counting goes on when governance is on again. A mandate run uses the run's
-own short-lived identity, not your personal token.
+"<name>" was switched off: 3 runs in a row were refused (<reason>). Fix the cause and resume it.` A refusal because
+a platform service is unavailable ("Try again later") does not count. Once the cause is fixed (for example, the
+mandate is in place), press **Resume**; the count starts again. A run that is admitted while governance is on also
+starts the count again; while governance is off the count is kept as it was, and counting goes on when governance is
+on again. A mandate run uses the run's own short-lived identity, not your personal token.
 
 If an administrator changes the owner of a schedule, the new owner needs a mandate of their own.
 

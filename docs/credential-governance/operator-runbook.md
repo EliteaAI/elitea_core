@@ -328,15 +328,15 @@ instead. Off: no notice, no read.
 **Auto-pause.** Under enforce, the third governance refusal in a row pauses the schedule (`disabled_reason =
 governance_refused`; the Enabled switch shows, on hover, "Paused: runs were refused by credential governance") and the
 owner gets one notice: `Schedule "<name>" was switched off: 3 runs in a row were refused (<last refusal text>). Fix
-the mandate and resume it`. Cron firings, Run now and Test run all count. Each refused run keeps its own reason in the
+the cause and resume it.` Cron firings, Run now and Test run all count. Each refused run keeps its own reason in the
 run list. A refusal for a platform outage (`DEPENDENCY_UNAVAILABLE`, `AUDIT_UNAVAILABLE`,
-`WORKER_CAPABILITY_UNAVAILABLE`, `INTERNAL_TOKEN_UNAVAILABLE`, `STORE_UNAVAILABLE`, `DENIED_ASSERTION_UNAVAILABLE`,
-`DENIED_OAUTH_APP_UNAVAILABLE`) neither counts nor ends the streak. A schedule that is already off (paused by hand,
+`WORKER_CAPABILITY_UNAVAILABLE`, `INTERNAL_TOKEN_UNAVAILABLE`, `STORE_UNAVAILABLE`) neither counts nor ends the
+streak; a missing Microsoft sign-in or app (`DENIED_ASSERTION_UNAVAILABLE`, `DENIED_OAUTH_APP_UNAVAILABLE`) counts. A schedule that is already off (paused by hand,
 expired) keeps its own reason and gets no pause notice. An admitted start ends the streak only while governance is on
 (audit only or enforce); so does **Resume**. A count left from before an off period is kept until the next governed
 run or a Resume, and counting goes on when governance is on again. Pausing by hand keeps the count. Off and audit
-only refuse nothing, so nothing pauses there. To resume: fix the mandate (create, approve or renew it for the owner on
-the schedule's version), then press **Resume** on the schedule. The count starts again from zero.
+only refuse nothing, so nothing pauses there. To resume: fix the cause the notice names (for a mandate: create, approve
+or renew it for the owner on the schedule's version), then press **Resume** on the schedule. The count starts again from zero.
 
 ### Steps
 
