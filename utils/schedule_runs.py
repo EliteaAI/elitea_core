@@ -136,7 +136,7 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str) -> None:
         log.exception('Schedule %s: cannot count the governance refusal of run %s', schedule.id, run_id)
         return
     if streak == REFUSAL_PAUSE_AFTER:
-        text = PAUSED_AFTER_REFUSALS.format(count=REFUSAL_PAUSE_AFTER, reason=reason)
+        text = PAUSED_AFTER_REFUSALS.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
         run = SimpleNamespace(id=run_id, reason=text, conversation_id=None)
         notify_schedule_event(project_id, schedule.created_by, Types.schedule_disabled, schedule, run)
 

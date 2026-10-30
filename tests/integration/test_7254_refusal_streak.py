@@ -19,7 +19,7 @@ _sa = REAL_SQLALCHEMY["sqlalchemy"]
 
 from unit._tool_spend_loader import load
 
-REFUSED = {"code": "MANDATE_REQUIRED", "error": "This scheduled run needs an approved mandate"}
+REFUSED = {"code": "MANDATE_REQUIRED", "error": "This scheduled run needs an approved mandate."}
 ADMITTED = {"task_id": "task-1"}
 
 
@@ -87,7 +87,7 @@ def test_three_refusals_in_a_row_pause_the_schedule_and_tell_the_owner_once(firi
         assert firing.run_reason(run_id) == ("failed", f"The run failed: {REFUSED['error']}")
     paused = [notice for notice in firing.notices if notice[1] == "schedule_disabled"]
     assert paused == [(OWNER, "schedule_disabled",
-                       f"3 runs in a row were refused (The run failed: {REFUSED['error']}). "
+                       "3 runs in a row were refused (The run failed: This scheduled run needs an approved mandate). "
                        "Fix the mandate and resume it")]
     assert [notice[1] for notice in firing.notices].count("schedule_run_failed") == 3
 
