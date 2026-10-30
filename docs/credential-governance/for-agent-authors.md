@@ -112,8 +112,10 @@ Creating a credential **from the chat**, through a secure form that never passes
 
 ## Scheduled runs
 
-A schedule is yours: you are its owner, also when you made it with "Build with AI" and saved it. It runs as you. Under Enforce it needs an **active mandate for the same agent version, made
-for you as owner**.
+A schedule is yours: you are its owner, also when you made it with "Build with AI" and saved it. It runs as you. Under
+Enforce its cron firings need an **active mandate for the same agent version, made for you as owner**. **Run now**
+and **Test run** act as you, like a toolkit test: they run with your sign-in and your credentials and need no mandate
+and no admin role.
 
 - Ask an operator for a mandate for that version with you as its owner and `run:schedule` allowed. It must be
   approved by a second person.
@@ -123,15 +125,16 @@ for you as owner**.
   "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has no
   name): a hover tooltip on Run now in the row menu, a line next to Run test on the edit page.
 - When you save a schedule while governance is on and you have no mandate for its version, the schedule is saved
-  and you see: "Scheduled runs need an approved mandate for you on this version; ask a project admin (Admin →
-  Governance → Mandates)." Under audit only it adds "Until then each run is recorded as 'would deny'."
+  and you see: "Scheduled (cron) runs need an approved mandate for you on this version; Run now and Test run act as
+  you. Ask a project admin (Admin → Governance → Mandates)." Under audit only it adds "Until then each run is
+  recorded as 'would deny'."
 - A mandate that is suspended, revoked or expired stops the run.
 
-| Mode | Your scheduled run |
-|---|---|
-| Off | Runs as before. |
-| Audit only | Runs. A missing or unusable mandate is recorded as "would deny" for the operators. |
-| Enforce | Runs on your mandate, or is refused (below). |
+| Mode | A cron firing | Run now / Test run |
+|---|---|---|
+| Off | Runs as before. | Runs as before. |
+| Audit only | Runs. A missing or unusable mandate is recorded as "would deny" for the operators. | Runs; evaluated as your own run. |
+| Enforce | Runs on your mandate, or is refused (below). | Acts as you, like a toolkit test: your own credentials, project ones granted to you, Microsoft ones on your current sign-in. No mandate. Not from an API token. |
 
 **What a failure looks like.** The run is marked **failed** at once (in under a second); it never sits in
 *running*. The schedule's run list shows the reason:
@@ -144,7 +147,7 @@ or ids. Other reasons you may see are `MANDATE_INACTIVE` (suspended or revoked),
 `DENIED_OPERATION` (the mandate does not allow schedules) and `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` (a sub-agent
 with credentials is not admitted in a scheduled run yet).
 
-After **three refused runs in a row** (cron, Run now and Test run all count) the schedule pauses itself. Its Enabled
+After **three refused cron firings in a row** the schedule pauses itself (Run now and Test run do not count). Its Enabled
 switch shows, on hover, "Paused: runs were refused by credential governance" and you get one notice: `Schedule
 "<name>" was switched off: 3 runs in a row were refused (<reason>). Fix the cause and resume it.` A refusal because
 a platform service is unavailable ("Try again later") does not count. Once the cause is fixed (for example, the

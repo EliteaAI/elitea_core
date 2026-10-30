@@ -23,6 +23,9 @@ ENTRY_TOOLKIT_TEST = "toolkit_test"
 ENTRY_INDEX_ON_DEMAND = "index_on_demand"
 # A plain LLM chat of the chat page (no agent): the person's own run, with no definition to bind (#7227 D1)
 ENTRY_CHAT_LLM = "chat_sio_llm"
+# Run now or Test run of a schedule by its owner (#7254): the owner's own interactive run, built by the run endpoint
+# from the signed-in caller; only cron firings need the mandate
+ENTRY_SCHEDULE_TEST = "schedule_test"
 
 
 class AdmissionRequest(BaseModel):
@@ -34,7 +37,7 @@ class AdmissionRequest(BaseModel):
     version_id: Optional[int] = None
     run_kind: Literal["interactive", "system", "mandate"]
     entry_point: Literal["chat_sio", "editor_chat", "chat_sio_llm", "predict_api", "schedule", "webhook", "toolkit_test",
-                         "index_on_demand"]
+                         "index_on_demand", "schedule_test"]
     caller_type: Literal["user", "token", "public", "trigger"]
     caller_id: Optional[int] = None
     caller_reference: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)

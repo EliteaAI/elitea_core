@@ -109,7 +109,7 @@ def take_trigger_admission(  # pylint: disable=R0913
 ) -> Optional[AdmissionRequest]:
     """The request a ticket was minted for, once, only for the project and agent version ``predict_sio`` loaded itself.
     The ticket is spent even when it does not match. ``None`` means "no mandate": the run is an ordinary system run."""
-    if ticket is None or not is_governed(module):
+    if ticket is None or not (is_governed(module) or is_auditing(module)):   # audit only: an owner's Run now (#7254)
         return None
     request = module._mandate_tickets.take(ticket)  # pylint: disable=W0212
     if request is None or request.project_id != project_id or request.version_id != version_id:
@@ -155,6 +155,23 @@ def owner_mandate(session, project_id, version_id, owner_id):
     if mandate is None or mandate.owner_user_id is None or mandate.owner_user_id != owner_id:
         return None
     return mandate
+
+
+def mint_owner_run_admission(module, *, project_id, application_id, version_id, schedule_id) -> Optional[str]:
+    """A single-use ticket for the owner's Run now or Test run of a schedule (#7254), or ``None`` when governance is
+    off (nothing is built or read). Called by the run endpoint, which holds the signed-in owner: the request is the
+    owner's interactive run (entry point ``schedule_test``), built from that request's holder, and travels to
+    ``predict_sio`` by reference as a trigger's does. No mandate is read."""
+    from types import SimpleNamespace  # pylint: disable=C0415
+    from ..models.pd.admission import ENTRY_SCHEDULE_TEST, admission_request_from  # pylint: disable=C0415
+    request = admission_request_from(
+        module, sid=None, project_id=project_id, binding_project_id=project_id,
+        version_row=SimpleNamespace(id=version_id, application_id=application_id), run_kind="interactive",
+        entry_point=ENTRY_SCHEDULE_TEST)
+    if request is None:
+        return None
+    return module._mandate_tickets.mint(  # pylint: disable=W0212
+        request.model_copy(update={"trigger_ref": schedule_trigger_ref(schedule_id)}))
 
 
 def _covering_mandate(project_id, version, owner_id):

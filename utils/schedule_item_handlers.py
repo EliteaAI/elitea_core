@@ -425,7 +425,11 @@ class ScheduleItemHandlers:
                 ))
                 return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
             session.commit()
-            if not start_schedule_run(entity_type, project_id, schedule_id, run_id):
+            # the owner's own run (#7254): admitted from this signed-in request, never on the mandate; None when off
+            from .mandate_admission import mint_owner_run_admission  # pylint: disable=C0415
+            ticket = mint_owner_run_admission(self.module, project_id=project_id, application_id=row.application_id,
+                                              version_id=row.version_id, schedule_id=schedule_id)
+            if not start_schedule_run(entity_type, project_id, schedule_id, run_id, ticket):
                 fail_run(session, run_id, START_FAILED)
                 session.commit()
                 return refusal("run_start_failed", "The run could not start", 500)

@@ -33,7 +33,7 @@ def _timing():
 
 @pytest.fixture
 def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the imported one
-    """`fire(answer, governed=True)`: claim a Run now of schedule 1 and start it with `answer` as the predict answer."""
+    """`fire(answer, ...)`: claim a run of schedule 1 and start it with `answer` as the predict answer."""
     starter = sys.modules[f"{PKG}.utils.schedule_run_starter"]
     schedules = sys.modules[f"{PKG}.models.entity_schedule"]
     tools = sys.modules["tools"]
@@ -49,11 +49,12 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
                         lambda *_args: None, raising=False)
     world.set_run_status("success")   # the fixture's run is over; each firing claims its own
 
-    def fire(answer, governed=True, trigger="manual"):
+    def fire(answer, governed=True, trigger="cron", owner_ticket=None):
+        """A cron firing by default; ``manual``/``test`` with ``owner_ticket`` is the owner's Run now / Test run."""
         state.governed = governed
         state.answers.append(answer)
         run_id = world.claim(trigger)
-        starter.run_owner_schedule(PROJECT_ID, 1, run_id)
+        starter.run_owner_schedule(PROJECT_ID, 1, run_id, owner_ticket)
         if answer is ADMITTED:   # the admitted run ends later, from its chat; end it so the next firing can claim
             with tools.db.get_session(PROJECT_ID) as session:
                 session.get(schedules.EntityScheduleRun, run_id).status = "success"
@@ -120,7 +121,7 @@ def _service(monkeypatch):
 
 
 def test_three_refusals_in_a_row_pause_the_schedule_and_tell_the_owner_once(firing):
-    runs = [firing.fire(REFUSED, trigger=trigger) for trigger in ("cron", "manual", "test")]   # Run now counts too
+    runs = [firing.fire(REFUSED) for _ in range(3)]   # cron firings
     assert firing.schedule() == (3, False, "governance_refused")
     for run_id in runs:   # each run keeps its own refusal text
         assert firing.run_reason(run_id) == ("failed", f"The run failed: {REFUSED['error']}")
@@ -203,3 +204,14 @@ def test_a_missing_sign_in_or_app_counts_like_any_refusal(firing, code):
     for _ in range(3):
         firing.fire({"code": code, "error": "Not available to this run."})
     assert firing.schedule() == (3, False, "governance_refused")
+
+
+@pytest.mark.parametrize("trigger", ["manual", "test"])
+@pytest.mark.parametrize("answer", [{"code": "DENIED_GRANT", "error": "No grant."}, ADMITTED])
+def test_run_now_and_test_run_neither_count_nor_end_the_streak(firing, trigger, answer):
+    """Roman 2026-10-30: the owner's own runs are not cron firings; only cron firings count toward the pause."""
+    firing.set_streak(2)
+    for _ in range(3):
+        firing.fire(answer, trigger=trigger, owner_ticket="owner-ticket")
+    assert firing.schedule() == (2, True, None)
+    assert all(notice[1] != "schedule_disabled" for notice in firing.notices)

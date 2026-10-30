@@ -54,6 +54,8 @@ class Harness:
         self.governance_notice = None
         self.governance_calls = []
         self.governance_owners = []  # (owner, saver) of each schedule notice (#7254)
+        self.owner_tickets = []  # the owner-run admissions the run endpoint minted (#7254, Roman 2026-10-30)
+        self.owner_ticket = None  # what minting answers: None is governance off
         self.fingerprint = 'fp-1'
         self.run_without_asking_allowed = False
         self.scans = []
@@ -209,6 +211,14 @@ def harness(isolated_sys_modules, monkeypatch):
     governance.governance_notice_for = governance_notice_for
     governance.schedule_governance_notice = schedule_governance_notice
     sys.modules[governance.__name__] = governance
+    mandates = types.ModuleType(f'{PACKAGE}.utils.mandate_admission')
+
+    def mint_owner_run_admission(module, **kwargs):
+        harness.owner_tickets.append((harness.user_id, kwargs))
+        return harness.owner_ticket
+
+    mandates.mint_owner_run_admission = mint_owner_run_admission
+    sys.modules[mandates.__name__] = mandates
     sys.modules[notifications.__name__] = notifications
 
     harness.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)

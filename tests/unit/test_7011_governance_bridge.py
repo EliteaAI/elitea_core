@@ -97,7 +97,7 @@ def run(ns, env, starter, monkeypatch):
     starter.writes.calls.clear()
     starter.writes.streak.clear()
 
-    def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None):
+    def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None, owner_ticket=None):
         version = version or FakeVersion()
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
@@ -108,7 +108,7 @@ def run(ns, env, starter, monkeypatch):
             version=types.SimpleNamespace(id=version.id, application_id=version.application_id, name="v1"),
             entity_name="Report", prompt="go", variables=[], trigger=trigger)
         monkeypatch.setattr(starter, "_load", lambda *args: loaded)
-        starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID)
+        starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID, owner_ticket)
         return starter.writes.calls
     return go
 
@@ -124,7 +124,7 @@ def counted(ns, monkeypatch):
 # --- enforce --------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("entity_type", ["pipeline", "agent"])
-@pytest.mark.parametrize("trigger", ["cron", "manual", "test"])   # cron tick, Run now, Test run: one starter
+@pytest.mark.parametrize("trigger", ["cron"])   # only cron firings use the mandate (#7254, Roman 2026-10-30)
 def test_enforce_a_run_with_its_owners_mandate_is_admitted_on_the_mandate_with_entry_point_schedule(
         ns, env, agent, run, monkeypatch, entity_type, trigger):
     arm(ns, env)
@@ -337,7 +337,7 @@ def test_off_the_predict_call_is_exactly_mains_and_nothing_is_read_or_minted(ns,
 
 def test_enforce_a_refused_run_counts_one_refusal_with_its_reason(ns, env, run, starter):
     arm(ns, env)
-    run(trigger="manual")   # Run now counts like a cron firing
+    run()   # a cron firing
     [(kind, project_id, schedule, run_id, reason, code)] = starter.writes.streak
     assert (kind, project_id, schedule.id, run_id, code) == ("refused", PROJECT_ID, SCHEDULE_ID, RUN_ID,
                                                              "MANDATE_REQUIRED")   # the code decides an outage
@@ -356,6 +356,28 @@ def test_audit_only_a_run_is_never_counted_as_refused(ns, env, run, starter):
     assert starter.writes.streak == [("end", PROJECT_ID, SCHEDULE_ID)]
 
 
+@pytest.mark.parametrize("governed, audit", [(True, False), (False, True)])
+@pytest.mark.parametrize("trigger", ["manual", "test"])
+def test_run_now_and_test_run_carry_the_owners_ticket_and_read_no_mandate(ns, env, agent, run, starter, monkeypatch,
+                                                                           trigger, governed, audit):
+    """Roman 2026-10-30 (#7254): the owner's Run now / Test run is the owner's own run, admitted from the ticket the run
+    endpoint minted; the starter reads no mandate, sends no ``unattended`` and touches no refusal streak."""
+    arm(ns, env, governed=governed, audit=audit)
+    reads = counted(ns, monkeypatch)
+    run(trigger=trigger, owner_ticket="owner-ticket")
+    [predict] = ns.state.predicts
+    assert predict["mandate_ticket"] == "owner-ticket" and "unattended" not in predict
+    assert (predict["user_id"], predict["is_system_user"]) == (OWNER, False)
+    assert reads == [] and starter.writes.streak == []
+
+
+def test_off_run_now_sends_exactly_mains_call(ns, env, agent, run, starter):
+    arm(ns, env, governed=False)
+    run(trigger="manual")   # off: the run endpoint minted nothing
+    [predict] = ns.state.predicts
+    assert "mandate_ticket" not in predict and "unattended" not in predict and starter.writes.streak == []
+
+
 @pytest.fixture
 def notice(ns):
     return load_module_with_stubs(PLUGIN_ROOT / "utils" / "trigger_governance.py", f"{PKG}.utils.trigger_governance")
@@ -367,8 +389,8 @@ def save_notice(ns, env, notice, owner=OWNER, saver=None):
             ns.tools.this.module, session, PROJECT_ID, 7, 70, owner, owner if saver is None else saver)
 
 
-def no_mandate_text(notice, whom="you"):
-    return notice.NO_MANDATE_NOTICE.format(whom=whom)
+def no_mandate_text(notice, whom="you", actor="you"):
+    return notice.NO_MANDATE_NOTICE.format(whom=whom, actor=actor)
 
 
 def test_save_notice_enforce_the_owners_active_mandate_needs_no_notice_in_one_read(ns, env, agent, notice, monkeypatch):
@@ -390,14 +412,14 @@ def test_save_notice_enforce_says_the_owner_needs_a_mandate(ns, env, agent, noti
     elif how == "not_for_schedules":
         set_mandate(env, ns, agent.mandate, allowed_operations=["run:webhook"])
     assert save_notice(ns, env, notice, owner=owner) == (
-        "Scheduled runs need an approved mandate for you on this version; ask a project admin "
-        "(Admin → Governance → Mandates).")
+        "Scheduled (cron) runs need an approved mandate for you on this version; Run now and Test run act as you. "
+        "Ask a project admin (Admin → Governance → Mandates).")
 
 
 def test_save_notice_an_admin_saving_another_owners_schedule_reads_of_the_owner(ns, env, agent, notice):
     arm(ns, env)
     set_mandate(env, ns, agent.mandate, state="revoked")
-    assert save_notice(ns, env, notice, saver=CREATOR) == no_mandate_text(notice, "the schedule owner")
+    assert save_notice(ns, env, notice, saver=CREATOR) == no_mandate_text(notice, "the schedule owner", "the owner")
 
 
 def test_save_notice_audit_only_adds_the_would_deny_sentence(ns, env, agent, notice):

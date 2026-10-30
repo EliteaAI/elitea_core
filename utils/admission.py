@@ -41,7 +41,7 @@ from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 from ..models.pd.admission import (
-    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, AdmissionRequest,
+    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_SCHEDULE_TEST, ENTRY_TOOLKIT_TEST, AdmissionRequest,
     ExecutionSecurityContextView,
 )
 from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
@@ -174,6 +174,8 @@ MESSAGES = {
     "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
                                       "included) are not admitted yet; run the toolkit from the Elitea UI or through a "
                                       "governed agent. The run was not started.",
+    "SCHEDULE_RUN_TOKEN_NOT_ADMITTED": "Run now and Test run of a schedule started with an API token are not admitted "
+                                       "yet; start them from the Elitea UI. The run was not started.",
     "SUB_AGENT_CREDENTIAL_NOT_ADMITTED": "Sub-agents that use credentials are not admitted yet for scheduled or webhook "
                                          "runs; the run was not started.",
     "DENIED_ENTRY_POINT": "This kind of run cannot be started from here; the run was not started.",
@@ -1194,6 +1196,8 @@ def _admit(  # pylint: disable=R0914
         # a toolkit run is the development run of a signed-in person; an API token (the MCP server's toolkit tools,
         # the REST test) is not one yet (scoped tokens, #7230): said as such, whatever the development setting is
         raise _denied("TOOLKIT_RUN_TOKEN_NOT_ADMITTED")
+    if request.entry_point == ENTRY_SCHEDULE_TEST and request.caller_type == "token":
+        raise _denied("SCHEDULE_RUN_TOKEN_NOT_ADMITTED")   # (#7254) a person's run, as a toolkit run is
     if not run_id:
         raise _denied("DEPENDENCY_UNAVAILABLE")
     # 3. who is asking
@@ -1212,6 +1216,18 @@ def _admit(  # pylint: disable=R0914
             raise _denied("DENIED_ENTRY_POINT")
         binding, rows = _read_toolkit(request)
         permissions = _author_permissions(request)
+        can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
+    elif request.entry_point == ENTRY_SCHEDULE_TEST:
+        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's own interactive run, decided as a
+        # development run is (their personal credentials, project ones granted to them, delegated ones on their live
+        # custody), whatever the development-runs setting, as a toolkit run (#7281). The run endpoint let only the
+        # schedule's owner start it; the right to run the agent is checked here, fail closed. No mandate is read
+        if request.run_kind != "interactive" or request.caller_type != "user":
+            raise _denied("DENIED_ENTRY_POINT")
+        binding, rows = _read_draft(request)
+        permissions = _author_permissions(request)
+        if PREDICT_PERMISSION not in permissions:
+            raise _denied("DENIED_RBAC")
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
     elif _is_development(request, settings):
         # 4. (development, #7213) the definition that runs, with no binding: the author's own right stands for it. Decided
@@ -1270,6 +1286,8 @@ def _admit(  # pylint: disable=R0914
         development=binding.id is None and children_of_drafts is not False, shadow=shadow,
         can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
+    if request.trigger_ref:   # an owner's Run now or Test run (#7254): which schedule it ran
+        caller["trigger_ref"] = request.trigger_ref
     if shadow:
         _record_shadow_allow(module, request, run_id, binding=binding, subject=subject, decisions=decisions,
                              caller=caller, children=children)

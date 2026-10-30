@@ -15,8 +15,8 @@ UNBOUND_NOTICE = ("Credential governance is on and this version has no active id
                   "trigger will be refused until an operator binds the version and approves a mandate for it. The "
                   "editor's test chat is not affected.")
 # An owner schedule (#7011) runs on a mandate made for its owner (#7254): said at save time, the save goes on
-NO_MANDATE_NOTICE = ("Scheduled runs need an approved mandate for {whom} on this version; ask a project admin "
-                     "(Admin → Governance → Mandates).")
+NO_MANDATE_NOTICE = ("Scheduled (cron) runs need an approved mandate for {whom} on this version; Run now and Test run "
+                     "act as {actor}. Ask a project admin (Admin → Governance → Mandates).")
 AUDIT_ONLY_SUFFIX = " Until then each run is recorded as 'would deny'."
 
 
@@ -51,5 +51,6 @@ def schedule_governance_notice(module, session, project_id, application_id, vers
     from .mandate_admission import audit_only_refusal, owner_mandate  # pylint: disable=C0415
     if audit_only_refusal(owner_mandate(session, project_id, version_id, owner_id)) is None:
         return None
-    notice = NO_MANDATE_NOTICE.format(whom="you" if saver_id == owner_id else "the schedule owner")
+    own = saver_id == owner_id
+    notice = NO_MANDATE_NOTICE.format(whom="you" if own else "the schedule owner", actor="you" if own else "the owner")
     return notice if is_governed(module) else notice + AUDIT_ONLY_SUFFIX

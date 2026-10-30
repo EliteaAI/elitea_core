@@ -263,7 +263,8 @@ mandate only if the mandate's owner is its custodian. A version has one current 
 
 | Trigger | Under Enforce |
 |---|---|
-| A person's schedule (owner schedule) of an agent or a pipeline, including Run now and Test run | An active mandate **of the schedule's owner** on that version. |
+| A person's schedule (owner schedule) of an agent or a pipeline: cron firings | An active mandate **of the schedule's owner** on that version. |
+| The same schedule: Run now and Test run by its owner | No mandate: the owner's own run, like a toolkit test (Scheduled runs, below). |
 | Webhook | An active mandate on that version. |
 | Legacy cron trigger | An active mandate on that version. |
 | A person chatting, using the editor, calling the API as themselves | No mandate. |
@@ -304,14 +305,14 @@ schedule made with "Build with AI" is no different: the draft is not saved, and 
 owner.
 
 **Who needs the mandate.** The schedule owner, on the schedule's version: one current mandate per version (its
-latest revision), made for the owner (`owner` = the schedule owner), active, allowing `run:schedule`. Cron firings,
-**Run now** and **Test run** all need it.
+latest revision), made for the owner (`owner` = the schedule owner), active, allowing `run:schedule`. Only cron
+firings need it. **Run now** and **Test run** are the owner's own run (below).
 
-| Mode | A scheduled run |
-|---|---|
-| Off | Runs as before. Nothing is read or recorded. |
-| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. |
-| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). |
+| Mode | A cron firing | Run now / Test run (the owner, signed in) |
+|---|---|---|
+| Off | Runs as before. Nothing is read or recorded. | Runs as before. |
+| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. | Runs. Evaluated as the owner's run (as a toolkit test is); no mandate row. |
+| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the owner, like a toolkit test: admitted as the owner's interactive run (entry point `schedule_test`, subject = the owner's verified sign-in), whatever the development-runs switch, with the owner's own credentials, project credentials granted to the owner and delegated ones on the owner's live sign-in (`DENIED_ASSERTION_UNAVAILABLE` when signed in without one). Needs only the owner's right to run the agent (no admin role); no mandate is read. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably but never count toward the auto-pause. |
 
 **Run now and Test run.** Only the owner can start them. An administrator sees the controls disabled, with the
 hint "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has
@@ -320,15 +321,17 @@ the edit page it is a line next to the disabled Run test.
 
 **Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
 mandate a run could use, the schedule is saved and the save shows:
-"Scheduled runs need an approved mandate for you on this version; ask a project admin (Admin → Governance →
-Mandates)." Under audit only it adds "Until then each run is recorded as 'would deny'." When an administrator saves
-another person's schedule the text says "for the schedule owner". An unbound version shows the binding notice
+"Scheduled (cron) runs need an approved mandate for you on this version; Run now and Test run act as you. Ask a
+project admin (Admin → Governance → Mandates)." Under audit only it adds "Until then each run is recorded as 'would
+deny'." When an administrator saves another person's schedule the text says "for the schedule owner" and "act as the
+owner". An unbound version shows the binding notice
 instead. Off: no notice, no read.
 
-**Auto-pause.** Under enforce, the third governance refusal in a row pauses the schedule (`disabled_reason =
+**Auto-pause.** Under enforce, the third governance refusal in a row of the schedule's cron firings pauses the
+schedule (`disabled_reason =
 governance_refused`; the Enabled switch shows, on hover, "Paused: runs were refused by credential governance") and the
 owner gets one notice: `Schedule "<name>" was switched off: 3 runs in a row were refused (<last refusal text>). Fix
-the cause and resume it.` Cron firings, Run now and Test run all count. Each refused run keeps its own reason in the
+the cause and resume it.` Only cron firings count: Run now and Test run neither count nor end the streak. Each refused run keeps its own reason in the
 run list. A refusal for a platform outage (`DEPENDENCY_UNAVAILABLE`, `AUDIT_UNAVAILABLE`,
 `WORKER_CAPABILITY_UNAVAILABLE`, `INTERNAL_TOKEN_UNAVAILABLE`, `STORE_UNAVAILABLE`) neither counts nor ends the
 streak; a missing Microsoft sign-in or app (`DENIED_ASSERTION_UNAVAILABLE`, `DENIED_OAUTH_APP_UNAVAILABLE`) counts. A schedule that is already off (paused by hand,

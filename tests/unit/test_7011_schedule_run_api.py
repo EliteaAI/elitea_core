@@ -15,6 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))  # the shared harness liv
 from test_7011_schedule_crud_api import (  # noqa: F401 -- `harness` is a fixture
     ADMIN,
     ADMIN_ID,
+    EDITOR,
     NOT_FOUND,
     OTHER_ID,
     OWNER_ID,
@@ -59,7 +60,7 @@ def test_7011_r1_1_owner_run_inserts_a_running_row_and_answers_202(harness, star
     body, status = run(harness, schedule_id, trigger)
     assert status == 202
     assert runs(harness) == [(body['run_id'], schedule_id, trigger, 'running', OWNER_ID)]
-    assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'])]
+    assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'], None)]   # off: no owner ticket (None)
 
 
 def test_7011_r1_1_a_run_that_cannot_start_is_failed_and_answers_500(harness):
@@ -115,13 +116,27 @@ def test_7011_r3_1_admin_who_is_not_the_owner_is_403_and_inserts_nothing(harness
     schedule_id = harness.seed(created_by=OTHER_ID)
     harness.request_as(ADMIN_ID, ADMIN)
     assert_refusal(run(harness, schedule_id), 403, code='not_owner')
-    assert (runs(harness), started) == ([], [])
+    assert (runs(harness), started, harness.owner_tickets) == ([], [], [])   # refused before any admission
 
 
 def test_7011_r3_2_regular_user_run_of_another_owners_schedule_is_404(harness, started):
     schedule_id = harness.seed(created_by=OTHER_ID)
     assert_refusal(run(harness, schedule_id), 404, NOT_FOUND['error'])
-    assert (runs(harness), started) == ([], [])
+    assert (runs(harness), started, harness.owner_tickets) == ([], [], [])   # refused before any admission
+
+
+@pytest.mark.parametrize('trigger', ['manual', 'test'])
+def test_7254_an_editor_owner_starts_their_own_run_with_their_admission_ticket(harness, started, trigger):
+    """Roman 2026-10-30: the owner's Run now / Test run is admitted as the owner's own run, minted from this signed-in
+    request and handed to the starter; an editor without any admin permission may do it."""
+    assert not any(permission.endswith('.admin') for permission in EDITOR)
+    harness.owner_ticket = 'owner-ticket'
+    schedule_id = harness.seed()
+    body, status = run(harness, schedule_id, trigger)
+    assert status == 202
+    assert harness.owner_tickets == [(OWNER_ID, {'project_id': PROJECT_ID, 'application_id': 1, 'version_id': 10,
+                                                 'schedule_id': schedule_id})]
+    assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'], 'owner-ticket')]
 
 
 def test_7011_r3_3_missing_run_permission_is_403_and_inserts_nothing(harness, started):
