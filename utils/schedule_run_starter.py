@@ -19,7 +19,7 @@ from .pipeline_execution import (
     finish_trigger_run_with_error,
     is_trigger_refusal,
 )
-from .schedule_prerun import run_prerun_check
+from .schedule_prerun import credential_toolkit_refs, run_prerun_check
 from .schedule_runs import (
     block_schedule_run,
     fail_schedule_run,
@@ -58,7 +58,8 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
-                approval_confirmed_by=schedule.approval_confirmed_by),
+                approval_confirmed_by=schedule.approval_confirmed_by,
+                credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(run_row := session.get(EntityScheduleRun, run_id), 'trigger', 'cron'),

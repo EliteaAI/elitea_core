@@ -56,6 +56,9 @@ def decisions(harness, monkeypatch):
     state.missing = None
     prerun.check_owner_credentials = lambda project_id, schedule: state.missing
     prerun.credential_wait = lambda reason: reason is not None
+    state.checked, state.forgotten = [], []
+    prerun.mark_credentials_checked = state.checked.append
+    prerun.forget_credentials_checked = state.forgotten.append
     monkeypatch.setitem(sys.modules, prerun.__name__, prerun)
     harness.module.start_schedule_run = lambda *args: state.started.append(args) or state.start_ok
     state.start_ok = True
@@ -107,6 +110,45 @@ def test_approve_while_the_credential_is_missing_is_409_and_the_run_keeps_waitin
     assert body['error'] == 'The credential is still missing. Add it, then approve again.'
     assert decisions.applied == [] and decisions.started == []
     assert run_status(harness, run_id) == ('waiting_for_approval', None)
+
+
+def test_a_clean_credential_check_is_remembered_for_the_restarted_run(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+
+    decide(harness, schedule_id, run_id)
+
+    assert decisions.checked == [run_id]
+
+
+def test_an_error_in_the_credential_check_is_logged_and_the_run_still_starts(harness, decisions, monkeypatch):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+    logged = []
+    monkeypatch.setattr(harness.module.log, 'exception', lambda *args: logged.append(args), raising=False)
+    prerun = sys.modules[f'{PACKAGE}.utils.schedule_prerun']
+
+    def explode(project_id, schedule):
+        raise RuntimeError('token service down')
+
+    prerun.check_owner_credentials = explode
+
+    assert decide(harness, schedule_id, run_id) == ({'run_id': run_id, 'status': 'running'}, 200)
+    assert len(logged) == 1
+    assert decisions.started == [('agent', PROJECT_ID, schedule_id, run_id)]
+    assert decisions.checked == []  # the restart runs the check itself
+
+
+def test_the_restart_fails_the_run_with_the_reason_when_the_credential_is_still_missing(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id, status='running')
+    harness.module.start_schedule_run = lambda *args: False
+
+    body, status = decide(harness, schedule_id, run_id)
+
+    assert (status, body['code']) == (500, 'run_start_failed')
+    assert run_status(harness, run_id) == ('failed', 'the run could not start')
+    assert decisions.forgotten == [run_id]
 
 
 def test_reject_does_not_check_the_credential(harness, decisions):

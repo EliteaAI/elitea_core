@@ -204,14 +204,31 @@ def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
     return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
 
 
-def _credential_still_missing(project_id: int, owner) -> bool:
-    """True when the same credential check as the pre-run step finds a missing credential for `owner`'s schedule."""
-    from .schedule_prerun import check_owner_credentials, credential_wait  # late, as the other pre-run helpers
+def _credential_still_missing(project_id: int, run_id: int, owner) -> bool:
+    """True when the same credential check as the pre-run step finds a missing credential for `owner`'s schedule.
+
+    A clean check is remembered, so the restarted run does not expand the version a second time.
+    """
+    from .schedule_prerun import (  # late, as the other pre-run helpers
+        check_owner_credentials,
+        credential_wait,
+        mark_credentials_checked,
+    )
     try:
-        return credential_wait(check_owner_credentials(project_id, owner))
+        reason = check_owner_credentials(project_id, owner)
     except Exception:  # noqa: BLE001 -- an unreadable check must not block the owner; the restart runs it again
         log.exception("Project %s: the credential check before an approval failed", project_id)
         return False
+    if credential_wait(reason):
+        return True
+    if reason is None:
+        mark_credentials_checked(run_id)
+    return False
+
+
+def _forget_checked(run_id: int) -> None:
+    from .schedule_prerun import forget_credentials_checked  # late, as the other pre-run helpers
+    forget_credentials_checked(run_id)
 
 
 def _parse_body(model):
@@ -491,7 +508,7 @@ class ScheduleItemHandlers:
                                     version_id=row.version_id)
         try:
             decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
-            if decision == "approve" and _credential_still_missing(project_id, owner):
+            if decision == "approve" and _credential_still_missing(project_id, run_id, owner):
                 return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
             apply_schedule_decision(project_id, run_id, decision)
         except ScheduleDecisionForbidden:
@@ -499,6 +516,7 @@ class ScheduleItemHandlers:
         except ScheduleRunNotWaiting:
             return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
         if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
+            _forget_checked(run_id)
             with db.get_session(project_id) as session:
                 fail_run(session, run_id, START_FAILED)
                 session.commit()

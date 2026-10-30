@@ -101,27 +101,35 @@ def check_owner_rights(project_id: int, owner_id: int, entity_type: str | None =
     return None
 
 
-def toolkit_using_credential(project_id: int, version_id: int, credential: str) -> str | None:
-    """The name of the first toolkit of the version whose settings reference the credential title; None if unknown.
+def credential_toolkit_refs(version) -> list:
+    """The (toolkit name, credential titles) of each toolkit of a loaded version, as plain values.
+
+    The run starter reads the version once; this keeps the toolkit lookup of a missing credential
+    from opening a second database session.
+    """
+    return [(tool.name or tool.type,
+             {str(value.get('elitea_title')) for value in (tool.settings or {}).values() if isinstance(value, dict)})
+            for tool in version.tools]
+
+
+def toolkit_using_credential(toolkits, credential: str) -> str | None:
+    """The name of the first toolkit whose settings reference the credential title; None if unknown.
 
     The expansion error names only the credential, and the owner needs the toolkit to know what to fix.
-    Never raises: the name only improves the message.
     """
-    try:
-        # Late, as the other DB users here: the models pull the whole plugin into every importer
-        from tools import db
+    return next((name for name, titles in toolkits or [] if credential in titles), None)
 
-        from ..models.all import ApplicationVersion
-        with db.get_session(project_id) as session:
-            version = session.get(ApplicationVersion, version_id)
-            for tool in (version.tools if version else []):
-                references = (value for value in (tool.settings or {}).values() if isinstance(value, dict))
-                if any(str(value.get('elitea_title')) == credential for value in references):
-                    return tool.name or tool.type
-    except Exception:  # noqa: BLE001 - a lookup failure must not change the pre-run result
-        log.exception('Version %s of project %s: the toolkit of credential %s was not found',
-                      version_id, project_id, credential)
-    return None
+
+# Runs whose owner approval already passed the credential check in the request; the restart skips the repeat
+_CHECKED_RUNS: set = set()
+
+
+def mark_credentials_checked(run_id: int) -> None:
+    _CHECKED_RUNS.add(run_id)
+
+
+def forget_credentials_checked(run_id: int) -> None:
+    _CHECKED_RUNS.discard(run_id)
 
 
 def check_owner_credentials(project_id: int, schedule) -> str | None:
@@ -144,7 +152,7 @@ def check_owner_credentials(project_id: int, schedule) -> str | None:
         return VERSION_NOT_EXPANDED
     reason = MissingCredential('; '.join(reasons))
     reason.credential = str(errors[0]['credential_id'])
-    reason.toolkit = toolkit_using_credential(project_id, schedule.version_id, reason.credential)
+    reason.toolkit = toolkit_using_credential(getattr(schedule, 'credential_toolkits', None), reason.credential)
     return reason
 
 
@@ -177,7 +185,9 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
         reason = (check_principal(schedule)
                   or check_owner_access(project_id, owner_id)
                   or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id))
-        if reason is None:
+        if reason is None and run_id in _CHECKED_RUNS:  # the owner's approval just ran this check
+            _CHECKED_RUNS.discard(run_id)
+        elif reason is None:
             reason = check_owner_credentials(project_id, schedule)
             # Only a missing credential can wait for the owner; a lost token or a broken version cannot
             waits_for_owner = credential_wait(reason)

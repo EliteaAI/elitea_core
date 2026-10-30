@@ -102,7 +102,7 @@ def world(monkeypatch):
         "models.conversation": {"Conversation": type("Conversation", (), {})},
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
                                    "EntityScheduleRun": type("EntityScheduleRun", (), {})},
-        "utils.schedule_prerun": {"run_prerun_check": prerun},
+        "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),

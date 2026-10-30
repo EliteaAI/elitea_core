@@ -51,7 +51,7 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
             "finish_trigger_run_refused": _ignore,
             "is_trigger_refusal": lambda _result: False},  # governance off: nothing is refused
         "utils.mandate_admission": {"prepare_schedule_run": lambda **_kwargs: {}},  # off: no extra predict argument
-        "utils.schedule_prerun": {"run_prerun_check": prerun},
+        "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block,
                                 "finish_schedule_run": finish, "run_failure_reason": str,
                                 "record_run_events": lambda *args, **kwargs: None, "run_event": lambda *args, **kwargs: {}},

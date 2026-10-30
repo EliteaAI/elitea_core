@@ -62,6 +62,7 @@ def apply(monkeypatch):
         monkeypatch.setattr(prerun, "check_owner_credentials", recorder.step("credentials"))
         schedule = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4)
         return prerun.run_prerun_check(34, schedule, RUN_ID)
+    run.prerun = prerun
     return run
 
 
@@ -178,3 +179,23 @@ def test_the_parked_run_gets_the_credential_title_of_the_reason(apply):
     recorder = Recorder(credentials=reason, parks=True)
     apply(recorder)
     assert recorder.named == (None, "qa_missing")
+
+
+def test_a_run_whose_approval_just_passed_the_credential_check_does_not_repeat_it(apply):
+    recorder = Recorder()
+    apply.prerun.mark_credentials_checked(RUN_ID)
+
+    result = apply(recorder)
+
+    assert result.ok is True
+    assert recorder.effects() == ["principal", "access", "rights"]
+    assert apply(Recorder()).ok is True  # the mark is spent once
+
+
+def test_a_still_missing_credential_on_the_restart_fails_the_run_with_the_reason_and_no_second_wait(apply):
+    recorder = Recorder(credentials="credential 9 not found", parks=False)
+
+    result = apply(recorder)
+
+    assert (result.ok, result.reason) == (False, "credential 9 not found")
+    assert "fail" in recorder.effects()

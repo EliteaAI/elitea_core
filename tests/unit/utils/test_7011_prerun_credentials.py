@@ -37,16 +37,14 @@ class FakeHelpers:
 @pytest.fixture
 def check(monkeypatch):
     prerun = load(PRERUN, fresh=True)
-    # The lookup reads the version from the database; these tests cover the reasons, not the lookup
-    monkeypatch.setattr(prerun, "toolkit_using_credential", lambda *args: None, raising=False)
 
-    def run(helpers):
+    def run(helpers, toolkits=None):
         monkeypatch.setitem(sys.modules, f"{UTILS}.predict_utils", SimpleNamespace(
             PredictPayloadError=PredictPayloadError,
             get_predict_token_and_session=helpers.get_predict_token_and_session))
         monkeypatch.setitem(sys.modules, f"{UTILS}.subagent_prefetch", SimpleNamespace(
             expand_version_for_runtime=helpers.expand_version_for_runtime))
-        schedule = SimpleNamespace(created_by=OWNER, application_id=5, version_id=7)
+        schedule = SimpleNamespace(created_by=OWNER, application_id=5, version_id=7, credential_toolkits=toolkits)
         return prerun.check_owner_credentials(34, schedule)
     run.prerun = prerun
     return run
@@ -120,16 +118,25 @@ def test_a_missing_credential_reason_carries_the_credential_title(check):
     assert reason == "credential qa_missing not found" and reason.credential == "qa_missing"
 
 
-def test_credential_reason_names_the_toolkit_found_in_the_version(check):
+def test_credential_reason_names_the_toolkit_found_in_the_loaded_version(check):
     helpers = FakeHelpers(expanded=_expansion_error("credential_not_found"))
-    seen = {}
+    toolkits = [("Jira", {"other"}), ("Team GitHub", {"jira-main"})]
 
-    def lookup(project_id, version_id, credential):
-        seen["args"] = (project_id, version_id, credential)
-        return "Team GitHub"
+    reason = check(helpers, toolkits)
 
-    check.prerun.toolkit_using_credential = lookup
-    reason = check(helpers)
     assert reason == "credential jira-main not found"
     assert reason.toolkit == "Team GitHub"
-    assert seen["args"] == (34, 7, "jira-main")
+
+
+def test_credential_reason_has_no_toolkit_when_the_version_has_no_such_reference(check):
+    helpers = FakeHelpers(expanded=_expansion_error("credential_not_found"))
+
+    assert check(helpers, [("Jira", {"other"})]).toolkit is None
+    assert check(helpers).toolkit is None
+
+
+def test_credential_toolkit_refs_read_names_and_titles_from_a_loaded_version(check):
+    tools = [SimpleNamespace(name="", type="github", settings={"cfg": {"elitea_title": "main"}, "x": 1}),
+             SimpleNamespace(name="Jira", type="jira", settings=None)]
+
+    assert check.prerun.credential_toolkit_refs(SimpleNamespace(tools=tools)) == [("github", {"main"}), ("Jira", set())]
