@@ -360,6 +360,15 @@ def test_breakdown_without_billable_input_keeps_its_input(usage):
     assert rows[0]['input_tokens'] == 120
 
 
+@pytest.mark.parametrize('billable', [0, None])
+def test_a_zero_or_null_billable_input_never_lowers_settled_input(usage, billable):
+    """A row whose billable_input_tokens is 0 or NULL keeps the ledger's input, not cache alone."""
+    rows, _ = usage.settle_usage_rows(
+        [_row(usage, 0, 'agent')],
+        [_cached_ledger(0, inp=1_000, billable=billable, cache_read=400, cache_creation=0)], PRID)
+    assert rows[0]['input_tokens'] == 1_000
+
+
 def test_a_run_stopped_for_its_token_budget_stays_over_it_once_settled(usage):
     """Run #58 of #7300: stopped at 32,207 runtime tokens against 30,000, read 5,775 once settled."""
     budget = {'per_run': {'tokens': 30_000, 'on_breach': 'stop'}}
