@@ -164,13 +164,25 @@ def test_a_sensitive_item_without_a_toolkit_name_is_left_out_of_the_pairs(run):
     assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
 
 
-def test_a_tool_from_the_global_list_is_approved_for_the_whole_toolkit(run):
-    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "Send-Email", "from_list": True}
+def test_a_listed_tool_with_a_different_spelling_is_still_approved_by_its_runtime_name(run):
+    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "Outlook___Send-Email", "from_list": True}
     run.state.review = {**clean_review(), "sensitive": [listed], "fingerprint": "fp-1"}
 
     kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
 
-    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "*")]
+    assert ("Outlook", "send-email") in kwargs["auto_approve_sensitive_actions"]
+    assert ("Outlook", "*") in kwargs["auto_approve_sensitive_actions"]
+
+
+def test_a_may_apply_tool_is_not_approved_by_another_confirmed_tool_of_the_toolkit(run):
+    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_email", "from_list": True}
+    maybe = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "delete_mail", "from_list": True,
+             "may_apply": True}
+    run.state.review = {**clean_review(), "sensitive": [listed], "notices": [maybe], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
+
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
 
 
 def test_a_confirmed_run_with_no_usable_pair_sends_false(run):

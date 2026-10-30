@@ -112,16 +112,38 @@ def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
     return _setting_allows_auto_approve(project_id)
 
 
+def _runtime_tool_name(name) -> str:
+    """The tool name as the SDK guard compares it: the last alias after `___` or `:`, in lower case."""
+    reduced = str(name or '').strip().lower()
+    if '___' in reduced:
+        reduced = reduced.split('___', 1)[1].strip()
+    if ':' in reduced:
+        reduced = reduced.split(':', 1)[1].strip()
+    return reduced
+
+
 def _confirmed_pairs(review: dict):
     """The confirmed (toolkit, tool) pairs a run may approve; a personal credential is (toolkit, '*'). False when none: an empty scan is no consent.
 
     An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks. An item that
-    comes from the global list is (toolkit, '*'): the SDK compares the exact runtime name, which may be spelled
-    differently from the listed one.
+    comes from the global list may be spelled differently from the runtime name, which the SDK compares exactly.
+    It is approved by its normalized name; only when the toolkit has no unconfirmed `may_apply` tool it is
+    also approved as (toolkit, '*'), because (toolkit, '*') would let that unconfirmed tool run unasked.
     """
-    pairs = [(item['toolkit'], '*' if item.get('from_list') else item.get('tool') or '*')
-             for item in review['sensitive'] if item.get('toolkit')]
-    return pairs or False
+    unconfirmed = {item.get('toolkit') for item in review.get('notices', []) if item.get('may_apply')}
+    pairs = []
+    for item in review['sensitive']:
+        toolkit = item.get('toolkit')
+        if not toolkit:
+            continue
+        if not item.get('from_list'):
+            pairs.append((toolkit, item.get('tool') or '*'))
+            continue
+        if item.get('tool'):
+            pairs.append((toolkit, _runtime_tool_name(item['tool'])))
+        if toolkit not in unconfirmed:
+            pairs.append((toolkit, '*'))
+    return list(dict.fromkeys(pairs)) or False
 
 
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
