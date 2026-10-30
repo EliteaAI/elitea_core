@@ -442,6 +442,18 @@ def grant_in_force(grant, now) -> bool:
     return (start is None or start <= now) and (end is None or now < end)
 
 
+def development_grant_holder(ctx: CredentialDecisionContext) -> Optional[str]:
+    """Whose grants a development-profile decision reads: the author's, or for a toolkit mandate's index run (#7305,
+    a mandate with no binding) its owner's (``mandate_owner_ref``), never the mandate's own (no binding can name it)."""
+    return ctx.mandate_owner_ref if ctx.subject_kind == "mandate" else ctx.subject_ref
+
+
+def subject_grant_holder(subject) -> Optional[str]:
+    """``development_grant_holder`` of a stored context subject: its owner for a mandate, else its reference."""
+    subject = subject if isinstance(subject, Mapping) else {}
+    return subject.get("owner") if subject.get("kind") == "mandate" else subject.get("ref")
+
+
 def holds_personal(ctx: CredentialDecisionContext, reference: Mapping) -> bool:
     """May the run use this personal reference? Its custodian may: the person whose identity the run carries (the
     subject of the run is the custodian's), or, for a mandate, the mandate's owner (#6947). Nobody else, and a
@@ -501,10 +513,11 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
     if ctx.profile == PROFILE_DEVELOPMENT:                                         # 8d. the author's own right (#7213)
         if reference.get("ownership_class") == "personal":                         #     the author's personal one (5.)
             return verdict(True, ALLOWED, reference_epoch=reference.get("revocation_epoch"))
-        grant = subject_grant_in_force(                                            #     or a grant to the author, on
-            facts.subject_grants.get(subject_grant_key(reference.get("ref_id"), ctx.subject_ref)), ctx.now)   # any binding
-        if grant is None:
-            return verdict(False, DEVELOPMENT_GRANT_REQUIRED)
+        holder = development_grant_holder(ctx)                                     #     or a grant to the author (a
+        grant = None if holder is None else subject_grant_in_force(                #     toolkit mandate: its owner),
+            facts.subject_grants.get(subject_grant_key(reference.get("ref_id"), holder)), ctx.now)   # on any binding
+        if grant is None:   # a toolkit mandate's owner holds no grant on it: the grant is missing, not a draft's
+            return verdict(False, "DENIED_GRANT" if ctx.subject_kind == "mandate" else DEVELOPMENT_GRANT_REQUIRED)
         return verdict(True, ALLOWED, reference_epoch=reference.get("revocation_epoch"),
                        grant_id=grant.get("grant_id"), grant_epoch=grant.get("revocation_epoch"))
     grant = facts.grants.get(grant_key(                                            # 8, 9. this binding, toolkit, user
@@ -550,8 +563,9 @@ def _read_decision_facts(ctx, uses, configurations) -> CredentialFacts:
     if ctx.profile == PROFILE_DEVELOPMENT:   # the author's grants on each credential, whatever the binding (#7213)
         if not facts_answer_subject_grants():
             raise CredentialDecisionError("DEPENDENCY_UNAVAILABLE")
+        holder = development_grant_holder(ctx)
         found = _credential_use_facts(ctx.binding_project_id, sorted(own), [], None,
-                                      subject_grants=[(config_id, ctx.subject_ref) for config_id in sorted(own)],
+                                      subject_grants=[(config_id, holder) for config_id in sorted(own)] if holder else None,
                                       **_caller_of(ctx))
         return CredentialFacts(configurations, found["references"], {}, found.get("subject_grants") or {})
     wanted = sorted({(ctx.agent_binding_ref, use.toolkit_instance_id, fact["id"], WHOLE_TARGET, ctx.subject_ref)
@@ -658,16 +672,18 @@ def recheck_failure(project_id, entries, subject_ref, agent_binding_ref, now) ->
     return None, None
 
 
-def recheck_development(project_id, entries, subject_ref, now) -> tuple:
+def recheck_development(project_id, entries, subject_ref, now, holder=None) -> tuple:  # pylint: disable=R0913
     """``recheck_failure`` for the decisions of a development run (#7213): the same reference checks, then, for a
     project credential, the grant the author was admitted on must still be in force at the same epoch (a personal
-    credential, recorded without a grant, needs the custodian check only). One read of the facts."""
+    credential, recorded without a grant, needs the custodian check only). One read of the facts. ``holder``: whose
+    grants those are when not the subject's (a toolkit mandate's owner, #7305; ``subject_grant_holder``)."""
     if not entries:
         return None, None
+    holder = holder or subject_ref
     granted = [entry for entry in entries if entry.get("grant_id") is not None]
     facts = _credential_use_facts(
         project_id, [], [], [entry["credential_ref"] for entry in entries],
-        subject_grants=sorted({(entry["credential_ref"], subject_ref) for entry in granted}) if granted else None)
+        subject_grants=sorted({(entry["credential_ref"], holder) for entry in granted}) if granted else None)
     references = {reference["ref_id"]: reference for reference in facts["references"].values()}
     held = facts.get("subject_grants") or {}
     uuids = sorted({entry["configuration_uuid"] for entry in entries})
@@ -679,9 +695,9 @@ def recheck_development(project_id, entries, subject_ref, now) -> tuple:
         if entry.get("grant_id") is None:
             continue
         grant = subject_grant_in_force(
-            held.get(subject_grant_key(entry["credential_ref"], subject_ref)), now, grant_id=entry["grant_id"])
+            held.get(subject_grant_key(entry["credential_ref"], holder)), now, grant_id=entry["grant_id"])
         if grant is None:
-            return DEVELOPMENT_GRANT_REQUIRED, entry
+            return (DEVELOPMENT_GRANT_REQUIRED if holder == subject_ref else "DENIED_GRANT"), entry
         if grant.get("revocation_epoch") != entry["grant_epoch"]:
             return "EPOCH_MISMATCH", entry
     return None, None

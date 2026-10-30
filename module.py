@@ -775,6 +775,17 @@ class Module(module.ModuleModel):
                              len(migrated), len(failed))
             except Exception:  # pylint: disable=W0703
                 log.exception("mandate identity schema: auto-migration failed")
+            try:
+                from .utils.mandate_toolkit_schema import (  # pylint: disable=C0415
+                    apply_toolkit_mandates, project_ids_missing_toolkit_mandates,
+                )
+                pending = project_ids_missing_toolkit_mandates()
+                if pending:
+                    migrated, failed = apply_toolkit_mandates(pending)
+                    log.info("mandate toolkit schema: toolkit mandates enabled (migrated=%s failed=%s)",
+                             len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("mandate toolkit schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
 

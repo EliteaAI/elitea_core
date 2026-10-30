@@ -204,9 +204,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         update_data.fix_name(project_id)
 
         from ...utils.web_search import shared_toolkit_error
+        from ...utils.toolkit_meta import keep_stored_index_schedules
         with db.with_project_schema_session(project_id) as session:
             # Read the old flag under a row lock in the same transaction as the update
             current = session.query(EliteATool.meta).filter(EliteATool.id == tool_id).with_for_update().first()
+            # index schedules are written by the schedule endpoints only (#7305): the stored ones stay as they are
+            update_data.meta = keep_stored_index_schedules(update_data.meta, current.meta if current else None)
             share_error = shared_toolkit_error(
                 project_id, payload['user_id'], update_data.type, update_data.settings, update_data.meta,
                 was_shared=bool(current and (current.meta or {}).get('shared')),

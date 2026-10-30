@@ -19,7 +19,8 @@ from sqlalchemy import String, select
 from sqlalchemy.exc import DBAPIError
 from tools import db
 
-from .trigger_principal import OPERATION_OF, TEAM_SCHEDULE_KEY, latest_mandates, principal_of
+from .trigger_principal import (OPERATION_OF, TEAM_SCHEDULE_KEY, TriggerPrincipal, covering_toolkit_mandate,
+                                latest_mandates, latest_toolkit_mandates, principal_of)
 
 MANDATE_TABLE = "autonomous_mandate"
 PRINCIPALS = ("legacy_system", "delegation", "mandate")
@@ -116,6 +117,16 @@ def _mandates(session, project_id, version_ids):
         return None
 
 
+def _toolkit_mandates(session, project_id):
+    """The latest toolkit mandate of each (toolkit, owner) (#7305), or None when the project's mandate table cannot hold
+    them yet (no table, or not yet migrated by the startup safety net)."""
+    try:
+        return latest_toolkit_mandates(session, project_id)
+    except DBAPIError:
+        session.rollback()
+        return None
+
+
 def _project_rows(session, project_id, now):
     pipelines, webhooks, indexes = _pipeline_triggers(session), _agent_webhooks(session), _index_schedules(session)
     mandates = _mandates(session, project_id, {item[0] for item in pipelines + webhooks})
@@ -131,10 +142,15 @@ def _project_rows(session, project_id, now):
         mandate = mandates.get(version_id)
         rows.append(_row(project_id, "agent_webhook", principal_of("agent_webhook", mandate), mandate, now, outcome,
                          application_id=application_id, version_id=version_id, owner_user_id=owner_id))
+    toolkit_mandates = (_toolkit_mandates(session, project_id) or {}) if indexes else {}
     for toolkit_id, index_name, key, enabled, created_by in indexes:
         principal = principal_of("index_schedule", schedule_key=key)
         owner = _int_or_none(created_by) if key == TEAM_SCHEDULE_KEY else principal.owner_user_id
-        rows.append(_row(project_id, "index_schedule", principal, None, now, toolkit_id=toolkit_id,
+        # covered by its owner's toolkit mandate (#7305): reported as that mandate would be admitted or refused
+        mandate = covering_toolkit_mandate(toolkit_mandates, toolkit_id, key, _int_or_none(created_by))
+        if mandate is not None:
+            principal = TriggerPrincipal("mandate", f"mandate:{mandate.id}", mandate.state, mandate.owner_user_id)
+        rows.append(_row(project_id, "index_schedule", principal, mandate, now, toolkit_id=toolkit_id,
                          index_name=index_name, enabled=enabled, owner_user_id=owner))
     return rows
 

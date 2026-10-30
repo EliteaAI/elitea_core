@@ -386,7 +386,15 @@ def test_the_postgresql_ddl_matches_the_design(ns):
         "CREATE UNIQUE INDEX uq_autonomous_mandate_live_version ON tenant.autonomous_mandate (project_id, agent_version) "
         "WHERE state IN ('draft', 'pending_approval', 'active', 'suspended')",
         "CREATE INDEX ix_autonomous_mandate_owner_state ON tenant.autonomous_mandate (owner_user_id, state)",
+        # one live toolkit mandate per toolkit and owner (#7305)
+        "CREATE UNIQUE INDEX uq_autonomous_mandate_live_toolkit ON tenant.autonomous_mandate (toolkit_id, owner_user_id) "
+        "WHERE toolkit_id IS NOT NULL AND state IN ('draft', 'pending_approval', 'active', 'suspended')",
     }
+    # an agent-version mandate or a toolkit mandate, exactly one (#7305)
+    assert ("CONSTRAINT autonomous_mandate_kind_ck CHECK ((agent_version IS NOT NULL AND application_id IS NOT NULL "
+            "AND agent_binding_ref IS NOT NULL AND toolkit_id IS NULL) OR (toolkit_id IS NOT NULL AND agent_version "
+            "IS NULL AND application_id IS NULL AND agent_binding_ref IS NULL))") in ddl
+    assert "application_id INTEGER," in ddl and "agent_version INTEGER," in ddl and "toolkit_id INTEGER," in ddl
 
 
 def test_the_row_holds_references_and_limits_only(ns):
@@ -404,6 +412,7 @@ CHANGES = {
     "valid_until": lambda row: row.valid_until + timedelta(days=1), "revision": lambda row: 9, "created_by": lambda row: 99,
     "created_at": lambda row: row.created_at + timedelta(days=1),
     "identity_source": lambda row: "owner_delegated",   # part of the approved scope (#7131)
+    "toolkit_id": lambda row: 9,   # what a toolkit mandate covers (#7305)
 }
 
 

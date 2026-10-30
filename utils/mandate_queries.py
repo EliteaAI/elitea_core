@@ -22,6 +22,7 @@ def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0):
     """``{total, rows, identity_sources}``: one page of the project's mandates, newest change first, and which
     identities the deployment lets a mandate name."""
     from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
     sources = allowed_sources(module)
     identity = (Mandate.identity_source, Mandate.identity_material_ref, Mandate.identity_consented_at) if sources else ()
     conditions = [Mandate.project_id == project_id] + ([Mandate.state == state] if state in MANDATE_STATES else [])
@@ -30,9 +31,11 @@ def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0):
                Mandate.suspended_reason, Mandate.revision, Mandate.allowed_operations, Mandate.max_runtime_s,
                Mandate.valid_until, Mandate.created_by, Mandate.approved_by, Mandate.approval_ref,
                Mandate.policy_revision, Mandate.updated_at, Application.name.label("application_name"),
-               ApplicationVersion.name.label("version_name"), *identity)
+               ApplicationVersion.name.label("version_name"), Mandate.toolkit_id,
+               EliteATool.name.label("toolkit_name"), *identity)
         .outerjoin(Application, Application.id == Mandate.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == Mandate.agent_version)
+        .outerjoin(EliteATool, EliteATool.id == Mandate.toolkit_id)
         .where(*conditions))
     with db.get_session(project_id) as session:
         total = session.execute(select(func.count()).select_from(
@@ -45,6 +48,8 @@ def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0):
         rows.append({
             "id": str(row.id), "application": {"id": row.application_id, "name": row.application_name},
             "version": {"id": row.agent_version, "name": row.version_name}, "owner": users.get(row.owner_user_id),
+            # a toolkit mandate (#7305) covers the owner's index schedules of this toolkit; null for an agent mandate
+            "toolkit": None if row.toolkit_id is None else {"id": row.toolkit_id, "name": row.toolkit_name},
             "state": row.state, "suspended_reason": row.suspended_reason, "revision": row.revision,
             "operations": list(row.allowed_operations or []), "max_runtime_s": row.max_runtime_s,
             "valid_until": _iso(row.valid_until), "created_by": users.get(row.created_by),

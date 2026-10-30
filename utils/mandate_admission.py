@@ -187,7 +187,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def audit_only_refusal(mandate) -> Optional[str]:
+def audit_only_refusal(mandate, operation=OPERATION_OF["pipeline_schedule"]) -> Optional[str]:
     """What enforce would refuse a run for, as far as the covering mandate's row says, in the order ``_admit_mandate``
     checks it: no mandate, past its end date or expired, suspended or revoked, or not allowed for schedules. ``None``:
     the row would let the run on (the rest of a mandate admission is not rehearsed)."""
@@ -201,9 +201,24 @@ def audit_only_refusal(mandate) -> Optional[str]:
         return "MANDATE_EXPIRED"
     if mandate.state != "active":
         return "MANDATE_INACTIVE"
-    if OPERATION_OF["pipeline_schedule"] not in (mandate.allowed_operations or []):
+    if operation not in (mandate.allowed_operations or []):
         return "DENIED_OPERATION"
     return None
+
+
+def index_schedule_trigger_ref(toolkit_id, index_meta_id, schedule_key) -> str:
+    """One index schedule of a toolkit (#7305), as admission and the audit trail name it."""
+    return f"index_schedule:{toolkit_id}:{index_meta_id}:{schedule_key}"
+
+
+def toolkit_mandate_request(*, project_id, toolkit_id, mandate, trigger_ref) -> AdmissionRequest:
+    """The admission request of one firing of an index schedule its owner's toolkit mandate covers (#7305). Built by the
+    index tick, which loaded the schedule itself and dispatches in this process (no ticket): the mandate is named here,
+    whether it can run is decided by admission from the row at the moment of the firing."""
+    return AdmissionRequest(
+        project_id=project_id, binding_project_id=project_id, run_kind="mandate", entry_point="index_schedule",
+        caller_type="trigger", caller_id=None, mandate_ref=str(mandate.id), trigger_ref=trigger_ref,
+        toolkit_id=toolkit_id)
 
 
 def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
