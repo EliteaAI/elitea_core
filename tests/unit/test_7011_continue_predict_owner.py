@@ -250,6 +250,17 @@ def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True})]
 
 
+def test_one_skip_among_the_sign_in_answers_rejects_the_run():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+    answers = [{'interrupt_id': 'a', 'action': 'authorize'}, {'interrupt_id': 'b', 'action': 'skip'}]
+
+    pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize',
+                                    mcp_auth_decisions=answers), OWNER)
+
+    assert denied is None
+    assert calls[0][4] == ['authorize', 'skip']
+
+
 def test_an_invalid_sign_in_answer_names_the_sign_in_field():
     check, _, _ = _helpers({'schedule_run_id': RUN_ID}, error=Invalid())
 

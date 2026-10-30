@@ -166,7 +166,10 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         if decisions else [parsed.hitl_action]
     )
     if sign_in:
-        actions = [parsed.mcp_auth_action]
+        # One answer per request: a single skip among them rejects the run, whatever the top action says
+        answers = getattr(parsed, 'mcp_auth_decisions', None)
+        actions = ([item.get('action') if isinstance(item, dict) else None for item in answers]
+                   if answers else [parsed.mcp_auth_action])
     try:
         decision = check_schedule_decision(
             parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in)
