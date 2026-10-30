@@ -15,3 +15,12 @@ class ScheduleRunRequest(BaseModel):
 
     trigger: Literal["manual", "test"] = Field(description="`manual` runs now; `test` is a test run",
                                                examples=["manual"])
+
+
+class ScheduleRunDecision(BaseModel):
+    """Request body for POST .../{schedule_id}/runs/{run_id}/decision: the owner's answer on a waiting run."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"action": "approve"}]})
+
+    action: Literal["approve", "reject"] = Field(description="`approve` starts the run again; `reject` ends it as failed",
+                                                 examples=["approve"])

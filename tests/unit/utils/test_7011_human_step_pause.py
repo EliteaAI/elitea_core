@@ -3,6 +3,8 @@
 Contract under test: utils/schedule_runs.py pause_schedule_run on the real models, in-memory SQLite.
 Harnesses come from the sibling 7011 test files.
 """
+from datetime import UTC, datetime
+
 import pytest
 from unit.utils.test_7011_schedule_runs_fail import _run, _schedule, runs, session  # noqa: F401
 from unit.utils.test_7011_schedule_runs_outcome import sent  # noqa: F401
@@ -138,3 +140,67 @@ def test_a_sign_in_answer_on_a_run_that_is_not_waiting_is_refused(runs, session,
 
     with pytest.raises(runs.ScheduleRunNotWaiting):
         runs.check_schedule_decision(1, run.id, 12, ["authorize"], sign_in=True)
+
+
+CREDENTIAL_REASON = "credential qa_missing not found"
+
+
+def _park(runs, session, rule="pause_and_ask", resumed=False):
+    schedule = _schedule(runs, session, created_by=12, approval_rule=rule)
+    run = _run(runs, session, schedule)
+    if resumed:
+        run.resumed_at = datetime.now(UTC)
+        session.commit()
+    parked = runs.park_for_credentials(1, run.id, CREDENTIAL_REASON)
+    session.refresh(run)
+    session.refresh(schedule)
+    return parked, run, schedule
+
+
+def test_a_missing_credential_waits_for_the_owner_without_a_chat(runs, session, sent):
+    parked, run, schedule = _park(runs, session)
+
+    assert parked and (run.status, run.reason) == ("waiting_for_approval", None)
+    assert run.conversation_id is None and run.approval_expires_at is not None
+    assert schedule.last_run_status == "waiting_for_approval"
+    assert [event["text"] for event in run.events if event["kind"] == "paused"] == [
+        f"Paused for approval: {CREDENTIAL_REASON}. Add the credentials, then approve"]
+    assert sent.notices == [(12, "schedule_approval_needed", run.id)]
+
+
+def test_a_missing_credential_under_run_without_asking_does_not_wait(runs, session, sent):
+    parked, run, _ = _park(runs, session, rule="run_without_asking")
+
+    assert not parked and run.status == "running" and sent.notices == []
+
+
+def test_a_missing_credential_after_the_owner_approved_does_not_wait_again(runs, session, sent):
+    parked, run, _ = _park(runs, session, resumed=True)
+
+    assert not parked and run.status == "running" and sent.notices == []
+
+
+def test_a_run_that_is_not_running_is_not_parked(runs, session, sent):
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule, status="success")
+
+    assert not runs.park_for_credentials(1, run.id, CREDENTIAL_REASON) and sent.notices == []
+
+
+def test_the_owner_approves_a_credential_wait_and_the_run_runs_again(runs, session, sent):
+    _, run, _ = _park(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, 12, ["approve"]) == "approve"
+    runs.apply_schedule_decision(1, run.id, "approve")
+    session.refresh(run)
+
+    assert run.status == "running" and run.resumed_at is not None and run.approval_expires_at is None
+
+
+def test_the_owner_rejects_a_credential_wait_and_the_run_fails(runs, session, sent):
+    _, run, _ = _park(runs, session)
+
+    runs.apply_schedule_decision(1, run.id, "reject")
+    session.refresh(run)
+
+    assert (run.status, run.reason) == ("failed", "rejected by the owner")

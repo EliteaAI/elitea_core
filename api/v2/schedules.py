@@ -29,6 +29,7 @@ ROUTES = {
     ("post", f"{ITEM}/run"): "_run",
     ("get", f"{ITEM}/runs"): "_runs",
     ("get", RUN): "_run_detail",
+    ("post", f"{RUN}/decision"): "_decide_run",
     ("post", f"{ITEM}/owner"): "_change_owner",
     ("get", "export"): "_export",
     ("post", "import"): "_import",
@@ -46,7 +47,7 @@ NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
 def _tail(schedule_id: int | None, run_id: int | None) -> str:
     """The URL tail after the project id, in the form of the `ROUTES` keys."""
     if run_id is not None:
-        return RUN
+        return f"{RUN}/decision" if request.path.rstrip("/").endswith("/decision") else RUN
     last = request.path.rstrip("/").rsplit("/", 1)[-1]
     action = "" if last.isdigit() else last
     if schedule_id is None:

@@ -107,6 +107,12 @@ def check_owner_credentials(project_id: int, schedule) -> str | None:
     return '; '.join(reasons) or VERSION_NOT_EXPANDED
 
 
+def _park(project_id: int, run_id: int, reason: str) -> bool:
+    """Make the run wait for the owner to add the credentials; False when it must fail."""
+    from .schedule_runs import park_for_credentials  # late, as the writers in run_prerun_check
+    return park_for_credentials(project_id, run_id, reason)
+
+
 class PreRunResult(NamedTuple):
     ok: bool
     owner_id: int | None = None
@@ -124,16 +130,22 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     from .schedule_runs import disable_schedule, fail_schedule_run
 
     owner_id = schedule.created_by
+    waits_for_owner = False
     try:
         reason = (check_principal(schedule)
                   or check_owner_access(project_id, owner_id)
-                  or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id)
-                  or check_owner_credentials(project_id, schedule))
+                  or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id))
+        if reason is None:
+            reason = check_owner_credentials(project_id, schedule)
+            # Only a missing credential can wait for the owner; a lost token or a broken version cannot
+            waits_for_owner = reason not in (None, NO_TOKEN, VERSION_NOT_EXPANDED)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
         reason = PRERUN_FAILED
     if reason is None:
         return PreRunResult(True, owner_id)
+    if waits_for_owner and _park(project_id, run_id, reason):
+        return PreRunResult(False, None, reason)
     fail_schedule_run(project_id, run_id, reason)
     event = Types.schedule_run_failed
     if reason == OWNER_LOST_ACCESS:

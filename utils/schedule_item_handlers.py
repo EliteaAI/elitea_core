@@ -18,7 +18,7 @@ from ..models.pd.entity_schedule import (
     ScheduleUpdate,
 )
 from ..models.pd.schedule_list import RunStatus
-from ..models.pd.schedule_run import ScheduleRunRequest
+from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .error_text import public_event, public_reason
 from .schedule_access import (
     SCHEDULE_PERMISSIONS,
@@ -428,6 +428,51 @@ class ScheduleItemHandlers:
                 session.commit()
                 return refusal("run_start_failed", "The run could not start", 500)
             return {"run_id": run_id}, 202
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _decide_run(self, project_id: int, schedule_id: int, run_id: int):
+        """Approve or reject a waiting run that has no chat to answer in (it waits for credentials).
+
+        Approve starts the run again: its pre-run check runs once more and ends the run as failed, with the
+        reason, while a credential is still missing. A run with a chat is decided in that chat.
+        Who may call: the owner with `schedules.run`; an admin cannot decide.
+        Errors: 400 invalid action; 403 not the owner; 404; 409 the run is not waiting, or has a chat.
+        """
+        body, error = _parse_body(ScheduleRunDecision)
+        if error:
+            return error
+        # Late: the decision writers load the run models, which the handler tests fake
+        from .schedule_runs import (
+            ScheduleDecisionForbidden,
+            ScheduleRunNotWaiting,
+            apply_schedule_decision,
+            check_schedule_decision,
+        )
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                row = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            run = session.get(EntityScheduleRun, run_id)
+            if run is None or run.schedule_id != schedule_id:
+                return RUN_NOT_FOUND
+            if run.conversation_id is not None:
+                return refusal("run_has_chat", "Decide this run in its chat", 409)
+            entity_type = row.entity_type
+        try:
+            decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
+            apply_schedule_decision(project_id, run_id, decision)
+        except ScheduleDecisionForbidden:
+            return refusal("not_owner", "Only the schedule owner can approve or reject this run", 403)
+        except ScheduleRunNotWaiting:
+            return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
+        if decision == "approve" and not start_schedule_run(entity_type, project_id, schedule_id, run_id):
+            with db.get_session(project_id) as session:
+                fail_run(session, run_id, START_FAILED)
+                session.commit()
+            return refusal("run_start_failed", "The run could not start", 500)
+        return {"run_id": run_id, "status": "running" if decision == "approve" else "failed"}, 200
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _runs(self, project_id: int, schedule_id: int):
