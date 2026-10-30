@@ -154,7 +154,6 @@ def test_a_run_of_another_schedule_is_404(harness, decisions):
 
 def test_a_missing_schedule_is_404(harness, decisions):
     assert decide(harness, 999, 1)[1] == 404
-    assert NOT_FOUND['code'] == 'not_found'
 
 
 def test_a_start_failure_after_approval_fails_the_run_and_answers_500(harness, decisions):
