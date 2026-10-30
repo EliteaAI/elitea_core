@@ -119,7 +119,9 @@ def test_the_other_actions_take_a_mandate(ns, env, action, extra):
     ("project_id=1;action=delete", "invalid action: 'delete'"),
     ("project_id=x;action=create", "invalid project_id: 'x'"),
     ("project_id=0;action=submit;mandate=" + str(uuid.uuid4()), "invalid project_id: '0'"),
-    (CREATE.replace("version_id=70;", ""), "version_id required"),
+    (CREATE.replace("version_id=70;", ""), "exactly one of version_id and toolkit_id required"),
+    (CREATE + ";toolkit_id=4", "exactly one of version_id and toolkit_id required"),   # #7305: not both
+    (CREATE.replace("run:schedule", "run:index_schedule"), "invalid operations"),   # a toolkit mandate's only
     (CREATE.replace(f"owner_user_id={OWNER};", ""), "owner_user_id required"),
     (CREATE.replace("operations=run:schedule;", ""), "operations required"),
     (CREATE.replace("max_runtime_s=600;", ""), "max_runtime_s required"),
@@ -292,7 +294,7 @@ def test_a_new_revision_is_accepted_after_a_revoke(ns, env, agent):
 
 
 def test_a_lost_insert_race_is_reported_and_rolled_back(ns, env, agent, monkeypatch):
-    monkeypatch.setattr(ns.mandate_admin, "_live_mandate", lambda session, project_id, version_id: None)
+    monkeypatch.setattr(ns.mandate_admin, "_live_mandate", lambda session, project_id, *args: None)
     create(ns, env)
     env.recorded.clear()
     result = run(ns, env, CREATE)

@@ -476,6 +476,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         id = sa.Column(sa.Integer, primary_key=True)
         type = sa.Column(sa.String, nullable=False)
         settings = sa.Column(postgresql.JSONB, nullable=False)
+        name = sa.Column(sa.String, nullable=True)        # the toolkit mandate list and picker (#7305)
+        meta = sa.Column(postgresql.JSONB, nullable=True)  # its index schedules (#7305)
 
     class EntityToolMapping(base):
         __tablename__ = "entity_tool_mapping"

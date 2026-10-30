@@ -16,12 +16,20 @@ from ..utils.application_tools import (DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC, ge
                                       should_trigger_scheduled_index, start_index_task,
                                       update_toolkit_index_meta_history_with_failed_state)
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
-from ..utils.admission import MESSAGES, index_schedule_refusal_code, record_index_schedule_refusal
+from ..utils.admission import _expire_mandate as expire_mandate  # pylint: disable=W0212
+from ..utils.admission import (index_schedule_refusal_code, index_schedule_refusal_text,
+                               record_index_schedule_refusal, record_index_schedule_would_deny)
+from ..utils.credential_slots import has_free_form_secret, has_secret_template, mark_free_form_secret
 from ..utils.cron_utils import is_cron_due
-from ..utils.governance import is_governed
-from ..utils.trigger_principal import principal_of
+from ..utils.exceptions import AdmissionDenied
+from ..utils.governance import is_auditing, is_governed
+from ..utils.mandate_admission import audit_only_refusal, index_schedule_trigger_ref, toolkit_mandate_request
+from ..utils.schedule_runs import OUTAGE_REFUSALS
+from ..utils.trigger_principal import (OPERATION_OF, covering_toolkit_mandate, latest_toolkit_mandates, principal_of,
+                                       resave_needed)
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import (
+    as_credential_reference,
     resolve_credentials,
     resolve_index_llm_settings,
     handle_failed_index_schedule,
@@ -41,6 +49,19 @@ from ..utils.maintenance_gate import is_maintenance_active
 # Re-entrancy guard: skip overlapping ticks if a previous run is still in
 # flight. The scheduler thread fires every minute regardless of prior state.
 _check_index_scheduling_lock = threading.Lock()
+_UNREADABLE = object()   # the toolkit mandates of a project could not be read this tick
+
+
+def _read_toolkit_mandates(project_id):
+    """``latest_toolkit_mandates`` of the project in a short session of its own (#7305), so a failed read never leaves
+    the tick's project session in an aborted transaction; ``_UNREADABLE`` when it failed."""
+    try:
+        with db.get_session(project_id) as session:
+            return latest_toolkit_mandates(session, project_id)
+    except Exception as e:  # pylint: disable=W0703
+        log.error(f"check_index_scheduling: the toolkit mandates of project {project_id} could not be read "
+                  f"({type(e).__name__})")
+        return _UNREADABLE
 
 
 class RPC:
@@ -94,6 +115,9 @@ class RPC:
                 # nothing commits it until the tick ends, so it holds AccessShareLock on
                 # every table it touched for the whole tick, blocking DDL/migrations.
                 end_ambient_transaction()
+                # the project's toolkit mandates (#7305): read once, at its first due schedule under enforce or audit
+                # only; never when governance is off
+                toolkit_mandates = None
                 with db.get_session(project_id) as project_session:
                     for toolkit in project_session.query(EliteATool).filter(
                         EliteATool.meta['indexes_meta'].isnot(None)
@@ -178,22 +202,52 @@ class RPC:
 
                                 stats['due'] += 1
 
-                                # A governed platform does not run scheduled indexing in this release: a team
-                                # schedule ran as the system user (no mandate), a per-user one acts for a person who
-                                # has not renewed their authorization. Refused before the system token is fetched or
-                                # any task is dispatched; the refusal is the index history entry and the slot is
-                                # consumed, so it is not retried every minute. The deny is audited once the
-                                # refusal was concluded, not on a slot that stays due.
-                                if is_governed(self):
-                                    try:
+                                # Governed (#7305): a scheduled index run runs only under the toolkit mandate of
+                                # the schedule's owner (personal key: that user, while they saved it last; team
+                                # key: who saved it last). Without one it is refused as before: before the system
+                                # token is fetched or any task is dispatched; the refusal is the index history
+                                # entry and the slot is consumed, so it is not retried every minute. The deny is
+                                # audited once the refusal was concluded, not on a slot that stays due. With one,
+                                # the dispatch carries the mandate's admission request. Audit only: the same
+                                # coverage is looked at, and a firing enforce would refuse leaves one would-deny.
+                                admission, would_deny, refused_by, resave = None, None, None, False
+                                governed = is_governed(self)
+                                if governed or is_auditing(self):
+                                    if toolkit_mandates is None:
+                                        toolkit_mandates = _read_toolkit_mandates(project_id)
+                                    if toolkit_mandates is _UNREADABLE:
+                                        if governed:   # unknown, not refused: retried on the next scan
+                                            stats['failed'] += 1
+                                            continue
+                                    else:
+                                        mandate = covering_toolkit_mandate(
+                                            toolkit_mandates, toolkit.id, user_id, creator_id)
+                                        trigger_ref = index_schedule_trigger_ref(toolkit.id, index_meta_id, user_id)
                                         code = index_schedule_refusal_code(
-                                            principal_of("index_schedule", schedule_key=user_id))
+                                            principal_of("index_schedule", schedule_key=user_id)) if mandate is None \
+                                            else audit_only_refusal(mandate, OPERATION_OF["index_schedule"])
+                                        resave = mandate is None and resave_needed(
+                                            toolkit_mandates, toolkit.id, user_id, creator_id)
+                                        if governed and mandate is not None and code is not None:
+                                            refused_by = mandate.id   # its row refuses already: nothing is resolved
+                                            if code == "MANDATE_EXPIRED":   # past its end: expired on the spot
+                                                expire_mandate(project_id, mandate.id)
+                                        elif governed and mandate is not None:
+                                            admission = toolkit_mandate_request(
+                                                project_id=project_id, toolkit_id=toolkit.id, mandate=mandate,
+                                                trigger_ref=trigger_ref)
+                                        elif not governed:
+                                            would_deny = code
+                                if governed and admission is None:
+                                    try:
                                         if handle_failed_index_schedule(
                                             project_id, deepcopy(toolkit.settings), creator_id, toolkit,
-                                            index_meta_id, MESSAGES[code], expand_user_id=creator_id,
+                                            index_meta_id, index_schedule_refusal_text(code, resave),
+                                            expand_user_id=creator_id,
                                         ):
                                             record_index_schedule_refusal(
-                                                self, code, project_id=project_id, toolkit_id=toolkit.id)
+                                                self, code, project_id=project_id, toolkit_id=toolkit.id,
+                                                mandate_ref=refused_by)
                                             stamp_schedule_last_run(
                                                 project_session, toolkit, index_meta_id, user_id, ctx,
                                             )
@@ -226,6 +280,10 @@ class RPC:
                                         user_id=user_id,
                                     )
 
+                                    if admission is not None and credentials_ok:
+                                        # a governed run carries the schedule's credential as a reference (#7305)
+                                        as_credential_reference(updated_settings, toolkit.type)
+
                                     # The specific reason, not a generic label: init_issue is
                                     # written to the index history and shown to whoever owns
                                     # the schedule, and "missing" vs "not found" vs "lookup
@@ -255,7 +313,9 @@ class RPC:
                                         )
                                         init_issue_retryable = False
                                     elif (credentials_ok and not init_issue_retryable
-                                          and schedule_model.retry_since):
+                                          and schedule_model.retry_since and admission is None):
+                                        # (a mandate run keeps the stamp until it concludes: an admission outage
+                                        # is measured by it too, #7305)
                                         # The lookups recovered. Clear here rather than on a
                                         # cursor write: this tick may still hit contention and
                                         # never reach one, leaving a stale stamp to escalate
@@ -441,17 +501,60 @@ class RPC:
                                                 "tool_params": index.cmetadata.get('index_configuration'),
                                                 "llm_model": llm_settings['model_name'],
                                                 "llm_settings": llm_settings,
-                                                "user_id": creator_id,
+                                                # a mandate run acts for the mandate's owner (#7305)
+                                                "user_id": creator_id if admission is None else mandate.owner_user_id,
                                                 "project_auth_token": user_token,
                                                 "deployment_url": get_predict_base_url(project_id)
                                             }
-                                            start_index_task(
-                                                self.task_node,
-                                                data,
-                                                None,
-                                                initiator=InitiatorType.schedule
-                                            )
+                                            if admission is not None:
+                                                # reference-only (#7229): a {{secret.*}} outside a credential
+                                                # configuration is refused at dispatch, as for on-demand indexing
+                                                mark_free_form_secret(data, has_free_form_secret(
+                                                    self, {'project_id': project_id, 'tools': [toolkit_config]})
+                                                    or has_secret_template(data.get('tool_params')))
+                                            try:
+                                                start_index_task(
+                                                    self.task_node,
+                                                    data,
+                                                    None,
+                                                    initiator=InitiatorType.schedule,
+                                                    admission=admission,
+                                                )
+                                            except AdmissionDenied as denied:
+                                                # refused by admission (audited there): ends the slot as a refusal
+                                                # without a mandate does, with the readable reason. A platform outage
+                                                # keeps the slot and is retried next minute, reported only once it
+                                                # outlives the grace (as a credential lookup outage is)
+                                                text = index_schedule_refusal_text(denied.reason_code)
+                                                if denied.reason_code in OUTAGE_REFUSALS:
+                                                    if not retry_escalation_due(schedule_model.retry_since):
+                                                        if not schedule_model.retry_since:
+                                                            stamp_schedule_retry_since(
+                                                                project_session, toolkit, index_meta_id, user_id, ctx)
+                                                        log.warning(f"{ctx} admission unavailable "
+                                                                    f"({denied.reason_code}); retrying on the next scan")
+                                                        stats['failed'] += 1
+                                                        continue
+                                                    text = f"{text}; still failing for over {describe_grace()}"
+                                                if handle_failed_index_schedule(
+                                                    project_id, updated_settings, creator_id, toolkit,
+                                                    index_meta_id, text,
+                                                    expand_user_id=creator_id,
+                                                ):
+                                                    stamp_schedule_last_run(
+                                                        project_session, toolkit, index_meta_id, user_id, ctx,
+                                                    )
+                                                stats['failed'] += 1
+                                                continue
                                             stats['dispatched'] += 1
+                                            if would_deny is not None:   # audit only: the run went on
+                                                try:
+                                                    record_index_schedule_would_deny(
+                                                        self, would_deny, project_id=project_id, toolkit_id=toolkit.id,
+                                                        trigger_ref=trigger_ref)
+                                                except Exception as e:  # pylint: disable=W0703
+                                                    log.error(f"{ctx} the audit-only evaluation failed "
+                                                              f"({type(e).__name__})")
 
                                             current_time = datetime.now(UTC).isoformat()
                                             stamp_schedule_last_run(

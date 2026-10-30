@@ -670,8 +670,10 @@ def test_the_test_entry_says_which_kind_of_toolkit_run_from_the_tool_and_passes_
 
 
 def test_scheduled_indexing_stays_refused_before_any_dispatch():
+    # without a toolkit mandate (#7305: with one, the dispatch carries the mandate's admission request)
     text = (PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text()
-    assert text.index("if is_governed(self):") < text.index("start_index_task(")
+    assert text.index("if governed and admission is None:") < text.index("start_index_task(")
+    assert "admission=admission," in text[text.index("start_index_task("):]
 
 
 def test_the_internal_mcp_checks_see_the_toolkits_of_a_sub_agent_as_main_prefetches_it(ns):

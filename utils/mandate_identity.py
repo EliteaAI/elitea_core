@@ -64,8 +64,8 @@ MESSAGES = {
     "AUDIT_UNAVAILABLE": "The audit trail is unavailable; nothing was changed. Try again later.",
     "CONCURRENT_CHANGE": "The mandate changed while this ran; read it again and retry.",
     "WITHDRAW_NOT_ALLOWED": "Only the mandate's owner, or an operator who manages mandates, can withdraw its consent.",
-    "NOTHING_TO_CONSENT": "This agent version uses no credential that acts with a Microsoft sign-in; there is nothing to "
-                          "consent to. Grant the credentials first, then consent.",
+    "NOTHING_TO_CONSENT": "This agent version (or toolkit) uses no credential that acts with a Microsoft sign-in; there "
+                          "is nothing to consent to. Grant the credentials first, then consent.",
 }
 
 
@@ -169,16 +169,47 @@ def consent_scope(project_id, version_id, owner_user_id) -> list:
     """The Entra-delegated credentials the agent version uses, as a consent records them: ``[{credential_ref,
     credential_generation, configuration_generation, toolkits}]`` (the owner's personal ones and the project's).
     Read from the version's own toolkits (two queries) and the facts (two calls); no secret."""
-    from .credential_decision import (  # pylint: disable=C0415
-        CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, _credential_use_facts, collect_credential_uses,
-        read_configuration_facts,
-    )
+    from .credential_decision import collect_credential_uses  # pylint: disable=C0415
     from .definition_digest import toolkit_rows  # pylint: disable=C0415
     with db.get_session(project_id) as session:
         rows = toolkit_rows(session, version_id)
         names = {str(tool.id): getattr(tool, "name", None) or tool.type for _, tool in rows}
         uses = collect_credential_uses(None, project_id, version_id, {}, rows=rows)
-    stored = [use for use in uses if use.selector == "uuid" and use.configuration_uuid]
+    return _delegated_scope(project_id, uses, names, owner_user_id)
+
+
+def toolkit_consent_scope(project_id, toolkit_id, owner_user_id) -> list:
+    """``consent_scope`` of a toolkit mandate (#7305): the Entra-delegated credentials the toolkit's stored settings
+    select, and the credential each index schedule of the owner on it names instead (resolved as the index tick
+    resolves it, without secrets). The toolkit row (one query), one lookup and expansion per such schedule, the facts."""
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    from .credential_decision import collect_credential_uses  # pylint: disable=C0415
+    from .trigger_principal import index_schedule_owner  # pylint: disable=C0415
+    with db.get_session(project_id) as session:
+        tool = session.execute(select(EliteATool).where(EliteATool.id == toolkit_id)).scalar_one_or_none()
+        if tool is None:
+            return []
+        session.expunge(tool)
+    rows = [(None, tool)]
+    tools = []
+    for index_entry in ((tool.meta or {}).get("indexes_meta") or {}).values():
+        for key, schedule in ((index_entry or {}).get("schedules") or {}).items():
+            if isinstance(schedule, dict) and schedule.get("credentials") and \
+                    index_schedule_owner(key, schedule.get("created_by")) == owner_user_id:
+                from .index_scheduling import schedule_credential_settings  # pylint: disable=C0415
+                settings = schedule_credential_settings(project_id, tool, schedule, key, owner_user_id)
+                if isinstance(settings, dict):
+                    tools.append({"id": tool.id, "settings": settings})
+    uses = collect_credential_uses(None, project_id, None, {"tools": tools}, rows=rows)
+    return _delegated_scope(project_id, uses, {str(tool.id): getattr(tool, "name", None) or tool.type}, owner_user_id)
+
+
+def _delegated_scope(project_id, uses, names, owner_user_id) -> list:
+    """The Entra-delegated credentials among ``uses``, as a consent records them."""
+    from .credential_decision import (  # pylint: disable=C0415
+        CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, _credential_use_facts, read_configuration_facts,
+    )
+    stored = [use for use in uses if use.selector in ("uuid", "undeclared") and use.configuration_uuid]
     configurations = read_configuration_facts((use.configuration_uuid, use.configuration_project_id) for use in stored)
     own = {fact["id"]: cfg_uuid for cfg_uuid, fact in configurations.items()
            if isinstance(fact, dict) and fact.get("section") == CREDENTIAL_SECTION and fact.get("project_id") == project_id}
@@ -325,7 +356,8 @@ def _event(event_type, reason_code, mandate, caller_ref, **fields) -> dict:
     event = {
         "event_type": event_type, "reason_code": reason_code, "outcome": "success",
         "project_id": mandate.project_id, "application_id": mandate.application_id,
-        "agent_binding_ref": str(mandate.agent_binding_ref), "mandate_ref": str(mandate.id), "caller_ref": caller_ref,
+        "agent_binding_ref": None if mandate.agent_binding_ref is None else str(mandate.agent_binding_ref),
+        "mandate_ref": str(mandate.id), "caller_ref": caller_ref,
         "user_ref": f"idp:{owner.get('tid')}:{owner.get('oid')}" if owner.get("tid") else None, **fields,
     }
     return {key: value for key, value in event.items() if value is not None}
@@ -432,9 +464,20 @@ def _consentable(module, project_id, mandate_id, actor_user_id):
     return mandate
 
 
+def _toolkit_of(project_id, mandate_id):
+    """The toolkit of a toolkit mandate (#7305; its ``agent_version`` is NULL). Read on its own: an agent mandate's
+    reads never name the column."""
+    with db.get_session(project_id) as session:
+        return session.execute(select(AutonomousMandate.toolkit_id).where(
+            AutonomousMandate.id == mandate_id, AutonomousMandate.project_id == project_id)).scalar_one_or_none()
+
+
 def _covered(project_id, mandate):
     try:
-        scope = consent_scope(project_id, mandate.agent_version, mandate.owner_user_id)
+        if mandate.agent_version is None:
+            scope = toolkit_consent_scope(project_id, _toolkit_of(project_id, mandate.id), mandate.owner_user_id)
+        else:
+            scope = consent_scope(project_id, mandate.agent_version, mandate.owner_user_id)
     except Exception as exc:  # pylint: disable=W0703
         log.error("mandate identity: the credentials of the version could not be read (%s)", type(exc).__name__)
         raise IdentityRefused("DEPENDENCY_UNAVAILABLE") from None

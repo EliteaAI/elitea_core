@@ -108,9 +108,12 @@ def suspend_owner_mandates(session, owner_user_id) -> list:
     ).scalars())
 
 
-def next_revision(session, project_id, agent_version) -> int:
-    """``1 + max(revision)`` over every mandate ever made for this agent version."""
+def next_revision(session, project_id, agent_version, toolkit_id=None, owner_user_id=None) -> int:
+    """``1 + max(revision)`` over every mandate ever made for this agent version, or for this toolkit and owner (#7305:
+    a toolkit mandate, ``agent_version`` None)."""
+    scope = (AutonomousMandate.agent_version == agent_version,) if toolkit_id is None else (
+        AutonomousMandate.toolkit_id == toolkit_id, AutonomousMandate.owner_user_id == owner_user_id)
     return session.execute(
         select(func.coalesce(func.max(AutonomousMandate.revision), 0) + 1)
-        .where(AutonomousMandate.project_id == project_id, AutonomousMandate.agent_version == agent_version)
+        .where(AutonomousMandate.project_id == project_id, *scope)
     ).scalar_one()
