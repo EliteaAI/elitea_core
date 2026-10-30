@@ -564,7 +564,7 @@ def settle_agents(agents: Optional[List[dict]], ledger: Optional[dict]) -> Optio
     for key, bucket in ledger.items():
         if key not in seen and not bucket['unparsed_calls']:
             out.append({'agent': bucket.get('name'), 'application_id': key, 'llm_calls': None,
-                        'tool_calls': None, **_ledger_figures(bucket)})
+                        'tool_calls': None, 'models': [], **_ledger_figures(bucket)})
     return out
 
 
