@@ -340,3 +340,15 @@ class TestEL7011R4SocketEvent:
         assert notifications.emit_schedule_run_finished(**FINISHED) is None
 
         assert any('sio down' in line for line in recorder.logged)
+
+
+def test_a_notice_other_than_the_expired_one_does_not_read_the_approval_window(notifications, recorder, monkeypatch):
+    runs = types.ModuleType(f'{PKG}.utils.schedule_runs')
+    reads = []
+    runs.approval_wait_hours = lambda: reads.append(1) or 48
+    monkeypatch.setitem(sys.modules, runs.__name__, runs)
+
+    _send(notifications, 'schedule_expired')
+
+    assert reads == []
+    assert recorder.fired

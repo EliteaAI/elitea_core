@@ -61,7 +61,8 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 approval_confirmed_by=schedule.approval_confirmed_by),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
-            trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
+            trigger=getattr(run_row := session.get(EntityScheduleRun, run_id), 'trigger', 'cron'),
+            resumed=getattr(run_row, 'resumed_at', None) is not None)
 
 
 def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
@@ -154,10 +155,11 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         fail_schedule_run(project_id, run_id, NOT_FOUND)
         return
     trigger = getattr(loaded, 'trigger', 'cron')
-    record_run_events(project_id, run_id, run_event(
-        'started', f"{'Test run' if trigger == 'test' else 'Run'} started · trigger: {trigger} · "
-                   f"version {loaded.version.name}", trigger=trigger, version_id=loaded.version.id,
-    ), version_id=loaded.version.id)
+    if not getattr(loaded, 'resumed', False):  # an approved parked run starts again; its log already has the first line
+        record_run_events(project_id, run_id, run_event(
+            'started', f"{'Test run' if trigger == 'test' else 'Run'} started · trigger: {trigger} · "
+                       f"version {loaded.version.name}", trigger=trigger, version_id=loaded.version.id,
+        ), version_id=loaded.version.id)
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return

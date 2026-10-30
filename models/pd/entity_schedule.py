@@ -103,6 +103,10 @@ class ScheduleRiskCheck(BaseModel):
     schedule_id: int | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
+    approval_rule: ApprovalRule | None = Field(
+        None, description='The rule to check under. With `pause_and_ask`, a missing credential or a personal '
+        'sign-in is a notice, not a block. Without it, an edit uses the rule of the stored schedule',
+        examples=['pause_and_ask'])
 
 
 class ScheduleVariable(BaseModel):

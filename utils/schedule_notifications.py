@@ -55,12 +55,14 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         return False
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
+        # Only the expired notice names the window; the settings read is skipped for every other notice
+        hours = _approval_hours() if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
             'message': MESSAGES[event_type].format(
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
-                hours=_approval_hours(),
+                hours=hours,
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,

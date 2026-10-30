@@ -271,7 +271,7 @@ class ScheduleItemHandlers:
         body, error = _parse_body(ScheduleRiskCheck)
         if error:
             return error
-        owner_id, stored = auth.current_user()["id"], None
+        owner_id, stored, rule = auth.current_user()["id"], None, body.approval_rule
         with db.get_session(project_id) as session:
             try:
                 if body.schedule_id is not None:
@@ -281,10 +281,11 @@ class ScheduleItemHandlers:
                     if refused:
                         return refused
                     owner_id, stored = row.created_by, _kept_fingerprint(row)
+                    rule = rule or row.approval_rule
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response
-        review = scan_schedule(project_id, body.version_id, owner_id, getattr(body, 'approval_rule', None))
+        review = scan_schedule(project_id, body.version_id, owner_id, rule)
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
         answer = {**review, "run_without_asking_allowed": allowed}
         if body.schedule_id is not None:
