@@ -114,9 +114,10 @@ Creating a credential **from the chat**, through a secure form that never passes
 
 A schedule is yours: you are its owner, also when you made it with "Build with AI" and saved it. It runs as you. Under
 Enforce its cron firings need an **active mandate for the same agent version, made for you as owner**. **Run now**
-and **Test run** act as you while development runs are on: they are your development run (as the editor's test chat),
-with your sign-in and your credentials, and need no mandate and no admin role. While development runs are off they
-are refused with `DEVELOPMENT_RUNS_DISABLED`.
+and **Test run** act as you while development runs are on, with your sign-in and no mandate or admin role. A bound
+version runs its approved definition (on its binding, with your grants); an unbound one runs the draft, as the
+editor's test chat, which needs the right to edit the agent. While development runs are off they are refused with
+`DEVELOPMENT_RUNS_DISABLED`.
 
 - Ask an operator for a mandate for that version with you as its owner and `run:schedule` allowed. It must be
   approved by a second person.
@@ -135,7 +136,7 @@ are refused with `DEVELOPMENT_RUNS_DISABLED`.
 |---|---|---|
 | Off | Runs as before. | Runs as before. |
 | Audit only | Runs. A missing or unusable mandate is recorded as "would deny" for the operators. | Runs; evaluated as your own run. |
-| Enforce | Runs on your mandate, or is refused (below). | Acts as you while development runs are on (your development run, as the editor's test chat): your own credentials, project ones granted to you, Microsoft ones on your current sign-in. No mandate. Off: refused `DEVELOPMENT_RUNS_DISABLED`. Not from an API token. |
+| Enforce | Runs on your mandate, or is refused (below). | Acts as you while development runs are on: a bound version runs its approved definition, an unbound one the draft (edit right needed, your own credentials and project ones granted to you, as the editor's test chat). Microsoft credentials on your current sign-in. No mandate. Off: refused `DEVELOPMENT_RUNS_DISABLED`. Not from an API token. |
 
 **What a failure looks like.** The run is marked **failed** at once (in under a second); it never sits in
 *running*. The schedule's run list shows the reason:

@@ -40,6 +40,7 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
     state = types.SimpleNamespace(governed=True, answers=[])
     mandate = types.ModuleType(f"{PKG}.utils.mandate_admission")
     mandate.prepare_schedule_run = lambda **_kwargs: {"unattended": True} if state.governed else {}
+    mandate.mint_owner_run_ticket = lambda request: "owner-ticket"   # the owner's run (#7254): minted at the send
     monkeypatch.setitem(sys.modules, mandate.__name__, mandate)
     monkeypatch.setattr(starter, "execute_pipeline_via_predict_sio", lambda **_kwargs: state.answers.pop(0))
     monkeypatch.setattr(starter, "finish_trigger_run_refused", lambda *_args: None)  # the chat end has its own tests
@@ -49,12 +50,12 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
                         lambda *_args: None, raising=False)
     world.set_run_status("success")   # the fixture's run is over; each firing claims its own
 
-    def fire(answer, governed=True, trigger="cron", owner_ticket=None):
-        """A cron firing by default; ``manual``/``test`` with ``owner_ticket`` is the owner's Run now / Test run."""
+    def fire(answer, governed=True, trigger="cron", owner_request=None):
+        """A cron firing by default; ``manual``/``test`` with ``owner_request`` is the owner's Run now / Test run."""
         state.governed = governed
         state.answers.append(answer)
         run_id = world.claim(trigger)
-        starter.run_owner_schedule(PROJECT_ID, 1, run_id, owner_ticket)
+        starter.run_owner_schedule(PROJECT_ID, 1, run_id, *(() if owner_request is None else (owner_request,)))
         if answer is ADMITTED:   # the admitted run ends later, from its chat; end it so the next firing can claim
             with tools.db.get_session(PROJECT_ID) as session:
                 session.get(schedules.EntityScheduleRun, run_id).status = "success"
@@ -212,6 +213,6 @@ def test_run_now_and_test_run_neither_count_nor_end_the_streak(firing, trigger, 
     """Roman 2026-10-30: the owner's own runs are not cron firings; only cron firings count toward the pause."""
     firing.set_streak(2)
     for _ in range(3):
-        firing.fire(answer, trigger=trigger, owner_ticket="owner-ticket")
+        firing.fire(answer, trigger=trigger, owner_request=object())
     assert firing.schedule() == (2, True, None)
     assert all(notice[1] != "schedule_disabled" for notice in firing.notices)

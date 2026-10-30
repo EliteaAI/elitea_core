@@ -1219,18 +1219,26 @@ def _admit(  # pylint: disable=R0914
         permissions = _author_permissions(request)
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
     elif request.entry_point == ENTRY_SCHEDULE_TEST:
-        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's development run, decided as one is
-        # (their personal credentials, project ones granted to them, delegated ones on their live custody), and only
-        # while development runs are on, as the editor's test chat. The run endpoint let only the schedule's owner
-        # start it; the right to run the agent is checked here, fail closed. No mandate is read
+        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's run, only while development runs are
+        # on. A bound version runs its approved definition on its binding, as any bound run of that person (digest
+        # checked, sub-agents bound, the person's grants); an unbound one runs the draft, as the editor's test chat
+        # (the edit right, the author's own credentials). The run endpoint let only the schedule's owner start it;
+        # the right to run the agent is checked here, fail closed. No mandate is read
         if not _is_development(request, settings):
             raise _denied("DEVELOPMENT_RUNS_DISABLED" if _is_development(
                 request, replace(settings, allow_development_runs=True)) else "DENIED_ENTRY_POINT")
-        binding, rows = _read_draft(request)
         permissions = _author_permissions(request)
         if PREDICT_PERMISSION not in permissions:
             raise _denied("DENIED_RBAC")
-        can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
+        try:
+            binding, rows = _find_binding(request, settings)
+        except AdmissionDenied as denied:
+            if denied.reason_code != "DENIED_BINDING":   # bound, but its definition changed: refused as any bound run
+                raise
+            if AUTHOR_PERMISSION not in permissions:   # the draft: only someone who may edit the agent may run it
+                raise _denied("DENIED_RBAC") from None
+            binding, rows = _read_draft(request)
+            can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
     elif _is_development(request, settings):
         # 4. (development, #7213) the definition that runs, with no binding: the author's own right stands for it. Decided
         # here, before any binding is looked for, so the governed path reads nothing more than before

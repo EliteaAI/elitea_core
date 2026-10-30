@@ -1,9 +1,10 @@
 """#7254 (Roman 2026-10-30): an owner's Run now / Test run of their own schedule is the owner's own interactive run.
 
-Entry point ``schedule_test``, built by the run endpoint from the signed-in owner (``mint_owner_run_admission``) and
-taken by ``predict_sio`` from its ticket. A development run of the owner (Roman's correction): admitted while
-development runs are on, refused ``DEVELOPMENT_RUNS_DISABLED`` while they are off, as the editor's test chat; it needs
-only the right to run the agent (no admin role, no edit right); no mandate is read. Real admission on SQLite (``fixtures/admission_env.py``).
+Entry point ``schedule_test``, built by the run endpoint from the signed-in owner (``owner_run_request``), its ticket
+minted by the starter right before the send and taken by ``predict_sio``. A development run of the owner (Roman's correction): admitted while
+development runs are on, refused ``DEVELOPMENT_RUNS_DISABLED`` while they are off. A bound version runs its approved
+definition on its binding (review M3); an unbound one runs the draft and needs the edit right, as the editor's test
+chat. The right to run the agent is needed either way; no admin role; no mandate is read. Real admission on SQLite (``fixtures/admission_env.py``).
 """
 import sys
 import types
@@ -18,7 +19,8 @@ from fixtures import admission_env  # noqa: E402  pylint: disable=C0413
 from fixtures.governed_credentials import RUN, SUBJECT, call_kwargs  # noqa: E402  pylint: disable=C0413
 
 PREDICT = "models.applications.predict.post"
-EDITOR_ONLY = {"credentials.use", PREDICT}   # an editor who owns the schedule: no admin, no edit right on the agent
+EDIT = "models.applications.application.update"
+EDITOR_ONLY = {"credentials.use", PREDICT, EDIT}   # an editor who owns the schedule: no admin permission at all
 DIGEST = "adv1:" + "5" * 64
 SCHEDULE = "schedule:entity:41"
 
@@ -87,12 +89,25 @@ def test_with_development_runs_off_it_is_refused_with_the_readable_reason(ns, en
     assert contexts(env, ns) == []
 
 
-def test_a_bound_version_is_still_the_owners_run_not_the_bindings(ns, env):
-    env.seed_agent(version_id=71)   # bound and active
-    env.digests[71] = DIGEST
+def test_a_bound_version_runs_its_approved_definition_on_its_binding(ns, env):
+    binding = env.seed_agent(version_id=71)   # bound and active, the definition unchanged since
     admit(ns, env, version_id=71)
     [row] = contexts(env, ns)
-    assert row.profile == "development" and row.agent_binding_ref is None
+    assert (row.profile, row.entry_point, str(row.agent_binding_ref)) == ("governed", "schedule_test", str(binding))
+    assert row.subject["ref"] == SUBJECT
+
+
+def test_a_bound_version_whose_definition_changed_is_refused_as_any_bound_run(ns, env):
+    env.seed_agent(version_id=71)
+    env.digests[71] = "adv1:" + "9" * 64   # the definition is no longer the approved one
+    assert refusal(ns, env, version_id=71) == "BINDING_DIGEST_MISMATCH"
+    assert contexts(env, ns) == []
+
+
+def test_an_unbound_version_with_only_the_run_right_is_refused(ns, env):
+    env.permissions[42] = {"credentials.use", PREDICT}   # may run the agent, may not edit it
+    assert refusal(ns, env) == "DENIED_RBAC"
+    assert contexts(env, ns) == []
 
 
 def test_an_api_token_is_refused_like_a_toolkit_run(ns, env):
@@ -132,11 +147,14 @@ def holder(monkeypatch, ns, **over):
 
 
 @pytest.mark.parametrize("governed, audit", [(True, False), (False, True)])
-def test_the_run_endpoint_mints_the_owners_request_and_predict_takes_it_once(ns, env, monkeypatch, governed, audit):
+def test_the_run_endpoint_builds_the_owners_request_and_predict_takes_its_ticket_once(ns, env, monkeypatch, governed,
+                                                                                       audit):
     holder(monkeypatch, ns)
     module = env.module(governed=governed, audit=audit)
-    ticket = ns.mandate_admission.mint_owner_run_admission(
+    built = ns.mandate_admission.owner_run_request(
         module, project_id=1, application_id=7, version_id=70, schedule_id=41)
+    monkeypatch.setattr(ns.mandate_admission, "this", types.SimpleNamespace(module=module))
+    ticket = ns.mandate_admission.mint_owner_run_ticket(built)
     request = ns.mandate_admission.take_trigger_admission(module, ticket, project_id=1, version_id=70)
     assert (request.entry_point, request.run_kind, request.caller_type, request.caller_id, request.trigger_ref) == (
         "schedule_test", "interactive", "user", 42, SCHEDULE)
@@ -144,9 +162,8 @@ def test_the_run_endpoint_mints_the_owners_request_and_predict_takes_it_once(ns,
     assert ns.mandate_admission.take_trigger_admission(module, ticket, project_id=1, version_id=70) is None   # once
 
 
-def test_off_the_run_endpoint_mints_nothing_and_reads_no_holder(ns, env, monkeypatch):
+def test_off_the_run_endpoint_builds_nothing_and_reads_no_holder(ns, env, monkeypatch):
     monkeypatch.setattr(ns.pd_admission, "_holder", lambda sid: (_ for _ in ()).throw(AssertionError("holder read")))
     module = env.module(governed=False)
-    assert ns.mandate_admission.mint_owner_run_admission(
+    assert ns.mandate_admission.owner_run_request(
         module, project_id=1, application_id=7, version_id=70, schedule_id=41) is None
-    assert len(module._mandate_tickets) == 0   # pylint: disable=W0212

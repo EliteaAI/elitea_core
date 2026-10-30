@@ -417,6 +417,13 @@ class ScheduleItemHandlers:
             if row.version_id is None:
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
             entity_type = row.entity_type
+            try:   # the owner's own run (#7254), from this signed-in request; None when off. Built before the run row
+                from .mandate_admission import owner_run_request  # pylint: disable=C0415
+                owner_request = owner_run_request(self.module, project_id=project_id, application_id=row.application_id,
+                                                  version_id=row.version_id, schedule_id=schedule_id)
+            except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
+                log.exception('Schedule %s: cannot build the owner run request', schedule_id)
+                return refusal("run_start_failed", "The run could not start", 500)
             run_id = insert_run(session, schedule_id, body.trigger, scope.user_id)
             if run_id is None:
                 active_id = session.scalar(select(EntityScheduleRun.id).where(
@@ -425,11 +432,7 @@ class ScheduleItemHandlers:
                 ))
                 return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
             session.commit()
-            # the owner's own run (#7254): admitted from this signed-in request, never on the mandate; None when off
-            from .mandate_admission import mint_owner_run_admission  # pylint: disable=C0415
-            ticket = mint_owner_run_admission(self.module, project_id=project_id, application_id=row.application_id,
-                                              version_id=row.version_id, schedule_id=schedule_id)
-            if not start_schedule_run(entity_type, project_id, schedule_id, run_id, ticket):
+            if not start_schedule_run(entity_type, project_id, schedule_id, run_id, owner_request):
                 fail_run(session, run_id, START_FAILED)
                 session.commit()
                 return refusal("run_start_failed", "The run could not start", 500)

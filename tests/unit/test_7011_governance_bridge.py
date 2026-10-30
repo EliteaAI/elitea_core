@@ -97,7 +97,7 @@ def run(ns, env, starter, monkeypatch):
     starter.writes.calls.clear()
     starter.writes.streak.clear()
 
-    def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None, owner_ticket=None):
+    def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None, owner_request=None):
         version = version or FakeVersion()
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
@@ -108,7 +108,7 @@ def run(ns, env, starter, monkeypatch):
             version=types.SimpleNamespace(id=version.id, application_id=version.application_id, name="v1"),
             entity_name="Report", prompt="go", variables=[], trigger=trigger)
         monkeypatch.setattr(starter, "_load", lambda *args: loaded)
-        starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID, owner_ticket)
+        starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID, *(() if owner_request is None else (owner_request,)))
         return starter.writes.calls
     return go
 
@@ -360,20 +360,28 @@ def test_audit_only_a_run_is_never_counted_as_refused(ns, env, run, starter):
 @pytest.mark.parametrize("trigger", ["manual", "test"])
 def test_run_now_and_test_run_carry_the_owners_ticket_and_read_no_mandate(ns, env, agent, run, starter, monkeypatch,
                                                                            trigger, governed, audit):
-    """Roman 2026-10-30 (#7254): the owner's Run now / Test run is the owner's own run, admitted from the ticket the run
-    endpoint minted; the starter reads no mandate, sends no ``unattended`` and touches no refusal streak."""
+    """Roman 2026-10-30 (#7254): the owner's Run now / Test run is the owner's own run. The run endpoint built its
+    request; the starter mints its ticket right before the send (review S5), reads no mandate, sends no ``unattended``
+    and touches no refusal streak; ``predict_sio`` takes exactly that request."""
     arm(ns, env, governed=governed, audit=audit)
     reads = counted(ns, monkeypatch)
-    run(trigger=trigger, owner_ticket="owner-ticket")
+    taken, real_take = [], ns.mandate_admission.take_trigger_admission
+    monkeypatch.setattr(ns.mandate_admission, "take_trigger_admission",
+                        lambda *args, **kwargs: (lambda r: (taken.append(r), r)[1])(real_take(*args, **kwargs)))
+    owner_request = ns.AdmissionRequest(
+        project_id=PROJECT_ID, binding_project_id=PROJECT_ID, application_id=7, version_id=70, run_kind="interactive",
+        entry_point="schedule_test", caller_type="user", caller_id=OWNER, trigger_ref=TRIGGER_REF)
+    run(trigger=trigger, owner_request=owner_request)
     [predict] = ns.state.predicts
-    assert predict["mandate_ticket"] == "owner-ticket" and "unattended" not in predict
+    assert isinstance(predict["mandate_ticket"], str) and "unattended" not in predict
+    assert taken == [owner_request]
     assert (predict["user_id"], predict["is_system_user"]) == (OWNER, False)
     assert reads == [] and starter.writes.streak == []
 
 
 def test_off_run_now_sends_exactly_mains_call(ns, env, agent, run, starter):
     arm(ns, env, governed=False)
-    run(trigger="manual")   # off: the run endpoint minted nothing
+    run(trigger="manual")   # off: the run endpoint built no request
     [predict] = ns.state.predicts
     assert "mandate_ticket" not in predict and "unattended" not in predict and starter.writes.streak == []
 

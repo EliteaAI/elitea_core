@@ -144,13 +144,13 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
 
-def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_ticket: str | None = None) -> None:
+def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
     closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
     Under governance (C-1009) a cron firing is admitted on its owner's mandate or refused; a refusal ends it at once.
-    Run now and Test run (``owner_ticket``, minted by the run endpoint) are the owner's own run: no mandate (#7254).
+    Run now and Test run (``owner_request``, built by the run endpoint) are the owner's own run: no mandate (#7254).
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
@@ -207,10 +207,13 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_tic
     record_run_events(project_id, run_id, run_event(
         'agent_started', f"{'Pipeline' if source == 'pipeline' else 'Agent'} started: {loaded.entity_name}"))
     try:
-        # late: only a governed cron firing reads its mandate; its single-use ticket is minted right before the run is
-        # sent. A manual run carries the owner's own ticket (none when governance is off)
+        # late: only a governed cron firing reads its mandate. Either single-use ticket is minted right before the run
+        # is sent: a manual run's from the owner's own request (none when governance is off)
         if manual:
-            governance = {} if owner_ticket is None else {'mandate_ticket': owner_ticket}
+            governance = {}
+            if owner_request is not None:
+                from .mandate_admission import mint_owner_run_ticket
+                governance = {'mandate_ticket': mint_owner_run_ticket(owner_request)}
         else:
             from .mandate_admission import prepare_schedule_run
             governance = prepare_schedule_run(project_id=project_id, version=loaded.version, schedule_id=schedule_id,
