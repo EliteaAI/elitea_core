@@ -83,7 +83,7 @@ finds the event in the audit trail. The texts below are the fixed texts of the p
 | `DENIED_RBAC` | You do not have permission to use this agent's credentials. | Ask for the permission to use credentials in the project. |
 | `DENIED_DEVELOPMENT_CREDENTIAL` | This credential needs a grant before a draft can use it. | Ask for a grant on that credential, or use a personal one. |
 | `DENIED_DEVELOPMENT_CHILD` | A sub-agent of this draft asked for a credential that was not checked for it when the draft started (only the sub-agents the draft calls are checked, each on its own); the run was not started. | Call the sub-agent directly from the draft, or bind it. |
-| `DEVELOPMENT_RUNS_DISABLED` | Development runs (the editor's test chat, toolkit tests, on-demand indexing and toolkits with credentials in a chat) are switched off on this platform; an administrator can switch them on in Admin → Governance. The run was not started. | Ask an administrator. |
+| `DEVELOPMENT_RUNS_DISABLED` | Development runs (the editor's test chat, toolkits with credentials in a chat, and Run now / Test run of a schedule on an unbound version) are switched off on this platform; an administrator can switch them on in Admin → Governance. The run was not started. | Ask an administrator. |
 | `CREDENTIAL_REFERENCE_REQUIRED` | This agent uses a credential that is not registered for governed use; the run was not started. | Select the saved credential in the toolkit (not a title or a typed value), and ask for it to be registered. |
 | `CREDENTIAL_REFERENCE_INACTIVE` | A credential this agent uses is suspended or retired; the run was not started. | Ask the operator. Your personal credential may still be pending approval. |
 | `CREDENTIAL_CLASS_NOT_ALLOWED` | This agent uses a personal credential that belongs to someone else; the run was not started. | Use a credential of your own. |
@@ -114,10 +114,10 @@ Creating a credential **from the chat**, through a secure form that never passes
 
 A schedule is yours: you are its owner, also when you made it with "Build with AI" and saved it. It runs as you. Under
 Enforce its cron firings need an **active mandate for the same agent version, made for you as owner**. **Run now**
-and **Test run** act as you while development runs are on, with your sign-in and no mandate or admin role. A bound
-version runs its approved definition (on its binding, with your grants); an unbound one runs the draft, as the
-editor's test chat, which needs the right to edit the agent. While development runs are off they are refused with
-`DEVELOPMENT_RUNS_DISABLED`.
+and **Test run** act as you, with your sign-in and no mandate or admin role; an unbound version needs development
+runs on and the edit right. A bound version runs its approved definition (on its binding, with your grants); an
+unbound one runs the draft, as the editor's test chat, and is refused with `DEVELOPMENT_RUNS_DISABLED` while
+development runs are off.
 
 - Ask an operator for a mandate for that version with you as its owner and `run:schedule` allowed. It must be
   approved by a second person.
@@ -136,7 +136,7 @@ editor's test chat, which needs the right to edit the agent. While development r
 |---|---|---|
 | Off | Runs as before. | Runs as before. |
 | Audit only | Runs. A missing or unusable mandate is recorded as "would deny" for the operators. | Runs; evaluated as your own run. |
-| Enforce | Runs on your mandate, or is refused (below). | Acts as you while development runs are on: a bound version runs its approved definition, an unbound one the draft (edit right needed, your own credentials and project ones granted to you, as the editor's test chat). Microsoft credentials on your current sign-in. No mandate. Off: refused `DEVELOPMENT_RUNS_DISABLED`. Not from an API token. |
+| Enforce | Runs on your mandate, or is refused (below). | Acts as you: a bound version runs its approved definition; an unbound version needs development runs on and the edit right and runs the draft (your own credentials and project ones granted to you, as the editor's test chat; `DEVELOPMENT_RUNS_DISABLED` while they are off). Microsoft credentials on your current sign-in. No mandate. Not from an API token. |
 
 **What a failure looks like.** The run is marked **failed** at once (in under a second); it never sits in
 *running*. The schedule's run list shows the reason:

@@ -69,7 +69,7 @@ ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent", TOOLKIT_TA
 # The entry points a development run may come from (#7213, #7229): the editor's test chat, and a person testing a toolkit
 # or indexing it on demand. A toolkit run has no other profile: it is never a governed (bound) run
 TOOLKIT_ENTRY_POINTS = frozenset({ENTRY_TOOLKIT_TEST, ENTRY_INDEX_ON_DEMAND})
-# and the owner's Run now / Test run of a schedule (#7254), which obeys the switch as the editor's test chat does
+# and the owner's Run now / Test run of a schedule (#7254), whose draft obeys the switch as the editor's test chat
 DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, ENTRY_SCHEDULE_TEST, *TOOLKIT_ENTRY_POINTS})
 
 
@@ -169,8 +169,9 @@ MESSAGES = {
     "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
                                 "draft started (only the sub-agents the draft calls are checked, each on its own); the "
                                 "run was not started.",
-    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat and toolkits with credentials in a chat) "
-                                 "are switched off on this platform; an administrator can switch them on in Admin → "
+    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat, toolkits with credentials in a chat, and "
+                                 "Run now / Test run of a schedule on an unbound version) are switched off on this "
+                                 "platform; an administrator can switch them on in Admin → "
                                  "Governance. The run was not started.",
     "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
                                       "included) are not admitted yet; run the toolkit from the Elitea UI or through a "
@@ -1219,14 +1220,14 @@ def _admit(  # pylint: disable=R0914
         permissions = _author_permissions(request)
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
     elif request.entry_point == ENTRY_SCHEDULE_TEST:
-        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's run, only while development runs are
-        # on. A bound version runs its approved definition on its binding, as any bound run of that person (digest
-        # checked, sub-agents bound, the person's grants); an unbound one runs the draft, as the editor's test chat
-        # (the edit right, the author's own credentials). The run endpoint let only the schedule's owner start it;
-        # the right to run the agent is checked here, fail closed. No mandate is read
-        if not _is_development(request, settings):
-            raise _denied("DEVELOPMENT_RUNS_DISABLED" if _is_development(
-                request, replace(settings, allow_development_runs=True)) else "DENIED_ENTRY_POINT")
+        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's run, as the editor's test chat: a bound
+        # version runs its approved definition on its binding, as any bound run of that person (digest checked,
+        # sub-agents bound, the person's grants), whatever the development-runs setting; an unbound one runs the draft,
+        # only while development runs are on and with the edit right (the author's own credentials). The run endpoint
+        # let only the schedule's owner start it; the right to run the agent is checked here, fail closed. No mandate
+        # is read
+        if not _is_development(request, replace(settings, allow_development_runs=True)):
+            raise _denied("DENIED_ENTRY_POINT")   # a guard: system, token and anonymous callers are refused above
         permissions = _author_permissions(request)
         if PREDICT_PERMISSION not in permissions:
             raise _denied("DENIED_RBAC")
@@ -1235,6 +1236,8 @@ def _admit(  # pylint: disable=R0914
         except AdmissionDenied as denied:
             if denied.reason_code != "DENIED_BINDING":   # bound, but its definition changed: refused as any bound run
                 raise
+            if not _is_development(request, settings):   # the draft needs development runs on (#7227 D10)
+                raise _denied("DEVELOPMENT_RUNS_DISABLED") from None
             if AUTHOR_PERMISSION not in permissions:   # the draft: only someone who may edit the agent may run it
                 raise _denied("DENIED_RBAC") from None
             binding, rows = _read_draft(request)

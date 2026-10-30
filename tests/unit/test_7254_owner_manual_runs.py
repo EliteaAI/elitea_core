@@ -80,13 +80,21 @@ def test_an_editor_owner_is_admitted_as_their_own_run_with_their_subject_and_no_
     assert env.permission_calls == [(42, "default", 1)] and env.denied == []
 
 
-def test_with_development_runs_off_it_is_refused_with_the_readable_reason(ns, env):
-    error = None
+def test_an_unbound_version_with_development_runs_off_is_refused_with_the_readable_reason(ns, env):
     with pytest.raises(ns.exceptions.AdmissionDenied) as error:
         admit(ns, env, env.module(allow_development_runs=False))
     assert (error.value.reason_code, error.value.message) == (
         "DEVELOPMENT_RUNS_DISABLED", ns.adm.MESSAGES["DEVELOPMENT_RUNS_DISABLED"])
+    assert "Run now / Test run of a schedule" in error.value.message   # D10: the text names it
     assert contexts(env, ns) == []
+
+
+def test_a_bound_version_with_development_runs_off_is_admitted_on_its_binding(ns, env):
+    """D9/D11: as the editor's test chat, the switch is about drafts only."""
+    binding = env.seed_agent(version_id=71)
+    admit(ns, env, env.module(allow_development_runs=False), version_id=71)
+    [row] = contexts(env, ns)
+    assert (row.profile, str(row.agent_binding_ref)) == ("governed", str(binding))
 
 
 def test_a_bound_version_runs_its_approved_definition_on_its_binding(ns, env):
