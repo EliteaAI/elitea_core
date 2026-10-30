@@ -434,11 +434,14 @@ def _ledger_entry(entry: dict) -> dict:
     The ledger keeps each provider's own convention, so its ``input_tokens`` leaves cache out for
     Anthropic and Bedrock. ``billable_input_tokens`` is input without cache for every provider, and
     adding the cache reads and writes back gives one convention (#7300). A breakdown from a usage
-    plugin that does not send it keeps its ``input_tokens``."""
+    plugin that does not send it keeps its ``input_tokens``. The rebuilt figure is never below the
+    ledger's own ``input_tokens`` in either convention, so a zero or missing billable value cannot
+    make it under-count."""
     if 'billable_input_tokens' not in entry:
         return entry
-    return {**entry, 'input_tokens': _count(entry.get('billable_input_tokens'))
-            + _count(entry.get('cache_read_tokens')) + _count(entry.get('cache_creation_tokens'))}
+    rebuilt = (_count(entry.get('billable_input_tokens'))
+               + _count(entry.get('cache_read_tokens')) + _count(entry.get('cache_creation_tokens')))
+    return {**entry, 'input_tokens': max(rebuilt, _count(entry.get('input_tokens')))}
 
 
 def _expects_ledger(row: dict) -> bool:
