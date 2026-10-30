@@ -210,7 +210,7 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
         _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait (R1.6)
         append_run_events(session, run_id, event)
     session.commit()
-    if not paused:  # a run that is not running stays as it is, with no notice (R1.4)
+    if not paused:  # a run that is not running stays as it is, with no notice
         return False
     try:
         run = session.get(EntityScheduleRun, run_id)
