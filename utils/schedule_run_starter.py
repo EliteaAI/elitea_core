@@ -123,14 +123,15 @@ def _confirmed_pairs(review: dict):
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
     """The risk outcome of the run for the run log and its `risk_check` event (owner CR 2026-10-21).
 
-    `blocked` (a blocking finding), `needs_approval` (sensitive tools, or "Run without asking" turned
+    `blocked` (a blocking finding), `needs_approval` (listed sensitive tools, or "Run without asking" turned
     back to "Pause and ask me"), `unknown` (a tool could not be checked) or `ok`.
     """
     from .schedule_risk import scan_complete
     if review['blocking']:
         reasons = '; '.join(item['message'] for item in review['blocking'])
         return 'blocked', run_event('risk_check', f'Risk check: blocked: {reasons}', 'error')
-    if review['sensitive']:
+    # A personal credential keeps its own item and confirmation; only a listed tool needs approval at run time
+    if any(item.get('code') == 'sensitive_action' for item in review['sensitive']):
         tools = ', '.join(f"{item.get('toolkit')} · {item.get('tool') or '*'}" for item in review['sensitive'])
         text = f'Risk check: needs approval for {tools}'
         if auto_approve:

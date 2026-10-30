@@ -22,7 +22,7 @@ SENSITIVE = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_ema
 
 @pytest.fixture
 def run(monkeypatch):
-    predicts, setting_reads, blocks, scans, finishes = [], [], [], [], []
+    predicts, setting_reads, blocks, scans, finishes, outcomes = [], [], [], [], [], []
     state = types.SimpleNamespace(review=clean_review())
 
     def allowed(project_id):
@@ -42,6 +42,9 @@ def run(monkeypatch):
         review=lambda *args: scans.append(args) or state.review,
     )
 
+    monkeypatch.setattr(starter, "record_run_events",
+                        lambda *args, **kw: outcomes.append(kw["risk_outcome"]) if "risk_outcome" in kw else None)
+
     def start(rule, setting, entity_type="pipeline", confirmed="fp-1", confirmed_by=OWNER):
         allowed.value = setting
         loaded = types.SimpleNamespace(
@@ -55,6 +58,7 @@ def run(monkeypatch):
 
     start.state, start.blocks, start.scans, start.predicts = state, blocks, scans, predicts
     start.finishes = finishes
+    start.outcomes = outcomes
     return start
 
 
@@ -194,3 +198,28 @@ def test_a_run_under_pause_and_ask_starts_when_the_scan_only_notices_a_sign_in(r
     kwargs, _ = run("pause_and_ask", True)
 
     assert kwargs is not None and run.blocks == [] and run.finishes == []
+
+
+def test_pause_and_ask_without_a_sensitive_tool_starts_without_a_stop_and_with_outcome_ok(run):
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert run.outcomes == ["ok"]
+
+
+def test_pause_and_ask_with_a_listed_tool_gives_needs_approval(run):
+    run.state.review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert run.outcomes == ["needs_approval"]
+
+
+def test_a_personal_credential_alone_does_not_give_needs_approval(run):
+    personal = {"code": "personal_credential", "toolkit": "GitHub", "tool": None}
+    run.state.review = {**clean_review(), "sensitive": [personal], "fingerprint": "fp-1"}
+
+    run("pause_and_ask", True)
+
+    assert run.outcomes == ["ok"]

@@ -76,3 +76,39 @@ def test_el7011_cr_tool_without_info_gets_the_default_badge_and_effect(security)
 def test_el7011_cr_an_unknown_badge_falls_back_to_needs_approval(security):
     _set(security, sensitive_tool_info={'jira': {'delete_issue': {'badge': 'red', 'effect': 'Deletes'}}})
     assert security.module.sensitive_tool_info('jira', 'delete_issue')['badge'] == 'needs_approval'
+
+
+@pytest.mark.parametrize('name', ['CreateFile', 'create-file', 'Create File', 'github___create_file',
+                                  'github:create_file', 'elitea_core:CREATE_FILE'])
+def test_tool_name_aliases_and_separators_match_a_listed_tool(security, name):
+    _set(security, sensitive_tools={'github': ['create_file']})
+    assert security.module.is_tool_sensitive('github', name) is True
+
+
+def test_a_listed_name_in_another_style_matches(security):
+    _set(security, sensitive_tools={'github': ['Create-File']})
+    assert security.module.is_tool_sensitive('github', 'create_file') is True
+
+
+def test_a_star_toolkit_entry_lists_the_tool_for_any_toolkit(security):
+    _set(security, sensitive_tools={'*': ['delete_file']})
+    assert security.module.is_tool_sensitive('gitlab', 'delete_file') is True
+    assert security.module.is_tool_sensitive('gitlab', 'list_files') is False
+
+
+def test_a_legacy_toolkit_type_spelling_matches_the_registered_type(security):
+    _set(security, sensitive_tools={'azure_devops_repos': ['create_branch']})
+    assert security.module.is_tool_sensitive('ado_repos', 'create_branch') is True
+    _set(security, sensitive_tools={'ado_repos': ['create_branch']})
+    assert security.module.is_tool_sensitive('azure_devops_repos', 'create_branch') is True
+
+
+def test_tool_info_matches_aliases_and_the_star_toolkit(security):
+    _set(security, sensitive_tool_info={'*': {'delete_file': {'badge': 'deletes_data', 'effect': 'Deletes a file'}}})
+    assert security.module.sensitive_tool_info('github', 'github___DeleteFile') == {
+        'badge': 'deletes_data', 'effect': 'Deletes a file'}
+
+
+def test_listed_sensitive_tools_returns_the_entries_of_the_type_and_the_star(security):
+    _set(security, sensitive_tools={'github': ['create_pull_request'], 'jira': ['x'], '*': ['delete_file']})
+    assert security.module.listed_sensitive_tools('GitHub') == ['create_pull_request', 'delete_file']

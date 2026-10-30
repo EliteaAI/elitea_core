@@ -80,13 +80,15 @@ def _personal_credential(tool, name) -> dict:
 
 
 def _sensitive_warnings(tool, name) -> list:
-    selected = (tool.settings or {}).get('selected_tools') or []
-    if not selected:
-        return []
     from .toolkit_security import (  # late: the policy reads the plugin descriptor
         is_tool_sensitive,
+        listed_sensitive_tools,
         sensitive_tool_info,
     )
+    # An empty selection exposes every tool of the toolkit at run time. The core has no tool list of the
+    # toolkit here, so the listed tools of its type stand in: a listed tool is never hidden by an empty list.
+    selected = (tool.settings or {}).get('selected_tools') or listed_sensitive_tools(tool.type)
+    selected = list(dict.fromkeys(selected))
     return [
         _warning(SENSITIVE_CODE, f'Tool "{tool_name}" of toolkit "{name}" needs approval',
                  toolkit=name, toolkit_type=tool.type, tool=tool_name, risk_level='needs_approval',

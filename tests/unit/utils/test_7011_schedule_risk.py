@@ -92,6 +92,7 @@ def scan(isolated_sys_modules):
     sys.modules[models_all.__name__] = models_all
     security = types.ModuleType(f'{PKG}.utils.toolkit_security')
     security.is_tool_sensitive = lambda type_, tool_name: (type_, tool_name) in state.sensitive
+    security.listed_sensitive_tools = lambda type_: [name for kind, name in sorted(state.sensitive) if kind == type_]
     security.sensitive_tool_info = lambda type_, tool_name: state.tool_info.get((type_, tool_name), DEFAULT_INFO)
     sys.modules[security.__name__] = security
     app_tools = types.ModuleType(f'{PKG}.utils.application_tools')
@@ -239,6 +240,17 @@ class TestEL7011R2SensitiveActions:
     def test_el7011_r2_3_unlisted_tool_gives_no_warning(self, scan):
         scan.sensitive = {('jira', 'delete_issue')}
         scan.version = _version(tools=[_tool(settings={'selected_tools': ['get_issue']})])
+        assert scan.run() == []
+
+    def test_an_empty_selection_scans_the_listed_tools_of_the_toolkit_type(self, scan):
+        scan.sensitive = {('jira', 'delete_issue')}
+        scan.version = _version(tools=[_tool(settings={})])
+        [warning] = scan.run()
+        assert (warning['code'], warning['tool']) == ('sensitive_action', 'delete_issue')
+
+    def test_an_empty_selection_reports_nothing_when_no_tool_is_listed(self, scan):
+        scan.sensitive = {('github', 'delete_file')}
+        scan.version = _version(tools=[_tool(settings={'selected_tools': []})])
         assert scan.run() == []
 
     def test_el7011_r2_3_no_policy_gives_no_warning(self, scan):
