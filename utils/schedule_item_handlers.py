@@ -43,7 +43,7 @@ from .schedule_service import (
     update_schedule,
 )
 from .schedule_timing import ScheduleLimitError
-from .trigger_governance import governance_notice_for
+from .trigger_governance import schedule_governance_notice
 
 MAX_RUNS_LIMIT = 100
 RUN_FIELDS = (
@@ -190,7 +190,8 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
     """Details of a saved row, with every finding of the risk review as the save `warnings` (R2.4).
 
     `review` is the scan the save already ran; a pause or a resume scans here. `notice` is the governance
-    notice of a create or an edit: the schedule is saved, but its version has no active binding.
+    notice of a create or an edit: the schedule is saved, but its version has no active binding or its owner
+    no mandate.
     """
     if review is None:
         from .schedule_risk import scan_schedule
@@ -265,8 +266,9 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
                     body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row),
                 )
             row = update_schedule(session, project_id, row, body, scope, confirmed)
-            notice = governance_notice_for(
-                module, session, project_id, row.application_id, row.version_id, "schedule") if reviewed else None
+            notice = schedule_governance_notice(
+                module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id,
+            ) if reviewed else None
             return _saved(row, scope, project_id, review, notice), 200
         except ScheduleError as e:
             return e.response
@@ -362,8 +364,8 @@ class ScheduleItemHandlers:
                 return e.response
             except ScheduleLimitError as e:
                 return refusal(LIMIT_REACHED, str(e), 409)
-            notice = governance_notice_for(
-                self.module, session, project_id, row.application_id, row.version_id, "schedule")
+            notice = schedule_governance_notice(
+                self.module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id)
             return _saved(row, scope, project_id, review, notice), 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))
@@ -456,6 +458,13 @@ class ScheduleItemHandlers:
             if row.version_id is None:
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
             entity_type = row.entity_type
+            try:   # the owner's own run (#7254), from this signed-in request; None when off. Built before the run row
+                from .mandate_admission import owner_run_request  # pylint: disable=C0415
+                owner_request = owner_run_request(self.module, project_id=project_id, application_id=row.application_id,
+                                                  version_id=row.version_id, schedule_id=schedule_id)
+            except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
+                log.exception('Schedule %s: cannot build the owner run request', schedule_id)
+                return refusal("run_start_failed", "The run could not start", 500)
             run_id = insert_run(session, schedule_id, body.trigger, scope.user_id)
             if run_id is None:
                 active_id = session.scalar(select(EntityScheduleRun.id).where(
@@ -464,7 +473,7 @@ class ScheduleItemHandlers:
                 ))
                 return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
             session.commit()
-            if not start_schedule_run(entity_type, project_id, schedule_id, run_id):
+            if not start_schedule_run(entity_type, project_id, schedule_id, run_id, owner_request):
                 fail_run(session, run_id, START_FAILED)
                 session.commit()
                 return refusal("run_start_failed", "The run could not start", 500)

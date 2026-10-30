@@ -16,7 +16,7 @@ import textwrap
 import types
 import uuid
 from collections import OrderedDict
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -903,6 +903,10 @@ def index_tick(ns, env, monkeypatch):
         f"{PKG}.utils.utils", make_yield_to_hub=lambda runtime: (lambda: None), end_ambient_transaction=lambda: None))
     monkeypatch.setitem(sys.modules, f"{PKG}.utils.maintenance_gate", stub(
         f"{PKG}.utils.maintenance_gate", is_maintenance_active=lambda: False))
+    outage = next(node for node in ast.parse(source_of("utils/schedule_runs.py")).body   # the real #7254 outage set
+                  if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "OUTAGE_REFUSALS")
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_runs", stub(
+        f"{PKG}.utils.schedule_runs", OUTAGE_REFUSALS=eval(compile(ast.Expression(outage.value), "o", "eval"))))
     web = types.SimpleNamespace(rpc=lambda *a, **k: (lambda func: func))
     monkeypatch.setattr(sys.modules["pylon.core.tools"], "web", web, raising=False)
     monkeypatch.setattr(ns.tools, "VaultClient", mock.MagicMock(), raising=False)
@@ -947,7 +951,9 @@ def test_a_governed_index_tick_refuses_the_schedule_before_any_credential_or_tok
     run_index_tick(ns, env, index_tick, {key: {"created_by": CREATOR}})
     helpers = index_tick.helpers
     [call] = helpers.handle_failed_index_schedule.call_args_list
-    assert call.args[5] == ns.adm.MESSAGES[code] and call.args[2] == CREATOR and call.args[3] is index_tick.toolkit
+    # the readable remedy (#7305): an index-schedule mandate for the schedule owner on this toolkit
+    assert call.args[5] == ns.adm.INDEX_SCHEDULE_MESSAGES[code] and "index-schedule mandate" in call.args[5]
+    assert call.args[2] == CREATOR and call.args[3] is index_tick.toolkit
     assert call.kwargs == {"expand_user_id": CREATOR}
     helpers.stamp_schedule_last_run.assert_called_once()
     assert helpers.resolve_credentials.call_count == 0
@@ -981,9 +987,243 @@ def test_flag_off_the_index_tick_goes_on_to_resolve_credentials_as_today(ns, env
 
 def test_the_governed_branch_sits_right_after_the_due_count_and_before_any_resolution():
     text = source_of("rpc/index_scheduling.py")
-    due, governed = text.index("stats['due'] += 1"), text.index("if is_governed(self):")
-    assert due < governed < text.index("resolve_credentials(") < text.index("get_system_user_token(project_id)")
+    due, governed = text.index("stats['due'] += 1"), text.index("governed = is_governed(self)")
+    refusal = text.index("if governed and admission is None:")
+    assert due < governed < refusal < text.index("resolve_credentials(") < text.index("get_system_user_token(project_id)")
     assert text.count("is_governed(self)") == 1
+
+
+# --- #7305: scheduled indexing under a toolkit mandate ---------------------------------------------------------------
+
+def a_toolkit_mandate(state="active", owner=OWNER, operations=("run:index_schedule",), valid_until=None):
+    return types.SimpleNamespace(id=uuid.uuid4(), toolkit_id=12, owner_user_id=owner, revision=1, state=state,
+                                 allowed_operations=list(operations),
+                                 valid_until=valid_until or datetime.now(timezone.utc) + timedelta(days=9))
+
+
+def ready_to_dispatch(index_tick, monkeypatch, mandates):
+    """The tick past the governed branch: the credential, the model, the token and the expansion resolve; ``mandates``
+    is what the one mandate read of the project answers (counted)."""
+    helpers, tools_module = index_tick.helpers, index_tick.tools_module
+    helpers.resolve_credentials.side_effect = None
+    helpers.resolve_credentials.return_value = (True, None, False)
+    helpers.resolve_index_llm_settings.return_value = ({"model_name": "m-1"}, None, False)
+    helpers.retry_escalation_due.return_value = False
+    index_tick.predict_utils.get_system_user_token.side_effect = None
+    index_tick.predict_utils.get_system_user_token.return_value = "system-token-made-up"
+    tools_module.start_index_task.side_effect = None
+    tools_module.should_trigger_scheduled_index.return_value = True
+    index = types.SimpleNamespace(id=1, cmetadata={"state": "done", "index_configuration": {"index_name": "idx"}})
+    tools_module.get_session_for_schema.return_value.__enter__.return_value.query.return_value.filter.return_value \
+        .first.return_value = index
+    rpc = types.SimpleNamespace(
+        project_list=lambda filter_=None: [{"id": 1}],
+        configurations_expand=lambda **kwargs: {**kwargs["settings"],
+                                                "pgvector_configuration": {"connection_string": "postgresql://made-up"}})
+    monkeypatch.setattr(index_tick.module, "rpc_tools", types.SimpleNamespace(
+        RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(timeout=lambda seconds: rpc))))
+    reads = []
+    monkeypatch.setattr(index_tick.module, "latest_toolkit_mandates",
+                        lambda session, project_id: reads.append(project_id) or dict(mandates))
+    return reads
+
+
+def run_tick_as(ns, env, index_tick, schedules, **mode):
+    module = arm(ns, env, **mode)
+    module.context = types.SimpleNamespace(web_runtime=None)
+    module.task_node = mock.MagicMock()
+    index_tick.toolkit.meta = {"indexes_meta": {"idx": {"schedules": schedules}}}
+    index_tick.module.RPC.check_index_scheduling(module)
+    return module
+
+
+@pytest.mark.parametrize("key, created_by", [(str(OWNER), OWNER), ("-1", OWNER)])
+def test_a_schedule_its_owners_toolkit_mandate_covers_is_dispatched_with_the_mandate_admission(
+        ns, env, index_tick, monkeypatch, key, created_by):
+    mandate = a_toolkit_mandate()
+    reads = ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): mandate})
+    run_tick_as(ns, env, index_tick, {key: {"created_by": created_by}})
+    [call] = index_tick.tools_module.start_index_task.call_args_list
+    admission = call.kwargs["admission"]
+    assert (admission.run_kind, admission.entry_point, admission.caller_type, admission.caller_id) == (
+        "mandate", "index_schedule", "trigger", None)
+    assert admission.mandate_ref == str(mandate.id) and admission.toolkit_id == 12
+    assert admission.trigger_ref == f"index_schedule:12:idx:{key}"
+    assert admission.application_id is None and admission.version_id is None
+    assert call.args[1]["user_id"] == OWNER   # the run acts for the mandate's owner
+    assert reads == [1]   # one read of the project's toolkit mandates, none per schedule
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0 and env.denied == []
+    # the credential the schedule names travels as a reference to its row (#7305)
+    [applied] = index_tick.helpers.as_credential_reference.call_args_list
+    assert applied.args[1] == "github" and applied.args[0] is index_tick.helpers.resolve_credentials.call_args.kwargs[
+        "project_settings"]
+
+
+def test_a_secret_template_in_the_index_parameters_is_marked_for_the_refusal_at_dispatch(ns, env, index_tick, monkeypatch):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    index = index_tick.tools_module.get_session_for_schema.return_value.__enter__.return_value.query.return_value \
+        .filter.return_value.first.return_value
+    index.cmetadata["index_configuration"] = {"index_name": "idx", "query": "{{secret.some_name}}"}
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}})
+    [call] = index_tick.tools_module.start_index_task.call_args_list
+    assert call.args[1][ns.credential_slots.FREE_FORM_SECRET_MARK] is True   # admit_dispatch refuses it
+
+
+def test_the_toolkit_mandates_are_read_once_per_project_whatever_the_number_of_schedules(
+        ns, env, index_tick, monkeypatch):
+    reads = ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}, "-1": {"created_by": OWNER},
+                                      "77": {"created_by": 77}})
+    assert reads == [1]
+    assert index_tick.tools_module.start_index_task.call_count == 2   # 77 has no mandate: refused
+    [refused] = index_tick.helpers.handle_failed_index_schedule.call_args_list
+    assert refused.args[5] == ns.adm.INDEX_SCHEDULE_MESSAGES["AUTHORIZATION_REQUIRED"]
+
+
+@pytest.mark.parametrize("key, created_by, code, resave", [
+    ("-1", 77, "MANDATE_REQUIRED", False),               # a team schedule saved last by someone else
+    (str(OWNER), 77, "AUTHORIZATION_REQUIRED", True),    # the owner's key, saved by someone else: they save it again
+    (str(OWNER), None, "AUTHORIZATION_REQUIRED", True),  # saved before the saver was recorded (C9-SEC-72): the same
+    ("77", 77, "AUTHORIZATION_REQUIRED", False),         # another person's schedule
+])
+def test_a_mandate_made_for_someone_else_never_covers_the_schedule(ns, env, index_tick, monkeypatch, key, created_by,
+                                                                   code, resave):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    run_tick_as(ns, env, index_tick, {key: {"created_by": created_by}})
+    assert index_tick.tools_module.start_index_task.call_count == 0
+    [call] = index_tick.helpers.handle_failed_index_schedule.call_args_list
+    assert call.args[5] == (ns.adm.INDEX_SCHEDULE_RESAVE_MESSAGE if resave else ns.adm.INDEX_SCHEDULE_MESSAGES[code])
+    [event] = env.denied
+    assert (event["reason_code"], event["caller_ref"]) == (code, "schedule:index:12")
+
+
+def test_with_no_toolkit_mandate_the_refusal_is_the_one_of_today(ns, env, index_tick, monkeypatch):
+    ready_to_dispatch(index_tick, monkeypatch, {})
+    run_tick_as(ns, env, index_tick, {"5": {"created_by": CREATOR}})
+    helpers = index_tick.helpers
+    [call] = helpers.handle_failed_index_schedule.call_args_list
+    assert call.args[5] == ns.adm.INDEX_SCHEDULE_MESSAGES["AUTHORIZATION_REQUIRED"]
+    helpers.stamp_schedule_last_run.assert_called_once()
+    assert helpers.resolve_credentials.call_count == 0 and index_tick.tools_module.start_index_task.call_count == 0
+    assert index_tick.predict_utils.get_system_user_token.call_count == 0
+    [event] = env.denied
+    assert (event["reason_code"], event["caller_ref"], event["decision"]) == (
+        "AUTHORIZATION_REQUIRED", "schedule:index:12", "deny")
+
+
+@pytest.mark.parametrize("code", ["MANDATE_INACTIVE", "MANDATE_EXPIRED", "DENIED_RBAC", "DENIED_MANDATE_CONSENT_REQUIRED",
+                                  "TOOLKIT_CHANGED", "IDENTITY_SUBJECT_UNLINKED"])
+def test_a_refusal_by_admission_ends_the_slot_with_the_readable_reason_and_no_second_deny(
+        ns, env, index_tick, monkeypatch, code):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    index_tick.tools_module.start_index_task.side_effect = ns.exceptions.AdmissionDenied(code, ns.adm.MESSAGES[code])
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}})
+    helpers = index_tick.helpers
+    [call] = helpers.handle_failed_index_schedule.call_args_list
+    assert call.args[5] == ns.adm.MESSAGES[code]
+    helpers.stamp_schedule_last_run.assert_called_once()   # the slot is consumed
+    assert env.denied == []   # admission audited it, once; the tick adds none
+
+
+@pytest.mark.parametrize("mandate, code", [
+    (a_toolkit_mandate(state="suspended"), "MANDATE_INACTIVE"),
+    (a_toolkit_mandate(state="revoked"), "MANDATE_INACTIVE"),
+    (a_toolkit_mandate(valid_until=NOW - timedelta(days=1)), "MANDATE_EXPIRED"),
+    (a_toolkit_mandate(operations=("run:schedule",)), "DENIED_OPERATION"),
+])
+def test_a_mandate_whose_row_refuses_is_refused_before_anything_is_resolved(ns, env, index_tick, monkeypatch, mandate,
+                                                                            code):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): mandate})
+    index_tick.helpers.resolve_credentials.side_effect = AssertionError("credentials were resolved")
+    index_tick.predict_utils.get_system_user_token.side_effect = AssertionError("the system token was fetched")
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}})
+    helpers = index_tick.helpers
+    [call] = helpers.handle_failed_index_schedule.call_args_list
+    assert call.args[5] == ns.adm.MESSAGES[code]
+    helpers.stamp_schedule_last_run.assert_called_once()
+    assert helpers.resolve_credentials.call_count == 0 and index_tick.tools_module.start_index_task.call_count == 0
+    assert index_tick.predict_utils.get_system_user_token.call_count == 0
+    assert index_tick.tools_module.get_session_for_schema.call_count == 0   # no vector store connect, no stale stop
+    [event] = env.denied
+    assert (event["reason_code"], event["mandate_ref"], event["caller_ref"]) == (
+        code, str(mandate.id), "schedule:index:12")
+
+
+@pytest.mark.parametrize("code", ["DEPENDENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE", "INTERNAL_TOKEN_UNAVAILABLE",
+                                  "WORKER_CAPABILITY_UNAVAILABLE", "STORE_UNAVAILABLE"])
+def test_an_outage_refusal_keeps_the_slot_and_is_retried_until_the_grace_ends(ns, env, index_tick, monkeypatch, code):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    index_tick.tools_module.start_index_task.side_effect = ns.exceptions.AdmissionDenied(code, ns.adm.MESSAGES[code])
+    helpers = index_tick.helpers
+    helpers.retry_escalation_due.return_value = False
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}})
+    assert helpers.handle_failed_index_schedule.call_count == 0 and helpers.stamp_schedule_last_run.call_count == 0
+    helpers.stamp_schedule_retry_since.assert_called_once()   # the outage clock starts
+    assert helpers.clear_schedule_retry_since.call_count == 0
+    helpers.retry_escalation_due.return_value = True   # it outlived the grace: reported once, the slot consumed
+    helpers.describe_grace.return_value = "an hour"
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER, "retry_since": "2026-10-30T00:00:00+00:00"}})
+    [call] = helpers.handle_failed_index_schedule.call_args_list
+    assert call.args[5] == f"{ns.adm.MESSAGES[code]}; still failing for over an hour"
+    helpers.stamp_schedule_last_run.assert_called_once()
+
+
+def test_a_lasting_refusal_is_not_an_outage(ns, env, index_tick, monkeypatch):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    index_tick.tools_module.start_index_task.side_effect = ns.exceptions.AdmissionDenied(
+        "DENIED_ASSERTION_UNAVAILABLE", ns.adm.MESSAGES["DENIED_ASSERTION_UNAVAILABLE"])
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}})
+    index_tick.helpers.stamp_schedule_last_run.assert_called_once()   # the owner fixes it: the slot ends
+
+
+def test_an_unreadable_mandate_table_refuses_nothing_and_retries_on_the_next_scan(ns, env, index_tick, monkeypatch):
+    ready_to_dispatch(index_tick, monkeypatch, {})
+    monkeypatch.setattr(index_tick.module, "latest_toolkit_mandates",
+                        mock.MagicMock(side_effect=RuntimeError("column missing")))
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}, "-1": {"created_by": OWNER}})
+    assert index_tick.module.latest_toolkit_mandates.call_count == 1   # not once per schedule
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0
+    assert index_tick.helpers.stamp_schedule_last_run.call_count == 0 and env.denied == []
+    assert index_tick.tools_module.start_index_task.call_count == 0
+
+
+@pytest.mark.parametrize("mandates, code", [
+    ({}, "AUTHORIZATION_REQUIRED"),
+    ({(12, OWNER): a_toolkit_mandate(state="suspended")}, "MANDATE_INACTIVE"),
+    ({(12, OWNER): a_toolkit_mandate(valid_until=NOW - timedelta(days=1))}, "MANDATE_EXPIRED"),
+    ({(12, OWNER): a_toolkit_mandate(operations=("run:schedule",))}, "DENIED_OPERATION"),
+])
+def test_audit_only_records_one_would_deny_per_firing_and_the_run_goes_on(
+        ns, env, index_tick, monkeypatch, mandates, code):
+    ready_to_dispatch(index_tick, monkeypatch, mandates)
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}}, governed=False, audit=True)
+    [call] = index_tick.tools_module.start_index_task.call_args_list
+    assert call.kwargs["admission"] is None   # dispatched as before
+    [event] = env.denied
+    assert (event["decision"], event["would_deny"], event["reason_code"], event["caller_ref"],
+            event["toolkit_instance_id"]) == ("allow", True, code, f"index_schedule:12:idx:{OWNER}", "12")
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0
+
+
+def test_audit_only_with_a_usable_mandate_records_nothing(ns, env, index_tick, monkeypatch):
+    ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}}, governed=False, audit=True)
+    assert index_tick.tools_module.start_index_task.call_count == 1 and env.denied == []
+
+
+def test_off_reads_no_mandate_and_writes_no_audit(ns, env, index_tick, monkeypatch):
+    reads = ready_to_dispatch(index_tick, monkeypatch, {(12, OWNER): a_toolkit_mandate()})
+    run_tick_as(ns, env, index_tick, {str(OWNER): {"created_by": OWNER}, "-1": {"created_by": CREATOR}},
+                governed=False)
+    assert reads == [] and env.denied == [] and env.recorded == []
+    assert index_tick.helpers.as_credential_reference.call_count == 0   # the row as before
+    calls = index_tick.tools_module.start_index_task.call_args_list
+    assert len(calls) == 2 and all(call.kwargs["admission"] is None for call in calls)
+    assert [call.args[1]["user_id"] for call in calls] == [OWNER, CREATOR]   # the schedule's author, as before
+    assert all(set(call.args[1]) == {   # the payload of before #7305, key for key
+        "tool_name", "project_id", "toolkit_config", "tool_params", "llm_model", "llm_settings", "user_id",
+        "project_auth_token", "deployment_url"} for call in calls)
+    assert all(set(call.kwargs) == {"initiator", "admission"} and call.kwargs["admission"] is None for call in calls)
 
 
 # --- the start_task wrapper and the owner event module ------------------------------------------

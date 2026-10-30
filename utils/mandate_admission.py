@@ -109,7 +109,7 @@ def take_trigger_admission(  # pylint: disable=R0913
 ) -> Optional[AdmissionRequest]:
     """The request a ticket was minted for, once, only for the project and agent version ``predict_sio`` loaded itself.
     The ticket is spent even when it does not match. ``None`` means "no mandate": the run is an ordinary system run."""
-    if ticket is None or not is_governed(module):
+    if ticket is None or not (is_governed(module) or is_auditing(module)):   # audit only: an owner's Run now (#7254)
         return None
     request = module._mandate_tickets.take(ticket)  # pylint: disable=W0212
     if request is None or request.project_id != project_id or request.version_id != version_id:
@@ -147,22 +147,47 @@ def schedule_trigger_ref(schedule_id) -> str:
     return f"schedule:entity:{schedule_id}"
 
 
-def _covering_mandate(project_id, version, owner_id):
+def owner_mandate(session, project_id, version_id, owner_id):
     """The latest mandate row of the version when it was made for the schedule's own owner, else ``None``. A schedule
     is its owner's, so another person's mandate never lends its authority to it. One indexed read, the one the legacy
     scheduler does."""
-    with db.get_session(project_id) as session:
-        mandate = latest_mandates(session, project_id, [version.id]).get(version.id)
+    mandate = latest_mandates(session, project_id, [version_id]).get(version_id)
     if mandate is None or mandate.owner_user_id is None or mandate.owner_user_id != owner_id:
         return None
     return mandate
+
+
+def owner_run_request(module, *, project_id, application_id, version_id, schedule_id) -> Optional[AdmissionRequest]:
+    """The admission request of the owner's Run now or Test run of a schedule (#7254), or ``None`` when governance is
+    off (nothing is built or read). Built by the run endpoint, which holds the signed-in owner: the owner's interactive
+    run (entry point ``schedule_test``) from that request's holder. It stays in this process: the starter mints its
+    single-use ticket right before the run is sent (``mint_owner_run_ticket``), as a cron firing's. No mandate is
+    read."""
+    from types import SimpleNamespace  # pylint: disable=C0415
+    from ..models.pd.admission import ENTRY_SCHEDULE_TEST, admission_request_from  # pylint: disable=C0415
+    request = admission_request_from(
+        module, sid=None, project_id=project_id, binding_project_id=project_id,
+        version_row=SimpleNamespace(id=version_id, application_id=application_id), run_kind="interactive",
+        entry_point=ENTRY_SCHEDULE_TEST)
+    return None if request is None else request.model_copy(update={"trigger_ref": schedule_trigger_ref(schedule_id)})
+
+
+def mint_owner_run_ticket(request: AdmissionRequest) -> str:
+    """The single-use ticket ``predict_sio`` takes for an owner's run request (#7254), minted right before the send."""
+    return this.module._mandate_tickets.mint(request)  # pylint: disable=W0212
+
+
+def _covering_mandate(project_id, version, owner_id):
+    """``owner_mandate`` in a session of its own."""
+    with db.get_session(project_id) as session:
+        return owner_mandate(session, project_id, version.id, owner_id)
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _audit_only_refusal(mandate) -> Optional[str]:
+def audit_only_refusal(mandate, operation=OPERATION_OF["pipeline_schedule"]) -> Optional[str]:
     """What enforce would refuse a run for, as far as the covering mandate's row says, in the order ``_admit_mandate``
     checks it: no mandate, past its end date or expired, suspended or revoked, or not allowed for schedules. ``None``:
     the row would let the run on (the rest of a mandate admission is not rehearsed)."""
@@ -176,9 +201,24 @@ def _audit_only_refusal(mandate) -> Optional[str]:
         return "MANDATE_EXPIRED"
     if mandate.state != "active":
         return "MANDATE_INACTIVE"
-    if OPERATION_OF["pipeline_schedule"] not in (mandate.allowed_operations or []):
+    if operation not in (mandate.allowed_operations or []):
         return "DENIED_OPERATION"
     return None
+
+
+def index_schedule_trigger_ref(toolkit_id, index_meta_id, schedule_key) -> str:
+    """One index schedule of a toolkit (#7305), as admission and the audit trail name it."""
+    return f"index_schedule:{toolkit_id}:{index_meta_id}:{schedule_key}"
+
+
+def toolkit_mandate_request(*, project_id, toolkit_id, mandate, trigger_ref) -> AdmissionRequest:
+    """The admission request of one firing of an index schedule its owner's toolkit mandate covers (#7305). Built by the
+    index tick, which loaded the schedule itself and dispatches in this process (no ticket): the mandate is named here,
+    whether it can run is decided by admission from the row at the moment of the firing."""
+    return AdmissionRequest(
+        project_id=project_id, binding_project_id=project_id, run_kind="mandate", entry_point="index_schedule",
+        caller_type="trigger", caller_id=None, mandate_ref=str(mandate.id), trigger_ref=trigger_ref,
+        toolkit_id=toolkit_id)
 
 
 def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
@@ -188,7 +228,7 @@ def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
     builds without a ticket is a system run (refused as ``MANDATE_REQUIRED`` under enforce, not rehearsed under audit
     only), while its payload stays the owner's. Enforce: a run its owner's mandate covers gets a ticket for the mandate
     request (entry point ``schedule``). Audit only: a run enforce would refuse for its mandate leaves one ``would_deny``
-    event (``_audit_only_refusal``); the rest of a mandate admission is not rehearsed. The audit-only evaluation never
+    event (``audit_only_refusal``); the rest of a mandate admission is not rehearsed. The audit-only evaluation never
     stops a run.
     """
     module = this.module
@@ -204,7 +244,7 @@ def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
     if not is_auditing(module):
         return {}
     try:
-        code = _audit_only_refusal(_covering_mandate(project_id, version, owner_id))
+        code = audit_only_refusal(_covering_mandate(project_id, version, owner_id))
         if code is not None:
             from .admission import record_schedule_would_deny  # pylint: disable=C0415  # audit only needs the writer
             record_schedule_would_deny(module, code, project_id=project_id, application_id=version.application_id,

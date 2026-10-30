@@ -14,6 +14,10 @@ UNATTENDED_TRIGGERS = frozenset({"schedule", "webhook"})
 UNBOUND_NOTICE = ("Credential governance is on and this version has no active identity binding: runs started by this "
                   "trigger will be refused until an operator binds the version and approves a mandate for it. The "
                   "editor's test chat is not affected.")
+# An owner schedule (#7011) runs on a mandate made for its owner (#7254): said at save time, the save goes on
+NO_MANDATE_NOTICE = ("Scheduled (cron) runs need an approved mandate for {whom} on this version; Run now and Test run "
+                     "act as {actor}. Ask a project admin (Admin → Governance → Mandates).")
+AUDIT_ONLY_SUFFIX = " Until then each run is recorded as 'would deny'."
 
 
 def version_is_bound(session, project_id, application_id, version_id) -> bool:
@@ -34,3 +38,19 @@ def governance_notice_for(module, session, project_id, application_id, version_i
     if version_is_bound(session, project_id, application_id, version_id):
         return None
     return UNBOUND_NOTICE
+
+
+def schedule_governance_notice(module, session, project_id, application_id, version_id, owner_id, saver_id):
+    """The notice for a saved owner schedule (#7011), or None: the unbound notice first; else, governance on, the
+    owner's mandate on the version (one indexed read in ``session``) as a run would need it. Governance off asks
+    nothing of the database."""
+    notice = governance_notice_for(module, session, project_id, application_id, version_id, "schedule")
+    if notice is not None or not (is_governed(module) or is_auditing(module)):
+        return notice
+    # late: only a governed save reads the mandate
+    from .mandate_admission import audit_only_refusal, owner_mandate  # pylint: disable=C0415
+    if audit_only_refusal(owner_mandate(session, project_id, version_id, owner_id)) is None:
+        return None
+    own = saver_id == owner_id
+    notice = NO_MANDATE_NOTICE.format(whom="you" if own else "the schedule owner", actor="you" if own else "the owner")
+    return notice if is_governed(module) else notice + AUDIT_ONLY_SUFFIX

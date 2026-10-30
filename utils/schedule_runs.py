@@ -1,11 +1,12 @@
 """Run status and schedule disable writers of the schedule runs (EL-7011)."""
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from pylon.core.tools import log
 from sqlalchemy import and_, func, or_, select, update
 from tools import db
 
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
@@ -25,6 +26,16 @@ SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not as
 SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
 # The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
 DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
+# A schedule pauses itself at this many governance refusals in a row (#7254); an admitted start or a resume ends a streak
+REFUSAL_PAUSE_AFTER = 3
+# Platform-side outage codes: they neither count nor end a streak (#7254 review M1). A missing sign-in or app is a
+# lasting condition a person fixes, so it counts
+OUTAGE_REFUSALS = frozenset({
+    'DEPENDENCY_UNAVAILABLE', 'AUDIT_UNAVAILABLE', 'WORKER_CAPABILITY_UNAVAILABLE', 'INTERNAL_TOKEN_UNAVAILABLE',
+    'STORE_UNAVAILABLE',
+})
+GOVERNANCE_REFUSED = 'governance_refused'
+PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the cause and resume it.'
 
 
 class ScheduleDecisionForbidden(Exception):
@@ -110,6 +121,51 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
             .values(enabled=False, disabled_reason=reason)
         )
         session.commit()
+
+
+def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None) -> None:
+    """One more governance refusal of a run of `schedule` (#7254), Run now and Test run included. The
+    `REFUSAL_PAUSE_AFTER`-th in a row pauses a schedule that is on (`governance_refused`) in the same transaction
+    and tells the owner once. An outage `code` (`OUTAGE_REFUSALS`) is not counted and leaves the streak as it is.
+    A failure is logged: the refused run stays refused."""
+    if code in OUTAGE_REFUSALS:
+        return
+    # Imported here, as in run_prerun_check: the notice helper pulls the event manager into every importer
+    from ..models.enums.all import NotificationEventTypes as Types
+    from .schedule_notifications import notify_schedule_event
+    paused = False
+    try:
+        with db.get_session(project_id) as session:
+            streak = session.execute(
+                update(EntitySchedule).where(EntitySchedule.id == schedule.id)
+                .values({REFUSAL_STREAK: func.coalesce(REFUSAL_STREAK, 0) + 1})
+                .returning(REFUSAL_STREAK)
+            ).scalar()
+            if streak == REFUSAL_PAUSE_AFTER:  # a schedule already off (by hand, expired) keeps its reason
+                paused = session.execute(
+                    update(EntitySchedule).where(EntitySchedule.id == schedule.id, EntitySchedule.enabled.is_(True))
+                    .values(enabled=False, disabled_reason=GOVERNANCE_REFUSED)
+                ).rowcount == 1
+            session.commit()
+    except Exception:  # noqa: BLE001 -- the run is already refused and ended; only the streak is lost
+        log.exception('Schedule %s: cannot count the governance refusal of run %s', schedule.id, run_id)
+        return
+    if paused:
+        text = PAUSED_AFTER_REFUSALS.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
+        run = SimpleNamespace(id=run_id, reason=text, conversation_id=None)
+        notify_schedule_event(project_id, schedule.created_by, Types.schedule_disabled, schedule, run)
+
+
+def end_refusal_streak(project_id: int, schedule_id: int) -> None:
+    """An admitted governed start ends a refusal streak (#7254); writes only a streak there is. A failure is logged."""
+    try:
+        with db.get_session(project_id) as session:
+            session.execute(update(EntitySchedule)
+                            .where(EntitySchedule.id == schedule_id, REFUSAL_STREAK > 0)
+                            .values({REFUSAL_STREAK: 0}))
+            session.commit()
+    except Exception:  # noqa: BLE001 -- the run goes on; the next refusal counts from the old streak
+        log.exception('Schedule %s: cannot end the refusal streak', schedule_id)
 
 
 REASON_MAX_LENGTH = 300

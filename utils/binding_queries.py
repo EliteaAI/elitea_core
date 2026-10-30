@@ -160,6 +160,19 @@ def get_detail(project_id, binding_id):
     return item
 
 
+def list_toolkits(project_id, *, search=None, limit=20, offset=0):
+    """``{total, rows}``: toolkits of the project (name order), for the toolkit mandate picker (#7305). Ids, names and
+    types only; no settings."""
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    statement = select(EliteATool.id, EliteATool.name, EliteATool.type)
+    if search:
+        statement = statement.where(EliteATool.name.ilike(_like(search), escape="\\"))
+    with db.get_session(project_id) as session:
+        total = session.execute(select(func.count()).select_from(statement.subquery())).scalar_one()
+        rows = session.execute(statement.order_by(EliteATool.name, EliteATool.id).limit(limit).offset(offset)).all()
+    return {"total": total, "rows": [{"id": row.id, "name": row.name or row.type, "type": row.type} for row in rows]}
+
+
 def list_agents(project_id, *, search=None, limit=20, offset=0):
     """``{total, rows}``: agents of the project (name order) with their versions and the bindings each version has."""
     application, version = _models()

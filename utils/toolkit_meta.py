@@ -20,3 +20,14 @@ def drop_index_schedules(meta):
     if not meta:
         return {}
     return {key: value for key, value in meta.items() if key != 'indexes_meta'}
+
+
+def keep_stored_index_schedules(meta, stored_meta):
+    """Return ``meta`` (a toolkit update's) with the stored ``indexes_meta`` in place of any the client sent (#7305,
+    C9-SEC-72). Index schedules are written only by the schedule endpoints, which stamp who saved each one; a toolkit
+    update carries the rest of ``meta`` only, so it can neither plant nor drop a schedule. Always a dict."""
+    kept = {key: value for key, value in (meta or {}).items() if key != 'indexes_meta'}
+    stored = (stored_meta or {}).get('indexes_meta') if isinstance(stored_meta, dict) else None
+    if stored is not None:
+        kept['indexes_meta'] = stored
+    return kept

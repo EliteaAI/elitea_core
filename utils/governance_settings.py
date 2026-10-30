@@ -98,7 +98,10 @@ DESCRIPTIONS = {
             "tooltip": "Every run is checked as if governance were enforced, and the result is recorded, but nothing "
                        "is refused. Users see no refusals; runs take as long to start as under enforce, so you can "
                        "measure the cost. Use it to find agents and credentials that are not ready before you enforce. "
-                       "Sub-agent runs and runs started by schedules or webhooks are not evaluated in this mode.",
+                       "Runs of schedules on the Schedules page are checked against their owner's mandate and leave "
+                       "'would deny' records, and so are scheduled index runs, against the index-schedule mandate "
+                       "of the schedule's owner on the toolkit; sub-agent runs are evaluated with an interactive "
+                       "parent run. Webhook runs and legacy cron triggers are not evaluated in this mode.",
         },
         "enforce": {
             "label": "Enforce",

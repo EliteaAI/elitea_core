@@ -11,37 +11,38 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from pylon.core.tools import log
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from tools import auth, db, this
 
 from ..models.agent_identity import LIVE_MANDATE_STATES, AgentIdentityBinding, AutonomousMandate
-from .admission import revoke_mandate_contexts, version_application_id
+from .admission import revoke_mandate_contexts, toolkit_digest, version_application_id
 from .binding_state import InvalidTransition
 from .definition_digest import DigestError, digest_for_version
 from .mandate_identity import IDENTITY_SOURCES, allowed_sources, retire_consent
 from .mandate_state import (
     BUMPS_EPOCH, MAX_MANDATE_VALIDITY_DAYS, approve_mandate, expire_if_due, next_revision, transition_mandate,
 )
-from .trigger_principal import OPERATION_OF
+from .trigger_principal import AGENT_OPERATIONS, TOOLKIT_OPERATIONS
 
 ACTIONS = ("create", "submit", "reject", "approve", "suspend", "resume", "revoke")
 USAGE = (
     "Format: project_id=N;action=<create|submit|reject|approve|suspend|resume|revoke>;"
-    "version_id=V;owner_user_id=U;operations=run:schedule[,run:webhook];max_runtime_s=60..86400;"
+    "version_id=V;operations=run:schedule[,run:webhook] | toolkit_id=T;operations=run:index_schedule;"
+    "owner_user_id=U;max_runtime_s=60..86400;"
     "valid_until=<ISO-8601 with offset> (create)[;targets=*][;identity=owner_delegated|application]"
     "[;mandate=M] (all other actions)[;approval_ref=...;policy_revision=...] (approve)[;dry_run]"
 )
-INT_KEYS = ("project_id", "version_id", "owner_user_id", "max_runtime_s")
+INT_KEYS = ("project_id", "version_id", "toolkit_id", "owner_user_id", "max_runtime_s")
 TEXT_KEYS = ("action", "operations", "targets", "valid_until", "mandate", "approval_ref", "policy_revision", "identity")
 # What each action takes (project_id and action always); `targets` is optional and must be `*`
 ACTION_KEYS = {
-    "create": ("version_id", "owner_user_id", "operations", "max_runtime_s", "valid_until", "targets", "identity"),
+    "create": ("version_id", "toolkit_id", "owner_user_id", "operations", "max_runtime_s", "valid_until", "targets",
+               "identity"),
     "approve": ("mandate", "approval_ref", "policy_revision"),
 }
-NEEDED = {"create": ("version_id", "owner_user_id", "operations", "max_runtime_s", "valid_until"),
+NEEDED = {"create": ("owner_user_id", "operations", "max_runtime_s", "valid_until"),
           "approve": ("mandate", "approval_ref", "policy_revision")}
-OPERATIONS = tuple(sorted(set(OPERATION_OF.values())))
 ANY_TARGET = "*"
 RUNTIME_RANGE_S = (60, 86400)
 MAX_INT = 2 ** 31 - 1
@@ -63,10 +64,14 @@ MESSAGES = {
     "BINDING_DIGEST_MISMATCH": "The agent changed after its identity binding was approved.",
     "BINDING_NOT_ACTIVE": "The identity binding this mandate was made for is no longer active.",
     "OWNER_NOT_FOUND": "The owner does not exist.",
+    "TOOLKIT_NOT_FOUND": "The toolkit does not exist in this project.",
+    "TOOLKIT_CHANGED": "The toolkit changed after the mandate was approved: resuming it approves the toolkit as it is now, "
+                       "which only an operator who is neither its creator nor its owner can do; or approve a new "
+                       "revision of the mandate.",
     "DEPENDENCY_UNAVAILABLE": "The identity service did not answer; try again.",
     "OWNER_NOT_LINKED": "The owner has no linked identity-provider subject.",
     "OWNER_INACTIVE": "The owner is not active.",
-    "MANDATE_EXISTS": "A live mandate already exists for this agent version.",
+    "MANDATE_EXISTS": "A live mandate already exists for this agent version (or for this toolkit and owner).",
     "MANDATE_NOT_FOUND": "No such mandate in this project.",
     "INVALID_STATE": "The mandate is not in a state that allows this action.",
     "SELF_APPROVAL": "The creator or the owner of a mandate cannot approve or resume it.",
@@ -156,10 +161,13 @@ def parse_mandate_param(param):  # pylint: disable=R0911,R0912
             return None, f"invalid mandate: '{values['mandate']}'"
     if action != "create":
         return values, None
+    if ("version_id" in values) == ("toolkit_id" in values):   # an agent version or a toolkit (#7305), not both
+        return None, f"exactly one of version_id and toolkit_id required. {USAGE}"
+    allowed_ops = TOOLKIT_OPERATIONS if "toolkit_id" in values else AGENT_OPERATIONS
     operations = list(dict.fromkeys(op.strip() for op in values["operations"].split(",")))
-    unknown = [op for op in operations if op not in OPERATIONS]
+    unknown = [op for op in operations if op not in allowed_ops]
     if unknown:
-        return None, f"invalid operations: '{values['operations']}' (allowed: {', '.join(OPERATIONS)})"
+        return None, f"invalid operations: '{values['operations']}' (allowed: {', '.join(sorted(allowed_ops))})"
     values["operations"] = operations
     if values.get("identity") is not None and values["identity"] not in IDENTITY_SOURCES:
         return None, f"invalid identity: '{values['identity']}' (allowed: {', '.join(IDENTITY_SOURCES)})"
@@ -175,10 +183,13 @@ def parse_mandate_param(param):  # pylint: disable=R0911,R0912
 
 
 def _event(event_type, reason, mandate_row, actor, **fields):
+    binding = mandate_row.agent_binding_ref
+    toolkit_id = mandate_row.toolkit_id if binding is None else None   # a toolkit mandate (#7305)
     event = {
         "event_type": event_type, "reason_code": reason, "outcome": "success",
         "project_id": mandate_row.project_id, "application_id": mandate_row.application_id,
-        "agent_binding_ref": str(mandate_row.agent_binding_ref), "mandate_ref": str(mandate_row.id),
+        "agent_binding_ref": None if binding is None else str(binding), "mandate_ref": str(mandate_row.id),
+        "toolkit_instance_id": None if toolkit_id is None else str(toolkit_id),
         "caller_ref": f"operator:{actor}", **fields,
     }
     return {key: value for key, value in event.items() if value is not None}
@@ -214,11 +225,28 @@ def _owner_ref(owner_user_id):
     return {"user_id": owner_user_id, "issuer": issuer, "tid": tid, "oid": oid}
 
 
-def _live_mandate(session, project_id, version_id):
-    """The one live mandate of the version (the unique index allows one), or None."""
+def _live_mandate(session, project_id, version_id=None, toolkit_id=None, owner_user_id=None):
+    """The one live mandate of the version, or of the toolkit and owner (#7305; the unique indexes allow one), or
+    None."""
+    scope = (AutonomousMandate.agent_version == version_id,) if toolkit_id is None else (
+        AutonomousMandate.toolkit_id == toolkit_id, AutonomousMandate.owner_user_id == owner_user_id)
     return session.execute(select(AutonomousMandate).where(
-        AutonomousMandate.project_id == project_id, AutonomousMandate.agent_version == version_id,
+        AutonomousMandate.project_id == project_id, *scope,
         AutonomousMandate.state.in_(LIVE_MANDATE_STATES))).scalar_one_or_none()
+
+
+def _toolkit_exists(session, toolkit_id) -> bool:
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    return session.execute(select(EliteATool.id).where(EliteATool.id == toolkit_id)).first() is not None
+
+
+def _toolkit_digest_now(session, toolkit_id):
+    """The digest of the toolkit as it is now (C9-SEC-73): what an approval or a resume holds the mandate's runs to."""
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    tool = session.execute(select(EliteATool.type, EliteATool.settings).where(EliteATool.id == toolkit_id)).first()
+    if tool is None:
+        raise MandateTaskError("TOOLKIT_NOT_FOUND")
+    return toolkit_digest(toolkit_id, tool)
 
 
 def _overdue(mandate, now):
@@ -241,29 +269,37 @@ def _expire_overdue(session, tracing, mandate, actor, now):
     return True
 
 
-def _create(module, session, tracing, values, actor):
-    project_id, version_id = values["project_id"], values["version_id"]
-    application_id = version_application_id(session, version_id)
-    if application_id is None:
-        raise MandateTaskError("VERSION_NOT_FOUND")
-    settings = getattr(module, "admission_settings", None)
-    binding_ref = _active_binding(
-        session, project_id, application_id, version_id, bool(settings and settings.allow_runtime_domain_binding))
+def _create(module, session, tracing, values, actor):  # pylint: disable=R0914
+    project_id, version_id, toolkit_id = values["project_id"], values.get("version_id"), values.get("toolkit_id")
+    if toolkit_id is not None:   # the index schedules of one toolkit (#7305): no version, no binding
+        if not _toolkit_exists(session, toolkit_id):
+            raise MandateTaskError("TOOLKIT_NOT_FOUND")
+        application_id = binding_ref = None
+    else:
+        application_id = version_application_id(session, version_id)
+        if application_id is None:
+            raise MandateTaskError("VERSION_NOT_FOUND")
+        settings = getattr(module, "admission_settings", None)
+        binding_ref = _active_binding(
+            session, project_id, application_id, version_id, bool(settings and settings.allow_runtime_domain_binding))
     identity = values.get("identity")
     if identity is not None and identity not in allowed_sources(module):
         raise MandateTaskError("IDENTITY_SOURCE_NOT_ALLOWED")
     owner = _owner_ref(values["owner_user_id"])
-    live, now, expired = _live_mandate(session, project_id, version_id), _now(), None
+    live = _live_mandate(session, project_id, version_id, toolkit_id, values["owner_user_id"])
+    now, expired = _now(), None
     if live is not None:
         # An overdue active or suspended mandate does not hold the version's slot: renewal must be possible
         if not _overdue(live, now):
             raise MandateTaskError("MANDATE_EXISTS")
         if not values["dry_run"] and _expire_overdue(session, tracing, live, actor, now):
             expired = live.id
-    revision = next_revision(session, project_id, version_id)
+    revision = next_revision(session, project_id, version_id, toolkit_id, values["owner_user_id"])
     if values["dry_run"]:
         return {"dry_run": True, "action": "create", "state": "draft", "revision": revision}
     named = {"identity_source": identity} if identity is not None else {}   # no identity: the row as before
+    if toolkit_id is not None:   # an agent mandate's row names no toolkit column, as before
+        named["toolkit_id"] = toolkit_id
     mandate = AutonomousMandate(
         project_id=project_id, application_id=application_id, agent_version=version_id, agent_binding_ref=binding_ref,
         owner_user_id=values["owner_user_id"], owner_user_ref=owner, allowed_operations=values["operations"],
@@ -295,18 +331,25 @@ def _read(session, values):
 
 
 def _guard_change(session, mandate, action, actor):
-    """The refusals that need more than the row's state; the conditional UPDATE repeats the ones that race."""
+    """The refusals that need more than the row's state; the conditional UPDATE repeats the ones that race. For an
+    approval or a resume of a toolkit mandate, the digest of its toolkit as it is now (stamped with the change)."""
     if action == "approve" and actor in (mandate.created_by, mandate.owner_user_id):
         raise MandateTaskError("SELF_APPROVAL")
     if action == "resume" and actor == mandate.owner_user_id:
         raise MandateTaskError("SELF_APPROVAL")
     if action not in ("approve", "resume"):
-        return
-    state = session.execute(
-        select(AgentIdentityBinding.state).where(AgentIdentityBinding.id == mandate.agent_binding_ref)
-    ).scalar_one_or_none()
-    if state != "active":
-        raise MandateTaskError("BINDING_NOT_ACTIVE")
+        return None
+    digest = None
+    if mandate.agent_binding_ref is None:   # a toolkit mandate (#7305): its toolkit as it is now is what is approved
+        digest = _toolkit_digest_now(session, mandate.toolkit_id)
+        if action == "resume" and digest != mandate.toolkit_digest and actor == mandate.created_by:
+            raise MandateTaskError("TOOLKIT_CHANGED")   # a changed toolkit is approved by a second person (C9-SEC-73)
+    else:
+        state = session.execute(
+            select(AgentIdentityBinding.state).where(AgentIdentityBinding.id == mandate.agent_binding_ref)
+        ).scalar_one_or_none()
+        if state != "active":
+            raise MandateTaskError("BINDING_NOT_ACTIVE")
     if action == "resume" and mandate.suspended_reason == "OWNER_SUSPENDED":
         try:
             verdict = auth.read_identity_epochs("user", mandate.owner_user_id)
@@ -314,6 +357,7 @@ def _guard_change(session, mandate, action, actor):
             raise MandateTaskError("DEPENDENCY_UNAVAILABLE") from None
         if not isinstance(verdict, dict) or verdict.get("active") is not True:
             raise MandateTaskError("OWNER_INACTIVE")
+    return digest
 
 
 def _change(module, session, tracing, values, actor):
@@ -333,7 +377,7 @@ def _change(module, session, tracing, values, actor):
         starts, target = MOVES[action]
     if mandate.state not in starts:
         raise MandateTaskError("INVALID_STATE")
-    _guard_change(session, mandate, action, actor)
+    digest = _guard_change(session, mandate, action, actor)
     source, mandate_id = mandate.state, mandate.id
     if values["dry_run"]:
         return {"dry_run": True, "action": action, "mandate_ref": str(mandate_id), "from": source, "to": target}
@@ -345,6 +389,9 @@ def _change(module, session, tracing, values, actor):
     if not changed:
         session.rollback()
         raise MandateTaskError("CONCURRENT_CHANGE")
+    if digest is not None:   # the toolkit the runs are held to, in the same transaction (C9-SEC-73)
+        session.execute(update(AutonomousMandate).where(AutonomousMandate.id == mandate_id)
+                        .values(toolkit_digest=digest).execution_options(synchronize_session=False))
     session.expire(mandate)  # the UPDATE bypassed the instance
     if target in BUMPS_EPOCH:
         revoke_mandate_contexts(session, mandate_id)

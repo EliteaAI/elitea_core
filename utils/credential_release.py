@@ -52,8 +52,8 @@ from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityConte
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
 from . import entra_obo, mandate_identity
 from .credential_decision import (
-    MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure, subject_grant_in_force,
-    subject_grant_key,
+    MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure, subject_grant_holder,
+    subject_grant_in_force, subject_grant_key,
 )
 from .credential_slots import DELEGATED_FIELD, MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
@@ -519,7 +519,8 @@ def _live_check(request: _Request, row, binding, entries, is_mandate, requests) 
     try:
         subject_ref = (row.subject or {}).get("ref")
         if development:
-            code, failed = recheck_development(binding_project_id, entries, subject_ref, adm._now())
+            code, failed = recheck_development(binding_project_id, entries, subject_ref, adm._now(),
+                                               holder=subject_grant_holder(row.subject))
         else:
             code, failed = recheck_failure(binding_project_id, entries, subject_ref, str(row.agent_binding_ref), adm._now())
     except Exception as exc:  # pylint: disable=W0703

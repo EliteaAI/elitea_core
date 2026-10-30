@@ -54,6 +54,7 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
         "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block,
                                 "finish_schedule_run": finish, "run_failure_reason": str,
+                                "count_refusal": _ignore, "end_refusal_streak": _ignore,  # #7254: own tests
                                 "record_run_events": lambda *args, **kwargs: None, "run_event": lambda *args, **kwargs: {}},
         "utils.budget_door": {"closed_budget_scope": budget_scope},
         "utils.exceptions": {

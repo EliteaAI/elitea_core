@@ -22,6 +22,8 @@ from .pipeline_execution import (
 from .schedule_prerun import credential_toolkit_refs, run_prerun_check
 from .schedule_runs import (
     block_schedule_run,
+    count_refusal,
+    end_refusal_streak,
     fail_schedule_run,
     finish_schedule_run,
     record_run_events,
@@ -170,12 +172,13 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
 
-def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
+def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
     closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
-    Under governance (C-1009) the run is admitted on its owner's mandate or refused; a refusal ends it at once.
+    Under governance (C-1009) a cron firing is admitted on its owner's mandate or refused; a refusal ends it at once.
+    Run now and Test run (``owner_request``, built by the run endpoint) are the owner's own run: no mandate (#7254).
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
@@ -238,10 +241,17 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     record_run_events(project_id, run_id, run_event(
         'agent_started', f"{'Pipeline' if source == 'pipeline' else 'Agent'} started: {loaded.entity_name}"))
     try:
-        # late: only a governed run reads its mandate; its single-use ticket is minted right before the run is sent
-        from .mandate_admission import prepare_schedule_run
-        governance = prepare_schedule_run(project_id=project_id, version=loaded.version, schedule_id=schedule_id,
-                                          owner_id=check.owner_id)
+        # late: only a governed cron firing reads its mandate. Either single-use ticket is minted right before the run
+        # is sent: a manual run's from the owner's own request (none when governance is off)
+        if manual:
+            governance = {}
+            if owner_request is not None:
+                from .mandate_admission import mint_owner_run_ticket
+                governance = {'mandate_ticket': mint_owner_run_ticket(owner_request)}
+        else:
+            from .mandate_admission import prepare_schedule_run
+            governance = prepare_schedule_run(project_id=project_id, version=loaded.version, schedule_id=schedule_id,
+                                              owner_id=check.owner_id)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule; the text stays fixed
         log.exception('Schedule %s run %s: cannot prepare the governed run', schedule_id, run_id)
         finish_trigger_run_with_error(project_id, response_id, START_FAILED, source)
@@ -264,7 +274,14 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)
     else:
         if is_trigger_refusal(result):  # governance refused it (C-1009): it ends now, readably, and the owner is told
+            reason = run_failure_reason(result.get('error'))
             try:  # ended first, so the chat stream-end hook finds it ended and sends no second notice
-                finish_schedule_run(project_id, run_id, 'failed', run_failure_reason(result.get('error')))
+                finish_schedule_run(project_id, run_id, 'failed', reason)
             finally:
                 finish_trigger_run_refused(project_id, response_id, result, source)
+            # only cron firings count (#7254), the third in a row pauses it; an outage code is not counted. Run now
+            # and Test run are the owner's own runs
+            if not manual:
+                count_refusal(project_id, loaded.schedule, run_id, reason, result.get('code'))
+        elif governance and not manual:  # a cron firing admitted under governance ends a streak (off writes nothing)
+            end_refusal_streak(project_id, schedule_id)

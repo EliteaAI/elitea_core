@@ -159,8 +159,11 @@ def test_get_returns_the_texts_the_page_shows(ns, env, module):
     assert texts["modes"]["off"]["label"] == "Off"
     assert texts["modes"]["audit_only"]["label"] == "Audit only"
     assert texts["modes"]["enforce"]["label"] == "Enforce"
-    assert texts["modes"]["audit_only"]["tooltip"].endswith(
-        "Sub-agent runs and runs started by schedules or webhooks are not evaluated in this mode.")
+    assert texts["modes"]["audit_only"]["tooltip"].endswith(   # #7254, #7305: the truth after the bridge and #7227
+        "Runs of schedules on the Schedules page are checked against their owner's mandate and leave 'would deny' "
+        "records, and so are scheduled index runs, against the index-schedule mandate of the schedule's owner on the "
+        "toolkit; sub-agent runs are evaluated with an interactive parent run. Webhook runs and legacy cron triggers "
+        "are not evaluated in this mode.")
     assert texts["modes"]["off"]["tooltip"].startswith("Agents run exactly as they do without governance")
     assert texts["fields"]["policy_revision"]["tooltip"].endswith("Required for audit-only and enforce.")
     assert texts["fields"]["change_note"]["placeholder"] == "Why are you changing this? (recorded in the history)"
