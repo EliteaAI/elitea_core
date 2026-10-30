@@ -161,7 +161,7 @@ def _install_package():
                  'attach_skill_to_agent', 'detach_skill_from_agent'):
         setattr(skill_utils, name, lambda *a, **k: None)
     skill_utils.SkillError = type('SkillError', (Exception,), {'http_status': 400})
-    skill_utils.normalize_version_frontmatter = lambda meta: meta
+    skill_utils.clean_stored_frontmatter = lambda meta: meta
 
     export_import = types.ModuleType(f'{PKG}.utils.skill_export_import')
     export_import.export_skill_md = _record(

@@ -14,6 +14,7 @@ import types
 from unittest import mock
 
 import pytest
+from pydantic import BaseModel
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = 'plugins.elitea_core'
@@ -275,8 +276,6 @@ class TestReimportRestoresEliteaFields:
 
 class TestImportRejectsSpecViolations:
     @pytest.mark.parametrize('frontmatter, message', [
-        ('name: my--skill\ndescription: d', 'consecutive hyphens'),
-        ('name: ok\ndescription: Use <tag> here', 'angle brackets'),
         ('name: ok\ndescription: d\ncompatibility: ' + 'x' * 501, '"compatibility" is 501 characters'),
         ('name: ok\ndescription: d\nlicense: [MIT]', '"license" must be a string'),
         ('name: ok\ndescription: d\nmetadata: author', '"metadata" must be a mapping'),
@@ -285,6 +284,10 @@ class TestImportRejectsSpecViolations:
         with pytest.raises(ValueError, match=message):
             imported_version(md, f'---\n{frontmatter}\n---\nBody')
         assert md.recorder.calls == []
+
+    def test_angle_brackets_in_the_description_are_allowed(self, md):
+        _, call, _ = imported_version(md, '---\nname: mapper\ndescription: Maps a -> b and <x>\n---\nBody')
+        assert call['description'] == 'Maps a -> b and <x>'
 
     def test_a_long_description_is_still_accepted(self, md):
         _, call, _ = imported_version(md, f'---\nname: long\ndescription: {"x" * 1500}\n---\nBody')
@@ -346,27 +349,10 @@ def stored_skill(name='my--skill', description='Use <b> carefully'):
 
 
 class TestExistingSkillsStaySavable:
-    def test_unchanged_grandfathered_name_and_description_save(self, skill_utils):
-        skill = stored_skill()
-        update_skill(skill_utils, skill, name='my--skill', description='Use <b> carefully')
-        assert (skill.name, skill.description) == ('my--skill', 'Use <b> carefully')
-
-    def test_a_stored_description_with_trailing_whitespace_still_saves_unchanged(self, skill_utils):
-        skill = stored_skill(description='Turns a -> b\n')
-        update_skill(skill_utils, skill, description='Turns a -> b')
-        assert skill.description == 'Turns a -> b'
-
-    def test_renaming_to_a_double_hyphen_is_rejected(self, skill_utils):
-        skill = stored_skill(name='ok')
-        with pytest.raises(skill_utils.SkillSpecViolationError, match='consecutive hyphens'):
-            update_skill(skill_utils, skill, name='still--bad')
-        assert skill.name == 'ok'
-
-    def test_changing_the_description_to_angle_brackets_is_rejected(self, skill_utils):
+    def test_a_description_with_angle_brackets_saves(self, skill_utils):
         skill = stored_skill(description='plain')
-        with pytest.raises(skill_utils.SkillSpecViolationError, match='angle brackets'):
-            update_skill(skill_utils, skill, description='a <b>')
-        assert skill.description == 'plain'
+        update_skill(skill_utils, skill, description='Maps a -> b')
+        assert skill.description == 'Maps a -> b'
 
 
 def update_version(skill_utils, version, meta):
@@ -403,24 +389,14 @@ class TestEditorFrontmatterIsSaved:
 
 
 
-def new_skill(name='release-notes', description='Draft notes.', meta=None):
-    return types.SimpleNamespace(name=name, description=description, versions=[types.SimpleNamespace(meta=meta)])
-
-
 class TestCreatingASkill:
-    @pytest.mark.parametrize('skill, message', [
-        (new_skill(name='my--skill'), 'consecutive hyphens'),
-        (new_skill(description='a <b>'), 'angle brackets'),
-        (new_skill(meta={'frontmatter': {'license': 1}}), '"license" must be a string'),
-    ])
-    def test_spec_violations_are_rejected(self, skill_utils, skill, message):
-        with pytest.raises(skill_utils.SkillSpecViolationError, match=message):
-            skill_utils.enforce_new_skill_spec(skill)
+    def test_invalid_stored_frontmatter_is_rejected(self, skill_utils):
+        with pytest.raises(skill_utils.SkillSpecViolationError, match='"license" must be a string'):
+            skill_utils.clean_stored_frontmatter({'frontmatter': {'license': 1}})
 
-    def test_editor_frontmatter_is_normalized_before_create(self, skill_utils):
-        skill = new_skill(meta={'frontmatter': {'license': 'MIT', 'description': 'echoed'}})
-        skill_utils.enforce_new_skill_spec(skill)
-        assert skill.versions[0].meta == {'frontmatter': {'license': 'MIT'}}
+    def test_editor_frontmatter_is_cleaned_before_create(self, skill_utils):
+        meta = {'icon_meta': {}, 'frontmatter': {'license': 'MIT', 'description': 'echoed'}}
+        assert skill_utils.clean_stored_frontmatter(meta) == {'icon_meta': {}, 'frontmatter': {'license': 'MIT'}}
 
 
 class RecordingSession:
@@ -730,3 +706,35 @@ class TestAgentPublishReusesSkillCopiesOnlyWhenFrontmatterMatches:
 
         assert agent_publish._resolve_or_fork_skill_twin(2, 1, skill, 3) == (8, 80)
         assert fingerprinted == [('Do it.', None, {'license': 'MIT'})]
+
+
+
+class AnyModelModule(types.ModuleType):
+    """Answers every `from x import Name` with an empty pydantic model, so model modules can be built."""
+
+    def __getattr__(self, name):
+        if name.startswith('__'):
+            raise AttributeError(name)
+        return type(name, (BaseModel,), {})
+
+
+@pytest.fixture
+def skill_models(monkeypatch):
+    _install_packages(monkeypatch)
+    for name in ('tools', f'{PKG}.utils.authors', f'{PKG}.utils.constants'):
+        monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    for name in (f'{PKG}.models.pd.collection_base', f'{PKG}.models.pd.tag', f'{PKG}.models.pd.skill_version'):
+        monkeypatch.setitem(sys.modules, name, AnyModelModule(name))
+    _load(monkeypatch, 'models/enums/all.py', f'{PKG}.models.enums.all')
+    return _load(monkeypatch, 'models/pd/skill.py', f'{PKG}.models.pd.skill')
+
+
+@pytest.mark.parametrize('name', ['my--skill', '-skill', 'skill-', 'Skill'])
+def test_the_skill_name_validator_rejects_names_the_spec_forbids(skill_models, name):
+    with pytest.raises(ValueError, match='no consecutive hyphens'):
+        skill_models.validate_skill_name(name)
+
+
+@pytest.mark.parametrize('name', ['a', 'release-notes', 'pdf-to-docx-v2'])
+def test_the_skill_name_validator_accepts_spec_names(skill_models, name):
+    assert skill_models.validate_skill_name(name) == name

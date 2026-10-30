@@ -12,9 +12,7 @@ from .skill_frontmatter import (
     FRONTMATTER_META_KEY,
     LEGACY_RUN_SETTINGS_KEY,
     compose_export_frontmatter,
-    extract_passthrough_frontmatter,
-    check_spec_description,
-    check_spec_name,
+    extract_non_elitea_frontmatter,
     list_unused_frontmatter_keys,
 )
 from .skill_utils import (
@@ -49,6 +47,7 @@ FLAG_STRINGS = {'true': True, 'false': False}
 
 
 def _parse_flag(value: str) -> bool:
+    """Read a boolean written as text, rejecting anything other than true or false."""
     try:
         return FLAG_STRINGS[value.strip().lower()]
     except KeyError:
@@ -158,6 +157,7 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
 
 
 def encode_elitea_metadata(version_name: Optional[str], tags: List[str], run_settings: Optional[dict]) -> Dict[str, str]:
+    """Write ELITEA's own fields as metadata.elitea-* strings, the only place the spec allows them."""
     metadata: Dict[str, str] = {}
     if tags:
         metadata[TAGS_METADATA_KEY] = json.dumps(tags, ensure_ascii=False)
@@ -177,6 +177,7 @@ def encode_elitea_metadata(version_name: Optional[str], tags: List[str], run_set
 
 
 def decode_elitea_metadata(metadata: dict) -> Dict[str, Any]:
+    """Read metadata.elitea-* back into the legacy frontmatter shape the import validators already know."""
     decoded: Dict[str, Any] = {}
     if TAGS_METADATA_KEY in metadata:
         decoded['tags'] = _decode_json_metadata(metadata, TAGS_METADATA_KEY)
@@ -193,6 +194,7 @@ def decode_elitea_metadata(metadata: dict) -> Dict[str, Any]:
 
 
 def _decode_json_metadata(metadata: dict, key: str) -> Any:
+    """Parse an elitea-* value stored as a JSON string, accepting a value already written as YAML."""
     value = metadata[key]
     if not isinstance(value, str):
         return value
@@ -203,6 +205,7 @@ def _decode_json_metadata(metadata: dict, key: str) -> Any:
 
 
 def _decode_run_setting(field: str, metadata: dict, key: str) -> Any:
+    """Turn one elitea-* run setting back into its typed value, leaving bad values for later validation to drop."""
     if key in JSON_ENCODED_METADATA_KEYS:
         return _decode_json_metadata(metadata, key)
     value = metadata[key]
@@ -399,6 +402,7 @@ def validate_skill_frontmatter(meta: dict) -> None:
 
 
 def validate_elitea_frontmatter_fields(meta: dict) -> None:
+    """Check the shape of ELITEA's own fields, wherever in the frontmatter they came from."""
     if 'elitea_version' in meta:
         version = meta['elitea_version']
         if not isinstance(version, str) or not version.strip():
@@ -423,6 +427,7 @@ def validate_elitea_frontmatter_fields(meta: dict) -> None:
 
 
 def build_embedded_skill_frontmatter(version: dict) -> Dict[str, Any]:
+    """Carry a skill's frontmatter, tags and run settings into an agent Markdown export."""
     return compose_export_frontmatter(
         identity={},
         passthrough=(version.get('meta') or {}).get(FRONTMATTER_META_KEY) or {},
@@ -435,13 +440,14 @@ def build_embedded_skill_frontmatter(version: dict) -> Dict[str, Any]:
 
 
 def unpack_embedded_skill_frontmatter(version: dict) -> dict:
+    """Restore tags, run settings and kept keys from a skill embedded in an agent Markdown import."""
     frontmatter = (version.get('meta') or {}).get(FRONTMATTER_META_KEY)
     if not frontmatter:
         return version
     if not isinstance(frontmatter, dict):
         raise ValueError(f'"meta.{FRONTMATTER_META_KEY}" must be a mapping')
 
-    passthrough = extract_passthrough_frontmatter(frontmatter)
+    passthrough = extract_non_elitea_frontmatter(frontmatter)
     elitea_fields = decode_elitea_metadata(frontmatter.get('metadata') or {})
     validate_elitea_frontmatter_fields(elitea_fields)
 
@@ -482,11 +488,9 @@ def import_skill_md(
     parsed = parse_skill_md(content)
     raw_frontmatter = parsed['frontmatter']
     body = parsed['body']
-    passthrough = extract_passthrough_frontmatter(raw_frontmatter)
+    passthrough = extract_non_elitea_frontmatter(raw_frontmatter)
     frontmatter = {**raw_frontmatter, **decode_elitea_metadata(raw_frontmatter.get('metadata') or {})}
     validate_skill_frontmatter(frontmatter)
-    check_spec_name(frontmatter['name'])
-    check_spec_description(frontmatter['description'])
 
     # Always use 'base' as the version name for imports. The elitea_version
     # field in the frontmatter is only informational (indicates which version

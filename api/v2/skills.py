@@ -14,7 +14,7 @@ from ...utils.skill_utils import (
     list_skills_api,
     create_skill,
     build_skill_detail,
-    enforce_new_skill_spec,
+    clean_stored_frontmatter,
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
@@ -138,7 +138,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ), 400
 
         try:
-            enforce_new_skill_spec(skill_data)
+            for version_data in skill_data.versions:
+                version_data.meta = clean_stored_frontmatter(version_data.meta)
         except SkillError as e:
             return {"error": str(e)}, e.http_status
 

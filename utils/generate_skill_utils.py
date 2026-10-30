@@ -15,7 +15,7 @@ def skill_output_contract(instructions_max_length: int) -> str:
 Return only a valid JSON object with exactly these keys:
 {{
   "name": "Slugified skill name: lowercase letters, digits and hyphens only, no leading or trailing hyphen, no consecutive hyphens, never containing 'claude' or 'anthropic', max {NAME_MAX_LENGTH} characters",
-  "description": "A concise description of what the skill helps with, max {DESCRIPTION_MAX_LENGTH} characters, without the characters < or >",
+  "description": "A concise description of what the skill helps with, max {DESCRIPTION_MAX_LENGTH} characters",
   "instructions": "The complete skill instructions in Markdown, max {instructions_max_length} characters"
 }}
 

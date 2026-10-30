@@ -23,7 +23,7 @@ from ...utils.skill_utils import (
     get_skill_version_by_id,
     attach_skill_to_agent,
     detach_skill_from_agent,
-    normalize_version_frontmatter,
+    clean_stored_frontmatter,
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
@@ -252,7 +252,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": "Version name 'base' is reserved; use a different name"}, 400
 
         try:
-            version_data.meta = normalize_version_frontmatter(version_data.meta)
+            version_data.meta = clean_stored_frontmatter(version_data.meta)
             detail = create_skill_version(
                 project_id=project_id,
                 skill_id=skill_id,

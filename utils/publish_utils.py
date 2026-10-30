@@ -1742,6 +1742,7 @@ _TWIN_PARENT_AUTHOR_ID = 'agent_publish_parent_author_id'
 def _skill_content_sha(
     instructions: str, run_settings: Optional[dict] = None, frontmatter: Optional[dict] = None,
 ) -> str:
+    """Fingerprint a skill version's content so publishing reuses a catalog copy only when nothing changed."""
     if not run_settings and not frontmatter:
         return hashlib.sha256((instructions or '').encode()).hexdigest()
     content = {'instructions': instructions or '', 'run_settings': run_settings}
