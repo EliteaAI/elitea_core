@@ -202,6 +202,21 @@ def test_a_run_that_is_not_waiting_is_409_run_not_waiting(harness, decisions):
     assert decisions.applied == [] and decisions.started == []
 
 
+def test_a_failed_decision_write_leaves_no_credential_mark(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+
+    def lost_race(project_id, run_id, decision):
+        raise sys.modules[f'{PACKAGE}.utils.schedule_runs'].ScheduleRunNotWaiting()
+
+    decisions.runs.apply_schedule_decision = lost_race
+
+    body, status = decide(harness, schedule_id, run_id)
+
+    assert (status, body['code']) == (409, 'run_not_waiting')
+    assert decisions.checked == []
+
+
 def test_a_missing_run_is_404(harness, decisions):
     schedule_id = harness.seed()
 

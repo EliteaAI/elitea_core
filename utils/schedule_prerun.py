@@ -185,15 +185,16 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
         reason = (check_principal(schedule)
                   or check_owner_access(project_id, owner_id)
                   or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id))
-        if reason is None and run_id in _CHECKED_RUNS:  # the owner's approval just ran this check
-            _CHECKED_RUNS.discard(run_id)
-        elif reason is None:
+        # A mark in _CHECKED_RUNS means the owner's approval just ran the credential check
+        if reason is None and run_id not in _CHECKED_RUNS:
             reason = check_owner_credentials(project_id, schedule)
             # Only a missing credential can wait for the owner; a lost token or a broken version cannot
             waits_for_owner = credential_wait(reason)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
         reason = PRERUN_FAILED
+    finally:
+        _CHECKED_RUNS.discard(run_id)  # the mark serves this one start, whatever way the checks end
     if reason is None:
         return PreRunResult(True, owner_id)
     if waits_for_owner and _park(project_id, run_id, reason):

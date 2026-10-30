@@ -204,26 +204,23 @@ def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
     return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
 
 
-def _credential_still_missing(project_id: int, run_id: int, owner) -> bool:
-    """True when the same credential check as the pre-run step finds a missing credential for `owner`'s schedule.
-
-    A clean check is remembered, so the restarted run does not expand the version a second time.
-    """
-    from .schedule_prerun import (  # late, as the other pre-run helpers
-        check_owner_credentials,
-        credential_wait,
-        mark_credentials_checked,
-    )
+def _credential_check(project_id: int, owner) -> str:
+    """The same credential check as the pre-run step for `owner`'s schedule: "missing", "clean" or "unknown"."""
+    from .schedule_prerun import check_owner_credentials, credential_wait  # late, as the other pre-run helpers
     try:
         reason = check_owner_credentials(project_id, owner)
     except Exception:  # noqa: BLE001 -- an unreadable check must not block the owner; the restart runs it again
         log.exception("Project %s: the credential check before an approval failed", project_id)
-        return False
+        return "unknown"
     if credential_wait(reason):
-        return True
-    if reason is None:
-        mark_credentials_checked(run_id)
-    return False
+        return "missing"
+    return "clean" if reason is None else "unknown"
+
+
+def _remember_checked(run_id: int) -> None:
+    """Skip the repeat of a clean credential check in the restarted run, so it does not expand the version twice."""
+    from .schedule_prerun import mark_credentials_checked  # late, as the other pre-run helpers
+    mark_credentials_checked(run_id)
 
 
 def _forget_checked(run_id: int) -> None:
@@ -508,9 +505,12 @@ class ScheduleItemHandlers:
                                     version_id=row.version_id)
         try:
             decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
-            if decision == "approve" and _credential_still_missing(project_id, run_id, owner):
+            checked = _credential_check(project_id, owner) if decision == "approve" else "unknown"
+            if checked == "missing":
                 return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
             apply_schedule_decision(project_id, run_id, decision)
+            if checked == "clean":  # only after the write: a lost race must leave no mark behind
+                _remember_checked(run_id)
         except ScheduleDecisionForbidden:
             return refusal("not_owner", "Only the schedule owner can approve or reject this run", 403)
         except ScheduleRunNotWaiting:

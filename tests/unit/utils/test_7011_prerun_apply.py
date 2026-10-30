@@ -199,3 +199,27 @@ def test_a_still_missing_credential_on_the_restart_fails_the_run_with_the_reason
 
     assert (result.ok, result.reason) == (False, "credential 9 not found")
     assert "fail" in recorder.effects()
+
+
+def test_a_mark_is_cleared_when_an_earlier_check_fails(apply):
+    apply.prerun.mark_credentials_checked(RUN_ID)
+
+    result = apply(Recorder(access="access check unavailable"))
+
+    assert result.ok is False
+    assert RUN_ID not in apply.prerun._CHECKED_RUNS
+
+
+def test_a_mark_is_cleared_when_a_check_raises(apply):
+    recorder = Recorder()
+
+    def broken(*args):
+        raise ConnectionError("rights RPC down")
+
+    recorder.step = lambda name: broken if name == "rights" else Recorder.step(recorder, name)
+    apply.prerun.mark_credentials_checked(RUN_ID)
+
+    result = apply(recorder)
+
+    assert result.reason == "the pre-run check failed"
+    assert RUN_ID not in apply.prerun._CHECKED_RUNS
