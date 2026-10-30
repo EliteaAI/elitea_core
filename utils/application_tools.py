@@ -1675,7 +1675,10 @@ def update_toolkit_index_meta_history_with_failed_state(connection_string: str, 
             return {'flipped': False, 'skipped_live_run': True}
         current_metadata = meta.cmetadata.copy()
         current_metadata['state'] = 'failed'
-        current_metadata['updated_on'] = time.time()
+        # The failure is an attempt of its own: it starts and ends now (the run entries' own
+        # created_on/updated_on). An inherited created_on puts it under the previous run in
+        # Toolkit History, which then shows that run's text and duration instead of this one.
+        current_metadata['created_on'] = current_metadata['updated_on'] = time.time()
         current_metadata['error'] = error
         history_raw = current_metadata.pop("history", "[]")
         try:

@@ -148,7 +148,7 @@ def _create_minimal_toolkit(project_id: int, author_id: int, toolkit_type: str, 
             minimal_settings['selected_tools'] = selected_tools
 
         # Merge provided meta (e.g., mcp flag) with import metadata
-        toolkit_meta = dict(meta or {})
+        toolkit_meta = {key: value for key, value in (meta or {}).items() if key != 'indexes_meta'}   # C9-SEC-72
         toolkit_meta.update({'import_incomplete': True, 'import_note': 'Created with missing credentials - requires configuration'})
 
         toolkit = EliteATool(

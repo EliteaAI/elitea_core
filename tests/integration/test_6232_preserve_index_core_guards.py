@@ -428,6 +428,18 @@ class TestSchedulerFailedStateWriter:
         assert entry["conversation_id"] is None
         assert session.committed
 
+    def test_the_failure_entry_is_an_attempt_of_its_own_in_time(self, application_tools, monkeypatch):
+        # #7305: a refused or failed scheduled run starts and ends now, never at the previous run's created_on (the
+        # history page groups entries by it and would show the previous run's text and duration)
+        meta, _ = _arrange(application_tools, monkeypatch, self._row(), run_rows=[])
+        before = __import__("time").time()
+        application_tools.update_toolkit_index_meta_history_with_failed_state(
+            "postgresql://", 42, "docs", "refused", initiator="schedule")
+        entry = json.loads(meta.cmetadata["history"])[-1]
+        assert entry["created_on"] == entry["updated_on"] >= before > 100.0
+        assert (entry["initiator"], entry["error"]) == ("schedule", "refused")
+        assert meta.cmetadata["created_on"] == entry["created_on"]
+
     def test_reindex_is_false_without_a_successful_history_entry(self, application_tools, monkeypatch):
         meta, _ = _arrange(application_tools, monkeypatch,
                            self._row(history=[{"state": "failed"}]), run_rows=[])

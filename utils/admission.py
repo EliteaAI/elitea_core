@@ -32,6 +32,7 @@ import uuid
 from collections import defaultdict, deque, namedtuple
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional, Union
 
 from pylon.core.tools import log
@@ -41,8 +42,8 @@ from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 from ..models.pd.admission import (
-    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_SCHEDULE_TEST, ENTRY_TOOLKIT_TEST, AdmissionRequest,
-    ExecutionSecurityContextView,
+    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_INDEX_SCHEDULE, ENTRY_SCHEDULE_TEST, ENTRY_TOOLKIT_TEST,
+    AdmissionRequest, ExecutionSecurityContextView,
 )
 from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
@@ -50,7 +51,8 @@ from .credential_decision import (
     USE_PERMISSION, WHOLE_TARGET,
     CredentialDecisionContext, CredentialDecisionError, _uuid_text, binding_ref, collect_credential_uses, decide_credential_uses,
     CREDENTIAL_SECTION, _int_or_none, _payload_toolkits, configurations_in, read_configuration_facts, recheck_credentials,
-    recheck_development, toolkit_secret_fields, user_may_use_credentials, walk_scope, want_configuration_facts,
+    recheck_development, subject_grant_holder, toolkit_secret_fields, user_may_use_credentials, walk_scope,
+    want_configuration_facts,
 )
 from .credential_slots import FREE_FORM_SECRET_MARK, has_free_form_secret, prefetched_tool_lists, seal_payload
 from .definition_digest import DIGEST_VERSION, DigestError, definition_digest, digest_for_version, norm_json, toolkit_rows
@@ -71,12 +73,15 @@ ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent", TOOLKIT_TA
 TOOLKIT_ENTRY_POINTS = frozenset({ENTRY_TOOLKIT_TEST, ENTRY_INDEX_ON_DEMAND})
 # and the owner's Run now / Test run of a schedule (#7254), whose draft obeys the switch as the editor's test chat
 DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, ENTRY_SCHEDULE_TEST, *TOOLKIT_ENTRY_POINTS})
+# What runs on the toolkit runner: the person's toolkit runs, and a scheduled index run under a toolkit mandate (#7305),
+# which is never a development run (it is admitted on the mandate)
+TOOLKIT_TASK_ENTRY_POINTS = frozenset({*TOOLKIT_ENTRY_POINTS, ENTRY_INDEX_SCHEDULE})
 
 
 def task_fits_entry(task_name, entry_point) -> bool:
     """The toolkit runner runs only toolkit runs, and a toolkit run only on the toolkit runner (C9-SEC-32): at dispatch,
     at the worker's validation and at every release."""
-    return (task_name == TOOLKIT_TASK) == (entry_point in TOOLKIT_ENTRY_POINTS)
+    return (task_name == TOOLKIT_TASK) == (entry_point in TOOLKIT_TASK_ENTRY_POINTS)
 # Passed as ``admission`` by the platform's own read of chat attachments (a built-in toolkit with no credential): such a
 # dispatch is not admitted, and its payload must be shown to carry no credential (sealed with no decisions)
 CREDENTIAL_FREE = type("CredentialFreeDispatch", (), {"__repr__": lambda self: "CREDENTIAL_FREE"})()
@@ -110,7 +115,7 @@ MAX_RUN_LIFETIME_S = 86400
 REVOKE_CODES = frozenset({
     "EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING",
     "CREDENTIAL_REFERENCE_INACTIVE", "CREDENTIAL_GENERATION_MISMATCH", "DENIED_GRANT", DEVELOPMENT_GRANT_REQUIRED,
-    "MANDATE_INACTIVE", "MANDATE_EXPIRED", "RUNTIME_LIMIT_EXCEEDED",
+    "MANDATE_INACTIVE", "MANDATE_EXPIRED", "RUNTIME_LIMIT_EXCEEDED", "TOOLKIT_CHANGED",
 })
 PROFILES = frozenset({"governed", PROFILE_DEVELOPMENT})   # the context profiles this version understands
 DEVELOPMENT_LABEL = "development:"   # + the definition digest: what a development run has instead of a binding ref
@@ -122,7 +127,10 @@ INHERITED_KEY = "c1009:inh:"   # set when a context is reopened for its children
 RunDeadline = namedtuple("RunDeadline", "at code")
 PREDICT_PERMISSION = "models.applications.predict.post"
 # The mandate operation each trigger entry point needs (the scheduler and both webhook kinds, #6947)
-MANDATE_OPERATION_OF = {"schedule": OPERATION_OF["pipeline_schedule"], "webhook": OPERATION_OF["pipeline_webhook"]}
+MANDATE_OPERATION_OF = {"schedule": OPERATION_OF["pipeline_schedule"], "webhook": OPERATION_OF["pipeline_webhook"],
+                        ENTRY_INDEX_SCHEDULE: OPERATION_OF["index_schedule"]}   # a toolkit mandate's (#7305)
+# The owner's right to index a toolkit: what the on-demand index of a toolkit asks of the person (#7305)
+INDEX_PERMISSION = "models.applications.tool.patch"
 # What a context row remembers of its subject. ``issuer`` and ``oid`` are the verified person's own fields (the tenant is
 # the row's ``tenant``): an Entra-delegated release binds to them and never parses ``ref`` (#6756 step 4)
 SUBJECT_COLUMNS = ("kind", "ref", "delegation_ref", "owner", "evidence", "issuer", "oid")
@@ -132,6 +140,9 @@ MANDATE_COLUMNS = (
     AutonomousMandate.owner_user_ref, AutonomousMandate.allowed_operations, AutonomousMandate.max_runtime_s,
     AutonomousMandate.valid_until, AutonomousMandate.state, AutonomousMandate.revocation_epoch,
 )
+# A toolkit mandate's row (#7305): the deferred ``toolkit_id`` is read only for a scheduled index run
+TOOLKIT_MANDATE_COLUMNS = (*MANDATE_COLUMNS, AutonomousMandate.toolkit_id, AutonomousMandate.toolkit_digest)
+TOOLKIT_CHANGED = "TOOLKIT_CHANGED"   # the toolkit is not the one its mandate was approved for (#7305)
 
 MESSAGES = {
     "AUDIT_UNAVAILABLE": "The security audit trail is unavailable; the run was not started. Try again later.",
@@ -154,6 +165,8 @@ MESSAGES = {
     "IDENTITY_TENANT_MISMATCH": "The user identity could not be verified; the run was not started.",
     "DENIED_BINDING": "This agent version has no active identity binding; the run was not started.",
     "BINDING_DIGEST_MISMATCH": "The agent changed after its identity binding was approved; the run was not started.",
+    "TOOLKIT_CHANGED": "The toolkit changed after its index-schedule mandate was approved; approve a new revision of the "
+                       "mandate (Admin → Governance → Mandates). The run was not started.",
     "DEPENDENCY_UNAVAILABLE": "Identity service is unavailable; the run was not started. Try again.",
     "STALE_CONTEXT": "The admission for this run is no longer valid; the run was stopped.",
     "EPOCH_MISMATCH": "Access was revoked after this run was admitted; the run was stopped.",
@@ -546,23 +559,67 @@ def _read_draft(request: AdmissionRequest):
     return Draft(None, None, digest), mappings
 
 
+def toolkit_digest(toolkit_id, tool) -> str:
+    """The digest of a stored toolkit: its type and settings (credential references only). What a toolkit run is held
+    to, and what a toolkit mandate is approved for (#7305). ``DigestError`` when it cannot be computed."""
+    return definition_digest({
+        "v": DIGEST_VERSION, "kind": "toolkit", "toolkit_id": toolkit_id,
+        "type": getattr(tool, "type", None), "settings": norm_json(getattr(tool, "settings", None) or {})})
+
+
 def _read_toolkit(request: AdmissionRequest):
     """Step 4 of a toolkit run (#7229): the stored toolkit the run tests or indexes, with no binding to hold it to. One
     read of the toolkit row in its project; it is the authority on which credential the run selects (the dispatched
     toolkit is cross-checked against it, as an agent's toolkits are against its version). The digest is of the stored
     toolkit: its type and settings, which hold credential references only. A toolkit that is not saved in the project
-    declares nothing, so any credential the dispatch carries is refused."""
+    declares nothing, so any credential the dispatch carries is refused.
+
+    A scheduled index run (#7305) declares the stored toolkit with the credential its schedule names applied (the
+    schedule read from this same row, by the server-built ``trigger_ref``): the run indexes with that credential."""
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
     with db.get_session(request.binding_project_id) as session:
         tool = None if request.toolkit_id is None else \
             session.query(EliteATool).filter(EliteATool.id == request.toolkit_id).first()
         try:
-            digest = definition_digest({
-                "v": DIGEST_VERSION, "kind": "toolkit", "toolkit_id": request.toolkit_id,
-                "type": getattr(tool, "type", None), "settings": norm_json(getattr(tool, "settings", None) or {})})
+            digest = toolkit_digest(request.toolkit_id, tool)
         except DigestError:
             raise _denied("DEPENDENCY_UNAVAILABLE") from None
+        if tool is not None and request.entry_point == ENTRY_INDEX_SCHEDULE:
+            tool = _with_schedule_credential(request, tool)
     return Draft(None, None, digest), [] if tool is None else [(None, tool)]
+
+
+INDEX_TRIGGER_PREFIX = "index_schedule:"
+
+
+def _with_schedule_credential(request: AdmissionRequest, tool):
+    """The stored toolkit as the scheduled run uses it (#7305): the credential its schedule names, applied as a
+    reference, the way the index tick applies it. The schedule is the one ``trigger_ref`` names in this toolkit's own
+    row; a reference that names another toolkit is no run of this mandate. A schedule that names no credential (a team
+    schedule) runs on the stored settings; one whose credential cannot be resolved declares the stored settings only,
+    so the credential the run carries is refused."""
+    ref = str(request.trigger_ref or "")
+    toolkit_part, _, rest = ref[len(INDEX_TRIGGER_PREFIX):].partition(":")
+    index_name, _, key = rest.rpartition(":")
+    if not ref.startswith(INDEX_TRIGGER_PREFIX) or toolkit_part != str(request.toolkit_id) or not index_name:
+        raise _denied("MANDATE_REQUIRED")
+    meta = tool.meta if isinstance(tool.meta, dict) else {}
+    entry = (meta.get("indexes_meta") or {}).get(index_name)
+    schedule = ((entry or {}).get("schedules") or {}).get(key) if isinstance(entry, dict) else None
+    if not isinstance(schedule, dict) or not schedule.get("credentials"):
+        return tool
+    from .index_scheduling import as_credential_reference, resolve_credentials  # pylint: disable=C0415
+    settings = copy.deepcopy(tool.settings if isinstance(tool.settings, dict) else {})
+    ok, _issue, retryable = resolve_credentials(
+        project_settings=settings, toolkit_type=tool.type, user_config=schedule, project_id=request.binding_project_id,
+        is_team_schedule=key == "-1", creator_id=schedule.get("created_by"), toolkit_id=tool.id,
+        index_name=index_name, user_id=key)
+    if retryable:
+        raise _denied("DEPENDENCY_UNAVAILABLE")
+    if not ok:
+        return tool
+    as_credential_reference(settings, tool.type)
+    return SimpleNamespace(id=tool.id, type=tool.type, settings=settings, meta=meta)
 
 
 def _chat_toolkit_ids(payload) -> list:
@@ -881,7 +938,7 @@ def _store_admission(  # pylint: disable=R0913,R0914
                 traceparent=request.trace_ref,
             ))
         _tracing().security_audit_record(session, _event(
-            event_type="admission", decision="allow", reason_code=_admitted_code(profile),
+            event_type="admission", decision="allow", reason_code=_admitted_code(profile, subject),
             tenant=subject["tid"], project_id=request.project_id, application_id=application_id,
             environment=settings.environment, caller_ref=caller["ref"], user_ref=user_ref,
             mandate_ref=subject.get("mandate_ref"),
@@ -927,8 +984,11 @@ def _store_admission(  # pylint: disable=R0913,R0914
     )
 
 
-def _admitted_code(profile) -> str:
-    """The reason code of an allow: ``ADMITTED_DEVELOPMENT`` names a development run in every audit view."""
+def _admitted_code(profile, subject=None) -> str:
+    """The reason code of an allow: ``ADMITTED_DEVELOPMENT`` names a development run in every audit view. A run under a
+    mandate is ``ADMITTED`` even with no binding (a toolkit mandate's index run, #7305): it ran on an approved mandate."""
+    if subject is not None and subject.get("kind") == "mandate":
+        return "ADMITTED"
     return "ADMITTED_DEVELOPMENT" if profile == PROFILE_DEVELOPMENT else "ADMITTED"
 
 
@@ -986,14 +1046,15 @@ def _mandate_event(mandate, reason) -> dict:
     """The lifecycle event of a change the platform made to a mandate by itself (expiry, owner suspension)."""
     return _event(
         event_type="lifecycle", reason_code=reason, outcome="success", project_id=mandate.project_id,
-        application_id=mandate.application_id, agent_binding_ref=str(mandate.agent_binding_ref),
+        application_id=mandate.application_id,
+        agent_binding_ref=None if mandate.agent_binding_ref is None else str(mandate.agent_binding_ref),
         mandate_ref=str(mandate.id), caller_ref="system:admission", revocation_epoch=mandate.revocation_epoch,
     )
 
 
-def _read_mandate(project_id, mandate_id):
+def _read_mandate(project_id, mandate_id, columns=MANDATE_COLUMNS):
     with db.get_session(project_id) as session:
-        return session.execute(select(*MANDATE_COLUMNS).where(AutonomousMandate.id == mandate_id)).one_or_none()
+        return session.execute(select(*columns).where(AutonomousMandate.id == mandate_id)).one_or_none()
 
 
 def _overdue(mandate) -> bool:
@@ -1046,22 +1107,34 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
 ) -> ExecutionSecurityContextView:
     """Steps 2 to 6 of a run under an autonomous mandate: the mandate, its owner, the binding, the owner's right to
     run the agent and use credentials, then the context. The mandate is read from the table at this moment; the
-    request only names it."""
+    request only names it.
+
+    A scheduled index run (#7305, entry point ``index_schedule``) is admitted on a toolkit mandate instead: matched by
+    its toolkit (there is no binding to check), the owner's right to index it, and the toolkit's credentials decided as
+    the owner's on-demand indexing decides them (their personal credentials, or project ones they hold a grant on)."""
     settings = module.admission_settings
     operation = MANDATE_OPERATION_OF.get(request.entry_point)
+    toolkit_run = request.entry_point == ENTRY_INDEX_SCHEDULE
     try:
         mandate_id = uuid.UUID(str(request.mandate_ref))
     except ValueError:
         raise _denied("MANDATE_REQUIRED") from None
-    if (request.caller_type != "trigger" or not request.trigger_ref or operation is None
-            or request.version_id is None or request.application_id is None):
+    if request.caller_type != "trigger" or not request.trigger_ref or operation is None:
+        raise _denied("MANDATE_REQUIRED")
+    if (request.toolkit_id is None or request.version_id is not None or request.application_id is not None) \
+            if toolkit_run else (request.version_id is None or request.application_id is None):
         raise _denied("MANDATE_REQUIRED")
     if not run_id:
         raise _denied("DEPENDENCY_UNAVAILABLE")
-    # 2. the mandate exists for this agent version, is in time, active and allows this kind of trigger
-    mandate = _read_mandate(request.binding_project_id, mandate_id)
-    if (mandate is None or mandate.project_id != request.binding_project_id
-            or mandate.agent_version != request.version_id or mandate.application_id != request.application_id):
+    # 2. the mandate exists for this agent version (or toolkit), is in time, active and allows this kind of trigger
+    if toolkit_run:
+        mandate = _read_mandate(request.binding_project_id, mandate_id, TOOLKIT_MANDATE_COLUMNS)
+        matches = mandate is not None and mandate.toolkit_id == request.toolkit_id and mandate.agent_version is None
+    else:
+        mandate = _read_mandate(request.binding_project_id, mandate_id)
+        matches = mandate is not None and mandate.agent_version == request.version_id \
+            and mandate.application_id == request.application_id
+    if not matches or mandate.project_id != request.binding_project_id:
         raise _denied("MANDATE_REQUIRED")
     if _overdue(mandate):
         _expire_mandate(request.binding_project_id, mandate_id)
@@ -1099,18 +1172,23 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
         raise _denied("DEPENDENCY_UNAVAILABLE") from None
     if not isinstance(linked, dict) or linked.get("id") != owner:
         raise _denied("IDENTITY_SUBJECT_UNLINKED")
-    # 4. the approved agent definition the mandate was made for is the one that runs
-    binding, rows = _find_binding(request, settings)
-    if str(binding.id) != str(mandate.agent_binding_ref):
-        raise _denied("DENIED_BINDING")
-    # 4a. the owner may still run agents in this project
+    # 4. the approved agent definition the mandate was made for is the one that runs; for a toolkit mandate, the stored
+    # toolkit (no binding: it is held to the toolkit row, as on-demand indexing is)
+    if toolkit_run:
+        binding, rows = _read_toolkit(request)
+        if not mandate.toolkit_digest or binding.definition_digest != mandate.toolkit_digest:
+            raise _denied(TOOLKIT_CHANGED)   # held to the toolkit as it was approved (C9-SEC-73)
+    else:
+        binding, rows = _find_binding(request, settings)
+        if str(binding.id) != str(mandate.agent_binding_ref):
+            raise _denied("DENIED_BINDING")
+    # 4a. the owner may still run agents (index this toolkit) in this project
     try:
-        permitted = PREDICT_PERMISSION in set(
-            auth.get_user_permissions(owner, mode="default", project_id=request.binding_project_id))
+        permissions = set(auth.get_user_permissions(owner, mode="default", project_id=request.binding_project_id))
     except Exception as exc:  # pylint: disable=W0703
         log.error("admission: the owner permissions could not be read (%s)", type(exc).__name__)
         raise _denied("DEPENDENCY_UNAVAILABLE") from None
-    if not permitted:
+    if (INDEX_PERMISSION if toolkit_run else PREDICT_PERMISSION) not in permissions:
         raise _denied("DENIED_RBAC")
     # 5. on whose authority: the mandate, vouched for by the platform (never turned into a verified user)
     owner_ref = f"idp:{tid}:{oid}"
@@ -1130,8 +1208,10 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
     _want_prefetched_facts(payload)
     decisions = _decide_credentials(
         module, request, subject, binding, payload, expires_at, rows=rows,
+        can_use=(lambda: USE_PERMISSION in permissions) if toolkit_run else None,
         mandate_identity=identity_reader(module, request.binding_project_id, mandate.id, request.trigger_ref, owner),
-        mandate_owner_ref=owner_ref if owner_delegated_allowed(module) else None)
+        # a toolkit mandate's project credentials are the owner's own grants (no binding can hold one for it)
+        mandate_owner_ref=owner_ref if toolkit_run or owner_delegated_allowed(module) else None)
     if any(getattr(decision, "auth_mode", None) == DELEGATED_AUTH_MODE for decision in decisions):
         # the run acts with the owner's consent (#7131): its context names the owner's subject, which the release
         # compares with the mandate's and the consent's
@@ -1151,17 +1231,50 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
 
 
 def index_schedule_refusal_code(principal) -> str:
-    """A scheduled index run is not admitted in this release (no agent binding to hold a mandate). The code that
-    refuses it: ``AUTHORIZATION_REQUIRED`` for a per-user schedule (it acts on a user's behalf and has no renewed
-    authorization), ``MANDATE_REQUIRED`` for a team schedule (it ran as the system user)."""
+    """The code that refuses a scheduled index run no toolkit mandate covers (#7305): ``AUTHORIZATION_REQUIRED`` for a
+    per-user schedule (it acts on a user's behalf), ``MANDATE_REQUIRED`` for a team schedule (it ran as the system
+    user)."""
     return "AUTHORIZATION_REQUIRED" if principal.kind == "delegation" else "MANDATE_REQUIRED"
 
 
-def record_index_schedule_refusal(module, code, *, project_id, toolkit_id) -> None:
+# What the index history says of a scheduled index run no toolkit mandate covers (#7305): the remedy, by code
+INDEX_SCHEDULE_MESSAGES = {
+    "AUTHORIZATION_REQUIRED": "This schedule runs on its owner's behalf, which needs an approved index-schedule mandate "
+                              "for the schedule owner on this toolkit (Admin → Governance → Mandates); it was not "
+                              "started.",
+    "MANDATE_REQUIRED": "This team schedule needs an approved index-schedule mandate for the schedule owner (who saved "
+                        "it last) on this toolkit (Admin → Governance → Mandates); it was not started.",
+}
+# A personal schedule its owner did not save last (or saved before the platform recorded who saves it): their mandate
+# covers it once they save it themselves (#7305, C9-SEC-72)
+INDEX_SCHEDULE_RESAVE_MESSAGE = ("This schedule was not saved by its owner (or was saved before the platform recorded "
+                                 "who saves it): the schedule owner saves the schedule again, then their index-schedule "
+                                 "mandate on this toolkit covers it. It was not started.")
+
+
+def index_schedule_refusal_text(code, resave=False) -> str:
+    """The index history text of a refused scheduled index run: the remedy for want of a mandate (``resave``: the
+    owner's mandate exists but the schedule is not confirmed as theirs), else the code's."""
+    if resave and code == "AUTHORIZATION_REQUIRED":
+        return INDEX_SCHEDULE_RESAVE_MESSAGE
+    return INDEX_SCHEDULE_MESSAGES.get(code) or MESSAGES.get(code, GENERIC_MESSAGE)
+
+
+def record_index_schedule_refusal(module, code, *, project_id, toolkit_id, mandate_ref=None) -> None:
     """Audit and count the refusal of one scheduled index run. Called once the refusal was concluded (written into
-    the index history), so a slot that is retried does not record one deny per minute."""
-    _record_deny(module, code, project_id=project_id, caller_ref=f"schedule:index:{toolkit_id}")
+    the index history), so a slot that is retried does not record one deny per minute. ``mandate_ref``: the covering
+    toolkit mandate whose row refused it (#7305)."""
+    _record_deny(module, code, project_id=project_id, caller_ref=f"schedule:index:{toolkit_id}",
+                 mandate_ref=None if mandate_ref is None else str(mandate_ref))
     _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", code)
+
+
+def record_index_schedule_would_deny(module, code, *, project_id, toolkit_id, trigger_ref) -> None:
+    """Audit only: what enforce would say of one firing of a scheduled index run (#7305) for want of a toolkit mandate
+    of its owner that can carry it (``code``). The run goes on."""
+    _record_deny(module, code, would_deny=True, project_id=project_id, caller_ref=trigger_ref,
+                 toolkit_instance_id=str(toolkit_id))
+    _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny", code)
 
 
 def record_schedule_would_deny(module, code, *, project_id, application_id, trigger_ref) -> None:
@@ -2166,7 +2279,8 @@ def _mandate_revoke_code(row, stamped) -> Optional[str]:
     except ValueError:
         return "MANDATE_INACTIVE"
     project_id = row.binding_project_id or row.project_id
-    mandate = _read_mandate(project_id, mandate_id)
+    toolkit_run = row.entry_point == ENTRY_INDEX_SCHEDULE   # a toolkit mandate's run (#7305)
+    mandate = _read_mandate(project_id, mandate_id, TOOLKIT_MANDATE_COLUMNS if toolkit_run else MANDATE_COLUMNS)
     if mandate is None:
         return "MANDATE_INACTIVE"
     if _overdue(mandate):
@@ -2178,7 +2292,11 @@ def _mandate_revoke_code(row, stamped) -> Optional[str]:
         return "MANDATE_INACTIVE"
     if mandate.revocation_epoch != stamped.get("mandate"):
         return "EPOCH_MISMATCH"
-    if str(mandate.agent_binding_ref) != str(row.agent_binding_ref):
+    if toolkit_run:   # the toolkit as the mandate approved it is the one the run was admitted on
+        if mandate.toolkit_id is None or not mandate.toolkit_digest or mandate.toolkit_digest != row.definition_digest:
+            return TOOLKIT_CHANGED
+        return None
+    if mandate.agent_binding_ref is None or str(mandate.agent_binding_ref) != str(row.agent_binding_ref):
         return "DENIED_BINDING"
     return None
 
@@ -2414,7 +2532,8 @@ def recheck_context_credentials(row, project_id, now) -> Optional[str]:
     binding_project_id = row.binding_project_id or project_id
     subject_ref = (row.subject or {}).get("ref")
     if row.profile == PROFILE_DEVELOPMENT:
-        return recheck_development(binding_project_id, row.allowed_bindings, subject_ref, now)[0]
+        return recheck_development(binding_project_id, row.allowed_bindings, subject_ref, now,
+                                   holder=subject_grant_holder(row.subject))[0]
     return recheck_credentials(binding_project_id, row.allowed_bindings, subject_ref, str(row.agent_binding_ref), now)
 
 
