@@ -21,7 +21,7 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER = 7, 9, 12
-HELPERS = {'_SCHEDULE_REFUSALS', '_check_schedule_decision', '_apply_schedule_decision'}
+HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision'}
 
 
 class Forbidden(Exception):
@@ -78,7 +78,8 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
 def _parsed(**values):
     return types.SimpleNamespace(**{
         'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'hitl_resume': True,
-        'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None, **values,
+        'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None,
+        'mcp_auth_resume': False, 'mcp_auth_action': None, **values,
     })
 
 
@@ -87,7 +88,7 @@ def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decisio
 
     pending, denied = check(_parsed(), OWNER)
     assert (pending, denied) == ((RUN_ID, 'approve'), None)
-    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False})]
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False})]
 
     assert apply(PROJECT_ID, pending) is None
     assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve')
@@ -107,7 +108,7 @@ def test_el_7011_r2_4_a_fan_out_child_on_a_resumed_run_has_nothing_to_apply():
     pending, denied = check(_parsed(thread_id='child-1'), OWNER)
 
     assert (pending, denied) == (None, None)
-    assert calls[0][-1] == {'fan_out': True}
+    assert calls[0][-1] == {'fan_out': True, 'sign_in': False}
     assert apply(PROJECT_ID, pending) is None
     assert [call[0] for call in calls] == ['check']
 
@@ -238,3 +239,38 @@ def test_el_7011_r2_4_rest_keeps_400_for_other_errors(post):
     rpc.result = {'error': 'Redis connection error'}
 
     assert call() == ({'error': 'Redis connection error'}, 400)
+
+
+def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize'), OWNER)
+
+    assert (pending, denied) == ((RUN_ID, 'approve'), None)
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True})]
+
+
+def test_one_skip_among_the_sign_in_answers_rejects_the_run():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+    answers = [{'interrupt_id': 'a', 'action': 'authorize'}, {'interrupt_id': 'b', 'action': 'skip'}]
+
+    pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize',
+                                    mcp_auth_decisions=answers), OWNER)
+
+    assert denied is None
+    assert calls[0][4] == ['authorize', 'skip']
+
+
+def test_an_invalid_sign_in_answer_names_the_sign_in_field():
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, error=Invalid())
+
+    pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='maybe'), OWNER)
+
+    assert pending is None and denied['field'] == 'mcp_auth_action' and denied['status'] == 400
+
+
+def test_a_sign_in_answer_in_a_chat_without_a_schedule_run_is_left_alone():
+    check, _, calls = _helpers({})
+
+    assert check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='skip'), OWNER) == (None, None)
+    assert calls == []

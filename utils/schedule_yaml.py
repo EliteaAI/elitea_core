@@ -221,9 +221,10 @@ def _review_item(project_id: int, owner_id: int, version_id: int, values: dict,
     # `reviews` holds the scans of one import by version and owner, so items of one version scan once
     if reviews is None:
         reviews = {}
-    if (version_id, owner_id) not in reviews:
-        reviews[(version_id, owner_id)] = scan_schedule(project_id, version_id, owner_id)
-    review = reviews[(version_id, owner_id)]
+    rule = values['approval_rule']
+    if (version_id, owner_id, rule) not in reviews:
+        reviews[(version_id, owner_id, rule)] = scan_schedule(project_id, version_id, owner_id, rule)
+    review = reviews[(version_id, owner_id, rule)]
     if review['blocking']:
         raise ScheduleError('schedule_blocked', '; '.join(finding['message'] for finding in review['blocking']))
     if values['approval_rule'] == 'run_without_asking' and (review['sensitive'] or not scan_complete(review)):

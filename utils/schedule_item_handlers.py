@@ -2,6 +2,8 @@
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
+from types import SimpleNamespace
+
 from flask import request
 from pydantic import BaseModel, Field, ValidationError
 from pylon.core.tools import log
@@ -17,8 +19,8 @@ from ..models.pd.entity_schedule import (
     ScheduleRiskCheck,
     ScheduleUpdate,
 )
-from ..models.pd.schedule_list import RunStatus
-from ..models.pd.schedule_run import ScheduleRunRequest
+from ..models.pd.schedule_list import DbId, RunStatus
+from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .error_text import public_event, public_reason
 from .schedule_access import (
     SCHEDULE_PERMISSIONS,
@@ -56,12 +58,26 @@ ENABLED_NOT_EDITABLE = refusal(
 LIMIT_REACHED = "schedule_limit_reached"
 RUN_WITHOUT_ASKING = "run_without_asking"
 # The human texts of the save refusals (owner CR 2026-10-21, risk review)
+CREDENTIAL_STILL_MISSING = "The credential is still missing. Add it, then approve again."
 RULE_NOT_ALLOWED = 'This project does not allow "Run without asking"'
 BLOCKED = "You can't save this schedule: a scheduled run cannot do what the blocking findings need"
 SCAN_INCOMPLETE = 'Some tools could not be checked, so "Run without asking" is not allowed; use "Pause and ask me"'
 CONFIRM = "Review the sensitive tools, then save again with `risk_ack` and this fingerprint"
 CHANGED = "The sensitive tools changed since you reviewed them; review them again and confirm"
 NAME_MISMATCH = 'Type the schedule name exactly to confirm "Run without asking"'
+
+
+def _started(entity_type: str, project_id: int, schedule_id: DbId, run_id: int) -> bool:
+    """Start an approved run; an error counts as "not started", so the caller fails the run with a reason.
+
+    The decision is already committed and the run is running. An error that escaped would leave it running
+    with no thread, and the owner would get a bare 500.
+    """
+    try:
+        return start_schedule_run(entity_type, project_id, schedule_id, run_id)
+    except Exception:  # noqa: BLE001 -- the run must end failed, not stay running
+        log.exception("Schedule %s run %s: the approved run could not start", schedule_id, run_id)
+        return False
 
 
 class RunsQuery(BaseModel):
@@ -149,7 +165,7 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
             `approval_rule_not_allowed` (incomplete scan) or `risk_name_mismatch` (`field: risk_ack`).
     """
     from .schedule_risk import scan_complete, scan_schedule
-    review = scan_schedule(project_id, version_id, owner_id)
+    review = scan_schedule(project_id, version_id, owner_id, rule)
     without_asking = rule == RUN_WITHOUT_ASKING
     if review["blocking"]:
         raise ScheduleError("schedule_blocked", BLOCKED, 409, **review)
@@ -179,7 +195,7 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
     """
     if review is None:
         from .schedule_risk import scan_schedule
-        review = scan_schedule(project_id, row.version_id, row.created_by)
+        review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
     warnings = review["blocking"] + review["sensitive"] + review["notices"]
     return {**_read_answer(row, scope, project_id), "warnings": warnings, "governance_notice": notice}
 
@@ -187,6 +203,30 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
     from .schedule_settings import is_run_without_asking_allowed
     return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
+
+
+def _credential_check(project_id: int, owner) -> str:
+    """The same credential check as the pre-run step for `owner`'s schedule: "missing", "clean" or "unknown"."""
+    from .schedule_prerun import check_owner_credentials, credential_wait  # late, as the other pre-run helpers
+    try:
+        reason = check_owner_credentials(project_id, owner)
+    except Exception:  # noqa: BLE001 -- an unreadable check must not block the owner; the restart runs it again
+        log.exception("Project %s: the credential check before an approval failed", project_id)
+        return "unknown"
+    if credential_wait(reason):
+        return "missing"
+    return "clean" if reason is None else "unknown"
+
+
+def _remember_checked(run_id: int) -> None:
+    """Skip the repeat of a clean credential check in the restarted run, so it does not expand the version twice."""
+    from .schedule_prerun import mark_credentials_checked  # late, as the other pre-run helpers
+    mark_credentials_checked(run_id)
+
+
+def _forget_checked(run_id: int) -> None:
+    from .schedule_prerun import forget_credentials_checked  # late, as the other pre-run helpers
+    forget_credentials_checked(run_id)
 
 
 def _parse_body(model):
@@ -273,7 +313,7 @@ class ScheduleItemHandlers:
         body, error = _parse_body(ScheduleRiskCheck)
         if error:
             return error
-        owner_id, stored = auth.current_user()["id"], None
+        owner_id, stored, rule = auth.current_user()["id"], None, body.approval_rule
         with db.get_session(project_id) as session:
             try:
                 if body.schedule_id is not None:
@@ -283,10 +323,11 @@ class ScheduleItemHandlers:
                     if refused:
                         return refused
                     owner_id, stored = row.created_by, _kept_fingerprint(row)
+                    rule = rule or row.approval_rule
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response
-        review = scan_schedule(project_id, body.version_id, owner_id)
+        review = scan_schedule(project_id, body.version_id, owner_id, rule)
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
         answer = {**review, "run_without_asking_allowed": allowed}
         if body.schedule_id is not None:
@@ -437,6 +478,59 @@ class ScheduleItemHandlers:
                 session.commit()
                 return refusal("run_start_failed", "The run could not start", 500)
             return {"run_id": run_id}, 202
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _decide_run(self, project_id: int, schedule_id: int, run_id: int):
+        """Approve or reject a waiting run that has no chat to answer in (it waits for credentials).
+
+        Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
+        Otherwise approve starts the run again. A run with a chat is decided in that chat.
+        Who may call: the owner with `schedules.run`; an admin cannot decide.
+        Errors: 400 invalid action; 403 not the owner; 404; 409 the run is not waiting, has a chat, or a credential is still missing.
+        """
+        body, error = _parse_body(ScheduleRunDecision)
+        if error:
+            return error
+        # Late: the decision writers load the run models, which the handler tests fake
+        from .schedule_runs import (
+            ScheduleDecisionForbidden,
+            ScheduleRunNotWaiting,
+            apply_schedule_decision,
+            check_schedule_decision,
+        )
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                row = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            run = session.get(EntityScheduleRun, run_id)
+            if run is None or run.schedule_id != schedule_id:
+                return RUN_NOT_FOUND
+            if run.conversation_id is not None:
+                return refusal("run_has_chat", "Decide this run in its chat", 409)
+            entity_type = row.entity_type
+            owner = SimpleNamespace(created_by=row.created_by, application_id=row.application_id,
+                                    version_id=row.version_id)
+        try:
+            decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
+            checked = _credential_check(project_id, owner) if decision == "approve" else "unknown"
+            if checked == "missing":
+                return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
+            apply_schedule_decision(project_id, run_id, decision)
+            if checked == "clean":  # only after the write: a lost race must leave no mark behind
+                _remember_checked(run_id)
+        except ScheduleDecisionForbidden:
+            return refusal("not_owner", "Only the schedule owner can approve or reject this run", 403)
+        except ScheduleRunNotWaiting:
+            return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
+        if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
+            _forget_checked(run_id)
+            with db.get_session(project_id) as session:
+                fail_run(session, run_id, START_FAILED)
+                session.commit()
+            return refusal("run_start_failed", "The run could not start", 500)
+        return {"run_id": run_id, "status": "running" if decision == "approve" else "failed"}, 200
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _runs(self, project_id: int, schedule_id: int):

@@ -21,7 +21,7 @@ from .pipeline_execution import (
     finish_trigger_run_with_error,
     is_trigger_refusal,
 )
-from .schedule_prerun import run_prerun_check
+from .schedule_prerun import credential_toolkit_refs, run_prerun_check
 from .schedule_runs import (
     block_schedule_run,
     count_refusal,
@@ -62,10 +62,12 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
-                approval_confirmed_by=schedule.approval_confirmed_by),
+                approval_confirmed_by=schedule.approval_confirmed_by,
+                credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
-            trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
+            trigger=getattr(run_row := session.get(EntityScheduleRun, run_id), 'trigger', 'cron'),
+            resumed=getattr(run_row, 'resumed_at', None) is not None)
 
 
 def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
@@ -133,26 +135,52 @@ def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
     return _setting_allows_auto_approve(project_id)
 
 
+def _runtime_tool_name(name) -> str:
+    """The tool name as the SDK guard compares it: the last alias after `___` or `:`, in lower case."""
+    reduced = str(name or '').strip().lower()
+    if '___' in reduced:
+        reduced = reduced.split('___', 1)[1].strip()
+    if ':' in reduced:
+        reduced = reduced.split(':', 1)[1].strip()
+    return reduced
+
+
 def _confirmed_pairs(review: dict):
     """The confirmed (toolkit, tool) pairs a run may approve; a personal credential is (toolkit, '*'). False when none: an empty scan is no consent.
 
-    An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks.
+    An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks. An item that
+    comes from the global list may be spelled differently from the runtime name, which the SDK compares exactly.
+    It is approved by its normalized name; only when the toolkit has no unconfirmed `may_apply` tool it is
+    also approved as (toolkit, '*'), because (toolkit, '*') would let that unconfirmed tool run unasked.
     """
-    pairs = [(item['toolkit'], item.get('tool') or '*') for item in review['sensitive'] if item.get('toolkit')]
-    return pairs or False
+    unconfirmed = {item.get('toolkit') for item in review.get('notices', []) if item.get('may_apply')}
+    pairs = []
+    for item in review['sensitive']:
+        toolkit = item.get('toolkit')
+        if not toolkit:
+            continue
+        if not item.get('from_list'):
+            pairs.append((toolkit, item.get('tool') or '*'))
+            continue
+        if item.get('tool'):
+            pairs.append((toolkit, _runtime_tool_name(item['tool'])))
+        if toolkit not in unconfirmed:
+            pairs.append((toolkit, '*'))
+    return list(dict.fromkeys(pairs)) or False
 
 
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
     """The risk outcome of the run for the run log and its `risk_check` event (owner CR 2026-10-21).
 
-    `blocked` (a blocking finding), `needs_approval` (sensitive tools, or "Run without asking" turned
+    `blocked` (a blocking finding), `needs_approval` (listed sensitive tools, or "Run without asking" turned
     back to "Pause and ask me"), `unknown` (a tool could not be checked) or `ok`.
     """
     from .schedule_risk import scan_complete
     if review['blocking']:
         reasons = '; '.join(item['message'] for item in review['blocking'])
         return 'blocked', run_event('risk_check', f'Risk check: blocked: {reasons}', 'error')
-    if review['sensitive']:
+    # A personal credential keeps its own item and confirmation; only a listed tool needs approval at run time
+    if any(item.get('code') == 'sensitive_action' for item in review['sensitive']):
         tools = ', '.join(f"{item.get('toolkit')} · {item.get('tool') or '*'}" for item in review['sensitive'])
         text = f'Risk check: needs approval for {tools}'
         if auto_approve:
@@ -178,10 +206,11 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         fail_schedule_run(project_id, run_id, NOT_FOUND)
         return
     trigger = getattr(loaded, 'trigger', 'cron')
-    record_run_events(project_id, run_id, run_event(
-        'started', f"{'Test run' if trigger == 'test' else 'Run'} started · trigger: {trigger} · "
-                   f"version {loaded.version.name}", trigger=trigger, version_id=loaded.version.id,
-    ), version_id=loaded.version.id)
+    if not getattr(loaded, 'resumed', False):  # an approved parked run starts again; its log already has the first line
+        record_run_events(project_id, run_id, run_event(
+            'started', f"{'Test run' if trigger == 'test' else 'Run'} started · trigger: {trigger} · "
+                       f"version {loaded.version.name}", trigger=trigger, version_id=loaded.version.id,
+        ), version_id=loaded.version.id)
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return
@@ -193,13 +222,18 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         return
     # late: the scan pulls in the toolkit expansion
     from .schedule_risk import scan_schedule
-    review = scan_schedule(project_id, loaded.version.id, check.owner_id)
+    review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule)
     auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
     approved = _confirmed_pairs(review) if auto_approve else False
     outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved))
     record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
     if review['blocking']:  # a scheduled run cannot sign in or answer a person
-        block_schedule_run(project_id, run_id, '; '.join(item['message'] for item in review['blocking']), 'error')
+        reasons = '; '.join(item['message'] for item in review['blocking'])
+        if all(item['code'] != 'human_input_step' for item in review['blocking']):
+            # "Run without asking" never waits: a missing sign-in or credential is a failure with a clear reason
+            finish_schedule_run(project_id, run_id, 'failed', reasons)
+        else:
+            block_schedule_run(project_id, run_id, reasons, 'error')
         return
     source = loaded.schedule.entity_type
     if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':

@@ -21,6 +21,9 @@ NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succe
 DEFAULT_APPROVAL_WAIT_HOURS = 24
 MAX_APPROVAL_WAIT_HOURS = 720
 REJECT_REASON = 'rejected by the owner'
+SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not ask the owner"
+# The owner's answer on a sign-in pause: `authorize` goes on, `skip` ends the run
+SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
 # The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
 DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
 # A schedule pauses itself at this many governance refusals in a row (#7254); an admitted start or a resume ends a streak
@@ -224,41 +227,99 @@ def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str |
 
 def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversation_id: int | None = None,
                        author_id: int | None = None) -> None:
-    """A sensitive-tool pause makes a running run wait for the owner; any other pause fails it.
+    """A sensitive-tool or sign-in pause makes a running run wait for the owner; any other pause fails it.
 
-    `conversation_id` and `author_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
+    A schedule that does not ask the owner fails on a sign-in at once. `conversation_id` and `author_id` of the
+    paused chat tie the pause to its own run (see `_own_conversation`).
     """
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
-    if sensitive is None:
+    sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
+    if sign_in is not None and _approval_rule(project_id, run_id) == 'run_without_asking':
+        name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
+        finish_schedule_run(project_id, run_id, 'failed', SIGN_IN_REASON.format(name), conversation_id,
+                            author_id=author_id)
+        return
+    waiting = sensitive or sign_in
+    if waiting is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
                             conversation_id, author_id=author_id)
         return
+    event = _sign_in_event(waiting) if sign_in is not None else _paused_event(sensitive, sum(
+        item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1)
+    _park_run(project_id, run_id, event, _own_conversation(conversation_id, author_id))
+
+
+def _park_run(project_id: int, run_id: int, event: dict, conditions: list) -> bool:
+    """Make a running run wait for the owner, log `event` and send the one notice; False when it was not running."""
+    with db.get_session(project_id) as session:
+        return _park_in_session(project_id, session, run_id, event, conditions)
+
+
+def _park_in_session(project_id: int, session, run_id: int, event: dict, conditions: list) -> bool:
+    """The work of `_park_run` on a session the caller opened."""
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
+    hours = approval_wait_hours()
+    paused = session.execute(
+        update(EntityScheduleRun)
+        .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running', *conditions)
+        # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
+        .values(status='waiting_for_approval', resumed_at=None,
+                approval_expires_at=datetime.now(UTC) + timedelta(hours=hours))
+    ).rowcount
+    if paused:
+        _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait
+        # The window goes into the log: the expired notice names it even after the setting changes
+        append_run_events(session, run_id, {**event, 'wait_hours': hours})
+    session.commit()
+    if not paused:  # a run that is not running stays as it is, with no notice
+        return False
+    try:
+        run = session.get(EntityScheduleRun, run_id)
+        schedule = session.get(EntitySchedule, run.schedule_id)
+        notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
+    except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it
+        log.exception('Schedule run %s: cannot send the approval notice', run_id)
+    return True
+
+
+def park_for_credentials(project_id: int, run_id: int, reason: str, toolkit: str | None = None,
+                         credential: str | None = None) -> bool:
+    """Make a run that cannot start for a missing credential wait for the owner, once.
+
+    Only under "Pause and ask me", and only before the owner approved this run: after an approval the credential
+    is still missing, and the run fails with the reason. The run has no conversation; the owner decides it
+    through the run decision route. True when the run now waits. The event names the toolkit and the credential
+    title when known, so a client can show what to add; never a secret.
+    """
     with db.get_session(project_id) as session:
-        paused = session.execute(
-            update(EntityScheduleRun)
-            .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running',
-                   *_own_conversation(conversation_id, author_id))
-            # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
-            .values(status='waiting_for_approval', resumed_at=None,
-                    approval_expires_at=datetime.now(UTC) + timedelta(hours=approval_wait_hours()))
-        ).rowcount
-        if paused:
-            _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait (R1.6)
-            append_run_events(session, run_id, _paused_event(sensitive, sum(
-                item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1))
-        session.commit()
-        if not paused:  # a run that is not running stays as it is, with no notice (R1.4)
-            return
-        try:
-            run = session.get(EntityScheduleRun, run_id)
-            schedule = session.get(EntitySchedule, run.schedule_id)
-            notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
-        except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
-            log.exception('Schedule run %s: cannot send the approval notice', run_id)
+        run = session.get(EntityScheduleRun, run_id)
+        if run is None or run.resumed_at is not None:
+            return False
+        if _approval_rule(project_id, run_id, session) != 'pause_and_ask':
+            return False
+        return _park_in_session(project_id, session, run_id, run_event(
+            'paused', f'Paused for approval: {reason}. Add the credentials, then approve', 'warning',
+            need='credential', toolkit=toolkit and str(toolkit)[:NAME_LIMIT],
+            credential=credential and str(credential)[:NAME_LIMIT]), [])
+
+
+def _is_sign_in(item: dict) -> bool:
+    """True for the flat request of a toolkit that needs the owner to sign in."""
+    return item.get('guardrail_type') == 'mcp_auth' or item.get('type') == 'mcp_authorization_required'
+
+
+def _approval_rule(project_id: int, run_id: int, session=None) -> str | None:
+    """The approval rule of the schedule the run belongs to; reads in `session` when the caller has one."""
+    query = (select(EntitySchedule.approval_rule)
+             .join(EntityScheduleRun, EntityScheduleRun.schedule_id == EntitySchedule.id)
+             .where(EntityScheduleRun.id == run_id))
+    if session is not None:
+        return session.scalar(query)
+    with db.get_session(project_id) as own:
+        return own.scalar(query)
 
 
 def _copy_status(session, run_id: int, status: str) -> None:
@@ -274,6 +335,13 @@ def _paused_event(item: dict, more: int = 0) -> dict:
     return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
 
 
+def _sign_in_event(item: dict) -> dict:
+    """The pause line for a sign-in: the toolkit only, never a URL or a token."""
+    toolkit = str(item.get('toolkit_name') or '?')[:NAME_LIMIT]
+    return run_event('paused', f'Paused for approval: a sign-in is needed for {toolkit}', 'warning', need='sign_in',
+                     toolkit=toolkit)
+
+
 def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
     """`PAUSE_REASON` plus the toolkit or step the pause names; the toolkit first, as an MCP sign-in node says little (R2.4)."""
     for key, label in (('toolkit_name', 'toolkit'), ('node_name', 'step')):
@@ -284,14 +352,17 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
-                            fan_out: bool = False) -> str | None:
+                            fan_out: bool = False, sign_in: bool = False) -> str | None:
     """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
 
     Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
     included (R2.3); then `ScheduleDecisionInvalid` for an empty or unknown action; then
     `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
-    that an earlier decision of the same pause resumed: nothing to change.
+    that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
+    the sign-in answers (`authorize`, `skip`) and map to approve and reject.
     """
+    if sign_in:  # an unknown answer stays in the list, so the check below refuses it
+        actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
         if run is None:

@@ -9,7 +9,7 @@ from typing import get_args
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
-from ..models.pd.schedule_run import ScheduleRunRequest
+from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
@@ -400,6 +400,21 @@ OPERATIONS = {
             "400 an invalid query option; 403 no permission; 404 not found"),
         "parameters": ITEM_PARAMS + RUNS_QUERY_PARAMS,
         "responses": _responses(200, "`total` and one page of `rows`", RUNS_EXAMPLE, {400: None, 403: None, 404: None}),
+    },
+    ("post", f"{RUN}/decision"): {
+        "name": "Decide a waiting run",
+        "summary": "Approve or reject a waiting run that has no chat",
+        "description": _text(
+            "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
+            "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",
+            "the owner with `schedules.run`; an admin cannot decide",
+            "400 an invalid action; 403 no permission or not the owner; 404 not found; "
+            "409 the run is not waiting, or has a chat; 500 the run could not start"),
+        "parameters": RUN_PARAMS,
+        "request_body": ScheduleRunDecision,
+        "responses": _responses(200, "The decision was written", {"run_id": 77, "status": "running"}, {
+            400: None, 403: "No permission, or not the owner", 404: None,
+            409: "The run is not waiting, or has a chat", 500: "The run could not start"}),
     },
     ("get", RUN): {
         "name": "Read a run of a schedule",

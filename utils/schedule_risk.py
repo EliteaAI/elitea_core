@@ -17,6 +17,9 @@ from .pipeline_utils import validate_yaml_from_str
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
 BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+# The owner can fix these while the run waits, so "Pause and ask me" saves and starts with them
+WAIT_FOR_OWNER_CODES = {'personal_signin_required', 'missing_credential'}
+WAIT_HINT = 'Sign in or add the credentials before the run; otherwise the run waits for you.'
 SENSITIVE_CODE = 'sensitive_action'
 PERSONAL_CODE = 'personal_credential'
 SENSITIVE_CODES = {SENSITIVE_CODE, PERSONAL_CODE}
@@ -76,19 +79,32 @@ def _personal_credential(tool, name) -> dict:
                     badge=PERSONAL_CODE, effect=f"Runs with the owner's personal {label} credential.")
 
 
+def _sensitive_text(name, tool_name, may_apply: bool) -> str:
+    if may_apply:
+        return f'Tool "{tool_name}" may need approval if toolkit "{name}" has it'
+    return f'Tool "{tool_name}" of toolkit "{name}" needs approval'
+
+
 def _sensitive_warnings(tool, name) -> list:
-    selected = (tool.settings or {}).get('selected_tools') or []
-    if not selected:
-        return []
     from .toolkit_security import (  # late: the policy reads the plugin descriptor
         is_tool_sensitive,
+        listed_sensitive_tools,
         sensitive_tool_info,
     )
+    # An empty selection exposes every tool of the toolkit at run time. The core has no tool list of the
+    # toolkit here, so the listed tools stand in. A listed name may be spelled differently from the runtime
+    # name, and the SDK guard compares the pair with the runtime name; such an item is approved as
+    # (toolkit, '*'). A tool listed for any toolkit ('*') may not exist in this one, so it is only
+    # `may_apply`: the run pauses for it if it is really called, and it leaves the fingerprint alone.
+    explicit = (tool.settings or {}).get('selected_tools')
+    selected = explicit or listed_sensitive_tools(tool.type, name)
+    specific = set(listed_sensitive_tools(tool.type, name, wildcard=False))
     return [
-        _warning(SENSITIVE_CODE, f'Tool "{tool_name}" of toolkit "{name}" needs approval',
+        _warning(SENSITIVE_CODE, _sensitive_text(name, tool_name, not explicit and tool_name not in specific),
                  toolkit=name, toolkit_type=tool.type, tool=tool_name, risk_level='needs_approval',
-                 **sensitive_tool_info(tool.type, tool_name))
-        for tool_name in selected if is_tool_sensitive(tool.type, tool_name)
+                 **({} if explicit else {'from_list': True, 'may_apply': tool_name not in specific}),
+                 **sensitive_tool_info(tool.type, tool_name, name))
+        for tool_name in dict.fromkeys(selected) if is_tool_sensitive(tool.type, tool_name, name)
     ]
 
 
@@ -163,17 +179,21 @@ def _fingerprint(version_id: int | None, sensitive: list, digest: str | None) ->
     return hashlib.sha256(json.dumps([version_id, pairs, digest]).encode()).hexdigest()
 
 
-def scan_schedule(project_id: int, version_id: int | None, owner_id: int) -> dict:
+def scan_schedule(project_id: int, version_id: int | None, owner_id: int, approval_rule: str | None = None) -> dict:
     """The risk review of one version run by one owner: `blocking`, `sensitive`, `notices`, `fingerprint`.
 
-    A blocking finding carries `fix`, the agent or pipeline version to open. `sensitive` holds the
+    A blocking finding carries `fix`, the agent or pipeline version to open. With the rule `pause_and_ask`,
+    a missing credential or a personal sign-in is a notice with `fix` and a hint, not a block. `sensitive` holds the
     `sensitive_action` tools and the `personal_credential` toolkits (`tool` null). Never raises: a
     failure is a `scan_incomplete` notice.
     """
     findings, fix, digest = _findings(project_id, version_id, owner_id)
-    blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES]
-    sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES]
-    notices = [item for item in findings if item['code'] not in BLOCKING_CODES | SENSITIVE_CODES]
+    waits = WAIT_FOR_OWNER_CODES if approval_rule == 'pause_and_ask' else set()
+    blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES - waits]
+    sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES and not item.get('may_apply')]
+    notices = [{**item, 'fix': fix, 'hint': WAIT_HINT} if item['code'] in waits else item
+               for item in findings if item['code'] not in BLOCKING_CODES - waits | SENSITIVE_CODES
+               or item.get('may_apply')]
     return {'blocking': blocking, 'sensitive': sensitive, 'notices': notices,
             'fingerprint': _fingerprint(version_id, sensitive, digest)}
 
