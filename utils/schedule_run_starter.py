@@ -1,6 +1,8 @@
 """Owner run starter of an agent or pipeline schedule (EL-7011 US-11, US-12, ADR-0002, ADR-0008)."""
 import queue
 import re
+import threading
+import time
 from types import SimpleNamespace
 
 from pylon.core.tools import log
@@ -88,16 +90,35 @@ def _setting_allows_auto_approve(project_id: int) -> bool:
     return is_run_without_asking_allowed(project_id)
 
 
+# The run log's owner name is kept this long per owner (#7294 P-07): the runs a tick starts for one owner ask the
+# identity service once. A display name only; nothing is decided on it
+OWNER_LABEL_TTL_S = 60.0
+MAX_OWNER_LABELS = 1024
+_OWNER_LABELS = {}   # owner id -> (label, monotonic until)
+_OWNER_LABELS_LOCK = threading.Lock()
+
+
 def _owner_label(owner_id: int) -> str:
     """The account the run uses: its owner by name, else email, else id."""
+    now = time.monotonic()
+    with _OWNER_LABELS_LOCK:
+        kept = _OWNER_LABELS.get(owner_id)
+        if kept is not None and kept[1] > now:
+            return kept[0]
     try:
         # Late: only the run log needs the auth lookup
         from .authors import get_authors_data
         user = next(iter(get_authors_data([owner_id])), None) or {}
     except Exception as e:  # noqa: BLE001 -- a name must never stop a run
         log.warning('Schedule run owner %s: name lookup failed: %s', owner_id, e)
-        user = {}
-    return f"{user.get('name') or user.get('email') or f'user {owner_id}'} (schedule owner)"
+        user = None
+    label = f"{(user or {}).get('name') or (user or {}).get('email') or f'user {owner_id}'} (schedule owner)"
+    if user is not None:   # a failed lookup is asked again by the next run
+        with _OWNER_LABELS_LOCK:
+            if len(_OWNER_LABELS) >= MAX_OWNER_LABELS:
+                _OWNER_LABELS.clear()
+            _OWNER_LABELS[owner_id] = (label, now + OWNER_LABEL_TTL_S)
+    return label
 
 
 def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:

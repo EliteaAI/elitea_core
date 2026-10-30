@@ -216,3 +216,32 @@ def test_run_now_and_test_run_neither_count_nor_end_the_streak(firing, trigger, 
         firing.fire(answer, trigger=trigger, owner_request=object())
     assert firing.schedule() == (2, True, None)
     assert all(notice[1] != "schedule_disabled" for notice in firing.notices)
+
+
+def test_the_pausing_refusal_is_one_statement_on_the_schedule(firing, monkeypatch):
+    """#7294 P-08: the third refusal counts and pauses in one UPDATE (main: an UPDATE of the count, then one of the
+    switch); the first two are one UPDATE each, as before."""
+    tools = sys.modules["tools"]
+    with tools.db.get_session(PROJECT_ID) as session:
+        engine = session.get_bind()
+    seen = []
+    listener = lambda conn, cursor, statement, params, context, many: seen.append(statement)   # noqa: E731
+    starter = sys.modules[f"{PKG}.utils.schedule_run_starter"]
+    real = starter.count_refusal
+    counted = []
+
+    def counting(*args, **kwargs):
+        start = len(seen)
+        real(*args, **kwargs)
+        counted.append([text for text in seen[start:] if "entity_schedules" in text and text.lstrip().upper()
+                        .startswith("UPDATE")])
+
+    monkeypatch.setattr(starter, "count_refusal", counting)
+    _sa.event.listen(engine, "before_cursor_execute", listener)
+    try:
+        for _ in range(3):
+            firing.fire(REFUSED)
+    finally:
+        _sa.event.remove(engine, "before_cursor_execute", listener)
+    assert [len(updates) for updates in counted] == [1, 1, 1]
+    assert firing.schedule() == (3, False, "governance_refused")
