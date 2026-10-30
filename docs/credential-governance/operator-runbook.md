@@ -212,8 +212,9 @@ yet as a **development run**:
 - the run acts as the signed-in author only (a verified identity; API tokens cannot author). There is no binding
   and no mandate. The author must hold the right to edit the application;
 - these runs are development runs: the editor's own private test chat of an agent or pipeline, **toolkit tests**
-  (Test on a toolkit tool), **on-demand indexing** (Reindex), the **draft's sub-agents** at every depth, and a plain
-  LLM chat whose toolkits carry a credential;
+  (Test on a toolkit tool), **on-demand indexing** (Reindex), the **draft's sub-agents** at every depth, a plain
+  LLM chat whose toolkits carry a credential, and a schedule owner's **Run now** / **Test run** (which needs the right
+  to run the agent instead of the right to edit it);
 - a credential is released only if the author could already use it: a personal credential of the author, or a
   project credential on which the author's subject holds an active grant on any agent and toolkit. Otherwise
   the turn is refused with `DENIED_DEVELOPMENT_CREDENTIAL`. Toolkits without a credential, built-in tools and
@@ -264,7 +265,7 @@ mandate only if the mandate's owner is its custodian. A version has one current 
 | Trigger | Under Enforce |
 |---|---|
 | A person's schedule (owner schedule) of an agent or a pipeline: cron firings | An active mandate **of the schedule's owner** on that version. |
-| The same schedule: Run now and Test run by its owner | No mandate: the owner's own run, like a toolkit test (Scheduled runs, below). |
+| The same schedule: Run now and Test run by its owner | No mandate: the owner's development run, while development runs are on (Scheduled runs, below). |
 | Webhook | An active mandate on that version. |
 | Legacy cron trigger | An active mandate on that version. |
 | A person chatting, using the editor, calling the API as themselves | No mandate. |
@@ -311,8 +312,8 @@ firings need it. **Run now** and **Test run** are the owner's own run (below).
 | Mode | A cron firing | Run now / Test run (the owner, signed in) |
 |---|---|---|
 | Off | Runs as before. Nothing is read or recorded. | Runs as before. |
-| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. | Runs. Evaluated as the owner's run (as a toolkit test is); no mandate row. |
-| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the owner, like a toolkit test: admitted as the owner's interactive run (entry point `schedule_test`, subject = the owner's verified sign-in), whatever the development-runs switch, with the owner's own credentials, project credentials granted to the owner and delegated ones on the owner's live sign-in (`DENIED_ASSERTION_UNAVAILABLE` when signed in without one). Needs only the owner's right to run the agent (no admin role); no mandate is read. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably but never count toward the auto-pause. |
+| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. | Runs. Evaluated as the owner's development run (as the editor's test chat is); no mandate row. |
+| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the owner while development runs are on: admitted as the owner's development run, as the editor's test chat (entry point `schedule_test`, subject = the owner's verified sign-in), with the owner's own credentials, project credentials granted to the owner and delegated ones on the owner's live sign-in (`DENIED_ASSERTION_UNAVAILABLE` when signed in without one). Needs only the owner's right to run the agent (no admin role); no mandate is read. Development runs off: refused `DEVELOPMENT_RUNS_DISABLED`. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably (run history and owner notice) but never count toward or reset the auto-pause. |
 
 **Run now and Test run.** Only the owner can start them. An administrator sees the controls disabled, with the
 hint "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has

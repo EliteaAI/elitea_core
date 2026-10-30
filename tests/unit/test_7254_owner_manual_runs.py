@@ -1,9 +1,9 @@
 """#7254 (Roman 2026-10-30): an owner's Run now / Test run of their own schedule is the owner's own interactive run.
 
 Entry point ``schedule_test``, built by the run endpoint from the signed-in owner (``mint_owner_run_admission``) and
-taken by ``predict_sio`` from its ticket. Admitted like a toolkit test (#7281): the owner's verified subject, decided as a
-development run is, whatever the development-runs switch, needing only the right to run the agent (no admin role, no
-edit right); no mandate is read. Real admission on SQLite (``fixtures/admission_env.py``).
+taken by ``predict_sio`` from its ticket. A development run of the owner (Roman's correction): admitted while
+development runs are on, refused ``DEVELOPMENT_RUNS_DISABLED`` while they are off, as the editor's test chat; it needs
+only the right to run the agent (no admin role, no edit right); no mandate is read. Real admission on SQLite (``fixtures/admission_env.py``).
 """
 import sys
 import types
@@ -54,7 +54,8 @@ def owner_request(env, **over):
 
 
 def admit(ns, env, module=None, **over):
-    return ns.adm.admit_execution(module or env.module(), owner_request(env, **over), run_id=RUN, payload=None)
+    module = module or env.module(allow_development_runs=True)
+    return ns.adm.admit_execution(module, owner_request(env, **over), run_id=RUN, payload=None)
 
 
 def refusal(ns, env, module=None, **over):
@@ -68,7 +69,7 @@ def contexts(env, ns):
 
 
 def test_an_editor_owner_is_admitted_as_their_own_run_with_their_subject_and_no_mandate(ns, env):
-    view = admit(ns, env)   # development runs off (the env default): admitted anyway, like a toolkit test
+    view = admit(ns, env)   # development runs on
     [row] = contexts(env, ns)
     assert (row.entry_point, row.profile, row.definition_digest) == ("schedule_test", "development", DIGEST)
     assert row.subject["ref"] == SUBJECT
@@ -77,10 +78,13 @@ def test_an_editor_owner_is_admitted_as_their_own_run_with_their_subject_and_no_
     assert env.permission_calls == [(42, "default", 1)] and env.denied == []
 
 
-@pytest.mark.parametrize("allowed", [True, False])
-def test_the_development_runs_switch_does_not_matter(ns, env, allowed):
-    admit(ns, env, env.module(allow_development_runs=allowed))
-    assert [row.entry_point for row in contexts(env, ns)] == ["schedule_test"]
+def test_with_development_runs_off_it_is_refused_with_the_readable_reason(ns, env):
+    error = None
+    with pytest.raises(ns.exceptions.AdmissionDenied) as error:
+        admit(ns, env, env.module(allow_development_runs=False))
+    assert (error.value.reason_code, error.value.message) == (
+        "DEVELOPMENT_RUNS_DISABLED", ns.adm.MESSAGES["DEVELOPMENT_RUNS_DISABLED"])
+    assert contexts(env, ns) == []
 
 
 def test_a_bound_version_is_still_the_owners_run_not_the_bindings(ns, env):
@@ -112,7 +116,7 @@ def test_a_system_or_anonymous_caller_never_takes_this_entry(ns, env):
 
 
 def test_audit_only_evaluates_it_as_the_owners_run_with_no_mandate_row(ns, env):
-    module = env.module(governed=False, audit=True)
+    module = env.module(governed=False, audit=True, allow_development_runs=True)
     assert ns.adm.admit_dispatch(module, "indexer_agent", call_kwargs({}), owner_request(env)) is None
     assert contexts(env, ns) == [] and env.denied == []
     [(_, admission)] = env.recorded

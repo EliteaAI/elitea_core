@@ -69,7 +69,8 @@ ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent", TOOLKIT_TA
 # The entry points a development run may come from (#7213, #7229): the editor's test chat, and a person testing a toolkit
 # or indexing it on demand. A toolkit run has no other profile: it is never a governed (bound) run
 TOOLKIT_ENTRY_POINTS = frozenset({ENTRY_TOOLKIT_TEST, ENTRY_INDEX_ON_DEMAND})
-DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, *TOOLKIT_ENTRY_POINTS})
+# and the owner's Run now / Test run of a schedule (#7254), which obeys the switch as the editor's test chat does
+DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, ENTRY_SCHEDULE_TEST, *TOOLKIT_ENTRY_POINTS})
 
 
 def task_fits_entry(task_name, entry_point) -> bool:
@@ -1218,12 +1219,13 @@ def _admit(  # pylint: disable=R0914
         permissions = _author_permissions(request)
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
     elif request.entry_point == ENTRY_SCHEDULE_TEST:
-        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's own interactive run, decided as a
-        # development run is (their personal credentials, project ones granted to them, delegated ones on their live
-        # custody), whatever the development-runs setting, as a toolkit run (#7281). The run endpoint let only the
-        # schedule's owner start it; the right to run the agent is checked here, fail closed. No mandate is read
-        if request.run_kind != "interactive" or request.caller_type != "user":
-            raise _denied("DENIED_ENTRY_POINT")
+        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's development run, decided as one is
+        # (their personal credentials, project ones granted to them, delegated ones on their live custody), and only
+        # while development runs are on, as the editor's test chat. The run endpoint let only the schedule's owner
+        # start it; the right to run the agent is checked here, fail closed. No mandate is read
+        if not _is_development(request, settings):
+            raise _denied("DEVELOPMENT_RUNS_DISABLED" if _is_development(
+                request, replace(settings, allow_development_runs=True)) else "DENIED_ENTRY_POINT")
         binding, rows = _read_draft(request)
         permissions = _author_permissions(request)
         if PREDICT_PERMISSION not in permissions:
