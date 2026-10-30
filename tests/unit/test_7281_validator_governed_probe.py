@@ -6,6 +6,7 @@ path they had. The helpers are lifted out of the module with ``ast`` (the module
 Pylon). Every value below is made up for the test.
 """
 import ast
+import json
 import pathlib
 import sys
 import textwrap
@@ -229,7 +230,9 @@ def test_a_batch_answer_becomes_the_same_entry_a_single_probe_gave():
         single[index] = load(one, Rpc())({"github_configuration": configuration(index)}, {}, 5, 9) or []
     assert resolved == single
     assert entry(11, None, resolved[1])["type"] == "value_error"            # the governed refusal shape (#7281)
-    assert entry(12, None, resolved[2])["type"] == "connection_error"
+    connection = entry(12, None, resolved[2])   # the EL-7276 encoding of connection errors (release/2.0.8)
+    assert connection["type"] == "value_error"
+    assert json.loads(connection["ctx"]["error"]) == {"__connection_errors__": resolved[2]}
     assert entry(13, None, resolved[3]) is None and entry(14, None, resolved[4]) is None   # not checked / passed
 
 
