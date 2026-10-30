@@ -48,6 +48,7 @@ def env(ns):
     ns.tools.this.module = ns.env.module()
     ns.tools.auth.epoch_ttl = 5.0
     ns.internal_obo._VERDICTS.clear()   # pylint: disable=W0212
+    ns.internal_obo._EXPIRED_AUDITED.clear()   # pylint: disable=W0212
     yield ns.env
     for name in ("SECRETS_MASTER_KEY", "APP_HOST"):
         vars(ns.tools.config).pop(name, None)
@@ -371,6 +372,23 @@ def test_an_expired_token_says_so_and_is_audited(ns, env):
     [event] = env.denied
     assert (event["event_type"], event["decision"], event["reason_code"], event["runtime_identity_ref"]) == (
         "platform_operation", "deny", "INTERNAL_TOKEN_EXPIRED", f"context:{claims['ctx']}")
+
+
+def test_an_expired_token_used_again_is_refused_and_counted_every_time_and_audited_once(ns, env):
+    # #7294 P-12: a run that keeps calling after its token expired adds one audit row, not one per call
+    token, claims = mint(ns, exp=int(time.time()) + 1)
+    other, _ = mint(ns, exp=int(time.time()) + 1)
+    before = dict(obo(ns)._COUNTER)   # pylint: disable=W0212
+    replies = [verify(ns, env, token, now=int(time.time()) + 5) for _ in range(5)]
+    assert {(r["ok"], r["code"], r["status"]) for r in replies} == {(False, "INTERNAL_TOKEN_EXPIRED", 401)}
+    key = ("deny", "INTERNAL_TOKEN_EXPIRED")
+    assert obo(ns)._COUNTER[key] - before.get(key, 0) == 5   # pylint: disable=W0212
+    assert [e["runtime_identity_ref"] for e in env.denied] == [f"context:{claims['ctx']}"]
+    assert verify(ns, env, other, now=int(time.time()) + 5)["code"] == "INTERNAL_TOKEN_EXPIRED"
+    assert len(env.denied) == 2   # another token of the same context is its own row
+    obo(ns)._EXPIRED_AUDITED.clear()   # pylint: disable=W0212   # past EXPIRED_AUDIT_TTL_S
+    verify(ns, env, token, now=int(time.time()) + 5)
+    assert len(env.denied) == 3
 
 
 def test_a_bad_signature_is_counted_not_audited(ns, env):

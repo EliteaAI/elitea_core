@@ -41,6 +41,7 @@ import json
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Optional
 
@@ -689,7 +690,8 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
     values = _read_store(module, requests, scope, release_ids)
     releases, kinds = [], []
     deadline = entra_obo.deadline_for(len(requests))   # one budget for every delegated slot of this request
-    for request, release_id in zip(requests, release_ids):
+    minted = _delegated_at_once(module, requests, values, scope, deadline)
+    for index, (request, release_id) in enumerate(zip(requests, release_ids)):
         slot = request.slot
         value = values.get(slot["credential_ref"])
         if value is None:
@@ -698,7 +700,13 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
             raise _denied_at(request, "CREDENTIAL_GENERATION_MISMATCH")
         delegation = getattr(value, "delegation", None)
         if delegation is not None:   # no stored value: a token minted now, on behalf of the run's person
-            fields, expires_at = _delegated(module, request, scope, delegation, deadline)
+            if index in minted:   # asked together with the other delegated slots of the request
+                outcome = minted[index]
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                fields, expires_at = outcome
+            else:
+                fields, expires_at = _delegated(module, request, scope, delegation, deadline)
             kinds.append(delegation.get("resource"))
         else:
             if not set(slot["fields"]) <= set(value.fields):
@@ -743,6 +751,37 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
         adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "allow",
                     RELEASED if resource is None else RELEASED_DELEGATED)
     return releases
+
+
+DELEGATED_PARALLEL = 4   # delegated slots of one release request asked at the same time
+
+
+def _delegated_at_once(module, requests, values, scope, deadline) -> dict:
+    """``{index: (fields, expires_at) | AdmissionDenied}`` of the delegated slots of a request with two or more (#7294
+    P-03): their tokens are asked at the same time, within the request's one deadline, instead of one after the other
+    (two cold slots cost one exchange's time). Only the slots the loop would reach are asked (it stops at the first
+    slot that fails its store checks); the loop still refuses at the first failing slot in order, so the answer is the
+    one the sequential loop gave. One delegated slot, or none: ``{}`` (the loop asks it itself, as before)."""
+    wanted = []
+    for index, request in enumerate(requests):
+        value = values.get(request.slot["credential_ref"])
+        if value is None or value.generation != request.slot["credential_generation"]:
+            break
+        delegation = getattr(value, "delegation", None)
+        if delegation is not None:
+            wanted.append((index, request, delegation))
+    if len(wanted) < 2:
+        return {}
+
+    def ask(item):
+        index, request, delegation = item
+        try:
+            return index, _delegated(module, request, scope, delegation, deadline)
+        except AdmissionDenied as denied:
+            return index, denied
+
+    with ThreadPoolExecutor(max_workers=min(DELEGATED_PARALLEL, len(wanted))) as pool:
+        return dict(pool.map(ask, wanted))
 
 
 def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadline=None) -> tuple:

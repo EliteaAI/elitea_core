@@ -7,6 +7,7 @@ is a test value made up here.
 import base64
 import json
 import sys
+import threading
 import time
 import types
 import uuid
@@ -656,6 +657,39 @@ def test_another_exchanging_client_misses_the_cache(ns, env, monkeypatch):
                                                                                                "another-client"]
 
 
+@pytest.mark.parametrize("status,body,code", [
+    (503, {"error": "temporarily_unavailable"}, "DEPENDENCY_UNAVAILABLE"),
+    (400, {"error": "invalid_client"}, "DENIED_OAUTH_APP_UNAVAILABLE"),
+    (400, {"error": "interaction_required"}, "DELEGATION_EXCHANGE_FAILED"),
+])
+def test_a_failed_exchange_is_not_asked_again_for_a_few_seconds(ns, env, monkeypatch, status, body, code):
+    """#7294 P-04: a retry within NEGATIVE_TTL_S gets the same refusal with no assertion RPC and no token POST; after
+    it, or for another person, Entra is asked again. Signing out forgets it."""
+    person = {"issuer": ENTRA, "tid": TID, "oid": OID}
+    delegation = {**descriptor(), "ownership_class": "project_shared", "custodian_subject_ref": None}
+    module = env.module()
+    clock = [5000.0]
+    monkeypatch.setattr(ns.entra_obo.time, "monotonic", lambda: clock[0])
+    env.entra.answers.append((status, body))
+    for _ in range(3):
+        with pytest.raises(ns.entra_obo.DelegationRefused) as refused:
+            ns.entra_obo.acquire(module, person, delegation, 1)
+        assert refused.value.code == code
+    assert (len(env.custody.calls), len(env.entra.posts)) == (1, 1)
+    ns.entra_obo.acquire(module, {**person, "oid": "oid-43"}, delegation, 1)   # another person is asked
+    assert len(env.entra.posts) == 2
+    clock[0] += ns.entra_obo.NEGATIVE_TTL_S + 0.1
+    ns.entra_obo.acquire(module, person, delegation, 1)   # Entra answers again: a token, cached as before
+    assert (len(env.custody.calls), len(env.entra.posts)) == (3, 3)
+    env.entra.answers.append((status, body))
+    ns.entra_obo.forget()
+    with pytest.raises(ns.entra_obo.DelegationRefused):
+        ns.entra_obo.acquire(module, person, delegation, 1)
+    assert ns.entra_obo.forget_subject(TID, OID) == 0 and ns.entra_obo._FAILED == {}   # pylint: disable=W0212
+    ns.entra_obo.acquire(module, person, delegation, 1)
+    assert len(env.entra.posts) == 5
+
+
 @pytest.mark.parametrize("aud", ["https://graph.microsoft.com", "another-client", None])
 def test_an_assertion_for_another_app_is_never_exchanged(ns, env, aud):
     env.custody.answer = {"ok": True, "assertion": jwt(tid=TID, oid=OID, aud=aud)}
@@ -673,32 +707,57 @@ def test_the_release_budget_of_two_slots_stays_within_the_workers_wait(ns):
     assert ns.entra_obo.request_budget(2) == 13 < 15 + 0.5 * 2   # the worker still waits for the reply
 
 
-def test_two_delegated_slots_share_one_budget_within_the_workers_wait(ns, env, monkeypatch):
-    ns.need_transport()   # the first slot must seal before the second one runs out of budget
+@pytest.mark.parametrize("answers_in,ok", [(8, True), (14, False)])
+def test_two_delegated_slots_are_asked_at_once_within_one_budget_of_the_workers_wait(ns, env, monkeypatch, answers_in, ok):
+    """#7294 P-03: the two cold slots (different scopes) of one release request are exchanged at the same time: the
+    request takes one exchange's time (8 s of Entra, not 16), and an Entra slower than the budget times both out at
+    the request's one deadline, inside the worker's wait."""
+    ns.need_transport()
     binding = env.seed_agent()
     first = Delegated(env, binding)
     second = Delegated(env, binding, tool_id=2, config_id=6)
     env.delegations[second.ref_id] = descriptor(scopes=[f"{GRAPH}/Files.Read.All"])
     run = admitted(ns, env, first, second)
-    clock = [1000.0]
+    clock, lock, asked = [1000.0], threading.Lock(), []
+    both = threading.Barrier(2, timeout=5)
     monkeypatch.setattr(ns.entra_obo.time, "monotonic", lambda: clock[0])
     real = env.entra.__call__
 
-    def slow(url, data, timeout=None):   # Entra answers in 8 s; a read timeout below that times out
+    def slow(url, data, timeout=None):   # Entra answers `answers_in` s after the POST; a read timeout below that times out
         connect, read = timeout
-        if read < 8:
-            clock[0] += read
-            raise ns.entra_obo.requests.exceptions.Timeout()
-        clock[0] += 8
+        began = clock[0]
+        asked.append(data.get("scope"))
+        both.wait()   # both exchanges are in flight before either one ends
+        with lock:
+            if read < answers_in:
+                clock[0] = max(clock[0], began + read)
+                raise ns.entra_obo.requests.exceptions.Timeout()
+            clock[0] = max(clock[0], began + answers_in)
         return real(url, data, timeout)
 
     monkeypatch.setattr(ns.entra_obo, "_post", slow)
-    monkeypatch.setattr(ns.entra_obo, "HTTP_TIMEOUT_S", 10)
+    monkeypatch.setattr(ns.entra_obo, "HTTP_TIMEOUT_S", 20)
     started = clock[0]
     reply = run.release()
-    assert reply["reason_code"] == "DEPENDENCY_UNAVAILABLE" and (reply["toolkit_instance_id"], reply["field"]) == (
-        "2", "credentials")
-    assert clock[0] - started <= ns.entra_obo.request_budget(2)
+    assert clock[0] - started <= ns.entra_obo.request_budget(2) < 15 + 0.5 * 2
+    assert len(asked) == 2 and len(set(asked)) == 2   # one exchange per slot, each for its own scopes
+    if ok:
+        assert reply["ok"] is True and clock[0] - started == answers_in
+    else:
+        assert reply["reason_code"] == "DEPENDENCY_UNAVAILABLE" and reply["toolkit_instance_id"] == "1"
+
+
+def test_the_first_failing_delegated_slot_in_order_is_the_one_named(ns, env):
+    """Asked at once, refused as before: the reply names the first slot that failed in the request's order."""
+    ns.need_transport()
+    binding = env.seed_agent()
+    first = Delegated(env, binding)
+    second = Delegated(env, binding, tool_id=2, config_id=6)
+    env.delegations[second.ref_id] = descriptor(scopes=[f"{GRAPH}/Files.Read.All"])
+    run = admitted(ns, env, first, second)
+    env.entra.answers.extend([(400, {"error": "invalid_client"})] * 2)
+    reply = run.release()
+    assert reply["reason_code"] == "DENIED_OAUTH_APP_UNAVAILABLE" and reply["toolkit_instance_id"] == "1"
 
 
 def test_the_authority_path_is_built_from_the_checked_tenant(ns, env):

@@ -43,6 +43,7 @@ def log(world, monkeypatch):
     authors = types.ModuleType(f"{PKG}.utils.authors")
     authors.get_authors_data = lambda ids: [{"id": OWNER, "name": "Ann Smith", "email": "ann@example.com"}]
     monkeypatch.setitem(sys.modules, authors.__name__, authors)
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_run_starter"], "_OWNER_LABELS", {})   # names kept per test
     monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_notifications"], "emit_schedule_run_finished",
                         lambda *args: None, raising=False)
     state.events = lambda: world.run_row().events or []
@@ -168,3 +169,28 @@ def test_cr_el7011_a_failed_predict_call_ends_the_log_after_the_agent_line(log):
 
     assert log.kinds()[-2:] == ["agent_started", "finished"]
     assert log.events()[-1]["text"] == "Run finished: failed (the run call failed)"
+
+
+def test_the_runs_of_one_owner_ask_the_identity_service_for_the_name_once_a_minute(log, monkeypatch):
+    """#7294 P-07: every run start asked pylon_auth for its owner's name (a cross-pylon RPC); the label is kept per
+    owner for OWNER_LABEL_TTL_S. A failed lookup is not kept."""
+    starter = sys.modules[f"{PKG}.utils.schedule_run_starter"]
+    asked = []
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.authors"], "get_authors_data",
+                        lambda ids: asked.append(list(ids)) or [{"id": OWNER, "name": "Ann Smith"}])
+    assert [starter._owner_label(OWNER) for _ in range(5)] == ["Ann Smith (schedule owner)"] * 5   # pylint: disable=W0212
+    assert asked == [[OWNER]]
+    clock = [starter.time.monotonic() + starter.OWNER_LABEL_TTL_S + 1]
+    monkeypatch.setattr(starter.time, "monotonic", lambda: clock[0])
+    starter._owner_label(OWNER)   # pylint: disable=W0212
+    assert len(asked) == 2
+
+    def down(ids):
+        asked.append("down")
+        raise RuntimeError("auth down")
+
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.authors"], "get_authors_data", down)
+    starter._OWNER_LABELS.clear()   # pylint: disable=W0212
+    assert starter._owner_label(OWNER) == f"user {OWNER} (schedule owner)"   # pylint: disable=W0212
+    starter._owner_label(OWNER)   # pylint: disable=W0212
+    assert asked[-2:] == ["down", "down"]

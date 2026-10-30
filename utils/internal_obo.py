@@ -57,6 +57,9 @@ MAX_TARGETS = 16
 MAX_CLOCK_SKEW_S = 60   # a token issued later than this in the future is refused
 VERDICT_TTL_S = 5.0     # a positive context verdict is reused this long (never longer than the auth epoch TTL)
 MAX_VERDICTS = 4096
+# An expired run token is refused on every request; its audit row is written once per (ctx, jti) this long (#7294 P-12):
+# a run that keeps calling with it after its end adds no row per call. The refusal and the counter are not cached
+EXPIRED_AUDIT_TTL_S = 600.0
 MAX_BODY_DEPTH = 8        # the walk of a tool call's arguments for project ids: deeper or larger is refused
 MAX_BODY_NODES = 2000
 MAX_NESTED_JSON_CHARS = 65536
@@ -343,22 +346,28 @@ def mint_for_admission(view, task_name, payload, internal=True) -> dict:
     return delivery(token, claims)
 
 
-def mint_for_context(project_id, context_ref, task_name, payload, internal=True) -> dict:
+# What a run token minted for a context admitted earlier is built from (``mint_for_context``)
+MINT_COLUMNS = (
+    ExecutionSecurityContext.subject, ExecutionSecurityContext.caller, ExecutionSecurityContext.agent_binding_ref,
+    ExecutionSecurityContext.definition_digest, ExecutionSecurityContext.binding_project_id,
+    ExecutionSecurityContext.run_id, ExecutionSecurityContext.expires_at, ExecutionSecurityContext.created_at,
+)
+
+
+def mint_for_context(project_id, context_ref, task_name, payload, internal=True, row=None) -> dict:  # pylint: disable=R0913
     """The delivery of a dispatch that runs under a context admitted earlier (a child, a reconcile run): one read of
-    the context row, then as at admission (``internal`` as there). The token expires with the context."""
+    the context row, then as at admission (``internal`` as there). The token expires with the context. ``row``: the
+    ``MINT_COLUMNS`` of this context the caller already read in the same dispatch (the seal's read of the parent,
+    #7294 P-11); nothing is read then."""
     if signing_key() is None:
         raise TokenUnavailable("no signing key")
     try:
         context_id = uuid.UUID(str(context_ref))
     except ValueError:
         raise TokenUnavailable("bad context") from None
-    columns = ExecutionSecurityContext
-    with db.get_session(project_id) as session:
-        row = session.execute(
-            select(columns.subject, columns.caller, columns.agent_binding_ref, columns.definition_digest,
-                   columns.binding_project_id, columns.run_id, columns.expires_at, columns.created_at)
-            .where(columns.id == context_id)
-        ).one_or_none()
+    if row is None:
+        with db.get_session(project_id) as session:
+            row = session.execute(select(*MINT_COLUMNS).where(ExecutionSecurityContext.id == context_id)).one_or_none()
     user_id = (row.caller or {}).get("user_id") if row is not None else None
     subject_ref = (row.subject or {}).get("ref") if row is not None else None
     if row is None or not isinstance(user_id, int) or isinstance(user_id, bool) or not subject_ref:
@@ -383,6 +392,7 @@ STATUS_OF = {INTERNAL_TOKEN_INVALID: 401, INTERNAL_TOKEN_EXPIRED: 401, INTERNAL_
              CONTEXT_NOT_LIVE: 403, DEPENDENCY_UNAVAILABLE: 503}
 _VERDICTS = {}            # (ctx, jti) -> monotonic deadline of a positive context verdict
 _VERDICTS_LOCK = threading.Lock()
+_EXPIRED_AUDITED = {}     # (ctx, jti) -> monotonic time until which an expired token is refused without a new audit row
 _COUNTER = {}
 _UNVERIFIED_LOG = {"at": 0.0, "suppressed": 0}
 
@@ -542,8 +552,28 @@ def _remember_verdict(claims):
         _VERDICTS[(claims["ctx"], claims["jti"])] = time.monotonic() + ttl
 
 
+def _first_expired_refusal(claims) -> bool:
+    """True the first time in ``EXPIRED_AUDIT_TTL_S`` an expired token of this (ctx, jti) is refused (it is then
+    audited); bounded like the verdict cache."""
+    key, now = (claims["ctx"], claims["jti"]), time.monotonic()
+    with _VERDICTS_LOCK:
+        until = _EXPIRED_AUDITED.get(key)
+        if until is not None and until > now:
+            return False
+        if len(_EXPIRED_AUDITED) >= MAX_VERDICTS:
+            for stale in [item for item, ends in _EXPIRED_AUDITED.items() if ends <= now] \
+                    or list(_EXPIRED_AUDITED)[:MAX_VERDICTS // 4]:
+                _EXPIRED_AUDITED.pop(stale, None)
+        _EXPIRED_AUDITED[key] = now + EXPIRED_AUDIT_TTL_S
+        return True
+
+
 def _refuse_verified(module, claims, code):
-    """A refusal of a token whose signature holds: counted and audited (the claims are Main's own)."""
+    """A refusal of a token whose signature holds: counted and audited (the claims are Main's own). An expired token
+    that was refused (and audited) a moment ago is only counted (``_first_expired_refusal``)."""
+    if code == INTERNAL_TOKEN_EXPIRED and not _first_expired_refusal(claims):
+        _count("deny", code)
+        return _refusal(code)
     _count("deny", code, line=True)
     try:
         _audit(claims, "token", "-", "-", "deny", code, module=module)
