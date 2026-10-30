@@ -192,6 +192,22 @@ def test_a_credential_wait_event_leaves_out_an_unknown_toolkit_and_credential(ru
     assert event["need"] == "credential" and "toolkit" not in event and "credential" not in event
 
 
+def test_parking_for_a_missing_credential_opens_one_database_session(runs, session, sent, monkeypatch):
+    schedule = _schedule(runs, session, created_by=12, approval_rule="pause_and_ask")
+    run = _run(runs, session, schedule)
+    opened = []
+    get_session = runs.db.get_session
+
+    def counting(project_id):
+        opened.append(project_id)
+        return get_session(project_id)
+
+    monkeypatch.setattr(runs.db, "get_session", counting)
+
+    assert runs.park_for_credentials(1, run.id, CREDENTIAL_REASON)
+    assert len(opened) == 1
+
+
 def test_a_missing_credential_under_run_without_asking_does_not_wait(runs, session, sent):
     parked, run, _ = _park(runs, session, rule="run_without_asking")
 

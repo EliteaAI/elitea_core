@@ -67,6 +67,19 @@ CHANGED = "The sensitive tools changed since you reviewed them; review them agai
 NAME_MISMATCH = 'Type the schedule name exactly to confirm "Run without asking"'
 
 
+def _started(entity_type: str, project_id: int, schedule_id: int, run_id: int) -> bool:
+    """Start an approved run; an error counts as "not started", so the caller fails the run with a reason.
+
+    The decision is already committed and the run is running. An error that escaped would leave it running
+    with no thread, and the owner would get a bare 500.
+    """
+    try:
+        return start_schedule_run(entity_type, project_id, schedule_id, run_id)
+    except Exception:  # noqa: BLE001 -- the run must end failed, not stay running
+        log.exception("Schedule %s run %s: the approved run could not start", schedule_id, run_id)
+        return False
+
+
 class RunsQuery(BaseModel):
     """Query of the run records list; `limit` above the cap is lowered to it (R3.3, R3.5)."""
 
@@ -485,7 +498,7 @@ class ScheduleItemHandlers:
             return refusal("not_owner", "Only the schedule owner can approve or reject this run", 403)
         except ScheduleRunNotWaiting:
             return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
-        if decision == "approve" and not start_schedule_run(entity_type, project_id, schedule_id, run_id):
+        if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
             with db.get_session(project_id) as session:
                 fail_run(session, run_id, START_FAILED)
                 session.commit()

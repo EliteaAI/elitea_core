@@ -194,6 +194,21 @@ def test_a_start_failure_after_approval_fails_the_run_and_answers_500(harness, d
     assert run_status(harness, run_id)[0] == 'failed'
 
 
+def test_an_error_while_starting_an_approved_run_fails_the_run_with_a_reason(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id, status='running')
+
+    def explode(*args):
+        raise RuntimeError('no starter')
+
+    harness.module.start_schedule_run = explode
+
+    body, status = decide(harness, schedule_id, run_id)
+
+    assert (status, body['code']) == (500, 'run_start_failed')
+    assert run_status(harness, run_id) == ('failed', 'the run could not start')
+
+
 def test_a_post_on_the_decision_path_runs_the_decision_handler(harness, decisions, monkeypatch):
     seen = []
     monkeypatch.setattr(harness.routes.PromptLibAPI, '_decide_run', lambda self, **ids: seen.append(ids) or ('ok', 200),
