@@ -104,7 +104,7 @@ def ns(tmp_path_factory):
                                                 f"{PKG}.utils.mandate_queries")
     ns.endpoints = types.SimpleNamespace(**{
         name: load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / f"{name}.py", f"{PKG}.api.v2.{name}")
-        for name in ("autonomous_mandates", "autonomous_mandate_action")})
+        for name in ("autonomous_mandates", "autonomous_mandate_action", "governance_toolkits")})
     yield ns
     sys.modules.clear()
     sys.modules.update(saved)
@@ -366,3 +366,72 @@ def test_with_no_identity_allowed_the_list_names_none_and_reads_no_identity_colu
     assert page["identity_sources"] == [] and page["rows"][0]["identity_source"] is None
     assert not [s for s in seen if "identity_source" in s or "identity_material_ref" in s]
     assert payload["ok"] is True
+
+
+# --- #7305: toolkit mandates through the API ---------------------------------------------------------------------------
+
+def toolkit_body(**over):
+    return {"toolkit_id": 1, "owner_user_id": OWNER, "operations": ["run:index_schedule"], "max_runtime_s": 600,
+            "valid_until": VALID_UNTIL, **over}
+
+
+def test_a_toolkit_mandate_is_created_approved_and_listed_with_its_toolkit(ns, env):
+    payload, status = hit(ns, env, "autonomous_mandates", "post", body=toolkit_body(identity="owner_delegated"))
+    assert status == 200 and payload["state"] == "draft", payload
+    assert act(ns, env, payload["id"], "submit")[1] == 200
+    assert act(ns, env, payload["id"], "approve", approval_ref="C", policy_revision="r")[0]["code"] == "SELF_APPROVAL"
+    assert act(ns, env, payload["id"], "approve", actor="approver", approval_ref="C", policy_revision="r")[1] == 200
+    [row] = hit(ns, env, "autonomous_mandates", "get")[0]["rows"]
+    assert (row["id"], row["state"], row["toolkit"]["id"], row["operations"]) == (
+        payload["id"], "active", 1, ["run:index_schedule"])
+    assert row["application"] == {"id": None, "name": None} and row["version"] == {"id": None, "name": None}
+
+
+def test_the_owners_consent_to_a_toolkit_mandate_covers_the_toolkits_delegated_credential(ns, env):
+    payload, _ = hit(ns, env, "autonomous_mandates", "post", body=toolkit_body(identity="owner_delegated"))
+    preview, status = act(ns, env, payload["id"], "consent_preview", actor="owner")
+    assert status == 200 and preview["covered"] == [{"toolkits": ["sharepoint"]}]
+    answer, status = act(ns, env, payload["id"], "consent", actor="owner")
+    assert status == 200 and answer["covered"] == [{"toolkits": ["sharepoint"]}]
+    assert env.fakes.granted == [(TID, OID, f"mandate:{payload['id']}")]
+
+
+@pytest.mark.parametrize("body", [
+    toolkit_body(version_id=70),                                     # both kinds
+    {key: value for key, value in toolkit_body().items() if key != "toolkit_id"},   # neither
+    toolkit_body(operations=["run:schedule"]),                       # an agent operation on a toolkit mandate
+    toolkit_body(operations=["run:index_schedule", "run:webhook"]),
+    {**toolkit_body(), "toolkit_id": None, "version_id": 70},        # index schedules on an agent version
+    toolkit_body(toolkit_id="1"),                                    # not an integer
+])
+def test_create_needs_exactly_one_kind_with_its_own_operations(ns, env, body):
+    if body.get("version_id") == 70 and body.get("toolkit_id") is None:
+        body = {**body, "operations": ["run:index_schedule"]}
+    refused, status = hit(ns, env, "autonomous_mandates", "post", body=body)
+    assert status == 400 and refused["code"] == "INVALID_REQUEST"
+    assert hit(ns, env, "autonomous_mandates", "get")[0]["rows"] == []
+
+
+@pytest.mark.parametrize("actor, status", [("viewer", 403), ("token_view", 403), ("anonymous", 403),
+                                           ("token_manage", 200)])
+def test_who_may_create_a_toolkit_mandate(ns, env, actor, status):
+    assert hit(ns, env, "autonomous_mandates", "post", actor=actor, body=toolkit_body())[1] == status
+
+
+def test_another_projects_toolkit_is_not_found(ns, env):
+    created, status = _in_project(ns, env, 2, "autonomous_mandates", "post", body=toolkit_body())
+    assert status == 404 and created["code"] == "TOOLKIT_NOT_FOUND"
+
+
+@pytest.mark.parametrize("actor, status", [("admin", 200), ("token_view", 200), ("viewer", 403), ("anonymous", 403)])
+def test_the_toolkit_picker_lists_the_projects_toolkits_by_name_for_who_may_view_mandates(ns, env, actor, status):
+    with env.get_session(1) as session:
+        session.execute(ns.sa.update(ns.EliteATool).where(ns.EliteATool.id == 1).values(name="obo-sharepoint"))
+        session.commit()
+    page, code = hit(ns, env, "governance_toolkits", "get", actor=actor, args={"search": "obo"})
+    assert code == status
+    if status == 200:
+        assert page == {"total": 1, "rows": [{"id": 1, "name": "obo-sharepoint", "type": "sharepoint"}]}
+        assert hit(ns, env, "governance_toolkits", "get", args={"search": "nothing"})[0] == {"total": 0, "rows": []}
+        other, _ = _in_project(ns, env, 2, "governance_toolkits", "get")
+        assert other == {"total": 0, "rows": []}   # another project's toolkits are its own

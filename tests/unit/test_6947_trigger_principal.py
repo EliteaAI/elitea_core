@@ -43,7 +43,9 @@ def test_the_kinds_and_operations_are_the_designed_ones(ns):
     tp = ns.trigger_principal
     assert tp.TRIGGER_KINDS == ("pipeline_schedule", "pipeline_webhook", "agent_webhook", "index_schedule")
     assert tp.OPERATION_OF == {
-        "pipeline_schedule": "run:schedule", "pipeline_webhook": "run:webhook", "agent_webhook": "run:webhook"}
+        "pipeline_schedule": "run:schedule", "pipeline_webhook": "run:webhook", "agent_webhook": "run:webhook",
+        "index_schedule": "run:index_schedule"}   # a toolkit mandate's (#7305)
+    assert tp.AGENT_OPERATIONS == {"run:schedule", "run:webhook"} and tp.TOOLKIT_OPERATIONS == {"run:index_schedule"}
 
 
 @pytest.mark.parametrize("key", ["-1", -1, None])

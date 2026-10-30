@@ -57,7 +57,7 @@ The check is made on every turn. You may change the draft's toolkits between tur
 - A sub-agent that asks for a credential that was not checked when the draft started.
 - Anything that leaves the editor: shared chats, public agents, API calls, schedules, webhooks. These need a
   binding, grants and, for schedules and webhooks, a mandate.
-- Toolkit runs started with an API token, and scheduled indexing.
+- Toolkit runs started with an API token, and scheduled indexing (it needs a toolkit mandate, below).
 - Everything, if your administrator has switched development runs off.
 
 **What to ask your operator for**
@@ -159,7 +159,26 @@ on again. A mandate run uses the run's own short-lived identity, not your person
 
 If an administrator changes the owner of a schedule, the new owner needs a mandate of their own.
 
-Scheduled **indexing** has no mandate path yet and is refused under Enforce (`AUTHORIZATION_REQUIRED`).
+### Scheduled indexing
+
+An index schedule of a toolkit runs, under Enforce, only on a **toolkit mandate** of the schedule's owner on that
+toolkit (Admin → Governance → Mandates → Create mandate → Covers: Toolkit index schedules; another operator approves
+it). What the schedule owner needs:
+
+- **Own the schedule.** A personal schedule is yours while you saved it last: if someone else saved it for you, save
+  it again yourself. A team schedule is the person's who saved it last.
+- **An approved toolkit mandate for you on the toolkit**, in force (not suspended, revoked or past its end date).
+- **The right to index the toolkit and to use credentials** in the project (as for Reindex).
+- **The toolkit's credential usable by you**: your own personal credential, or a project credential granted to you.
+- **For a Microsoft sign-in credential**: the mandate names your sign-in and you gave consent (Give consent in the
+  Mandates tab). Changing the credential, or the credential the schedule names, needs a new consent.
+
+Without a mandate the index history says: "This schedule runs on its owner's behalf, which needs an approved
+index-schedule mandate for the schedule owner on this toolkit (Admin → Governance → Mandates); it was not started."
+(a team schedule: "This team schedule needs an approved index-schedule mandate for the schedule owner (who saved it
+last) on this toolkit …"). A mandate that cannot carry the run is named in the history instead (for example "The
+mandate for this autonomous run is suspended or revoked; the run was not started."). Under Audit only the schedule runs
+and each firing that enforce would refuse is recorded as "would deny".
 
 ## Microsoft credentials *(from PR #602/#7/#21/#786, pending)*
 

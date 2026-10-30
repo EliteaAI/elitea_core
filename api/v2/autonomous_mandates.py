@@ -13,7 +13,7 @@ from ...utils.mandate_admin import manage_mandate
 from ...utils.mandate_queries import DEFAULT_LIMIT, MAX_LIMIT, list_page
 
 PROJECT_ID_PARAM = {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}}
-STATUS = {"VERSION_NOT_FOUND": 404, "MANDATE_NOT_FOUND": 404, "OWNER_NOT_FOUND": 404, "MANDATE_EXISTS": 409,
+STATUS = {"VERSION_NOT_FOUND": 404, "TOOLKIT_NOT_FOUND": 404, "MANDATE_NOT_FOUND": 404, "OWNER_NOT_FOUND": 404, "MANDATE_EXISTS": 409,
           "INVALID_STATE": 409, "MANDATE_EXPIRED": 409, "CONCURRENT_CHANGE": 409, "BINDING_DIGEST_MISMATCH": 409,
           "BINDING_NOT_ACTIVE": 409, "DENIED_BINDING": 403, "SELF_APPROVAL": 403, "OWNER_NOT_LINKED": 409,
           "OWNER_INACTIVE": 409, "IDENTITY_SOURCE_NOT_ALLOWED": 403, "DEPENDENCY_UNAVAILABLE": 503,
@@ -31,7 +31,7 @@ def task_answer(result, ok):
 class AdminAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List Autonomous Mandates (Admin)",
-        description=("One page of the project's autonomous mandates: agent and version, owner (email), state, "
+        description=("One page of the project's autonomous mandates: agent and version (or toolkit), owner (email), state, "
                      "operations, limits, approval, and the identity the runs act with with whether its owner consented "
                      "(never the consent itself). Returns {total, rows, identity_sources}."),
         tags=[api.OPENAPI_TAG],
@@ -59,9 +59,11 @@ class AdminAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Autonomous Mandate (Admin)",
-        description=("Create a draft mandate for one agent version with an active identity binding: owner, operations "
-                     "(run:schedule, run:webhook), max runtime, validity, and optionally the identity its runs act "
-                     "with (owner_delegated, application) when the platform allows it. Returns {ok, id, state}."),
+        description=("Create a draft mandate for one agent version with an active identity binding (version_id; "
+                     "operations run:schedule, run:webhook), or for the owner's index schedules of one toolkit "
+                     "(toolkit_id; operation run:index_schedule): owner, max runtime, validity, and optionally the "
+                     "identity its runs act with (owner_delegated, application) when the platform allows it. Exactly "
+                     "one of version_id and toolkit_id. Returns {ok, id, state}."),
         tags=[api.OPENAPI_TAG], parameters=[PROJECT_ID_PARAM], request_body=CreateMandateRequest,
         responses={"200": {"description": "{ok, id, state}"}, "403": {"description": "Not allowed."},
                    "409": {"description": "A live mandate exists, or a state conflict."}},
@@ -77,7 +79,8 @@ class AdminAPI(api_tools.APIModeHandler):
             return error
         if body.valid_until.tzinfo is None:
             return api.refusal("INVALID_REQUEST", "valid_until needs a time zone offset")
-        param = (f"project_id={project_id};action=create;version_id={body.version_id};"
+        covers = f"toolkit_id={body.toolkit_id}" if body.toolkit_id is not None else f"version_id={body.version_id}"
+        param = (f"project_id={project_id};action=create;{covers};"
                  f"owner_user_id={body.owner_user_id};operations={','.join(body.operations)};"
                  f"max_runtime_s={body.max_runtime_s};valid_until={body.valid_until.isoformat()}")
         if body.identity is not None:

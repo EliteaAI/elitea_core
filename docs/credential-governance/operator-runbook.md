@@ -22,7 +22,8 @@ administrators choose the mode below it in the Admin UI.
 |---|---|---|---|
 | Person's chat, editor, predict API | Unchanged. Nothing is read or recorded. | Checked as enforce would check it and recorded. Never refused. | Refused unless identity, binding and credentials pass. |
 | Schedule of a person (owner schedule) | Unchanged. | The version's mandate is looked at; if enforce would refuse it, one `would_deny` row is written (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`). The run goes ahead. | Runs only on its owner's own active mandate. Otherwise refused with `MANDATE_REQUIRED` and ended at once. |
-| Webhooks, legacy cron triggers, scheduled indexing, child dispatches, system runs | Unchanged. | Not evaluated. A child dispatch is not evaluated on its own: the sub-agents of a person's run are evaluated within that run's admission (#7227). | Webhooks and system runs need a mandate. Child dispatches follow their parent. |
+| Scheduled indexing (a toolkit's index schedule) | Unchanged. Nothing is read or recorded. | The toolkit mandate of the schedule's owner is looked at; if enforce would refuse the firing for it, one `would_deny` row is written (`AUTHORIZATION_REQUIRED` or `MANDATE_REQUIRED` without one, else `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`; caller `index_schedule:<toolkit>:<index>:<key>`). The run goes ahead. | Runs only on the schedule owner's own active toolkit mandate (section 6, Toolkit mandates). Otherwise refused before any dispatch, with the remedy in the index history. |
+| Webhooks, legacy cron triggers, child dispatches, system runs | Unchanged. | Not evaluated. A child dispatch is not evaluated on its own: the sub-agents of a person's run are evaluated within that run's admission (#7227). | Webhooks and system runs need a mandate. Child dispatches follow their parent. |
 | Platform identity of the run | The user's own token, as before. | As before. A built-in Elitea tools toolkit that still uses a personal token is recorded as `LEGACY_PAT_INTERNAL_MCP` (`would_deny`). | The run token only (section 7). |
 | Development runs (section 5a) | Not needed. | On by default. | Off by default for a deployment already in Enforce. On when the switch to Enforce turns it on (see 5a). |
 | Context row, sealed payload, credential release | No | No | Yes |
@@ -122,7 +123,8 @@ long after sign-in a governed run can start.
 
 Under Audit only, owner schedule runs (Schedules page) leave the mandate `would_deny` row described in section 1, and
 the sub-agents of a person's run are evaluated within that run's admission. A scheduled run's own sub-agents are not
-rehearsed (only its mandate row is). Webhooks, legacy cron triggers and scheduled indexing are not evaluated, so check
+rehearsed (only its mandate row is). Scheduled index runs leave the toolkit-mandate `would_deny` row of section 1.
+Webhooks and legacy cron triggers are not evaluated, so check
 them with `report_trigger_principals` (section 6) before enforcing. The Admin UI text of the mode says the same.
 
 ## 4. Bind an agent
@@ -225,7 +227,8 @@ yet as a **development run**:
   checked when the draft started is refused (`DENIED_DEVELOPMENT_CHILD`);
 - nothing else takes this path. Shared chats, public agents, the API, schedules, webhooks and mandate runs of the
   same version take the governed path and are refused as before. Toolkit runs started with an API token (the MCP
-  server's toolkit tools) are refused with `TOOLKIT_RUN_TOKEN_NOT_ADMITTED`. Scheduled indexing is refused too.
+  server's toolkit tools) are refused with `TOOLKIT_RUN_TOKEN_NOT_ADMITTED`. Scheduled indexing runs only on a
+  toolkit mandate (section 6), never as a development run.
   A schedule or webhook saved on an unbound version is kept, and the editor shows a notice that its runs need a
   binding and a mandate;
 - the audit trail records the admission as `ADMITTED_DEVELOPMENT` with `development:<definition digest>` where a
@@ -269,7 +272,7 @@ mandate only if the mandate's owner is its custodian. A version has one current 
 | Webhook | An active mandate on that version. |
 | Legacy cron trigger | An active mandate on that version. |
 | A person chatting, using the editor, calling the API as themselves | No mandate. |
-| Scheduled indexing | Refused (`AUTHORIZATION_REQUIRED`). There is no mandate path yet. |
+| Scheduled indexing (a toolkit's index schedule) | An active **toolkit mandate** of the schedule's owner on that toolkit (Toolkit mandates, below). Without one: `AUTHORIZATION_REQUIRED` (a personal schedule) or `MANDATE_REQUIRED` (a team schedule). |
 
 ### Decision: only the schedule owner's own mandate covers a scheduled run
 
@@ -351,6 +354,45 @@ or renew it for the owner on the schedule's version), then press **Resume** on t
    nor owner. The Admin UI Governance -> Mandates tab does the same (it runs the admin task's code).
 3. Grant the credentials the run needs to the mandate (`subject_ref=mandate:<uuid>`).
 4. The owner creates (or keeps) the schedule. The schedule's owner must be the mandate's owner.
+
+### Toolkit mandates (scheduled indexing, #7305)
+
+An index schedule has no agent version, so an agent mandate cannot cover it. A **toolkit mandate** covers the index
+schedules of **one toolkit** whose owner is the mandate's owner. It is created with `toolkit_id` instead of a version
+(the version, application and binding stay empty), allows the one operation `run:index_schedule` ("Index schedules"
+in the Admin UI), and has the same states, four-eyes approval, end date, longest run, identity (section 8a) and
+consent as an agent mandate. One live toolkit mandate per toolkit and owner; a new revision after a revoke or expiry.
+
+**Coverage rule.** A toolkit mandate covers an index schedule of its toolkit when the schedule is its owner's:
+
+| Schedule | Whose it is |
+|---|---|
+| Personal (key `<user id>`) | That user, while they saved it last (every save records the saver; a schedule saved for them by someone else is not covered until they save it again). |
+| Team (key `-1`) | The person who saved it last. |
+
+As for agent schedules, a mandate made for someone else never covers the schedule.
+
+**What the run is allowed.** The firing is admitted on the mandate (entry point `index_schedule`, subject
+`mandate:<id>`, caller `index_schedule:<toolkit>:<index>:<key>`), on the toolkit runner, held to the stored toolkit
+(there is no binding). The owner must still be active and linked to the same identity (`IDENTITY_SUBJECT_UNLINKED`),
+and may index the toolkit (`models.applications.tool.patch`, the permission of the on-demand index) and use
+credentials (`credentials.use`); `DENIED_RBAC` otherwise. Its credentials are decided as the owner's on-demand index
+would decide them: the owner's own personal credential, or a project credential on which **the owner** holds a grant
+(any binding; `DENIED_GRANT` otherwise). No grant to the mandate is needed or possible (a grant names a binding). A
+Microsoft sign-in credential needs the mandate to name the owner's identity and the owner's consent (section 8a);
+the consent covers the toolkit's delegated credentials and the credential the owner's schedules name instead. The run
+is stopped at the earlier of `max_runtime_s` and `valid_until`. A refusal is the index history entry of the slot (the
+slot is consumed), audited once.
+
+**The index history text without a mandate.** A personal schedule: "This schedule runs on its owner's behalf, which
+needs an approved index-schedule mandate for the schedule owner on this toolkit (Admin → Governance → Mandates); it
+was not started." A team schedule: "This team schedule needs an approved index-schedule mandate for the schedule owner
+(who saved it last) on this toolkit (Admin → Governance → Mandates); it was not started."
+
+**Steps.** Admin → Governance → Mandates → **Create mandate** → Covers: **Toolkit index schedules**, pick the toolkit,
+the owner, the longest run and the end date (or `manage_autonomous_mandate` with `toolkit_id=<id>;operations=
+run:index_schedule`); submit; someone who is neither its creator nor its owner approves it. The owner keeps (or saves)
+the index schedule; with a Microsoft sign-in credential the owner gives consent in the Mandates tab.
 
 A mandate run is stopped by Main at the earlier of `max_runtime_s` and `valid_until` (`RUNTIME_LIMIT_EXCEEDED`).
 A mandate run carries the run token only, with the mandate's deadline. Its sub-agents that use credentials are
@@ -594,11 +636,11 @@ See the table in section 7: `INTERNAL_TOKEN_INVALID`, `INTERNAL_TOKEN_EXPIRED`, 
 
 | Code | First thing to check |
 |---|---|
-| `MANDATE_REQUIRED` | A schedule or webhook has no mandate, or the schedule's owner is not the mandate's owner (section 6). |
+| `MANDATE_REQUIRED` | A schedule or webhook has no mandate, or the schedule's owner is not the mandate's owner (section 6). A team index schedule: no toolkit mandate of the person who saved it last. |
 | `MANDATE_INACTIVE`, `MANDATE_EXPIRED` | The mandate was suspended, revoked or expired. Renew or resume it. |
-| `DENIED_OPERATION` | The mandate does not allow this trigger kind (`run:schedule` or `run:webhook`). |
+| `DENIED_OPERATION` | The mandate does not allow this trigger kind (`run:schedule`, `run:webhook` or `run:index_schedule`). |
 | `RUNTIME_LIMIT_EXCEEDED` | The run overran `max_runtime_s`. Raise it in a new mandate revision, or shorten the run. |
-| `AUTHORIZATION_REQUIRED` | Scheduled indexing. No mandate path yet. |
+| `AUTHORIZATION_REQUIRED` | A personal index schedule with no toolkit mandate of its owner on the toolkit (or saved last by someone else). Create one (section 6, Toolkit mandates). |
 | `SUB_AGENT_CREDENTIAL_NOT_ADMITTED` | A scheduled or webhook run calls a sub-agent that uses credentials. Not admitted yet. |
 
 ### Microsoft sign-in credentials *(from PR #602/#7/#21/#786, pending)*

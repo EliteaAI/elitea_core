@@ -15,7 +15,10 @@ from ..models.agent_identity import AutonomousMandate
 
 TRIGGER_KINDS = ("pipeline_schedule", "pipeline_webhook", "agent_webhook", "index_schedule")
 # The operation a mandate must allow for each agent-version trigger
-OPERATION_OF = {"pipeline_schedule": "run:schedule", "pipeline_webhook": "run:webhook", "agent_webhook": "run:webhook"}
+OPERATION_OF = {"pipeline_schedule": "run:schedule", "pipeline_webhook": "run:webhook", "agent_webhook": "run:webhook",
+                "index_schedule": "run:index_schedule"}   # the index schedules of a toolkit mandate (#7305)
+AGENT_OPERATIONS = frozenset({"run:schedule", "run:webhook"})
+TOOLKIT_OPERATIONS = frozenset({OPERATION_OF["index_schedule"]})
 TEAM_SCHEDULE_KEY = "-1"
 _COLUMNS = (AutonomousMandate.id, AutonomousMandate.agent_version, AutonomousMandate.revision,
             AutonomousMandate.state, AutonomousMandate.owner_user_id, AutonomousMandate.allowed_operations,
@@ -45,6 +48,46 @@ def latest_mandates(session, project_id, version_ids=None) -> dict:
     if version_ids is not None:
         statement = statement.where(AutonomousMandate.agent_version.in_(list(version_ids)))
     return {row.agent_version: row for row in session.execute(statement)}
+
+
+_TOOLKIT_COLUMNS = (AutonomousMandate.id, AutonomousMandate.toolkit_id, AutonomousMandate.owner_user_id,
+                    AutonomousMandate.revision, AutonomousMandate.state, AutonomousMandate.allowed_operations,
+                    AutonomousMandate.valid_until)
+
+
+def latest_toolkit_mandates(session, project_id) -> dict:
+    """The latest revision row of each (toolkit, owner) that has a toolkit mandate (#7305), keyed so. One query for the
+    whole project (the index tick asks it once per project, never per schedule): a correlated ``max(revision)``."""
+    other = aliased(AutonomousMandate)
+    newest = select(func.max(other.revision)).where(
+        other.project_id == AutonomousMandate.project_id, other.toolkit_id == AutonomousMandate.toolkit_id,
+        other.owner_user_id == AutonomousMandate.owner_user_id,
+    ).scalar_subquery()
+    statement = select(*_TOOLKIT_COLUMNS).where(
+        AutonomousMandate.project_id == project_id, AutonomousMandate.toolkit_id.isnot(None),
+        AutonomousMandate.revision == newest)
+    return {(row.toolkit_id, row.owner_user_id): row for row in session.execute(statement)}
+
+
+def index_schedule_owner(schedule_key, created_by):
+    """Whose index schedule this is, for a toolkit mandate (#7305), or ``None`` when no mandate can cover it. A personal
+    schedule (key ``<user id>``) is that user's, but only while they made its last change (every save stamps
+    ``created_by`` with the saver, so a schedule someone else saved for them is not theirs to vouch for; a schedule from
+    before the field, ``None``, is); a team schedule (key ``-1``) is the person who saved it last."""
+    key = str(schedule_key)
+    if key == TEAM_SCHEDULE_KEY:
+        return created_by if isinstance(created_by, int) and created_by > 0 else None
+    if not key.isdigit():
+        return None
+    owner = int(key)
+    return owner if created_by in (None, owner) else None
+
+
+def covering_toolkit_mandate(mandates, toolkit_id, schedule_key, created_by):
+    """The latest toolkit mandate of the schedule's owner on this toolkit (whatever its state, so a refusal can say
+    why), or ``None``. ``mandates``: ``latest_toolkit_mandates`` of the project. Pure: no read."""
+    owner = index_schedule_owner(schedule_key, created_by)
+    return None if owner is None else mandates.get((toolkit_id, owner))
 
 
 def principal_of(trigger_kind, mandate=None, schedule_key=None) -> TriggerPrincipal:

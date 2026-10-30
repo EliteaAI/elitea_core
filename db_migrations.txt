@@ -539,3 +539,13 @@ Run admin task seed_eval_trajectory_dimensions
 # Until then, in that schema, a refused schedule run is still ended and reported but not counted (logged), an admitted
 # run cannot end a streak (logged), and Resume fails. Create, import, reads and the legacy migration do not name the
 # column (it is not mapped in the model).
+
+# Issue #7305 (C-1009): toolkit mandates (scheduled indexing). autonomous_mandate gains the nullable column toolkit_id;
+# application_id, agent_version and agent_binding_ref become nullable (a toolkit mandate leaves them NULL); the check
+# autonomous_mandate_kind_ck (exactly one of an agent version and a toolkit) and the partial unique index
+# uq_autonomous_mandate_live_toolkit (toolkit_id, owner_user_id) WHERE toolkit_id IS NOT NULL AND state is live are
+# added, in every project schema. No task: the startup safety net does it (one catalog query; per schema that lacks
+# any of them, ADD COLUMN IF NOT EXISTS, DROP NOT NULL, the check when the catalog has none, CREATE UNIQUE INDEX IF NOT
+# EXISTS, under a 5 s lock_timeout). Until then, in that schema, creating or listing mandates fails (the INSERT and the
+# list name the column) and index schedules are refused as before; admission of agent-mandate runs is not affected
+# (the column is deferred and never read for them).

@@ -26,6 +26,9 @@ ENTRY_CHAT_LLM = "chat_sio_llm"
 # Run now or Test run of a schedule by its owner (#7254): the owner's own interactive run, built by the run endpoint
 # from the signed-in caller; only cron firings need the mandate
 ENTRY_SCHEDULE_TEST = "schedule_test"
+# A firing of a toolkit's index schedule under its owner's toolkit mandate (#7305): built by the index tick only, which
+# loaded the schedule itself; runs on the toolkit runner like on-demand indexing
+ENTRY_INDEX_SCHEDULE = "index_schedule"
 
 
 class AdmissionRequest(BaseModel):
@@ -37,16 +40,18 @@ class AdmissionRequest(BaseModel):
     version_id: Optional[int] = None
     run_kind: Literal["interactive", "system", "mandate"]
     entry_point: Literal["chat_sio", "editor_chat", "chat_sio_llm", "predict_api", "schedule", "webhook", "toolkit_test",
-                         "index_on_demand", "schedule_test"]
+                         "index_on_demand", "schedule_test", "index_schedule"]
     caller_type: Literal["user", "token", "public", "trigger"]
     caller_id: Optional[int] = None
     caller_reference: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
     trace_ref: Optional[str] = None
     # A run under an autonomous mandate (#6947): the mandate id and the trigger that fired it
-    # (``schedule:version:<id>`` / ``webhook:version:<id>``). Only the trusted trigger paths build these.
+    # (``schedule:version:<id>`` / ``webhook:version:<id>``, ``index_schedule:<toolkit>:<index>:<schedule key>``). Only the
+    # trusted trigger paths build these.
     mandate_ref: Optional[str] = None
     trigger_ref: Optional[str] = None
-    # A toolkit run (#7229): the saved toolkit it tests or indexes (no application, no version)
+    # A toolkit run (#7229): the saved toolkit it tests or indexes (no application, no version); a scheduled index run
+    # under a toolkit mandate too (#7305)
     toolkit_id: Optional[int] = None
 
 

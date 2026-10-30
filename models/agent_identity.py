@@ -29,8 +29,13 @@ REFERENCE_PATTERN = r'^[A-Za-z0-9._:/@-]{1,128}$'
 MANDATE_IMMUTABLE = frozenset({
     'id', 'project_id', 'application_id', 'agent_version', 'agent_binding_ref', 'owner_user_id', 'owner_user_ref',
     'allowed_operations', 'allowed_targets', 'max_runtime_s', 'valid_until', 'revision', 'created_by', 'created_at',
-    'identity_source',
+    'identity_source', 'toolkit_id',
 })
+# What a mandate covers (#7305): an agent version (``application_id``, ``agent_version``, ``agent_binding_ref``) or the
+# index schedules of one toolkit (``toolkit_id``; the three version columns NULL), exactly one of the two
+MANDATE_KIND_CHECK = ('(agent_version IS NOT NULL AND application_id IS NOT NULL AND agent_binding_ref IS NOT NULL '
+                      'AND toolkit_id IS NULL) OR (toolkit_id IS NOT NULL AND agent_version IS NULL '
+                      'AND application_id IS NULL AND agent_binding_ref IS NULL)')
 
 
 def _in_list(column: str, values) -> str:
@@ -149,14 +154,20 @@ class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
               postgresql_where=text(_in_list('state', LIVE_MANDATE_STATES)),
               sqlite_where=text(_in_list('state', LIVE_MANDATE_STATES))),
         Index('ix_autonomous_mandate_owner_state', 'owner_user_id', 'state'),
+        CheckConstraint(MANDATE_KIND_CHECK, name='autonomous_mandate_kind_ck'),
+        # One live toolkit mandate per toolkit and owner (#7305)
+        Index('uq_autonomous_mandate_live_toolkit', 'toolkit_id', 'owner_user_id', unique=True,
+              postgresql_where=text('toolkit_id IS NOT NULL AND ' + _in_list('state', LIVE_MANDATE_STATES)),
+              sqlite_where=text('toolkit_id IS NOT NULL AND ' + _in_list('state', LIVE_MANDATE_STATES))),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    application_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    agent_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    agent_binding_ref: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # NULL for a toolkit mandate (#7305, ``MANDATE_KIND_CHECK``)
+    application_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    agent_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    agent_binding_ref: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     owner_user_ref: Mapped[dict] = mapped_column(JSONB, nullable=False)
     allowed_operations: Mapped[list] = mapped_column(JSONB, nullable=False)
@@ -190,6 +201,10 @@ class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
     identity_consented_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True,
                                                                      deferred=True)
     identity_scope: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, deferred=True)
+    # A toolkit mandate (#7305): the toolkit whose index schedules of the owner it covers (``run:index_schedule``).
+    # Deferred like the identity columns: an agent-mandate read never selects it, so a schema that predates it (until
+    # the startup safety net adds it) reads agent mandates as before.
+    toolkit_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, deferred=True)
 
 
 @event.listens_for(AutonomousMandate, 'before_update')
