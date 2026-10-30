@@ -43,6 +43,7 @@ def log(world, monkeypatch):
     authors = types.ModuleType(f"{PKG}.utils.authors")
     authors.get_authors_data = lambda ids: [{"id": OWNER, "name": "Ann Smith", "email": "ann@example.com"}]
     monkeypatch.setitem(sys.modules, authors.__name__, authors)
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_run_starter"], "_OWNER_LABELS", {})   # names kept per test
     monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_notifications"], "emit_schedule_run_finished",
                         lambda *args: None, raising=False)
     state.events = lambda: world.run_row().events or []
@@ -168,3 +169,4 @@ def test_cr_el7011_a_failed_predict_call_ends_the_log_after_the_agent_line(log):
 
     assert log.kinds()[-2:] == ["agent_started", "finished"]
     assert log.events()[-1]["text"] == "Run finished: failed (the run call failed)"
+

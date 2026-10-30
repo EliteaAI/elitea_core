@@ -1,3 +1,4 @@
+import contextvars
 import json
 from json import loads
 from datetime import datetime
@@ -970,19 +971,64 @@ NOT_CHECKED = frozenset({'DENIED_RBAC', 'DEPENDENCY_UNAVAILABLE', 'RATE_LIMITED'
                          'AUDIT_UNAVAILABLE', 'STALE_CONTEXT'})
 
 
-def _governed_connection_error(config: dict, project_id, user_id) -> dict | None:
-    """Under enforce, the connection check of a saved credential is the governed probe (#7281): the stored
-    configuration and a single-use ticket go to the governed worker, which asks Main for the value through the trusted
-    release (audited); nothing expanded here is sent. ``None`` when it passed, or when nothing could be checked
-    (``NOT_CHECKED``); else the connection error with the probe's code and readable text. A kept outcome answers a
-    repeat for a short while (``reuse``)."""
-    data = config['data']
-    answer = this.module.governed_check_connection(
-        data.get('configuration_project_id') or project_id, data.get('configuration_uuid'), config['type'], user_id,
-        reuse=True)
+_PROBE_BATCH = contextvars.ContextVar('validator_governed_probes', default=None)
+PROBE_BATCH_SIZE = 64   # items of one governed_check_connection_many call (its MAX_PROBE_BATCH)
+
+
+class _DeferredProbe:
+    """A governed probe a validator asked for while a version's toolkits are walked (#7294 P-01): it stands in the
+    toolkit's connection errors until ``_ProbeBatch.run`` answers it (``error``: the connection error, or None)."""
+
+    __slots__ = ('config', 'project_id', 'user_id', 'error')
+
+    def __init__(self, config, project_id, user_id):
+        self.config, self.project_id, self.user_id, self.error = config, project_id, user_id, None
+
+
+class _ProbeBatch:
+    """The governed probes of one version's toolkits, asked once they are all known: per (project, tester) one
+    ``governed_check_connection_many`` call per ``PROBE_BATCH_SIZE`` credentials (permission and facts read once, the
+    probes run a few at a time, each still answered from a kept outcome while it stands), a credential used by several
+    toolkits probed once. The answers and audit rows of each probe are those of ``governed_check_connection``."""
+
+    def __init__(self):
+        self.deferred = []
+
+    def defer(self, config, project_id, user_id) -> _DeferredProbe:
+        item = _DeferredProbe(config, project_id, user_id)
+        self.deferred.append(item)
+        return item
+
+    def run(self) -> None:
+        groups = {}
+        for item in self.deferred:
+            data = item.config['data']
+            key = (data.get('configuration_uuid'), item.config['type'])
+            groups.setdefault((data.get('configuration_project_id') or item.project_id, item.user_id), {}) \
+                .setdefault(key, []).append(item)
+        for (project_id, user_id), by_credential in groups.items():
+            keys = list(by_credential)
+            for start in range(0, len(keys), PROBE_BATCH_SIZE):
+                chunk = keys[start:start + PROBE_BATCH_SIZE]
+                try:
+                    answers = this.module.governed_check_connection_many(
+                        project_id, [{'configuration_uuid': uuid, 'config_type': type_} for uuid, type_ in chunk],
+                        user_id, reuse=True)
+                except Exception as ex:  # noqa: BLE001 -- never raises by contract; a broken call checks nothing
+                    log.warning(f"Governed connection checks failed: {type(ex).__name__}")
+                    answers = []
+                for index, key in enumerate(chunk):
+                    answer = answers[index] if index < len(answers) else None
+                    for item in by_credential[key]:
+                        item.error = _connection_error_of(item.config, answer)
+
+
+def _connection_error_of(config: dict, answer) -> dict | None:
+    """The connection error of a governed probe's answer, or None when it passed or nothing could be checked."""
     if isinstance(answer, dict) and (answer.get('success') is True or answer.get('code') in NOT_CHECKED):
         return None
-    answer = answer if isinstance(answer, dict) else {}
+    if answer is None:
+        return None   # not answered at all: as DEPENDENCY_UNAVAILABLE, nothing was checked
     error = {
         'configuration_title': config['title'],
         'configuration_type': config['type'],
@@ -993,6 +1039,47 @@ def _governed_connection_error(config: dict, project_id, user_id) -> dict | None
     if answer.get('code'):
         error['code'] = answer['code']
     return error
+
+
+def _resolved(connection_errors) -> list:
+    """A toolkit's connection errors with each deferred probe replaced by its answer (and dropped when it passed)."""
+    out = []
+    for error in connection_errors or ():
+        if isinstance(error, _DeferredProbe):
+            error = error.error
+        if error is not None:
+            out.append(error)
+    return out
+
+
+def _toolkit_connection_entry(tool_id, err_input, connection_errors) -> dict | None:
+    """The validation error of a toolkit's connection errors, as the toolkit loop builds it: a governed refusal is a
+    value error with its code (#7281), any other connection error a connection error; None when there is none."""
+    if not connection_errors:
+        return None
+    refusal = governed_refusal_of(connection_errors)
+    if refusal is not None:
+        return {'type': 'value_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
+                'ctx': {'error': refusal}}
+    # 'connection_error' is not a valid pydantic type and ctx must be a dict (EL-7276)
+    return {'type': 'value_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
+            'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})}}
+
+
+def _governed_connection_error(config: dict, project_id, user_id) -> dict | None:
+    """Under enforce, the connection check of a saved credential is the governed probe (#7281): the stored
+    configuration and a single-use ticket go to the governed worker, which asks Main for the value through the trusted
+    release (audited); nothing expanded here is sent. ``None`` when it passed, or when nothing could be checked
+    (``NOT_CHECKED``); else the connection error with the probe's code and readable text. A kept outcome answers a
+    repeat for a short while (``reuse``)."""
+    batch = _PROBE_BATCH.get()
+    if batch is not None:   # a version's validation: asked with the probes of its other toolkits (#7294 P-01)
+        return batch.defer(config, project_id, user_id)
+    data = config['data']
+    answer = this.module.governed_check_connection(
+        data.get('configuration_project_id') or project_id, data.get('configuration_uuid'), config['type'], user_id,
+        reuse=True)
+    return _connection_error_of(config, answer if isinstance(answer, dict) else {})
 
 
 def _check_configurations_connection_from_expanded_settings(
@@ -1216,69 +1303,22 @@ def validate_application_version_details(
             raise RuntimeError(f"Application version data validation error: {e}") from e
 
         application_toolkit_errors = []
-        for tool in version_toolkits:
-            # validate application toolkits which can expand recursively
-            if tool.get('type') == 'application':
-                try:
-                    log.debug(f"Validating application toolkit: {tool.get('id')}")
-                    _validate_toolkit_type_application(
-                        session=session,
-                        tool=tool,
-                        project_id=project_id,
-                        user_id=user_id,
-                        _visited=_visited
-                    )
-                except ValueError as ex:
-                    application_toolkit_errors.append({
-                        'type': 'value_error',
-                        'loc': ('tools', tool['id'], '__root__'),
-                        'input': tool,
-                        'ctx': {'error': str(ex)},
-                    })
-            else:
-                log.debug(f"Validating regular toolkit: {tool.get('id')}")
-                tool['project_id'] = project_id
-                tool['user_id'] = user_id
-                is_mcp = (
-                    tool.get('type') == 'mcp'
-                    or (isinstance(tool.get('meta'), dict) and tool['meta'].get('mcp') is True)
-                )
-                validation_context = {'check_connection': not is_mcp, 'mcp_tokens': {}}
-                try:
-                    ToolValidatedDetails.model_validate(tool, context=validation_context)
-                except ValidationError as e:
-                    for err in e.errors():
-                        connection_errors = connection_errors_from(err)
-                        refusal = governed_refusal_of(connection_errors)
-                        if refusal is not None:   # the governed probe refused (enforce only): readable (#7281)
-                            application_toolkit_errors.append({
-                                'type': 'value_error',
-                                'loc': ('tools', tool['id'], '__root__'),
-                                'input': err.get('input'),
-                                'ctx': {'error': refusal},
-                            })
-                        elif connection_errors is not None:
-                            # 'connection_error' is not a valid pydantic type and ctx must be a dict
-                            application_toolkit_errors.append({
-                                'type': 'value_error',
-                                'loc': ('tools', tool['id'], '__root__'),
-                                'input': err.get('input'),
-                                'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})},
-                            })
-                        else:
-                            application_toolkit_errors.append({
-                                'type': err['type'],
-                                'loc': ('tools', tool['id'], '__root__'),
-                                'input': err.get('input'),
-                                'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
-                            })
-                except Exception as ex:
-                    application_toolkit_errors.append({
-                        'type': 'value_error',
-                        'loc': ('tools', tool['id'], '__root__'),
-                        'input': tool,
-                        'ctx': {'error': str(ex)},
-                    })
+        # the governed probes of every toolkit are asked once the loop has seen them all (#7294 P-01); the authors of
+        # the toolkits are not looked up: a validation does not show them (one identity-service call per toolkit)
+        profile = getattr(this.module, 'governance_profile', None)
+        batch = _ProbeBatch() if getattr(profile, 'enabled', False) is True else None
+        batch_token = _PROBE_BATCH.set(batch)
+        pending = []
+        try:
+            _validate_version_toolkits(session, version_toolkits, project_id, user_id, _visited,
+                                       application_toolkit_errors, pending)
+        finally:
+            _PROBE_BATCH.reset(batch_token)
+        if batch is not None and batch.deferred:
+            batch.run()
+        for index, tool_id, err_input, connection_errors in pending:
+            application_toolkit_errors[index] = _toolkit_connection_entry(tool_id, err_input, _resolved(connection_errors))
+        application_toolkit_errors = [entry for entry in application_toolkit_errors if entry is not None]
         if application_toolkit_errors:
             raise ValidationError.from_exception_data(
                 'ApplicationVersionDetailToolValidatedModel',
@@ -1286,6 +1326,80 @@ def validate_application_version_details(
             )
 
     return True
+
+
+def _validate_version_toolkits(session, version_toolkits, project_id, user_id, _visited, application_toolkit_errors,
+                               pending) -> None:  # pylint: disable=R0913
+    """The per-toolkit loop of ``validate_application_version_details``. A toolkit whose connection errors hold a
+    deferred governed probe gets a placeholder entry, listed in ``pending`` as ``(index, tool id, input, errors)``."""
+    for tool in version_toolkits:
+        # validate application toolkits which can expand recursively
+        if tool.get('type') == 'application':
+            try:
+                log.debug(f"Validating application toolkit: {tool.get('id')}")
+                _validate_toolkit_type_application(
+                    session=session,
+                    tool=tool,
+                    project_id=project_id,
+                    user_id=user_id,
+                    _visited=_visited
+                )
+            except ValueError as ex:
+                application_toolkit_errors.append({
+                    'type': 'value_error',
+                    'loc': ('tools', tool['id'], '__root__'),
+                    'input': tool,
+                    'ctx': {'error': str(ex)},
+                })
+        else:
+            log.debug(f"Validating regular toolkit: {tool.get('id')}")
+            tool['project_id'] = project_id
+            tool['user_id'] = user_id
+            is_mcp = (
+                tool.get('type') == 'mcp'
+                or (isinstance(tool.get('meta'), dict) and tool['meta'].get('mcp') is True)
+            )
+            validation_context = {'check_connection': not is_mcp, 'mcp_tokens': {}, 'authors_map': {}}
+            try:
+                ToolValidatedDetails.model_validate(tool, context=validation_context)
+            except ValidationError as e:
+                for err in e.errors():
+                    connection_errors = connection_errors_from(err)
+                    if any(isinstance(item, _DeferredProbe) for item in connection_errors or ()):
+                        pending.append((len(application_toolkit_errors), tool['id'], err.get('input'),
+                                        connection_errors))
+                        application_toolkit_errors.append(None)   # filled once the probes are answered
+                        continue
+                    refusal = governed_refusal_of(connection_errors)
+                    if refusal is not None:   # the governed probe refused (enforce only): readable (#7281)
+                        application_toolkit_errors.append({
+                            'type': 'value_error',
+                            'loc': ('tools', tool['id'], '__root__'),
+                            'input': err.get('input'),
+                            'ctx': {'error': refusal},
+                        })
+                    elif connection_errors is not None:
+                        # 'connection_error' is not a valid pydantic type and ctx must be a dict (EL-7276)
+                        application_toolkit_errors.append({
+                            'type': 'value_error',
+                            'loc': ('tools', tool['id'], '__root__'),
+                            'input': err.get('input'),
+                            'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})},
+                        })
+                    else:
+                        application_toolkit_errors.append({
+                            'type': err['type'],
+                            'loc': ('tools', tool['id'], '__root__'),
+                            'input': err.get('input'),
+                            'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
+                        })
+            except Exception as ex:
+                application_toolkit_errors.append({
+                    'type': 'value_error',
+                    'loc': ('tools', tool['id'], '__root__'),
+                    'input': tool,
+                    'ctx': {'error': str(ex)},
+                })
 
 
 def get_application_by_tags(project_id, tags: List[int]):

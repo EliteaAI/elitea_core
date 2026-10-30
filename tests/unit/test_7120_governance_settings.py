@@ -813,3 +813,34 @@ def test_booting_into_off_with_live_runs_registers_the_handlers_otherwise_nothin
     assert start.index("state.refresh()") < start.index("has_live_contexts()") < start.index("state.start()")
     assert "if not self.governed_handlers_registered and has_live_contexts():" in start
     assert "_ensure_governed_handlers_registered()" in start
+
+
+def test_the_refresher_read_asks_the_catalog_once_and_again_only_after_a_failure(ns, env):
+    """#7294: the settings read (every 10 s per replica) asked the catalog each time; now once while the table is
+    there. A table dropped later still reads as missing_table (the failed read asks the catalog again)."""
+    gs = ns.governance_settings
+    gs._TABLES_SEEN.clear()   # pylint: disable=W0212
+    genv.create_tables(ns)
+    asked = []
+    real = gs.inspect
+
+    def counting(bind):
+        asked.append(1)
+        return real(bind)
+
+    gs.inspect = counting
+    try:
+        reads = [gs.read_settings() for _ in range(5)]
+        assert reads == [("ok", None)] * 5
+        has_table_calls = len(asked)
+        gs._COLUMNS_SEEN.add(gs.SETTINGS_TABLE)   # pylint: disable=W0212   # the column read is cached on its own
+        asked.clear()
+        assert [gs.read_settings() for _ in range(5)] == [("ok", None)] * 5 and asked == []
+        with ns.tools.db.get_session(None) as session:
+            session.execute(ns.sa.text("DROP TABLE credential_governance_settings"))
+            session.commit()
+        assert gs.read_settings() == ("missing_table", None)
+    finally:
+        gs.inspect = real
+        gs._TABLES_SEEN.clear()   # pylint: disable=W0212
+    assert has_table_calls <= 2   # the first read: has_table (+ the column read before it is cached)

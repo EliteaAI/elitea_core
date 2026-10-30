@@ -659,6 +659,31 @@ def test_a_batch_of_probes_refuses_item_by_item_and_all_when_the_actor_may_not(n
     assert ns.credential_probe.governed_check_connection_many(env.module(), 1, [], USER) == []
 
 
+def test_a_validators_batch_of_probes_is_answered_from_the_kept_outcomes_on_a_repeat(ns, env):
+    """#7294 P-01: the validators hand all the probes of a version to one batch with ``reuse``: a repeat inside the
+    outcome TTL starts no task and reads no stored configuration; the facts and the permission are still read once
+    per batch (a revoked reference or a new generation is a new key, so it is probed again)."""
+    creds = credentials(env, 3)
+    env.engine(1)
+    stored = []
+    ns.credential_probe._stored_configuration = lambda project_id, configuration_uuid, user_id: stored.append(1) or {   # pylint: disable=W0212
+        "configuration_uuid": configuration_uuid, "configuration_project_id": 1, "configuration_type": "jira",
+        "configuration_generation": 3, "base_url": "https://jira.example", "token": "{{secret.t}}"}
+    ns.credential_probe.forget_outcomes()
+    module = env.module()
+    items = [{"configuration_uuid": cred.uuid, "config_type": "jira"} for cred in creds]
+    assert ns.credential_probe.governed_check_connection_many(module, 1, items, USER, reuse=True) == [{"success": True}] * 3
+    started, reads = len(env.started), len(stored)
+    before_facts, before_perm = len(env.secrets_calls), len(env.permission_calls)
+    assert ns.credential_probe.governed_check_connection_many(module, 1, items, USER, reuse=True) == [{"success": True}] * 3
+    assert (len(env.started), len(stored)) == (started, reads) == (3, 3)
+    assert (len(env.secrets_calls) - before_facts, len(env.permission_calls) - before_perm) == (1, 1)
+    # without reuse (the Credentials page) every probe runs again
+    ns.credential_probe.governed_check_connection_many(module, 1, items, USER)
+    assert len(env.started) == 6
+    ns.credential_probe.forget_outcomes()
+
+
 # --- S8: the owner scan ---------------------------------------------------------------------------------------------
 
 class PublicSession:
@@ -681,6 +706,7 @@ class PublicSession:
 def test_the_owner_scan_looks_in_one_session_and_suspends_only_where_there_are_mandates(ns, env, monkeypatch):
     owner = mandate_env.OWNER
     env.epochs[owner] = {"active": False, "user": 1, "token": 0}
+    monkeypatch.setattr(ns.mandate_owner, "_SEEN", set())
     public = PublicSession([f"p_{pid}" for pid in range(1, 51)], owning=[7])
     suspended = []
     opened = []
@@ -702,6 +728,7 @@ def test_the_owner_scan_looks_in_one_session_and_suspends_only_where_there_are_m
 
 
 def test_the_owner_scan_looks_in_chunks_and_never_quotes_what_is_not_a_project_schema(ns, env, monkeypatch):
+    monkeypatch.setattr(ns.mandate_owner, "_SEEN", set())
     public = PublicSession(["p_1", "p_2", "evil\"; drop table x; --", "p_3x"], owning=[])
     monkeypatch.setattr(env.ns.tools.db, "get_session", lambda project_id: _ctx(public))
     assert ns.mandate_owner.projects_with_active_mandates(5, [1, 2, 3]) == []
@@ -710,6 +737,39 @@ def test_the_owner_scan_looks_in_chunks_and_never_quotes_what_is_not_a_project_s
     public.executed.clear()
     ns.mandate_owner.projects_with_active_mandates(5, range(1, 451))
     assert len(public.executed) == 1 + 3                                        # the catalog, then 200 + 200 + 50
+
+
+def test_the_owner_scan_asks_the_catalog_only_for_projects_it_has_not_seen(ns, env, monkeypatch):
+    """#7294: the catalog query of every deactivated user ran over every project; now only over the projects not seen
+    with the mandate table, so a wave of deactivations asks it once. A failure asks it again for all."""
+    monkeypatch.setattr(ns.mandate_owner, "_SEEN", set())
+    public = PublicSession([f"p_{pid}" for pid in range(1, 51)], owning=[7])
+    monkeypatch.setattr(env.ns.tools.db, "get_session", lambda project_id: _ctx(public))
+    assert ns.mandate_owner.projects_with_active_mandates(5, range(1, 51)) == [7]
+    first = [params for text, params in public.executed if "information_schema" in text]
+    assert len(first) == 1 and len(first[0]["names"]) == 50
+    public.executed.clear()
+    for user in range(6, 16):   # ten more deactivated users
+        assert ns.mandate_owner.projects_with_active_mandates(user, range(1, 51)) == [7]
+    assert [text for text, _ in public.executed if "information_schema" in text] == []
+    assert len(public.executed) == 10                                           # one probe statement each
+    public.executed.clear()
+    ns.mandate_owner.projects_with_active_mandates(5, range(1, 53))             # two new projects
+    [(text, params)] = [item for item in public.executed if "information_schema" in item[0]]
+    assert params == {"names": ["p_51", "p_52"]}
+    real = public.execute
+    failed = []
+
+    def once_broken(statement, params=None):
+        if "UNION ALL" in str(statement) and not failed:
+            failed.append(1)
+            raise RuntimeError("relation does not exist")
+        return real(statement, params)
+
+    public.execute = once_broken
+    public.executed.clear()
+    assert ns.mandate_owner.projects_with_active_mandates(5, range(1, 51)) == [7]
+    assert [len(params["names"]) for text, params in public.executed if "information_schema" in text] == [50]
 
 
 class _ctx:
