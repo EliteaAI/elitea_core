@@ -27,7 +27,10 @@ MAX_PENDING_USERS = 1024
 OWNER_CHUNK = 200   # project schemas per query when the projects that hold a user's mandates are looked for
 _MANDATE_SCHEMAS = text(
     "SELECT table_schema FROM information_schema.tables "
-    "WHERE table_name = 'autonomous_mandate' AND table_schema ~ '^p_[0-9]+$'")
+    "WHERE table_name = 'autonomous_mandate' AND table_schema ~ '^p_[0-9]+$' AND table_schema = ANY(:names)")
+# Projects whose schema was seen with the mandate table (a table is never dropped from a live schema): the catalog is
+# asked only for the others (#7294: it was asked for every project on every deactivated user). Forgotten on a failure
+_SEEN = set()
 _PROJECT_SCHEMA = re.compile(r"^p_([0-9]+)$")
 
 
@@ -49,17 +52,30 @@ def invalidated_user_id(payload):
 
 def projects_with_active_mandates(user_id, project_ids) -> list:
     """The projects, among ``project_ids``, in which ``user_id`` owns an active mandate: one session, one catalog query
-    and one statement per ``OWNER_CHUNK`` project schemas (each part reads ``ix_autonomous_mandate_owner_state``),
+    for the projects not seen before (none once every project was seen) and one statement per ``OWNER_CHUNK`` project schemas (each part reads ``ix_autonomous_mandate_owner_state``),
     instead of a session per project. Schema names come from the catalog and are checked against ``p_<digits>`` before
     they are quoted into the text; the user id is a bound parameter. Where the schemas cannot be asked at once (not
     PostgreSQL), every project is a candidate."""
     wanted = [int(project_id) for project_id in project_ids]
+    try:
+        return _owning_projects(user_id, wanted)
+    except Exception:  # pylint: disable=W0703
+        if not _SEEN:
+            raise
+        _SEEN.clear()   # a schema remembered may be gone: ask the catalog for every project once more
+        return _owning_projects(user_id, wanted)
+
+
+def _owning_projects(user_id, wanted) -> list:
     with db.get_session(None) as session:
         if session.get_bind().dialect.name != "postgresql":
             return wanted
-        present = {int(match.group(1)) for match in (
-            _PROJECT_SCHEMA.match(name) for name in session.execute(_MANDATE_SCHEMAS).scalars()) if match}
-        schemas = [project_id for project_id in wanted if project_id in present]
+        unknown = [f"p_{project_id}" for project_id in wanted if project_id not in _SEEN]
+        if unknown:
+            _SEEN.update(int(match.group(1)) for match in (
+                _PROJECT_SCHEMA.match(name) for name in session.execute(_MANDATE_SCHEMAS, {"names": unknown}).scalars())
+                if match)
+        schemas = [project_id for project_id in wanted if project_id in _SEEN]
         owning = []
         for start in range(0, len(schemas), OWNER_CHUNK):
             parts = " UNION ALL ".join(

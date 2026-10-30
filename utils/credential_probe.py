@@ -498,13 +498,14 @@ def _shared_checks(module, project_id, uuids, user_id, actor_user_id) -> types.S
 
 
 def governed_check_connection_many(  # pylint: disable=R0913,R0914
-    module, project_id, items, user_id, actor_user_id=None, onboarding=False, parallel=PROBE_PARALLEL,
+    module, project_id, items, user_id, actor_user_id=None, onboarding=False, parallel=PROBE_PARALLEL, reuse=False,
 ) -> list:
     """Test several saved credentials of one project: ``items`` is ``[{"configuration_uuid", "config_type"}]``. The
     actor's permission and the facts of all the configurations are read once; the probes then run at the same time, at
     most ``parallel`` of them (each is a task of the ``governed_ops`` pool, which has as many slots), instead of one
     after the other on the greenlet of the request. One answer per item, in order, each as ``governed_check_connection``
-    answers it (a refusal of one item does not touch the others). Never raises."""
+    answers it (a refusal of one item does not touch the others); ``reuse`` as there (a validator's batch, #7294).
+    Never raises."""
     answers = [None] * len(items) if isinstance(items, (list, tuple)) else []
     if not answers:
         return answers
@@ -542,7 +543,7 @@ def governed_check_connection_many(  # pylint: disable=R0913,R0914
     def probe(item):
         index, configuration_uuid, config_type = item
         answers[index] = governed_check_connection(
-            module, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, shared)
+            module, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, shared, reuse)
 
     with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(valid)))) as pool:
         list(pool.map(probe, valid))
