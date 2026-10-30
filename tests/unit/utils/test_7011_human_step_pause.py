@@ -82,6 +82,16 @@ def test_a_sign_in_pause_waits_for_approval_and_names_the_toolkit(runs, session,
     assert sent.notices == [(12, "schedule_approval_needed", run.id)]
 
 
+def test_a_parked_run_stores_the_approval_window_in_its_paused_event(runs, session, sent, monkeypatch):
+    monkeypatch.setattr(runs, "approval_wait_hours", lambda: 48)
+
+    run, _ = _pause(runs, session, SIGN_IN)
+
+    event = next(event for event in run.events if event["kind"] == "paused")
+    assert event["wait_hours"] == 48
+    assert (run.approval_expires_at - datetime.now(UTC).replace(tzinfo=run.approval_expires_at.tzinfo)).days == 1
+
+
 def test_a_sign_in_event_has_the_sign_in_need(runs, session, sent):
     run, _ = _pause(runs, session, SIGN_IN)
 

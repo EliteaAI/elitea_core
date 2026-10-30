@@ -199,16 +199,18 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
     """The work of `_park_run` on a session the caller opened."""
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
+    hours = approval_wait_hours()
     paused = session.execute(
         update(EntityScheduleRun)
         .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running', *conditions)
         # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
         .values(status='waiting_for_approval', resumed_at=None,
-                approval_expires_at=datetime.now(UTC) + timedelta(hours=approval_wait_hours()))
+                approval_expires_at=datetime.now(UTC) + timedelta(hours=hours))
     ).rowcount
     if paused:
         _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait
-        append_run_events(session, run_id, event)
+        # The window goes into the log: the expired notice names it even after the setting changes
+        append_run_events(session, run_id, {**event, 'wait_hours': hours})
     session.commit()
     if not paused:  # a run that is not running stays as it is, with no notice
         return False

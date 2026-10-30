@@ -113,26 +113,22 @@ def _send(notifications, event_type, **kwargs):
     return notifications.notify_schedule_event(12, 42, event_type, SCHEDULE, **kwargs)
 
 
-def test_the_expired_notice_names_the_configured_window(notifications, recorder, monkeypatch):
-    runs = types.ModuleType(f'{PKG}.utils.schedule_runs')
-    runs.approval_wait_hours = lambda: 48
-    monkeypatch.setitem(sys.modules, runs.__name__, runs)
+def _parked(*hours):
+    return types.SimpleNamespace(
+        id=5, conversation_id=None, reason=None,
+        events=[{'kind': 'paused', 'wait_hours': value} for value in hours] + [{'kind': 'finished'}])
 
-    _send(notifications, 'schedule_approval_expired')
+
+def test_the_expired_notice_names_the_window_the_run_was_parked_with(notifications, recorder):
+    _send(notifications, 'schedule_approval_expired', run=_parked(24, 48))
 
     assert 'was not approved in 48 hours' in recorder.fired[0][1]['meta']['message']
 
 
-def test_the_expired_notice_falls_back_to_24_hours_when_the_setting_cannot_be_read(notifications, recorder, monkeypatch):
-    runs = types.ModuleType(f'{PKG}.utils.schedule_runs')
-
-    def broken():
-        raise RuntimeError('config down')
-
-    runs.approval_wait_hours = broken
-    monkeypatch.setitem(sys.modules, runs.__name__, runs)
-
-    _send(notifications, 'schedule_approval_expired')
+@pytest.mark.parametrize('run', [None, types.SimpleNamespace(id=5, conversation_id=None, reason=None, events=None),
+                                 _parked(0), _parked('x'), _parked(True)])
+def test_the_expired_notice_falls_back_to_24_hours_when_the_run_has_no_window(notifications, recorder, run):
+    _send(notifications, 'schedule_approval_expired', run=run)
 
     assert 'was not approved in 24 hours' in recorder.fired[0][1]['meta']['message']
 
@@ -340,15 +336,3 @@ class TestEL7011R4SocketEvent:
         assert notifications.emit_schedule_run_finished(**FINISHED) is None
 
         assert any('sio down' in line for line in recorder.logged)
-
-
-def test_a_notice_other_than_the_expired_one_does_not_read_the_approval_window(notifications, recorder, monkeypatch):
-    runs = types.ModuleType(f'{PKG}.utils.schedule_runs')
-    reads = []
-    runs.approval_wait_hours = lambda: reads.append(1) or 48
-    monkeypatch.setitem(sys.modules, runs.__name__, runs)
-
-    _send(notifications, 'schedule_expired')
-
-    assert reads == []
-    assert recorder.fired

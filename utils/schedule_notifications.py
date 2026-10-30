@@ -24,13 +24,16 @@ MESSAGES = {
 _NAME_BRACKETS = str.maketrans('[]', '［］')
 
 
-def _approval_hours() -> int:
-    """The approval window in hours, as the run was parked with it; 24 when the setting cannot be read."""
-    try:
-        from .schedule_runs import approval_wait_hours  # late: schedule_runs sends notices through this module
-        return approval_wait_hours()
-    except Exception:  # noqa: BLE001 -- a notice must not fail on a settings read
-        return DEFAULT_APPROVAL_HOURS
+def _approval_hours(run) -> int:
+    """The approval window in hours the run was parked with: the last `paused` event of the run holds it.
+
+    The setting may have changed since; the event keeps the value the run was given. 24 when no event has it.
+    """
+    for event in reversed(getattr(run, 'events', None) or []):
+        hours = event.get('wait_hours') if isinstance(event, dict) and event.get('kind') == 'paused' else None
+        if isinstance(hours, int) and not isinstance(hours, bool) and hours > 0:
+            return hours
+    return DEFAULT_APPROVAL_HOURS
 
 
 def _schedule_link(schedule) -> str:
@@ -55,8 +58,8 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         return False
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
-        # Only the expired notice names the window; the settings read is skipped for every other notice
-        hours = _approval_hours() if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
+        # Only the expired notice names the window
+        hours = _approval_hours(run) if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
             'message': MESSAGES[event_type].format(
                 link=_schedule_link(schedule),
