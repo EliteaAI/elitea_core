@@ -108,6 +108,8 @@ def world(monkeypatch):
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args: state.calls.append(("finish", *args)),
             "run_failure_reason": str,
+            "count_refusal": lambda *args: state.calls.append(("refused", *args)),  # #7254 has its own tests
+            "end_refusal_streak": lambda *args: state.calls.append(("streak_end", *args)),
             "record_run_events": lambda *args, **kwargs: None,  # the run log has its own tests
             "run_event": lambda *args, **kwargs: {}},
         "utils.budget_door": {"closed_budget_scope": lambda *args: None},

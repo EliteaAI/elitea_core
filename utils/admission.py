@@ -41,7 +41,7 @@ from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 from ..models.pd.admission import (
-    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, AdmissionRequest,
+    ENTRY_CHAT_LLM, ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_SCHEDULE_TEST, ENTRY_TOOLKIT_TEST, AdmissionRequest,
     ExecutionSecurityContextView,
 )
 from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
@@ -69,7 +69,8 @@ ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent", TOOLKIT_TA
 # The entry points a development run may come from (#7213, #7229): the editor's test chat, and a person testing a toolkit
 # or indexing it on demand. A toolkit run has no other profile: it is never a governed (bound) run
 TOOLKIT_ENTRY_POINTS = frozenset({ENTRY_TOOLKIT_TEST, ENTRY_INDEX_ON_DEMAND})
-DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, *TOOLKIT_ENTRY_POINTS})
+# and the owner's Run now / Test run of a schedule (#7254), whose draft obeys the switch as the editor's test chat
+DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, ENTRY_SCHEDULE_TEST, *TOOLKIT_ENTRY_POINTS})
 
 
 def task_fits_entry(task_name, entry_point) -> bool:
@@ -168,12 +169,15 @@ MESSAGES = {
     "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
                                 "draft started (only the sub-agents the draft calls are checked, each on its own); the "
                                 "run was not started.",
-    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat and toolkits with credentials in a chat) "
-                                 "are switched off on this platform; an administrator can switch them on in Admin → "
+    "DEVELOPMENT_RUNS_DISABLED": "Development runs (the editor's test chat, toolkits with credentials in a chat, and "
+                                 "Run now / Test run of a schedule on an unbound version) are switched off on this "
+                                 "platform; an administrator can switch them on in Admin → "
                                  "Governance. The run was not started.",
     "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
                                       "included) are not admitted yet; run the toolkit from the Elitea UI or through a "
                                       "governed agent. The run was not started.",
+    "SCHEDULE_RUN_TOKEN_NOT_ADMITTED": "Run now and Test run of a schedule started with an API token are not admitted "
+                                       "yet; start them from the Elitea UI. The run was not started.",
     "SUB_AGENT_CREDENTIAL_NOT_ADMITTED": "Sub-agents that use credentials are not admitted yet for scheduled or webhook "
                                          "runs; the run was not started.",
     "DENIED_ENTRY_POINT": "This kind of run cannot be started from here; the run was not started.",
@@ -1194,6 +1198,8 @@ def _admit(  # pylint: disable=R0914
         # a toolkit run is the development run of a signed-in person; an API token (the MCP server's toolkit tools,
         # the REST test) is not one yet (scoped tokens, #7230): said as such, whatever the development setting is
         raise _denied("TOOLKIT_RUN_TOKEN_NOT_ADMITTED")
+    if request.entry_point == ENTRY_SCHEDULE_TEST and request.caller_type == "token":
+        raise _denied("SCHEDULE_RUN_TOKEN_NOT_ADMITTED")   # (#7254) a person's run, as a toolkit run is
     if not run_id:
         raise _denied("DEPENDENCY_UNAVAILABLE")
     # 3. who is asking
@@ -1213,6 +1219,29 @@ def _admit(  # pylint: disable=R0914
         binding, rows = _read_toolkit(request)
         permissions = _author_permissions(request)
         can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
+    elif request.entry_point == ENTRY_SCHEDULE_TEST:
+        # 4. (Run now or Test run of a schedule by its owner, #7254) the owner's run, as the editor's test chat: a bound
+        # version runs its approved definition on its binding, as any bound run of that person (digest checked,
+        # sub-agents bound, the person's grants), whatever the development-runs setting; an unbound one runs the draft,
+        # only while development runs are on and with the edit right (the author's own credentials). The run endpoint
+        # let only the schedule's owner start it; the right to run the agent is checked here, fail closed. No mandate
+        # is read
+        if not _is_development(request, replace(settings, allow_development_runs=True)):
+            raise _denied("DENIED_ENTRY_POINT")   # a guard: system, token and anonymous callers are refused above
+        permissions = _author_permissions(request)
+        if PREDICT_PERMISSION not in permissions:
+            raise _denied("DENIED_RBAC")
+        try:
+            binding, rows = _find_binding(request, settings)
+        except AdmissionDenied as denied:
+            if denied.reason_code != "DENIED_BINDING":   # bound, but its definition changed: refused as any bound run
+                raise
+            if not _is_development(request, settings):   # the draft needs development runs on (#7227 D10)
+                raise _denied("DEVELOPMENT_RUNS_DISABLED") from None
+            if AUTHOR_PERMISSION not in permissions:   # the draft: only someone who may edit the agent may run it
+                raise _denied("DENIED_RBAC") from None
+            binding, rows = _read_draft(request)
+            can_use = lambda: USE_PERMISSION in permissions  # noqa: E731  # pylint: disable=C3001
     elif _is_development(request, settings):
         # 4. (development, #7213) the definition that runs, with no binding: the author's own right stands for it. Decided
         # here, before any binding is looked for, so the governed path reads nothing more than before
@@ -1270,6 +1299,8 @@ def _admit(  # pylint: disable=R0914
         development=binding.id is None and children_of_drafts is not False, shadow=shadow,
         can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
+    if request.trigger_ref:   # an owner's Run now or Test run (#7254): which schedule it ran
+        caller["trigger_ref"] = request.trigger_ref
     if shadow:
         _record_shadow_allow(module, request, run_id, binding=binding, subject=subject, decisions=decisions,
                              caller=caller, children=children)

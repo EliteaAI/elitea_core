@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     Uuid,
@@ -84,12 +85,26 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     approval_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The legacy version trigger a migrated row replaced, read back by restore_version_trigger; NULL on rows moved before the column existed
     original_trigger: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Governance refusals in a row since the last admitted governed start or resume (#7254); NULL counts as 0. A table
+    # column only, not mapped (`exclude_properties`): no ORM INSERT or SELECT names it, so a schema that predates it
+    # (the startup safety net adds it) still creates, imports and reads schedules. Written by Core updates on
+    # `REFUSAL_STREAK` only: the refusal count, the end of a streak and Resume
+    refusal_streak = mapped_column(SmallInteger, nullable=True)
+    __mapper_args__ = {'exclude_properties': ['refusal_streak']}  # noqa: RUF012 -- SQLAlchemy reads it
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+    def to_json(self, exclude_fields: tuple = ()) -> dict:
+        """The mixin's row dict (and repr) without the unmapped refusal count, which the row does not hold."""
+        return super().to_json((*exclude_fields, 'refusal_streak'))
+
+# The unmapped refusal count of a schedule (#7254), for Core statements
+REFUSAL_STREAK = EntitySchedule.__table__.c.refusal_streak
 
 
 class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
