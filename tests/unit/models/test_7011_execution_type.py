@@ -14,7 +14,7 @@ from unit._tool_spend_loader import PLUGIN_ROOT
 from unit.utils.test_7011_pipeline_execution_owner import world  # noqa: F401 -- the real TriggerType
 
 PKG = "plugins.elitea_core"
-SHARED_TRIGGERS = ["chat", "api", "mcp", "webhook", "scheduled", "schedule_manual"]
+SHARED_TRIGGERS = ["chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "schedule_test"]
 
 
 @pytest.fixture
@@ -62,6 +62,25 @@ def test_el_7011_r1_1_stored_execution_type_is_returned(model, stored):
 def test_el_7011_bug12_r1_1_shared_trigger_value_is_returned(model, stored):
     """BUG-12: meta.execution_type=schedule_manual (or any shared value) is returned, not turned into manual."""
     assert _row(model, {"execution_type": stored}).execution_type == stored
+
+
+def _run_ref(trigger):
+    return {"id": 9, "schedule_id": 3, "schedule_name": "Nightly", "status": "success", "trigger": trigger}
+
+
+@pytest.mark.parametrize(("trigger", "expected"), [
+    ("test", "schedule_test"), ("manual", "schedule_manual"), ("cron", "schedule_manual")])
+def test_an_old_manual_row_reads_as_test_only_when_its_run_row_says_test(model, trigger, expected):
+    """Rows made before the test type was stored say schedule_manual; the run row keeps the truth."""
+    row = model.ConversationListExtended(
+        id=1, name="run", is_private=True, author_id=1, created_at=datetime(2026, 1, 1),
+        meta={"execution_type": "schedule_manual"}, participants_count=1, message_groups_count=1, users_count=1,
+        schedule_run=_run_ref(trigger))
+    assert row.execution_type == expected
+
+
+def test_a_row_without_a_run_record_keeps_the_stored_execution_type(model):
+    assert _row(model, {"execution_type": "schedule_manual"}).execution_type == "schedule_manual"
 
 
 # TC-US16-03, TC-US16-04: R1.2 - legacy flag

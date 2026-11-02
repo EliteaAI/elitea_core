@@ -240,8 +240,14 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    manual = trigger in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
-    trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
+    manual = trigger in ('manual', 'test')  # Run now and Test run are the owner's own runs
+    if trigger == 'test':
+        trigger_type = TriggerType.SCHEDULE_TEST
+    else:
+        trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
+    # The usage plugin drops a trigger source it does not know and counts the call as manual, so a test run
+    # is told apart in the chat only; its calls keep the source of Run now
+    usage_source = TriggerType.SCHEDULE_MANUAL if manual else trigger_type
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
         conversation_uuid, _, response_id = create_trigger_run_conversation(
@@ -282,7 +288,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         result = execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
-            trigger_source=trigger_type, is_system_user=False,
+            trigger_source=usage_source, is_system_user=False,
             auto_approve_sensitive_actions=approved, **governance,
         )
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it

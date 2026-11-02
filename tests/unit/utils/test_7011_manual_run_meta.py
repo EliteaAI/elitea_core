@@ -24,7 +24,8 @@ def world(monkeypatch):
     )
     # the stubbed TriggerType of the shared harness has no SCHEDULE_MANUAL member
     monkeypatch.setattr(starter, "TriggerType", types.SimpleNamespace(SCHEDULED="scheduled",
-                                                                      SCHEDULE_MANUAL="schedule_manual"))
+                                                                      SCHEDULE_MANUAL="schedule_manual",
+                                                                      SCHEDULE_TEST="schedule_test"))
 
     def run(trigger):
         loaded = types.SimpleNamespace(
@@ -38,13 +39,13 @@ def world(monkeypatch):
 
 
 # TC-US15-06 / R1.3
-@pytest.mark.parametrize("trigger", ["manual", "test"])
-def test_7011_r1_3_manual_run_conversation_has_execution_type_manual(world, trigger):
+@pytest.mark.parametrize(("trigger", "stored"), [("manual", "schedule_manual"), ("test", "schedule_test")])
+def test_7011_r1_3_manual_and_test_run_conversations_keep_their_own_execution_type(world, trigger, stored):
     calls = world(trigger)
 
-    assert calls.conversation[0]["trigger_type"] == "schedule_manual"
+    assert calls.conversation[0]["trigger_type"] == stored
     assert calls.conversation[0]["extra_meta"] == {
-        "schedule_id": SCHEDULE_ID, "schedule_run_id": RUN_ID, "execution_type": "schedule_manual"}
+        "schedule_id": SCHEDULE_ID, "schedule_run_id": RUN_ID, "execution_type": stored}
 
 
 # TC-US15-01 / R1.2

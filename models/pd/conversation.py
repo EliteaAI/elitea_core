@@ -58,6 +58,9 @@ class ConversationListExtended(ConversationList):
             self.execution_type = stored
         elif self.meta.get('scheduled_run') is True:
             self.execution_type = 'scheduled'
+        # A chat made before the test type was stored reads schedule_manual; its run row still says test
+        if self.execution_type == TriggerType.SCHEDULE_MANUAL and self.schedule_run and self.schedule_run.trigger == 'test':
+            self.execution_type = TriggerType.SCHEDULE_TEST
         return self
 
     @model_validator(mode='after')
