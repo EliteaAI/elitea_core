@@ -41,6 +41,7 @@ MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
 MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY = 'skill_builder'
 MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY = 'project_context_builder'
 MCP_PROJECT_ID_MARKER = '{project_id}'
+ASK_USER_INTERNAL_TOOL_KEY = 'ask_user'
 
 MCP_ENDPOINT_CONFIGS = [
     {"suffix": "elitea_core/applications", "name": "Elitea Applications"},
@@ -965,9 +966,21 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
             "Use elitea_core/project_context MCP tools.\n"
             "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
         )
+        if ASK_USER_INTERNAL_TOOL_KEY in enabled_tools:
+            few_shot_blocks.append(
+                "Project Context clarification rule (the `ask_user` tool is available):\n"
+                "- If the user asks to create or update project context but has not given enough information "
+                "(e.g. what the project is about, its architecture, workflows or constraints), you MUST call the "
+                "`ask_user` tool to collect the missing details. Do NOT ask for them in a plain-text reply, and "
+                "do NOT invent placeholder content.\n"
+                "- Ask 1-4 focused questions, each with a short header and 2-4 concrete options; leave "
+                "`allow_other` enabled so the user can type a free-form answer.\n"
+                "- After the user answers, use the elitea_core/project_context MCP tools to create or update "
+                "the project context from those answers."
+            )
     if few_shot_blocks:
         few_shot_joined = "\n\n".join(few_shot_blocks)
-        few_shot_instruction = f"\n\n{few_shot_joined}"
+        few_shot_instruction = f"\n\n{few_shot_joined}\n\n"
     else:
         few_shot_instruction = ""
     return (
