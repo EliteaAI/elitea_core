@@ -14,6 +14,7 @@ from tools import VaultClient, rpc_tools, this, config as c, auth
 
 from .internal_base_url import internal_base_url
 from .mcp_config import is_mcp_exposure_enabled
+from .platform_buckets import is_platform_managed_bucket
 from .support_utils import get_support_config
 
 
@@ -366,6 +367,11 @@ def get_default_attachment_bucket(project_id: int) -> str:
         vault_client = VaultClient(project_id)
         secrets = vault_client.get_all_secrets()
         bucket = secrets.get('default_attachment_bucket', ATTACHMENT_DEFAULT_BUCKET)
+        if is_platform_managed_bucket(bucket):
+            log.warning(
+                f"default_attachment_bucket '{bucket}' is managed by the platform; using '{ATTACHMENT_DEFAULT_BUCKET}'"
+            )
+            return ATTACHMENT_DEFAULT_BUCKET
         log.debug(f"Using attachment bucket: {bucket}")
         return bucket
     except Exception as e:

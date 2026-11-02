@@ -1,4 +1,5 @@
-"""#7185: a chat attachment path naming the ``skill-files`` bucket reaches neither storage nor a message.
+"""#7185: a chat attachment path naming the ``skill-files`` bucket reaches neither storage nor a message, and the
+project setting ``default_attachment_bucket`` cannot point chat uploads into it.
 
 Skill file content is only served through the skill file endpoints, which check the skill's folder access. The chat
 attachment paths take a bucket-qualified ``/{bucket}/{name}``, so each of them is driven here with the real
@@ -201,3 +202,24 @@ class TestAttachmentDelete:
         response, status = endpoint.api.PromptLibAPI().delete(project_id=7, conversation_id=1)
 
         assert status == 400 and endpoint.storage.mock_calls == []
+
+
+class TestDefaultAttachmentBucket:
+    @pytest.fixture
+    def setting(self, plugin, monkeypatch):
+        internal_tools = _load(monkeypatch, 'utils/internal_tools.py')
+        secrets = {}
+        monkeypatch.setattr(internal_tools, 'VaultClient',
+                            lambda project_id: types.SimpleNamespace(get_all_secrets=lambda: secrets))
+        return types.SimpleNamespace(read=lambda: internal_tools.get_default_attachment_bucket(7), secrets=secrets)
+
+    @pytest.mark.parametrize('bucket', ['skill-files', 'p--7.skill-files', 'Skill-Files'])
+    def test_a_setting_naming_the_skill_files_bucket_falls_back_to_attachments(self, setting, bucket):
+        setting.secrets['default_attachment_bucket'] = bucket
+
+        assert setting.read() == 'attachments'
+
+    def test_any_other_setting_is_kept(self, setting):
+        setting.secrets['default_attachment_bucket'] = 'team-uploads'
+
+        assert setting.read() == 'team-uploads'
