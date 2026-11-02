@@ -217,6 +217,10 @@ class Env:  # pylint: disable=R0902,R0904
         self.tracing_calls = 0
         # auth fake
         self.verify_calls = []
+        self.token_scopes = {}          # token id -> auth.token_scope answer (#7336); a missing id is a legacy token
+        self.token_scope_calls = []
+        self.token_scope_raises = None
+        self.user_rows = {}             # user id -> auth.get_user row (#7336: a scoped token's owner and IdP link)
         self.verify_result = {"ok": True, "principal": principal()}
         self.verify_raises = None
         self.epoch_calls = []
@@ -557,6 +561,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.entra_obo = load("utils", "entra_obo")   # the on-behalf-of exchange of Entra-delegated credentials (#6756)
     ns.mandate_identity = load("utils", "mandate_identity")   # a mandate owner's offline consent (#7131)
     ns.adm = load("utils", "admission")
+    ns.token_scope = load("utils", "token_scope")   # what a scoped API token may do on a request (#7336)
     ns.credential_release = load("utils", "credential_release")
     ns.credential_probe = load("utils", "credential_probe")
     ns.binding_admin = load("utils", "binding_admin")
@@ -856,6 +861,22 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             return dict(user) if user is not None else None
 
         tools.auth.get_user_by_idp_subject = get_user_by_idp_subject
+
+        def token_scope(token_id):
+            env.token_scope_calls.append(token_id)
+            if env.token_scope_raises:
+                raise env.token_scope_raises
+            scope = env.token_scopes.get(token_id)
+            return None if scope is None else dict(scope)
+
+        tools.auth.token_scope = token_scope
+
+        def get_user(user_id):
+            if user_id not in env.user_rows:
+                raise RuntimeError("No such user found")
+            return dict(env.user_rows[user_id])
+
+        tools.auth.get_user = get_user
 
         def find_schema(tool_type, project_id, user_id, status=None):
             env.schema_calls.append((tool_type, project_id, user_id))

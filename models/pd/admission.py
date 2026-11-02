@@ -78,6 +78,8 @@ class ExecutionSecurityContextView(BaseModel):
     # platform acts as, and the agent's project; what the run token is minted from. References only
     subject_ref: Optional[str] = None
     subject_user_id: Optional[int] = None
+    # Who asked (#7336): ``user`` (a session), ``api_token`` (a scoped API token), ``trigger`` (a mandate run)
+    caller_kind: Optional[str] = None
     binding_project_id: Optional[int] = None
     # The sub-agents admitted with the run (#7227): their decisions by prefetch key (``<application id>:<version id>``),
     # which dispatch seals each one's toolkits against

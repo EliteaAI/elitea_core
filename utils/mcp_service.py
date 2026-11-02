@@ -11,7 +11,7 @@ from ..models.all import Application, ApplicationVersion
 from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
-from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
+from ..utils.exceptions import AdmissionDenied, InputGuardrailBlockedError, PoolSaturationError
 from .internal_tools import MCP_CURRENT_PROJECT_SUFFIXES, MCP_PROJECT_SCOPED_SUFFIXES
 from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
@@ -439,6 +439,9 @@ class McpService:
                 result = {"error": f"Version matching failure for {request.params.name}"}
         except _RunTokenRefusal as e:
             result = {"error": str(e)}
+        except AdmissionDenied as e:
+            # a governed agent run refused (an API token out of its scope, an unscoped token, #7336): readable
+            result = {"error": f"{e.reason_code}: {e.message}"}
         except InputGuardrailBlockedError as e:
             result = e.body()
         except PoolSaturationError as e:
