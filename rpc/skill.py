@@ -57,7 +57,7 @@ class RPC:
             versions = ensure_base_version([
                 unpack_embedded_skill_frontmatter(version or {}) for version in model_data.get('versions') or []
             ])
-            staged_files = stage_import_files(project_id, versions, model_data.get('owner_id'))
+            staged_files = stage_import_files(project_id, versions, model_data.get('owner_id'), author_id)
             with db.get_session(project_id) as session:
                 imported = import_skill(
                     project_id=project_id,

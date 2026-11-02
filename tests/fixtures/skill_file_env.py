@@ -346,6 +346,26 @@ class FakeMinioClient:
         ]
 
 
+class Access:
+    """Who may read what, as the copy check asks it: by default every user holds the skill read permission in every
+    project and no folder is restricted. ``non_members`` holds ``(user, project)`` pairs without the permission
+    (outsiders, removed members); ``restricted`` holds ``(user, project, skill)`` folder exclusions."""
+    READ = 'models.applications.skills.details'
+
+    def __init__(self):
+        self.public_project_id = 1
+        self.non_members = set()
+        self.restricted = set()
+        self.permission_lookups = []
+
+    def get_user_permissions(self, user_id, mode=None, project_id=None):
+        self.permission_lookups.append((user_id, mode, project_id))
+        return [] if (user_id, project_id) in self.non_members else [self.READ]
+
+    def resolve_entity_access(self, project_id, entity_type, entity_id, user_id=None):
+        return 'no_access' if (user_id, project_id, entity_id) in self.restricted else 'full'
+
+
 class PublishStatus:
     draft = 'draft'
     published = 'published'
@@ -403,6 +423,7 @@ def install(monkeypatch, limits: dict):
     for name in [name for name in sys.modules if name == 'plugins' or name.startswith(f'{PKG}')]:
         monkeypatch.delitem(sys.modules, name)
     storage = Storage()
+    access = Access()
     FakeMinioClient.storage = storage
     FakeSession.locks = {}
     sessions = {}
@@ -449,7 +470,8 @@ def install(monkeypatch, limits: dict):
     tools = types.ModuleType('tools')
     tools.serialize = lambda model: model.model_dump(mode='json')
     tools.db = types.SimpleNamespace(get_session=get_session, with_project_schema_session=get_session)
-    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': 1})
+    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': 1}, get_user_permissions=access.get_user_permissions)
+    tools.config = types.SimpleNamespace(DEFAULT_MODE='default')
     tools.this = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={'skills': limits}))
     tools.rpc_tools = mock.MagicMock()
     tools.context = mock.MagicMock()
@@ -475,8 +497,10 @@ def install(monkeypatch, limits: dict):
     store = load(monkeypatch, 'utils/skill_file_store.py', f'{PKG}.utils.skill_file_store')
     skill_utils = load(monkeypatch, 'utils/skill_utils.py', f'{PKG}.utils.skill_utils')
     skill_files = load(monkeypatch, 'utils/skill_files.py', f'{PKG}.utils.skill_files')
+    monkeypatch.setattr(skill_files, 'resolve_entity_access', access.resolve_entity_access)
+    monkeypatch.setattr(skill_files, 'get_public_project_id', lambda: access.public_project_id)
     skill_export = load(monkeypatch, 'utils/skill_export_import.py', f'{PKG}.utils.skill_export_import')
     return types.SimpleNamespace(
         store=store, utils=skill_utils, files=skill_files, export=skill_export, tools=tools,
-        storage=storage, session_of=session_of,
+        storage=storage, session_of=session_of, access=access,
     )

@@ -13,8 +13,9 @@ from datetime import datetime, timedelta, timezone
 from pylon.core.tools import log
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from tools import db, serialize
+from tools import auth, config as c, db, serialize
 
+from .folder_access import resolve_entity_access
 from .skill_file_store import (
     content_exists, delete_contents, get_content, list_contents, project_client, put_content, put_contents,
 )
@@ -31,6 +32,7 @@ from .skill_utils import (
     hold_skill_file_deletes,
     release_unreferenced_contents,
 )
+from .utils import get_public_project_id
 from ..models.skill import SkillVersion, SkillVersionFile
 from ..models.pd.skill_file import SkillFileModel, describe_manifest
 
@@ -38,6 +40,7 @@ from ..models.pd.skill_file import SkillFileModel, describe_manifest
 MAX_PATH_LENGTH = 1024
 MAX_PATH_DEPTH = 16
 INSTRUCTIONS_FILE_NAME = 'skill.md'
+SKILL_READ_PERMISSION = 'models.applications.skills.details'
 SWEEP_MIN_AGE = timedelta(hours=1)
 
 
@@ -404,11 +407,44 @@ def _decode_payload_file(payload_file: dict) -> dict:
     return build_file_entry(payload_file.get('path'), data)
 
 
-def _find_source_files(source_project_id, source_version_id, payload_files: list) -> list:
-    """The source version's rows matching each listed ``(path, sha256)``; a pair the source lacks is refused."""
+def _not_a_source_file(payload_file: dict, source_project_id, source_version_id) -> SkillFileError:
+    return SkillFileError(
+        f"'{payload_file.get('path')}' is not a file of skill version {source_version_id} in project {source_project_id}"
+    )
+
+
+def _actor_holds_skill_read(actor_id, source_project_id) -> bool:
+    if actor_id is None:
+        return False
+    try:
+        permissions = auth.get_user_permissions(actor_id, mode=c.DEFAULT_MODE, project_id=source_project_id)
+    except Exception:  # pylint: disable=W0703
+        log.exception('skill files: permissions of user %s in project %s unreadable', actor_id, source_project_id)
+        return False
+    return SKILL_READ_PERMISSION in (permissions or ())
+
+
+def _actor_may_read_source_version(source_session, actor_id, source_project_id, source_version_id) -> bool:
+    """Whether the acting user could read the source version's files through the file endpoint: the skill read
+    permission in the source project and folder access to its skill. The public catalog is readable by everyone."""
+    if source_project_id == get_public_project_id():
+        return True
+    if not _actor_holds_skill_read(actor_id, source_project_id):
+        return False
+    version = source_session.query(SkillVersion.skill_id).filter(SkillVersion.id == source_version_id).first()
+    if version is None:
+        return False
+    return resolve_entity_access(source_project_id, 'skill', version.skill_id, actor_id) != 'no_access'
+
+
+def _find_source_files(source_project_id, source_version_id, payload_files: list, actor_id=None) -> list:
+    """The source version's rows matching each listed ``(path, sha256)``, for an acting user who may read them. A
+    pair the source lacks and a source the user may not read are refused alike, so neither tells what exists."""
     if source_project_id is None or source_version_id is None:
         raise SkillFileError('the skill lists files without their content or the version they come from')
     with db.get_session(source_project_id) as source_session:
+        if not _actor_may_read_source_version(source_session, actor_id, source_project_id, source_version_id):
+            raise _not_a_source_file(payload_files[0], source_project_id, source_version_id)
         held = {
             (row['path'], row['sha256']): row
             for row in list_version_manifest(source_session, source_version_id)
@@ -417,35 +453,33 @@ def _find_source_files(source_project_id, source_version_id, payload_files: list
     for payload_file in payload_files:
         row = held.get((payload_file.get('path'), payload_file.get('sha256')))
         if row is None:
-            raise SkillFileError(
-                f"'{payload_file.get('path')}' is not a file of skill version {source_version_id} "
-                f"in project {source_project_id}"
-            )
+            raise _not_a_source_file(payload_file, source_project_id, source_version_id)
         entries.append(row)
     return entries
 
 
-def resolve_payload_files(payload_files: list, source_project_id=None, source_version_id=None) -> list:
+def resolve_payload_files(payload_files: list, source_project_id=None, source_version_id=None, actor_id=None) -> list:
     """Entries for the files a skill payload lists: decoded bytes when it carries them, checked against the caps,
-    else the source version's own rows, which copy as they are so a lowered cap never breaks an existing skill."""
+    else the source version's own rows, which copy as they are so a lowered cap never breaks an existing skill.
+    Rows of the source are given only to an acting user who may read them there."""
     carried = [payload_file for payload_file in payload_files if payload_file.get('content_base64') is not None]
     referenced = [payload_file for payload_file in payload_files if payload_file.get('content_base64') is None]
     entries = [_decode_payload_file(payload_file) for payload_file in carried]
     validate_package(entries)
     if referenced:
-        entries.extend(_find_source_files(source_project_id, source_version_id, referenced))
+        entries.extend(_find_source_files(source_project_id, source_version_id, referenced, actor_id))
     return entries
 
 
-def stage_import_files(project_id: int, versions: list, source_project_id=None) -> dict:
-    """Resolve the files each payload version lists and store their objects, before the import's transaction:
-    ``{version name: (entries, bytes stored by hash)}``."""
+def stage_import_files(project_id: int, versions: list, source_project_id=None, actor_id=None) -> dict:
+    """Resolve the files each payload version lists, as ``actor_id`` may read them, and store their objects, before
+    the import's transaction: ``{version name: (entries, bytes stored by hash)}``."""
     staged = {}
     for version in versions:
         payload_files = version.get('files') or []
         if not payload_files:
             continue
-        entries = resolve_payload_files(payload_files, source_project_id, version.get('id'))
+        entries = resolve_payload_files(payload_files, source_project_id, version.get('id'), actor_id)
         staged[version.get('name', 'base')] = (entries, stage_version_files(project_id, entries, source_project_id))
     return staged
 

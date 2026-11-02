@@ -22,6 +22,7 @@ from fixtures.skill_file_env import (  # noqa: E402  pylint: disable=C0413
 PROJECT = 7
 OTHER = 9
 PUBLIC = 1
+ACTOR = 1
 SKILL = 3
 MB = 1024 * 1024
 
@@ -732,7 +733,7 @@ class TestPayloadFiles:
         payload = [{'path': entry['path'], 'sha256': entry['sha256'], 'size': 0, 'content_type': 'x'}
                    for entry in manifest]
 
-        entries = env.files.resolve_payload_files(payload, PROJECT, 10)
+        entries = env.files.resolve_payload_files(payload, PROJECT, 10, ACTOR)
 
         assert entries == manifest
 
@@ -740,7 +741,7 @@ class TestPayloadFiles:
         manifest = _seed_source(env)
         limits['max_package_files'] = 1
 
-        entries = env.files.resolve_payload_files([dict(entry) for entry in manifest], PROJECT, 10)
+        entries = env.files.resolve_payload_files([dict(entry) for entry in manifest], PROJECT, 10, ACTOR)
 
         assert [entry['path'] for entry in entries] == ['a.png', 'forms.md']
 
@@ -757,7 +758,7 @@ class TestPayloadFiles:
         foreign = _seed_source(env, project_id=OTHER, version_id=60, files=((b'secret', 'secret.md'),))
 
         with pytest.raises(env.utils.SkillFileError, match="'secret.md' is not a file of skill version 10 in project 7"):
-            env.files.resolve_payload_files([dict(foreign[0])], PROJECT, 10)
+            env.files.resolve_payload_files([dict(foreign[0])], PROJECT, 10, ACTOR)
 
     def test_listed_files_without_a_source_are_refused(self, env):
         with pytest.raises(env.utils.SkillFileError, match='without their content'):
@@ -772,7 +773,7 @@ class TestPayloadFiles:
             {'name': 'notes', 'files': [{'path': 'n.md', 'content_base64': base64.b64encode(b'n').decode()}]},
         ]
 
-        staged = env.files.stage_import_files(OTHER, versions, PROJECT)
+        staged = env.files.stage_import_files(OTHER, versions, PROJECT, ACTOR)
         added = env.files.import_version_files(target, OTHER, {'base': 41, 'v2': 42, 'notes': 43}, staged, PROJECT)
 
         assert added == 3

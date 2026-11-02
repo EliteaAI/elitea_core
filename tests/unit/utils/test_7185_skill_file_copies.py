@@ -318,6 +318,90 @@ class TestImportRpc:
         assert env.storage.keys(CONSUMER) == [_sha(b'n')]
 
 
+OWNER = 1
+OUTSIDER = 66
+
+
+class TestCopyAuthorization:
+    """A payload names its source project, version and hashes itself, so the import reads the source rows only for an
+    acting user who could read them through the file endpoint; anything else is refused exactly like a pair the
+    source does not hold."""
+
+    def _fork(self, env, skill_rpc, actor, version_id=10, owner_id=SOURCE, target=CONSUMER):
+        manifest = env.files.list_version_manifest(env.session_of(owner_id), 10)
+        payload = _fork_payload(manifest, owner_id=owner_id)
+        payload['versions'][0]['id'] = version_id
+        env.storage.clients.clear()
+        return skill_rpc.RPC.applications_import_skill(None, payload, target, actor)
+
+    def _refused(self, env, result, errors):
+        assert result is None
+        assert errors == ["Skill import failed: 'assets/logo.png' is not a file of skill version 10 in project 7"]
+        assert env.session_of(CONSUMER).commits == 0 and env.storage.keys(CONSUMER) == []
+        assert SOURCE not in env.storage.clients
+
+    def test_an_actor_outside_the_source_project_gets_nothing(self, env, skill_rpc):
+        _seed(env)
+        env.access.non_members.add((OUTSIDER, SOURCE))
+
+        self._refused(env, *self._fork(env, skill_rpc, OUTSIDER))
+        assert env.access.permission_lookups == [(OUTSIDER, 'default', SOURCE)]
+
+    def test_a_member_removed_from_the_source_project_gets_nothing(self, env, skill_rpc):
+        _seed(env)
+        env.access.non_members.add((OWNER, SOURCE))
+
+        self._refused(env, *self._fork(env, skill_rpc, OWNER))
+
+    def test_an_actor_without_access_to_the_skills_folder_gets_nothing(self, env, skill_rpc):
+        _seed(env)
+        env.access.restricted.add((OWNER, SOURCE, SKILL))
+
+        self._refused(env, *self._fork(env, skill_rpc, OWNER))
+
+    def test_a_forbidden_source_answers_like_a_missing_version_or_a_hash_the_source_lacks(self, env, skill_rpc):
+        manifest = env.files.list_version_manifest(_seed(env), 10)
+        env.access.non_members.add((OUTSIDER, SOURCE))
+        forged = [{**manifest[0], 'sha256': _sha(b'guess')}]
+
+        _, forbidden = self._fork(env, skill_rpc, OUTSIDER)
+        _, missing = self._fork(env, skill_rpc, OWNER, version_id=999)
+        _, lacking = skill_rpc.RPC.applications_import_skill(None, _fork_payload(forged), CONSUMER, OWNER)
+
+        assert forbidden == lacking == [m.replace('999', '10') for m in missing]
+
+    def test_the_owner_copies(self, env, skill_rpc):
+        _seed(env)
+
+        result, errors = self._fork(env, skill_rpc, OWNER)
+
+        assert errors == [] and _paths(env.session_of(CONSUMER), 500) == ['assets/logo.png', 'references/guide.md']
+
+    def test_a_catalog_attach_copies_from_the_public_project_for_anyone(self, env, skill_rpc):
+        _seed(env, project_id=PUBLIC)
+        env.access.non_members.add((OUTSIDER, PUBLIC))
+
+        result, errors = self._fork(env, skill_rpc, OUTSIDER, owner_id=PUBLIC)
+
+        assert errors == [] and len(_paths(env.session_of(CONSUMER), 500)) == 2
+
+    def test_an_agent_publish_twin_copies_from_the_publishers_project_into_the_public_one(self, env, skill_rpc):
+        _seed(env)
+
+        result, errors = self._fork(env, skill_rpc, OWNER, target=PUBLIC)
+
+        assert errors == [] and len(_paths(env.session_of(PUBLIC), 500)) == 2
+        assert len(env.storage.keys(PUBLIC)) == 2
+
+    def test_a_skill_publish_copies_from_its_server_built_snapshot_without_an_actor_check(self, env, publish):
+        env.access.non_members.add((OWNER, SOURCE))
+
+        _, _, _, result = _published_twin(env, publish)
+
+        assert len(_paths(env.session_of(PUBLIC), result['version_id'])) == 2
+        assert env.access.permission_lookups == []
+
+
 class ExportModel:
     @classmethod
     def model_validate(cls, data):
