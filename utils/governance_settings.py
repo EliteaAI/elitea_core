@@ -124,9 +124,9 @@ DESCRIPTIONS = {
         },
         "admit_legacy_pat": {
             "label": "Admit legacy API tokens",
-            "tooltip": "When on, runs started with a personal API token pass the identity check. They still cannot act "
-                       "for a user without a mandate. Leave it off unless integrations that use tokens must keep "
-                       "running under governance.",
+            "tooltip": "Unscoped tokens only; scoped, expiring tokens are admitted by default. When on, runs started "
+                       "with an unscoped personal API token pass the identity check. They still cannot act for a "
+                       "user without a mandate. Leave it off: integrations should use a scoped, expiring token.",
         },
         "allow_runtime_domain_binding": {
             "label": "Allow runtime domain bindings",

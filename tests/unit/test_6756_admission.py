@@ -261,7 +261,7 @@ def test_verification_gets_the_session_reference_and_only_admitted_kinds(ns, env
     admit(env, ns)
     [(evidence, kinds)] = env.verify_calls
     assert evidence == {"kind": "session_user", "user_id": 42, "auth_reference": COOKIE}
-    assert kinds == frozenset({"session_user"})
+    assert kinds == frozenset({"session_user", "api_token"})   # a scoped API token needs no switch (#7336)
 
 
 FAILING_STEPS = [
@@ -359,7 +359,7 @@ def test_a_legacy_token_is_refused_by_the_verifier_unless_the_operator_admits_it
     error = denied_code(env, ns, caller_type="token", caller_id=7, caller_reference=None)
     assert error.reason_code == "IDENTITY_KIND_NOT_ADMITTED"
     [(evidence, kinds)] = env.verify_calls
-    assert evidence == {"kind": "legacy_pat", "token_id": 7} and kinds == frozenset({"session_user"})
+    assert evidence == {"kind": "legacy_pat", "token_id": 7} and kinds == frozenset({"session_user", "api_token"})
 
 
 def test_a_legacy_token_still_needs_a_mandate_even_when_admitted(ns, env):
@@ -370,7 +370,7 @@ def test_a_legacy_token_still_needs_a_mandate_even_when_admitted(ns, env):
         ns.adm.admit_execution(module, env.request(caller_type="token", caller_id=7, caller_reference=None),
                                run_id=RUN)
     assert err.value.reason_code == "MANDATE_REQUIRED"
-    assert env.verify_calls[0][1] == frozenset({"session_user", "legacy_pat"})
+    assert env.verify_calls[0][1] == frozenset({"session_user", "api_token", "legacy_pat"})
     assert contexts(env, ns) == []
 
 
