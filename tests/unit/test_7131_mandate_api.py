@@ -503,3 +503,10 @@ def test_owner_mode_is_for_the_owners_consent_only(ns, env):
     assert owner_hit(ns, env, "autonomous_mandates", "get", actor="member")[0]["rows"] == []   # only one's own
     assert owner_hit(ns, env, "autonomous_mandates", "get", actor="anonymous")[1] == 403
     assert owner_act(ns, env, mandate_id, "consent", actor="anonymous")[1] == 403
+
+
+def test_the_list_says_whether_api_tokens_may_act_with_their_owners_sign_in(ns, env):
+    assert hit(ns, env, "autonomous_mandates", "get")[0]["token_identity"] is False
+    env.sources = ["owner_delegated", "token_owner_delegated"]
+    page = hit(ns, env, "autonomous_mandates", "get")[0]
+    assert page["token_identity"] is True and page["identity_sources"] == ["owner_delegated"]   # not a mandate's

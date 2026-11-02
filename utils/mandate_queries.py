@@ -19,8 +19,9 @@ def _iso(moment):
 
 
 def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, owner_user_id=None):
-    """``{total, rows, identity_sources}``: one page of the project's mandates, newest change first, and which
-    identities the deployment lets a mandate name. ``owner_user_id``: that owner's only (the owner's own view, #7337)."""
+    """``{total, rows, identity_sources, token_identity}``: one page of the project's mandates, newest change first,
+    which identities the deployment lets a mandate name, and whether it lets scoped API tokens act with their owner's
+    sign-in (#7337). ``owner_user_id``: that owner's only (the owner's own view, #7337)."""
     from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
     sources = allowed_sources(module)
@@ -61,4 +62,7 @@ def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, 
             "consented": bool(sources and row.identity_material_ref is not None),
             "consented_at": _iso(row.identity_consented_at) if sources else None,
         })
-    return {"total": total, "rows": rows, "identity_sources": list(sources)}
+    # (#7337) whether restricted API tokens may act with their owner's sign-in here: said in the Admin UI, set nowhere
+    from .token_identity import allowed as token_identity_allowed  # pylint: disable=C0415
+    return {"total": total, "rows": rows, "identity_sources": list(sources),
+            "token_identity": token_identity_allowed(module)}
