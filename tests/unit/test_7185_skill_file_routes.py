@@ -55,14 +55,21 @@ class SentFile:
         self.headers = {}
 
 
+class FakeFiles(dict):
+    def to_dict(self):
+        return dict(self)
+
+
 class FakeRequest:
-    """Flask's request as far as an upload goes: the body is read when ``files`` or ``get_json`` is first touched,
-    and reading more than ``max_content_length`` raises 413 the way Werkzeug's limited stream does."""
+    """Flask's request as far as an upload goes. The body is read once, when ``files``, ``get_data`` or ``get_json``
+    is first touched, and kept. Over ``max_content_length``, a body with a declared length is a 413 the way
+    Werkzeug's limited stream raises it; a chunked one is cut at the limit, and its JSON then does not parse."""
 
     def __init__(self, harness):
         self.harness = harness
         self.max_content_length = None
         self.body_reads = []
+        self.read_size = None
 
     @property
     def content_length(self):
@@ -73,18 +80,28 @@ class FakeRequest:
         return self.harness.mimetype
 
     def _read_body(self):
+        if self.read_size is not None:
+            return self.read_size
         self.body_reads.append(self.max_content_length)
-        if self.max_content_length is not None and self.harness.body_size > self.max_content_length:
-            raise RequestEntityTooLarge()
+        limit = self.max_content_length
+        if limit is not None and self.harness.body_size > limit:
+            if self.harness.declared_length is not None or self.harness.mimetype == 'multipart/form-data':
+                raise RequestEntityTooLarge()
+            self.read_size = limit
+        else:
+            self.read_size = self.harness.body_size
+        return self.read_size
 
     @property
     def files(self):
         self._read_body()
-        return self.harness.files
+        return FakeFiles(self.harness.files)
+
+    def get_data(self):
+        return b'x' * self._read_body()
 
     def get_json(self, silent=False):
-        self._read_body()
-        return self.harness.json
+        return self.harness.json if self._read_body() == self.harness.body_size else None
 
 
 class Harness:
@@ -101,6 +118,16 @@ class Harness:
         self.raises = None
         self.files = {}
         self.json = None
+        self.metrics_bodies = []
+
+    def endpoint_metrics(self, func):
+        """Like the platform's: for a JSON request it reads the body, before the handler, to log it."""
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if self.request.mimetype == 'application/json':
+                self.metrics_bodies.append(self.request.get_json(silent=True))
+            return func(*args, **kwargs)
+        return wrapper
 
     def check_api(self, descriptor):
         required = set(descriptor['permissions'])
@@ -155,7 +182,7 @@ def harness(isolated_sys_modules):
     tools.api_tools = types.SimpleNamespace(
         APIModeHandler=type('APIModeHandler', (), {}),
         APIBase=type('APIBase', (), {}),
-        endpoint_metrics=lambda func: func,
+        endpoint_metrics=harness.endpoint_metrics,
         with_modes=lambda params: params,
     )
     tools.auth = types.SimpleNamespace(decorators=types.SimpleNamespace(check_api=harness.check_api))
@@ -301,18 +328,31 @@ class TestUploadSize:
         return _call(harness, 'put')
 
     LIMITS = {'multipart': MAX_BODY_BYTES, 'json': MAX_JSON_BODY_BYTES}
+    READ_LIMITS = {'multipart': MAX_BODY_BYTES, 'json': MAX_JSON_BODY_BYTES + 1}
 
     @pytest.mark.parametrize('declared', [True, False])
     @pytest.mark.parametrize('kind', ['multipart', 'json'])
-    def test_a_body_up_to_its_bound_is_read(self, harness, kind, declared):
+    def test_a_body_up_to_its_bound_is_read_once_bounded_and_reaches_the_handler(self, harness, kind, declared):
         assert self._send(harness, kind, self.LIMITS[kind], declared) == (ENTRY, 200)
-        assert harness.request.body_reads[0] == self.LIMITS[kind]
+        assert harness.request.body_reads == [self.READ_LIMITS[kind]]
 
     @pytest.mark.parametrize('declared', [True, False])
     @pytest.mark.parametrize('kind', ['multipart', 'json'])
     def test_one_byte_more_is_a_413_and_nothing_is_stored(self, harness, kind, declared):
         assert self._send(harness, kind, self.LIMITS[kind] + 1, declared) == self.TOO_LARGE
         assert harness.calls == []
+
+    @pytest.mark.parametrize('declared', [True, False])
+    def test_a_json_body_is_bounded_before_the_metrics_wrapper_reads_it(self, harness, declared):
+        assert self._send(harness, 'json', 10 * MAX_JSON_BODY_BYTES, declared) == self.TOO_LARGE
+
+        assert harness.request.body_reads in ([], [MAX_JSON_BODY_BYTES + 1])
+        assert harness.metrics_bodies == [] and harness.calls == []
+
+    def test_under_the_bound_the_metrics_wrapper_and_the_handler_share_the_one_read(self, harness):
+        assert self._send(harness, 'json', MAX_FILE_BYTES, declared=False) == (ENTRY, 200)
+
+        assert harness.metrics_bodies == [{'content': 'x'}] and harness.request.body_reads == [MAX_JSON_BODY_BYTES + 1]
 
     @pytest.mark.parametrize('declared', [True, False])
     def test_escaped_json_text_under_the_cap_is_accepted_though_its_body_is_over_cap_plus_envelope(self, harness,

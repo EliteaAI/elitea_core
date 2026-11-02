@@ -1,3 +1,4 @@
+import functools
 from io import BytesIO
 from pathlib import PurePosixPath
 
@@ -33,6 +34,7 @@ PATH_PARAMETERS = [
 UPLOAD_ENVELOPE_BYTES = 64 * 1024
 JSON_ESCAPED_BYTES_PER_BYTE = 6
 JSON_MIMETYPE = 'application/json'
+MULTIPART_MIMETYPE = 'multipart/form-data'
 
 WRITE_ROLES = {
     c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -40,24 +42,47 @@ WRITE_ROLES = {
 }
 
 
+def parse_multipart_body() -> dict:
+    """The form parts of a multipart body, which Flask parses once and keeps for the handler."""
+    return request.files.to_dict()
+
+
+def bound_upload_body(func):
+    """Read the request body once, before anything else of the request does, and only up to the per-file cap plus
+    room for its envelope (a JSON body with room for every byte escaped as ``\\uXXXX``); a larger one is a 413.
+    A body without a declared length is read one byte past the bound, so one cut at the bound is told from one that
+    fits. Whatever runs after it gets the bounded body Flask cached."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        max_file_bytes = get_max_file_bytes()
+        encoded_bytes_per_byte = JSON_ESCAPED_BYTES_PER_BYTE if request.mimetype == JSON_MIMETYPE else 1
+        max_body_bytes = encoded_bytes_per_byte * max_file_bytes + UPLOAD_ENVELOPE_BYTES
+        too_large = {
+            "error": f"the upload is too large: a skill file can be at most {describe_size(max_file_bytes)}"
+        }, 413
+        if request.content_length is not None and request.content_length > max_body_bytes:
+            return too_large
+        try:
+            if request.mimetype == MULTIPART_MIMETYPE:
+                request.max_content_length = max_body_bytes
+                parse_multipart_body()
+            else:
+                request.max_content_length = max_body_bytes + 1
+                if len(request.get_data()) > max_body_bytes:
+                    return too_large
+        except RequestEntityTooLarge:
+            return too_large
+        return func(*args, **kwargs)
+    return wrapper
+
+
 def read_uploaded_bytes():
-    """The bytes a write carries: a multipart ``file`` part, or UTF-8 text in a JSON ``content`` field. The body
-    is read only up to the per-file cap plus room for its envelope, a JSON one with room for every byte escaped as
-    ``\\uXXXX``; a larger one is a 413 before any of it is kept. The decoded content is held to the cap after parsing."""
-    max_file_bytes = get_max_file_bytes()
-    encoded_bytes_per_byte = JSON_ESCAPED_BYTES_PER_BYTE if request.mimetype == JSON_MIMETYPE else 1
-    max_body_bytes = encoded_bytes_per_byte * max_file_bytes + UPLOAD_ENVELOPE_BYTES
-    too_large = {"error": f"the upload is too large: a skill file can be at most {describe_size(max_file_bytes)}"}, 413
-    if request.content_length is not None and request.content_length > max_body_bytes:
-        return None, too_large
-    request.max_content_length = max_body_bytes
-    try:
-        uploaded = request.files.get('file')
-        if uploaded is not None:
-            return uploaded.read(), None
-        body = request.get_json(silent=True)
-    except RequestEntityTooLarge:
-        return None, too_large
+    """The bytes a write carries: a multipart ``file`` part, or UTF-8 text in a JSON ``content`` field. The body was
+    bounded by ``bound_upload_body``; the decoded content is held to the cap when it is stored."""
+    uploaded = request.files.get('file')
+    if uploaded is not None:
+        return uploaded.read(), None
+    body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return None, ({"error": "send the file as a multipart 'file' part or as JSON {\"content\": \"...\"}"}, 400)
     try:
@@ -125,6 +150,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         "permissions": ["models.applications.skills.update"],
         "recommended_roles": WRITE_ROLES,
     })
+    @bound_upload_body
     @api_tools.endpoint_metrics
     @require_folder_access('skill', 'skill_id', write=True)
     def put(self, project_id: int, skill_id: int, version_id: int, path: str, **kwargs):
