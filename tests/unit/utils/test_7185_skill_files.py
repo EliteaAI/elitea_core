@@ -666,6 +666,13 @@ class TestCrossProjectCopies:
 
         assert env.storage.keys(OTHER) == [_sha(b'n')] and set(env.storage.clients) == {OTHER}
 
+    def test_a_copy_listing_no_files_touches_no_storage(self, env):
+        target = env.session_of(OTHER)
+
+        _copy(env, target, [])
+
+        assert env.storage.clients == [] and _paths(target, 40) == []
+
     def test_bytes_the_source_holds_under_another_hash_are_refused_naming_the_path(self, env):
         manifest = _seed_source(env)
         env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms'))] = b'# Tampered'

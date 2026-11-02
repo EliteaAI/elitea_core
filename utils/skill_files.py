@@ -329,6 +329,8 @@ def stage_version_files(project_id: int, entries: list, source_project_id: int =
     """Store in the project's bucket, before any transaction adds rows naming them, the bytes the entries carry and
     those the project lacks of the rest, read and verified from ``source_project_id``; returns the bytes stored, by
     hash, for ``add_version_files`` to store again should a delete remove one meanwhile."""
+    if not entries:
+        return {}
     contents = {entry['sha256']: entry['data'] for entry in entries if 'data' in entry}
     client = project_client(project_id)
     lacking = [
@@ -342,6 +344,8 @@ def stage_version_files(project_id: int, entries: list, source_project_id: int =
 
 
 def _restore_missing_objects(project_id: int, entries: list, contents: dict, source_project_id) -> None:
+    if not entries:
+        return
     client = project_client(project_id)
     missing = [entry for entry in _unique_by_hash(entries) if not content_exists(project_id, entry['sha256'], client)]
     if not missing:
