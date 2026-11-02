@@ -21,9 +21,11 @@ from .skill_utils import (
     SkillVersionNotFoundError,
     _ensure_version_updatable,
     _skill_session,
+    claim_skill_file_deletes,
     get_max_file_bytes,
     get_max_package_bytes,
     get_max_package_files,
+    hold_skill_file_deletes,
     release_unreferenced_contents,
 )
 from ..models.skill import SkillVersion, SkillVersionFile
@@ -219,6 +221,7 @@ def write_version_file(project_id: int, skill_id: int, version_id: int, path: st
             max_package_bytes=get_max_package_bytes(),
             max_package_files=get_max_package_files(),
         )
+        hold_skill_file_deletes(s, project_id)
         put_content(project_id, entry['sha256'], data)
         replaced_hash = replaced.sha256 if replaced else None
         version_file = replaced or SkillVersionFile(skill_version_id=version.id)
@@ -264,6 +267,7 @@ def delete_version_file(project_id: int, skill_id: int, version_id: int, path: s
 def add_version_files(session, project_id: int, version_id: int, entries: list, source_project_id: int = None) -> None:
     """Give a version of ``project_id`` the entries as file rows, storing first the bytes the entries carry and
     copying the rest from ``source_project_id``'s bucket when that is another project."""
+    hold_skill_file_deletes(session, project_id)
     put_contents(project_id, {entry['sha256']: entry['data'] for entry in entries if 'data' in entry})
     referenced = [entry['sha256'] for entry in entries if 'data' not in entry]
     if referenced and source_project_id is not None:
@@ -345,16 +349,18 @@ def import_version_files(session, project_id: int, version_ids: dict, versions: 
 
 def sweep_skill_files(project_id: int, dry_run: bool = False, now: datetime = None) -> dict:
     """Delete the objects of the project's bucket that no file row references and that are older than an hour,
-    so an upload whose row is still being committed survives."""
+    so an upload whose row is still being committed survives; refused while a transaction is adding file rows."""
     cutoff = (now or datetime.now(timezone.utc)) - SWEEP_MIN_AGE
     with db.get_session(project_id) as s:
+        if not claim_skill_file_deletes(s, project_id):
+            raise SkillFileError(f'skill files of project {project_id} are being written; run the sweep again')
         referenced = {sha256 for (sha256,) in s.query(SkillVersionFile.sha256).distinct().all()}
-    unreferenced = [obj for obj in list_contents(project_id) if obj['name'] not in referenced]
-    stale = [
-        obj['name'] for obj in unreferenced
-        if not obj.get('modified') or datetime.fromisoformat(obj['modified']).astimezone(timezone.utc) < cutoff
-    ]
-    if stale and not dry_run:
-        delete_contents(project_id, stale)
+        unreferenced = [obj for obj in list_contents(project_id) if obj['name'] not in referenced]
+        stale = [
+            obj['name'] for obj in unreferenced
+            if not obj.get('modified') or datetime.fromisoformat(obj['modified']).astimezone(timezone.utc) < cutoff
+        ]
+        if stale and not dry_run:
+            delete_contents(project_id, stale)
     return {'project_id': project_id, 'deleted': stale, 'kept_recent': len(unreferenced) - len(stale),
             'dry_run': dry_run}

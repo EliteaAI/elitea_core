@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import List, Optional, Tuple, Literal
 
-from sqlalchemy import func, or_, asc, desc
+from sqlalchemy import func, or_, asc, desc, text
 from sqlalchemy.orm import selectinload
 
 from pylon.core.tools import log
@@ -45,6 +45,8 @@ DEFAULT_MAX_INSTRUCTIONS_LENGTH = 50000
 DEFAULT_MAX_PACKAGE_SIZE_MB = 30
 DEFAULT_MAX_FILE_SIZE_MB = 10
 DEFAULT_MAX_PACKAGE_FILES = 500
+SKILL_FILE_WRITE_LOCK = "SELECT pg_advisory_xact_lock_shared(hashtext('skill-files'), :project_id)"
+SKILL_FILE_DELETE_LOCK = "SELECT pg_try_advisory_xact_lock(hashtext('skill-files'), :project_id)"
 
 
 def _skill_limit(key: str, default: int) -> int:
@@ -1195,6 +1197,7 @@ def create_skill_version(
             ).first()
             if not source_version:
                 raise SkillVersionNotFoundError(skill_id, version_id=version_data.files_from_version_id)
+            hold_skill_file_deletes(s, project_id)
             copy_version_files(s, source_version.id, version.id)
 
         return serialize(SkillVersionDetailModel.model_validate(version))
@@ -1327,25 +1330,41 @@ def list_version_file_hashes(session, version_ids) -> set:
     }
 
 
+def hold_skill_file_deletes(session, project_id: int) -> None:
+    """Keep the project's skill file deletes off until this transaction ends, so an object it reuses or a row it
+    adds is never deleted from under it."""
+    session.execute(text(SKILL_FILE_WRITE_LOCK), {'project_id': project_id})
+
+
+def claim_skill_file_deletes(session, project_id: int) -> bool:
+    """Whether no transaction is adding skill file rows to the project; if none is, new ones wait until this
+    transaction ends."""
+    return bool(session.execute(text(SKILL_FILE_DELETE_LOCK), {'project_id': project_id}).scalar())
+
+
 def release_unreferenced_contents(project_id: int, hashes) -> list:
-    """Delete from the project's bucket those of ``hashes`` that no committed file row of the project lists."""
+    """Delete from the project's bucket those of ``hashes`` that no committed file row of the project lists,
+    leaving them to the sweep while another transaction is adding file rows."""
     candidates = set(hashes or ())
     if not candidates:
         return []
     with db.get_session(project_id) as s:
+        if not claim_skill_file_deletes(s, project_id):
+            log.info('skill files: %s object(s) of project %s left to the sweep', len(candidates), project_id)
+            return []
         referenced = {
             sha256 for (sha256,) in s.query(SkillVersionFile.sha256).filter(
                 SkillVersionFile.sha256.in_(sorted(candidates)),
             ).all()
         }
-    released = sorted(candidates - referenced)
-    if not released:
-        return []
-    try:
-        delete_contents(project_id, released)
-    except Exception:  # pylint: disable=W0703
-        log.exception('skill files: could not release %s object(s) of project %s', len(released), project_id)
-        return []
+        released = sorted(candidates - referenced)
+        if not released:
+            return []
+        try:
+            delete_contents(project_id, released)
+        except Exception:  # pylint: disable=W0703
+            log.exception('skill files: could not release %s object(s) of project %s', len(released), project_id)
+            return []
     return released
 
 

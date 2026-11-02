@@ -146,11 +146,26 @@ FakeEntitySkillMapping = _model(
 
 
 class FakeSession:
+    """One project schema's rows; the advisory locks it holds live in ``locks``, shared by every session of a
+    test and dropped when its transaction ends."""
+    locks = {}
+
     def __init__(self, project_id):
         self.project_id = project_id
         self.rows = {FakeSkill: [], FakeSkillVersion: [], FakeSkillVersionFile: [], FakeEntitySkillMapping: []}
         self.next_id = 100
         self.commits = 0
+
+    def execute(self, statement, params):
+        holders = self.locks.setdefault(params['project_id'], set())
+        granted = 'pg_try_advisory_xact_lock' not in statement or holders <= {self}
+        if granted:
+            holders.add(self)
+        return types.SimpleNamespace(scalar=lambda: granted)
+
+    def end_transaction(self):
+        for holders in self.locks.values():
+            holders.discard(self)
 
     def query(self, target):
         model = target if isinstance(target, type) else target.owner
@@ -178,12 +193,13 @@ class FakeSession:
 
     def commit(self):
         self.commits += 1
+        self.end_transaction()
 
     def rollback(self):
-        pass
+        self.end_transaction()
 
     def close(self):
-        pass
+        self.end_transaction()
 
 
 def _init_version(self, id=None, skill_id=3, name='base', status='draft', instructions='Body.',
@@ -360,6 +376,7 @@ def install(monkeypatch, limits: dict):
         monkeypatch.delitem(sys.modules, name)
     storage = Storage()
     FakeMinioClient.storage = storage
+    FakeSession.locks = {}
     sessions = {}
 
     def session_of(project_id):
@@ -367,7 +384,11 @@ def install(monkeypatch, limits: dict):
 
     @contextlib.contextmanager
     def get_session(project_id):
-        yield session_of(project_id)
+        session = session_of(project_id)
+        try:
+            yield session
+        finally:
+            session.end_transaction()
 
     for name in (
         'pylon', 'pylon.core', 'pylon.core.tools',
@@ -384,6 +405,7 @@ def install(monkeypatch, limits: dict):
 
     sqlalchemy = types.ModuleType('sqlalchemy')
     sqlalchemy.func = types.SimpleNamespace(lower=Lower)
+    sqlalchemy.text = lambda statement: statement
     for name in ('or_', 'asc', 'desc', 'and_', 'distinct'):
         setattr(sqlalchemy, name, lambda *a, **k: None)
     sqlalchemy_orm = types.ModuleType('sqlalchemy.orm')

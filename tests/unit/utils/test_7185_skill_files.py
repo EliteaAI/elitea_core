@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from fixtures.skill_file_env import (  # noqa: E402  pylint: disable=C0413
-    FakeEntitySkillMapping, FakeSkill, FakeSkillVersion, FakeSkillVersionFile, install,
+    FakeEntitySkillMapping, FakeSession, FakeSkill, FakeSkillVersion, FakeSkillVersionFile, install,
 )
 
 PROJECT = 7
@@ -617,3 +617,52 @@ class TestSweep:
 
     def test_a_project_without_a_bucket_sweeps_nothing(self, env):
         assert env.files.sweep_skill_files(OTHER, now=self.NOW)['deleted'] == []
+
+
+class TestDeletesWaitForOpenWrites:
+    """A transaction that reuses an object or adds rows naming it keeps the project's deletes off until it ends, so
+    neither the sweep nor a release deletes the object between the reuse and the row becoming visible."""
+
+    def _open_transaction(self):
+        """Another session of the project: what it adds stays invisible to ``session_of`` until the test moves it."""
+        other = FakeSession(PROJECT)
+        other.add(FakeSkill())
+        other.add(FakeSkillVersion(id=20))
+        return other
+
+    def test_the_sweep_keeps_an_old_unreferenced_object_an_open_write_reused(self, env, session):
+        env.store.put_content(PROJECT, _sha(b'reused'), b'reused')
+        writer = self._open_transaction()
+        _write(env, writer, 'forms.md', b'reused', version_id=20)
+
+        with pytest.raises(env.utils.SkillFileError, match='being written'):
+            env.files.sweep_skill_files(PROJECT, now=TestSweep.NOW)
+        writer.commit()
+        session.rows[FakeSkillVersionFile].extend(writer.rows[FakeSkillVersionFile])
+
+        assert env.files.sweep_skill_files(PROJECT, now=TestSweep.NOW)['deleted'] == []
+        assert env.storage.keys(PROJECT) == [_sha(b'reused')]
+
+    def test_a_release_leaves_an_object_an_open_import_reuses_to_the_sweep(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'shared')
+        session.commit()
+        importer = self._open_transaction()
+        env.files.add_version_files(importer, PROJECT, 20, [env.files.build_file_entry('forms.md', b'shared')])
+
+        env.files.delete_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+
+        assert _paths(session, 10) == [] and env.storage.keys(PROJECT) == [_sha(b'shared')]
+
+    def test_a_release_leaves_an_object_an_open_save_as_version_copies_to_the_sweep(self, env, session):
+        env.store.put_content(PROJECT, _sha(b'x'), b'x')
+        saver = self._open_transaction()
+        saver.add(FakeSkillVersionFile(20, 'forms.md', 1, _sha(b'x'), 'text/markdown', True))
+        version_data = types.SimpleNamespace(
+            name='v2', instructions='Body.', author_id=1, tags=None, meta=None, run_settings=None,
+            files_from_version_id=20,
+        )
+        env.utils.create_skill_version(PROJECT, SKILL, version_data, session=saver, instructions_already_saved=True)
+
+        assert env.utils.release_unreferenced_contents(PROJECT, {_sha(b'x')}) == []
+        assert env.storage.keys(PROJECT) == [_sha(b'x')]
