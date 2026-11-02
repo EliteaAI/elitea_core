@@ -744,7 +744,8 @@ class Module(module.ModuleModel):
         request. Without it (an auth plugin that predates #7336) tokens pass the hook as before; their runs are still
         held to their scope by admission."""
         from .utils import token_scope  # pylint: disable=C0415
-        self._token_scope_checker = lambda token_id: token_scope.check(self, token_id)  # pylint: disable=W0201
+        self._token_scope_checker = lambda token_id, request_parts=None: token_scope.check(  # pylint: disable=W0201
+            self, token_id, request_parts)
         try:
             auth.register_token_scope_checker(self._token_scope_checker)
         except Exception as exc:  # pylint: disable=W0703

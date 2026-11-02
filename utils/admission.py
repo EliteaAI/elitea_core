@@ -164,6 +164,9 @@ MESSAGES = {
                            "to it, or sign in.",
     "TOKEN_SCOPE_OPERATION": "This API token is not scoped to run agents or tools; the run was not started. Use a token "
                              "with the run operation, or sign in.",
+    "API_TOKEN_RUN_KEY_UNAVAILABLE": "Runs started with a scoped API token need the platform's run token key, which is "
+                                     "not configured here; the run was not started. Ask an administrator, or sign "
+                                     "in.",
     "IDENTITY_REVOKED": "This session or token was revoked; the run was not started.",
     "IDENTITY_EXPIRED": "Sign in again to run governed agents.",
     "IDENTITY_SIGNATURE_INVALID": "The user identity could not be verified; the run was not started.",
@@ -1382,6 +1385,9 @@ def _admit(  # pylint: disable=R0914
             raise _denied("TOKEN_SCOPE_PROJECT")
         if "run" not in evidence["operations"]:
             raise _denied("TOKEN_SCOPE_OPERATION")
+        if internal_obo.signing_key() is None:
+            # without the run token the run would carry a personal token of the owner (C9-SEC-76): refused
+            raise _denied("API_TOKEN_RUN_KEY_UNAVAILABLE")
         # from here on the run is its owner's interactive run, as a session's is (PLAN §21.1): the steps below that
         # ask for the person read the token's owner. The audit keeps naming the token (``caller``)
         caller = {"kind": "api_token", "ref": _caller_ref(request), "user_id": principal["user_id"]}

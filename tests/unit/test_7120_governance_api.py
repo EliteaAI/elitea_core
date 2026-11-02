@@ -166,6 +166,9 @@ def test_get_returns_the_texts_the_page_shows(ns, env, module):
         "are not evaluated in this mode.")
     assert texts["modes"]["off"]["tooltip"].startswith("Agents run exactly as they do without governance")
     assert texts["fields"]["policy_revision"]["tooltip"].endswith("Required for audit-only and enforce.")
+    # #7336: the switch is about unscoped tokens; this server text is what the Admin UI shows
+    assert texts["fields"]["admit_legacy_pat"]["tooltip"].startswith(
+        "Unscoped tokens only; scoped, expiring tokens are admitted by default.")
     assert texts["fields"]["change_note"]["placeholder"] == "Why are you changing this? (recorded in the history)"
     assert "ELITEA_CREDENTIAL_GOVERNANCE_MAX_MODE" in texts["locks"]["max_mode"]
     assert texts["preflight"]["unavailable"].startswith("Governance is on but a required service is unavailable.")

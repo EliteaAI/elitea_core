@@ -312,7 +312,11 @@ def test_every_route_of_the_table_needs_its_operation_and_nothing_less(ns):
 
 @pytest.mark.parametrize("endpoint, method, view_args, path, operation", [
     ("api.v2.elitea_core.applications", "POST", {"project_id": 1}, "", "build"),   # unclassified write: build
-    ("api.v2.configurations.configurations", "PUT", {"project_id": 1}, "", "build"),
+    ("api.v2.configurations.configurations", "PUT", {"project_id": 1}, "", "admin"),   # a credential write (C9-SEC-78)
+    ("api.v2.artifacts.s3_credentials", "POST", {"project_id": 1}, "", "admin"),
+    ("api.v2.secrets.secret", "GET", {"project_id": 1}, "", "admin"),             # returns a value (C9-SEC-77)
+    ("api.v2.elitea_core.pipeline_trigger", "GET", {"project_id": 1}, "", "admin"),
+    ("api.v2.artifacts.artifacts", "POST", {"project_id": 1}, "", "build"),
     ("api.v2.elitea_core.schedules", "POST", {"project_id": 1}, "/api/v2/elitea_core/schedules/prompt_lib/1/4/run", "run"),
     ("api.v2.elitea_core.schedules", "POST", {"project_id": 1}, "/api/v2/elitea_core/schedules/prompt_lib/1/4/pause", "build"),
     ("api.v2.elitea_core.applications", "GET", {"project_id": 1}, "", "read"),
@@ -340,8 +344,16 @@ def test_how_a_request_is_classified(ns, endpoint, method, view_args, path, oper
     ("elitea_core.client_streamable_http", "POST", 2, SCOPE, "TOKEN_SCOPE_PROJECT"),
     ("elitea_core.client_parametrized_streamable_http", "POST", 1, dict(SCOPE, operations=["build"]),
      "TOKEN_SCOPE_OPERATION"),
-    ("api.v2.projects.project", "GET", None, SCOPE, "TOKEN_SCOPE_OPERATION"),       # no project: admin only
-    ("api.v2.projects.project", "GET", None, dict(SCOPE, operations=["admin"]), None),
+    ("api.v2.projects.project", "GET", None, SCOPE, None),                          # a read with no project (D2)
+    (None, "GET", None, SCOPE, None),                                               # e.g. the caller's own user
+    ("api.v2.projects.project", "POST", None, SCOPE, "TOKEN_SCOPE_OPERATION"),      # a write with no project: admin
+    ("api.v2.projects.project", "POST", None, dict(SCOPE, operations=["admin"]), None),
+    ("api.v2.admin.users", "GET", None, SCOPE, "TOKEN_SCOPE_OPERATION"),            # admin routes stay admin
+    ("api.v2.elitea_core.governance_settings", "GET", None, SCOPE, "TOKEN_SCOPE_OPERATION"),
+    ("sio.connect", "POST", None, SCOPE, "TOKEN_SCOPE_OPERATION"),                  # a socket: admin only (C9-SEC-75)
+    ("sio.connect", "POST", None, dict(SCOPE, operations=["run", "admin"]), None),
+    ("sio.project", "GET", 1, SCOPE, None),                                         # ... and only in its projects
+    ("sio.project", "GET", 5, dict(SCOPE, operations=["run", "admin"]), "TOKEN_SCOPE_PROJECT"),
     ("api.v2.elitea_core.applications", "POST", None, dict(SCOPE, operations=["build"]), "TOKEN_SCOPE_OPERATION"),
     ("api.v2.auth.token", "GET", None, dict(SCOPE, operations=["run", "build", "admin"]), "TOKEN_SCOPE_OPERATION"),
     ("api.v2.auth.token", "POST", None, dict(SCOPE, operations=["run", "build", "admin"]), "TOKEN_SCOPE_OPERATION"),
@@ -353,6 +365,36 @@ def test_how_a_request_is_classified(ns, endpoint, method, view_args, path, oper
 ])
 def test_what_a_token_may_do(ns, endpoint, method, project, scope, code):
     assert ns.token_scope.decide(scope, endpoint, method, {"project_id": project}, "", project) == code
+
+
+# Secrets and long-lived credentials (C9-SEC-77, C9-SEC-78): one by one, every method is admin
+SECRET_ROUTES = ["api.v2.secrets.secret", "api.v2.secrets.secrets", "api.v2.secrets.private_secret",
+                 "api.v2.secrets.hide", "api.v2.secrets.credential_material", "api.v2.artifacts.s3_credentials",
+                 "api.v2.elitea_core.pipeline_trigger"]
+CREDENTIAL_WRITES = ["api.v2.configurations.configurations", "api.v2.configurations.configuration",
+                     "api.v2.configurations.models"]
+
+
+@pytest.mark.parametrize("endpoint", SECRET_ROUTES)
+@pytest.mark.parametrize("method", ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
+def test_a_route_that_returns_or_mints_a_secret_needs_admin(ns, endpoint, method):
+    assert ns.token_scope.operation_of(endpoint, method, {"project_id": 1}) == "admin"
+    for operations in (["run"], ["build"], ["run", "build"]):
+        scope = {"projects": [1], "operations": operations, "user_id": OWNER}
+        assert ns.token_scope.decide(scope, endpoint, method, {"project_id": 1}, "", 1) == "TOKEN_SCOPE_OPERATION"
+        assert ns.token_scope.decide(scope, endpoint, method, {}, "", None) == "TOKEN_SCOPE_OPERATION"
+    admin = {"projects": [1], "operations": ["admin"], "user_id": OWNER}
+    assert ns.token_scope.decide(admin, endpoint, method, {"project_id": 1}, "", 1) is None
+
+
+@pytest.mark.parametrize("endpoint", CREDENTIAL_WRITES)
+def test_a_configuration_write_needs_admin_and_its_read_stays_a_read(ns, endpoint):
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        assert ns.token_scope.operation_of(endpoint, method, {"project_id": 1}) == "admin"
+        assert ns.token_scope.decide(dict(SCOPE, operations=["build"]), endpoint, method, {"project_id": 1}, "", 1) \
+            == "TOKEN_SCOPE_OPERATION"
+    assert ns.token_scope.operation_of(endpoint, "GET", {"project_id": 1}) == "read"
+    assert ns.token_scope.decide(SCOPE, endpoint, "GET", {"project_id": 1}, "", 1) is None
 
 
 class Holder:
@@ -463,3 +505,98 @@ def test_the_run_identity_means_the_owners_token_is_never_looked_up():
                  "run_identity_applies": lambda sid, mandate=False: True}
     fn = _function("utils/predict_utils.py", "get_predict_token_and_session", namespace)
     assert fn(1, OWNER, None, run_identity=True) == (None, None) and looked_up == []
+
+
+# --- fix round: no run token key (C9-SEC-76), sockets (C9-SEC-75), the legacy token pickers -----------------------
+
+def test_without_the_run_token_key_a_scoped_token_run_is_refused_readably(ns, env):
+    env.seed_agent()
+    vars(ns.tools.config).pop("SECRETS_MASTER_KEY")
+    assert ns.internal_obo.signing_key() is None
+    call = call_kwargs(with_tokens({"application": {"version_details": {"tools": []}}}), project_auth_token=PAT)
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_dispatch(env.module(), "indexer_agent", call, token_request(env))
+    assert err.value.reason_code == "API_TOKEN_RUN_KEY_UNAVAILABLE"
+    assert err.value.message == ns.adm.MESSAGES["API_TOKEN_RUN_KEY_UNAVAILABLE"]
+    assert contexts(env, ns) == [] and env.recorded == []
+    [deny] = env.denied
+    assert (deny["reason_code"], deny["caller_ref"]) == ("API_TOKEN_RUN_KEY_UNAVAILABLE", f"token:{TOKEN}")
+    # a session run without the key is admitted as before (it keeps what the payload builders put on it)
+    env.denied.clear()
+    env.verify_result = {"ok": True, "principal": admission_env.principal()}
+    assert ns.adm.admit_execution(env.module(), env.request(), run_id=RUN)
+
+
+def test_without_the_run_token_key_audit_only_records_the_refusal(ns, env):
+    env.seed_agent()
+    vars(ns.tools.config).pop("SECRETS_MASTER_KEY")
+    ns.adm.admit_dispatch(env.module(audit=True), "indexer_agent", call_kwargs({}), token_request(env))
+    assert [event["reason_code"] for event in env.denied if event.get("would_deny")] == ["API_TOKEN_RUN_KEY_UNAVAILABLE"]
+
+
+def test_a_run_started_from_a_tokens_socket_is_held_to_its_scope(ns, env):
+    """A run-starting event (chat_predict and the others) builds its request from the socket's holder: a token socket
+    is a token caller, refused out of its projects at admission, admitted in them."""
+    env.seed_agent()
+    env.seed_agent(project_id=2)
+    env.sio_users["sid-1"] = types.SimpleNamespace(type="token", id=TOKEN, reference="-")
+    module = env.module()
+
+    def request(project_id):
+        return ns.pd_admission.admission_request_from(
+            module, sid="sid-1", project_id=project_id, binding_project_id=project_id,
+            version_row=types.SimpleNamespace(id=70, application_id=7), run_kind="interactive", entry_point="chat_sio")
+
+    assert (request(1).caller_type, request(1).caller_id) == ("token", TOKEN)
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_execution(module, request(2), run_id=RUN)
+    assert err.value.reason_code == "TOKEN_SCOPE_PROJECT"
+    view = ns.adm.admit_execution(module, request(1), run_id="run-3")
+    assert view.caller_kind == "api_token" and view.subject_user_id == OWNER
+
+
+@pytest.mark.parametrize("parts, scope, code", [
+    (("sio.connect", "POST", {}, "", {}, {}), SCOPE, "TOKEN_SCOPE_OPERATION"),
+    (("sio.connect", "POST", {}, "", {}, {}), dict(SCOPE, operations=["run", "admin"]), None),
+    (("sio.project", "GET", {"project_id": 1}, "", {}, {}), SCOPE, None),
+    (("sio.project", "GET", {"project_id": 5}, "", {}, {}), SCOPE, "TOKEN_SCOPE_PROJECT"),
+])
+def test_the_checker_answers_a_sockets_synthetic_requests(ns, env, parts, scope, code):
+    env.token_scopes[TOKEN] = scope
+    refusal = ns.token_scope.check(env.module(), TOKEN, parts)
+    assert (refusal or {}).get("code") == code
+
+
+def test_off_the_checker_answers_a_socket_with_nothing_read(ns, env):
+    env.token_scope_raises = AssertionError("read under off")
+    assert ns.token_scope.check(env.module(governed=False), TOKEN, ("sio.connect", "POST", {}, "", {}, {})) is None
+    assert env.token_scope_calls == []
+
+
+@pytest.fixture
+def pickers():
+    """``get_user_token`` and ``resolve_user_token_state`` with a token list of user 42: a scoped token first."""
+    import datetime as dt   # pylint: disable=C0415
+    future = dt.datetime.now() + dt.timedelta(days=5)
+    rows = [{"id": 21, "expires": future, "scope_projects": [1], "scope_operations": ["run"]},
+            {"id": 22, "expires": future, "scope_projects": None, "scope_operations": None},
+            {"id": 23, "expires": None}]
+    state = {"rows": rows}
+    auth = types.SimpleNamespace(list_tokens=lambda user_id: list(state["rows"]),
+                                 encode_token=lambda token_id: f"encoded-{token_id}",
+                                 ensure_system_token=lambda user_id: "system")
+    namespace = {"Optional": __import__("typing").Optional, "datetime": dt.datetime, "auth": auth,
+                 "log": types.SimpleNamespace(warning=lambda *a, **k: None)}
+    get_user_token = _function("utils/predict_utils.py", "get_user_token", dict(namespace))
+    resolve = _function("utils/internal_tools.py", "resolve_user_token_state", dict(namespace))
+    return get_user_token, resolve, state
+
+
+def test_the_legacy_token_pickers_never_pick_a_scoped_token(pickers):
+    get_user_token, resolve, state = pickers
+    assert get_user_token(OWNER) == "encoded-22" and resolve(OWNER) == ("VALID", "encoded-22")
+    state["rows"] = state["rows"][:1]   # only a scoped token: the system token, as with no PAT
+    assert get_user_token(OWNER) == "system" and resolve(OWNER) == ("VALID", "system")
+    state["rows"] = [{"id": 30, "expires": None}]   # tokens from before #7336 have no scope keys: unchanged
+    assert get_user_token(OWNER) == "encoded-30" and resolve(OWNER) == ("VALID", "encoded-30")
+

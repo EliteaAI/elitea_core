@@ -551,6 +551,8 @@ def resolve_user_token_state(user_id: int) -> tuple[str, str | None]:
         return 'MISSING', None
     # list_tokens hides the platform-owned system token, so a real PAT still wins.
     for token in auth.list_tokens(user_id):
+        if token.get('scope_projects') is not None or token.get('scope_operations') is not None:
+            continue   # a scoped API token (#7336) is its holder's, never put in a toolkit's settings
         expires = token.get('expires')
         if not expires or expires > datetime.now():
             return 'VALID', auth.encode_token(token['id'])

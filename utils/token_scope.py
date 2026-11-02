@@ -2,14 +2,16 @@
 
 A scoped token (auth_core ``scope_projects``, ``scope_operations``, an expiry) names the projects it may act in and its
 operations there: ``run`` (start an agent, a toolkit tool, a model call, a chat turn; the MCP server), ``build``
-(create, change or delete platform entities) and ``admin`` (administration, governance, members and roles, and any
-route that names no project). Under the governed profile the auth plugin asks ``check`` for every request an API token
-makes, after the token's own admission:
+(create, change or delete platform entities) and ``admin`` (administration, governance, members and roles, secrets and
+long-lived credentials, and any write that names no project). Under the governed profile the auth plugin asks ``check``
+for every request an API token makes, after the token's own admission, and for its sockets (``sio.connect``: a write
+that names no project; ``sio.project``: a read of the project a socket acts in):
 
-* GET, HEAD and OPTIONS are allowed in the token's projects;
-* every other request needs its route's operation (``ROUTE_OPERATIONS``; an unknown write is ``build``, never allowed by
-  default) in the token's projects;
-* a route that names no project needs ``admin``;
+* GET, HEAD and OPTIONS are allowed in the token's projects, and on routes that name no project (the caller's own
+  identity, project lists), but for the ``admin`` routes: whatever returns or manages a secret or a credential;
+* every other request needs its route's operation (``ROUTE_OPERATIONS``, ``WRITE_OPERATIONS``; an unknown write is
+  ``build``, never allowed by default) in the token's projects;
+* a write that names no project needs ``admin``;
 * token management is never open to a token (tokens do not mint or delete tokens), scoped or not.
 
 Off and audit only: nothing is read, everything passes as before. An unscoped (legacy) token: only the token-management
@@ -89,6 +91,22 @@ ROUTE_OPERATIONS = {
     "api.v2.secrets.credential_references": "admin",
     "api.v2.secrets.credential_reference": "admin",
     "api.v2.secrets.credential_reference_action": "admin",
+    # secrets and long-lived credentials (C9-SEC-77, C9-SEC-78), whatever the method: they return a secret, or mint or
+    # change one that outlives the token (an S3 access key, a secret value, a personal credential's material)
+    "api.v2.secrets.secret": "admin",
+    "api.v2.secrets.secrets": "admin",
+    "api.v2.secrets.private_secret": "admin",
+    "api.v2.secrets.hide": "admin",
+    "api.v2.secrets.credential_material": "admin",
+    "api.v2.artifacts.s3_credentials": "admin",
+    "api.v2.elitea_core.pipeline_trigger": "admin",   # its read answers the webhook secret
+}
+# Writes only (their reads stay reads): the configurations that create or change a credential, as #7214's
+# ``credentials`` class (``internal_obo.ENDPOINT_OPERATIONS``)
+WRITE_OPERATIONS = {
+    "api.v2.configurations.configurations": "admin",
+    "api.v2.configurations.configuration": "admin",
+    "api.v2.configurations.models": "admin",
 }
 # Whole plugins whose routes are administration (members, roles, invitations, projects, runtime)
 ADMIN_PREFIXES = ("api.v2.admin.", "admin.", "admin_ui.")
@@ -118,7 +136,7 @@ def operation_of(endpoint, method, view_args=None, path="") -> str:
         return "admin"
     if method in READ_METHODS:
         return "read"
-    return named or "build"
+    return named or WRITE_OPERATIONS.get(endpoint) or "build"
 
 
 def decide(scope, endpoint, method, view_args=None, path="", project=None) -> Optional[str]:
@@ -129,8 +147,8 @@ def decide(scope, endpoint, method, view_args=None, path="", project=None) -> Op
     if scope is None:
         return None
     operation = operation_of(endpoint, method, view_args, path)
-    if project is None:
-        return None if "admin" in scope["operations"] else TOKEN_SCOPE_OPERATION
+    if project is None:   # a read that names no project is any token's (D2); anything else needs admin
+        return None if operation == "read" or "admin" in scope["operations"] else TOKEN_SCOPE_OPERATION
     if project not in scope["projects"]:
         return TOKEN_SCOPE_PROJECT
     if operation != "read" and operation not in scope["operations"]:
