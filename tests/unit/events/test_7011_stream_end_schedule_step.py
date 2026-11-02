@@ -224,6 +224,15 @@ def test_a_pause_inside_a_fan_out_child_fails_the_schedule_run_with_a_reason(mak
     assert world.events == ["commit", finish]
 
 
+def test_a_top_level_sign_in_pause_still_parks_the_schedule_run(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    interrupt = {"guardrail_type": "mcp_auth", "toolkit_name": "github"}
+    world.pause_event(interrupt)
+    pause = ("pause", PROJECT_ID, RUN_ID, {"chat_project_id": PROJECT_ID, **interrupt}, CONVERSATION_ID, AUTHOR_ID)
+    assert world.msg_group.is_streaming is False
+    assert world.events == ["commit", pause]
+
+
 def test_7011_r1_6_a_failing_finish_step_does_not_break_the_stream_end(make_world):
     world = make_world(dict(SCHEDULE_META))
     world.fail_step = True
