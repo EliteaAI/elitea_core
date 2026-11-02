@@ -70,12 +70,12 @@ def check_enabled_cap(session, adding: int = 1) -> None:
     Callers pass adding=0 for a row that is already enabled.
     """
     # Imported here: the pydantic model imports this module and must not load the ORM tables.
-    from ..models.entity_schedule import EntitySchedule
+    from ..models.entity_schedule import EntitySchedule, not_draft
 
     cap = schedule_limits().max_enabled_per_project
     # lean: soft cap, no lock (US-07 checks and writes in one transaction); lock when parallel enables pass it
     enabled = session.execute(
-        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True))
+        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True), not_draft())
     ).scalar()
     if enabled + adding > cap:
         raise ScheduleLimitError(cap)

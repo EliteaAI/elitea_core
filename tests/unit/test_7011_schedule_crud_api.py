@@ -701,3 +701,36 @@ def test_schedule_body_without_a_required_field_is_400_on_that_field(harness, fi
     body = agent_body()
     del body[field]
     assert_400_names(harness.call('post', body), field)
+
+
+def _draft(harness, **fields):
+    return harness.seed(draft=True, enabled=False, **fields)
+
+
+def test_a_draft_row_is_not_found_by_read_edit_delete_pause_resume_and_run(harness):
+    draft_id = _draft(harness)
+
+    for verb, suffix in (
+        ('get', ''), ('put', ''), ('delete', ''), ('post', '/pause'), ('post', '/resume'), ('post', '/run'),
+    ):
+        body, status = harness.call(verb, {'trigger': 'manual'} if suffix == '/run' else {'name': 'x'}, draft_id, suffix=suffix)
+        assert (body, status) == (NOT_FOUND, 404), (verb, suffix)
+
+
+def test_an_admin_cannot_read_a_draft_row_either(harness):
+    draft_id = _draft(harness, created_by=OTHER_ID)
+    harness.user_id, harness.permissions = ADMIN_ID, set(ADMIN)
+
+    assert harness.call('get', schedule_id=draft_id) == (NOT_FOUND, 404)
+
+
+
+def test_the_owner_change_loads_its_schedule_with_the_draft_filter(harness):
+    draft_id = _draft(harness)
+    service = sys.modules[f'{PACKAGE}.utils.schedule_service']
+    scope = sys.modules[f'{PACKAGE}.utils.schedule_access'].ScheduleScope(ADMIN_ID, True, frozenset())
+
+    with harness.session_factory() as session, pytest.raises(service.ScheduleNotFound):
+        service.load_schedule_in_scope(session, draft_id, scope)
+    with harness.session_factory() as session:
+        assert service.load_schedule_in_scope(session, draft_id, scope, include_draft=True).draft is True

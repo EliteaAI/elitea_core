@@ -62,6 +62,12 @@ ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS original_trigger JSO
 # column (DROP COLUMN IF EXISTS original_trigger) and the index (DROP INDEX IF EXISTS ix_entity_schedule_runs_conversation)
 # Governance refusals in a row of a schedule's runs (#7254); the startup safety net adds it too
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS refusal_streak SMALLINT DEFAULT 0;
+# A hidden row that holds the runs of "Test" before a schedule is saved (issue 7338); the startup safety net adds it too
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS draft BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedules_draft_owner_entity
+    ON {pid}.entity_schedules (created_by, application_id) WHERE draft;
+# Revert by hand: DELETE FROM {pid}.entity_schedules WHERE draft; DROP INDEX IF EXISTS uq_entity_schedules_draft_owner_entity;
+# ALTER TABLE {pid}.entity_schedules DROP COLUMN IF EXISTS draft;
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
     id SERIAL PRIMARY KEY,

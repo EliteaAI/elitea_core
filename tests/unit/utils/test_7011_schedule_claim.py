@@ -205,3 +205,47 @@ def test_el_7011_cr24_refused_run_now_keeps_last_run(claim, session):
 
     session.expire_all()
     assert session.get(claim.EntitySchedule, row.id).last_run.replace(tzinfo=None) == OLD_LAST_RUN
+
+
+def test_due_query_skips_a_draft_row(claim, session):
+    _schedule(claim, session, draft=True, application_id=1, created_by=2, next_run=SEEN)
+    kept = _schedule(claim, session, next_run=SEEN)
+
+    assert [row.id for row in claim.select_due_schedules(session, ["pipeline"], 10)] == [kept.id]
+
+
+def test_list_query_counts_and_returns_no_draft_row(claim, session, monkeypatch):
+    from sqlalchemy import String
+    from sqlalchemy.orm import Mapped, mapped_column
+
+    class Parent(DeclarativeBase):
+        pass
+
+    class Application(Parent):
+        __tablename__ = "applications"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        name: Mapped[str] = mapped_column(String)
+
+    class ApplicationVersion(Parent):
+        __tablename__ = "application_versions"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        name: Mapped[str] = mapped_column(String)
+
+    models_all = types.ModuleType("plugins.elitea_core.models.all")
+    models_all.Application, models_all.ApplicationVersion = Application, ApplicationVersion
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.all", models_all)
+    queries = load("utils/schedule_queries.py", fresh=True)
+    statements = []
+    real_execute, real_scalar = session.execute, session.scalar
+    session.execute = lambda statement, *a, **k: (statements.append(statement), types.SimpleNamespace(all=lambda: []))[1]
+    session.scalar = lambda statement, *a, **k: (statements.append(statement), 0)[1]
+    scope = types.SimpleNamespace(is_admin=True, user_id=1)
+    filters = types.SimpleNamespace(
+        owner_ids=None, entity_type=None, status=None, enabled=None, entity_id=None, version_id=None,
+        search=None, sort_by="next_run", sort_order="asc")
+
+    queries.list_schedules(session, scope, filters, 10, 0)
+
+    session.execute, session.scalar = real_execute, real_scalar
+    assert len(statements) == 2
+    assert all("entity_schedules.draft IS false" in str(statement) for statement in statements)

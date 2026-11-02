@@ -1,6 +1,6 @@
 from sqlalchemy import func, update
 
-from ..models.entity_schedule import EntitySchedule
+from ..models.entity_schedule import EntitySchedule, not_draft
 
 
 def disable_version_schedules(session, version_ids) -> list[dict]:
@@ -12,7 +12,7 @@ def disable_version_schedules(session, version_ids) -> list[dict]:
         return []
     statement = (
         update(EntitySchedule)
-        .where(EntitySchedule.version_id.in_(version_ids))
+        .where(EntitySchedule.version_id.in_(version_ids), not_draft())
         .values(enabled=False, disabled_reason='version_deleted', updated_at=func.now())
         .returning(EntitySchedule.id, EntitySchedule.name, EntitySchedule.created_by)
     )

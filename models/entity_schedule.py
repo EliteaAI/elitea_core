@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     Uuid,
     desc,
+    false,
     func,
     text,
     true,
@@ -44,6 +45,10 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedules_created_by', 'created_by'),
         Index('ix_entity_schedules_application_version', 'application_id', 'version_id'),
         Index('uq_entity_schedules_uuid', 'uuid', unique=True),
+        Index(
+            'uq_entity_schedules_draft_owner_entity', 'created_by', 'application_id', unique=True,
+            postgresql_where=text('draft'), sqlite_where=text('draft'),
+        ),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
@@ -79,6 +84,9 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     last_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A hidden row that only holds the runs of "Test" before a schedule is saved. Every reader that is not the test run
+    # route filters it out with not_draft(); it is never enabled and never gets next_run or last_run
+    draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     # Who confirmed "Run without asking", when, and the fingerprint of the sensitive tools they saw
     approval_confirmed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     approval_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -102,6 +110,11 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     def to_json(self, exclude_fields: tuple = ()) -> dict:
         """The mixin's row dict (and repr) without the unmapped refusal count, which the row does not hold."""
         return super().to_json((*exclude_fields, 'refusal_streak'))
+
+def not_draft():
+    """The one filter of every schedule reader except the test run route: a draft row is not a schedule."""
+    return EntitySchedule.draft.is_(False)
+
 
 # The unmapped refusal count of a schedule (#7254), for Core statements
 REFUSAL_STREAK = EntitySchedule.__table__.c.refusal_streak

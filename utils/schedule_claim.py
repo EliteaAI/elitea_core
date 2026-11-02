@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun, not_draft
 
 # Must stay stable across deploys: the legacy step of the tick and the migration (US-24) take the same keys
 LEGACY_LOCK_BASE = 7011 << 32
@@ -61,6 +61,7 @@ def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedu
         select(EntitySchedule)
         .where(
             EntitySchedule.enabled.is_(True),
+            not_draft(),
             EntitySchedule.entity_type.in_(entity_types),
             or_(EntitySchedule.next_run <= func.now(), EntitySchedule.expires_at <= func.now()),
         )
