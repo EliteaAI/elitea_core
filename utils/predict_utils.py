@@ -81,6 +81,8 @@ def get_user_token(user_id: int) -> Optional[str]:
         return
     # list_tokens hides the platform-owned system token, so a real PAT still wins.
     for i in auth.list_tokens(user_id):
+        if i.get('scope_projects') is not None or i.get('scope_operations') is not None:
+            continue   # a scoped API token (#7336) is its holder's, never put on a payload
         expires = i.get('expires')
         if not expires or expires > datetime.now():
             return auth.encode_token(i['id'])

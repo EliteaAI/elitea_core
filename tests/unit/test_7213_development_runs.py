@@ -202,7 +202,7 @@ def test_a_system_user_or_a_token_cannot_author(ns, env):
     assert refusal(env, ns, run_kind="system").reason_code == "MANDATE_REQUIRED"
     env.verify_result = {"ok": False, "reason_code": "IDENTITY_KIND_NOT_ADMITTED"}
     assert refusal(env, ns, caller_type="token", caller_reference=None).reason_code == "IDENTITY_KIND_NOT_ADMITTED"
-    assert "#7214" in ns.adm.MESSAGES["IDENTITY_KIND_NOT_ADMITTED"]
+    assert "scoped, expiring API token" in ns.adm.MESSAGES["IDENTITY_KIND_NOT_ADMITTED"]   # the way in (#7336)
     env.verify_result = {"ok": True, "principal": admission_env.principal(verified=False)}   # a PAT that verified
     assert refusal(env, ns).reason_code == "MANDATE_REQUIRED"   # asserted, not verified: never an author
     assert contexts(env, ns) == []
