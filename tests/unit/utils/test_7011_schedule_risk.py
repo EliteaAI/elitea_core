@@ -223,6 +223,18 @@ class TestEL7011R2PersonalToken:
         scan.expanded[type_] = {f'{type_}_configuration': {'client_id': 'x'}}
         assert scan.run() == []
 
+    def test_7309_sharepoint_with_stored_login_does_not_block(self, scan):
+        # A saved Microsoft login (refresh token) is used by scheduled runs, like Outlook/Teams/Dataverse
+        scan.version = _version(tools=[_tool('sharepoint', 'Docs', settings={'sharepoint_configuration': {'elitea_title': 'c'}})])
+        scan.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp', 'refresh_token': 'r'}}
+        assert scan.run() == []
+
+    def test_7309_openapi_refresh_token_still_blocks(self, scan):
+        # Only the Microsoft stored-login path injects tokens; OpenAPI still needs a live sign-in
+        scan.version = _version(tools=[_tool('openapi', 'Api', settings={'openapi_configuration': {'elitea_title': 'c'}})])
+        scan.expanded['openapi'] = {'openapi_configuration': {'oauth_discovery_endpoint': 'https://idp', 'refresh_token': 'r'}}
+        assert _codes(scan.run()) == ['personal_signin_required']
+
     def test_r2_2_toolkit_with_missing_credential_gets_only_the_credential_warning(self, scan):
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'oauth_discovery_endpoint': 'u'})])
         scan.expand_errors['openapi'] = [_error('a', 'credential_not_found')]

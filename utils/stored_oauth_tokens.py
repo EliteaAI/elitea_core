@@ -20,6 +20,7 @@ GRAPH_CONFIGURATION_KEYS = ("sharepoint_configuration", "outlook_configuration",
 
 def _graph_login(config: dict) -> Optional[dict]:
     authority = (config.get("oauth_discovery_endpoint") or "").rstrip("/")
+    authority = authority.removesuffix("/v2.0")  # the token path already carries v2.0
     if not authority.startswith(ENTRA_AUTHORITY):
         return None
     scopes = config.get("scopes") or [GRAPH_DEFAULT_SCOPE]
