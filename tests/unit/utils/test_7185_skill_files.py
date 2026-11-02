@@ -649,14 +649,37 @@ class TestCrossProjectCopies:
         assert env.storage.keys(OTHER) == sorted([_sha(b'# Forms'), _sha(b'\x89PNG\x00')])
         assert _row(target, 40, 'a.png').content_type == 'image/png'
 
-    def test_a_target_that_already_holds_the_hash_gets_rows_only(self, env):
+    def test_a_target_that_already_holds_the_hash_whole_gets_rows_only(self, env, monkeypatch):
         manifest = _seed_source(env)
-        env.store.put_contents(OTHER, {entry['sha256']: b'kept' for entry in manifest})
+        env.store.put_contents(OTHER, {_sha(b'# Forms'): b'# Forms', _sha(b'\x89PNG\x00'): b'\x89PNG\x00'})
         target = env.session_of(OTHER)
+        uploads, reads = [], []
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda *args: uploads.append(args))
+        monkeypatch.setattr(env.store.MinioClient, 'download_file', lambda *args: reads.append(args))
 
         _copy(env, target, manifest)
 
-        assert set(env.storage.objects[(f'p--{OTHER}.skill-files', e['sha256'])] for e in manifest) == {b'kept'}
+        assert uploads == [] and reads == [] and _paths(target, 40) == ['a.png', 'forms.md']
+
+    def test_an_object_cut_short_in_the_target_is_replaced_from_the_source_while_staging(self, env):
+        manifest = _seed_source(env)
+        env.store.put_contents(OTHER, {_sha(b'# Forms'): b'# Fo'})
+
+        staged = env.files.stage_version_files(OTHER, manifest, PROJECT)
+
+        assert env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] == b'# Forms'
+        assert staged[_sha(b'# Forms')] == b'# Forms'
+
+    def test_an_object_cut_short_between_staging_and_the_rows_is_replaced_from_the_staged_bytes(self, env):
+        manifest = _seed_source(env)
+        target = env.session_of(OTHER)
+        staged = env.files.stage_version_files(OTHER, manifest, PROJECT)
+        env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] = b'# Fo'
+        del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms'))]
+
+        env.files.add_version_files(target, OTHER, 40, manifest, staged, PROJECT)
+
+        assert env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] == b'# Forms'
 
     def test_entries_with_bytes_are_stored_without_reading_any_source(self, env):
         target = env.session_of(OTHER)
@@ -890,10 +913,11 @@ class TestDeletesAreHeldOffAroundTheirCriticalSections:
     def test_an_add_holds_deletes_off_before_it_checks_the_objects_and_adds_the_rows(self, env, session, monkeypatch):
         _version(session)
         held = []
-        content_exists = env.files.content_exists
+        holds_content = env.files.holds_content
         add = session.add
-        monkeypatch.setattr(env.files, 'content_exists', lambda project_id, sha256, client=None: held.append(
-            ('check', session in FakeSession.locks.get(project_id, ()))) or content_exists(project_id, sha256, client))
+        monkeypatch.setattr(env.files, 'holds_content', lambda project_id, sha256, size, client=None: held.append(
+            ('check', session in FakeSession.locks.get(project_id, ()))) or holds_content(project_id, sha256, size,
+                                                                                         client))
         monkeypatch.setattr(session, 'add', lambda row: held.append(
             ('row', session in FakeSession.locks.get(PROJECT, ()))) or add(row))
         entries = [env.files.build_file_entry('a.md', b'a')]

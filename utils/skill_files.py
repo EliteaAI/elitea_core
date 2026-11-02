@@ -17,7 +17,7 @@ from tools import auth, config as c, db, serialize
 
 from .folder_access import resolve_entity_access
 from .skill_file_store import (
-    content_exists, delete_contents, get_content, list_contents, project_client, put_content, put_contents,
+    delete_contents, get_content, holds_content, list_contents, project_client, put_content, put_contents,
 )
 from .skill_utils import (
     SkillFileError,
@@ -346,7 +346,7 @@ def stage_version_files(project_id: int, entries: list, source_project_id: int =
     client = project_client(project_id)
     lacking = [
         entry for entry in _unique_by_hash(entries)
-        if 'data' not in entry and not content_exists(project_id, entry['sha256'], client)
+        if 'data' not in entry and not holds_content(project_id, entry['sha256'], entry['size'], client)
     ]
     if lacking:
         contents.update(_fetch_from_source(source_project_id, project_id, lacking))
@@ -358,7 +358,10 @@ def _restore_missing_objects(project_id: int, entries: list, contents: dict, sou
     if not entries:
         return
     client = project_client(project_id)
-    missing = [entry for entry in _unique_by_hash(entries) if not content_exists(project_id, entry['sha256'], client)]
+    missing = [
+        entry for entry in _unique_by_hash(entries)
+        if not holds_content(project_id, entry['sha256'], entry['size'], client)
+    ]
     if not missing:
         return
     log.warning('skill files: %s object(s) of project %s went missing before their rows; storing them again',
