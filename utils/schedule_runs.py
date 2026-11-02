@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from pylon.core.tools import log
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from tools import db
 
 from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule, EntityScheduleRun
@@ -132,18 +132,24 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
     from .schedule_notifications import notify_schedule_event
     paused = False
     try:
+        # one statement (#7294 P-08): every SET reads the row as it was, so the pause takes a schedule that is on at
+        # the REFUSAL_PAUSE_AFTER-th refusal; a schedule already off (by hand, expired) keeps its reason
+        streak = func.coalesce(REFUSAL_STREAK, 0) + 1
+        pause = and_(streak == REFUSAL_PAUSE_AFTER, EntitySchedule.enabled.is_(True))
         with db.get_session(project_id) as session:
-            streak = session.execute(
+            row = session.execute(
                 update(EntitySchedule).where(EntitySchedule.id == schedule.id)
-                .values({REFUSAL_STREAK: func.coalesce(REFUSAL_STREAK, 0) + 1})
-                .returning(REFUSAL_STREAK)
-            ).scalar()
-            if streak == REFUSAL_PAUSE_AFTER:  # a schedule already off (by hand, expired) keeps its reason
-                paused = session.execute(
-                    update(EntitySchedule).where(EntitySchedule.id == schedule.id, EntitySchedule.enabled.is_(True))
-                    .values(enabled=False, disabled_reason=GOVERNANCE_REFUSED)
-                ).rowcount == 1
+                .values({REFUSAL_STREAK: streak,
+                         EntitySchedule.enabled: case((pause, False), else_=EntitySchedule.enabled),
+                         EntitySchedule.disabled_reason: case((pause, GOVERNANCE_REFUSED),
+                                                              else_=EntitySchedule.disabled_reason)})
+                .returning(REFUSAL_STREAK, EntitySchedule.enabled, EntitySchedule.disabled_reason)
+            ).one_or_none()
             session.commit()
+        # the streak reaches REFUSAL_PAUSE_AFTER once until it ends (an admitted start or a resume sets it to 0), so at
+        # exactly that count an off schedule with this reason was paused by this statement
+        paused = row is not None and row[0] == REFUSAL_PAUSE_AFTER and row[1] is False \
+            and row[2] == GOVERNANCE_REFUSED
     except Exception:  # noqa: BLE001 -- the run is already refused and ended; only the streak is lost
         log.exception('Schedule %s: cannot count the governance refusal of run %s', schedule.id, run_id)
         return

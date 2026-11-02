@@ -313,6 +313,14 @@ def test_the_description_documents_calls():
     assert '`calls`' in description and 'all (the default' in description
 
 
+def test_ledger_agents_count_cache_inside_input(usage):
+    """#7300: a sub-agent's settled input counts cache, as the case's own settled row does."""
+    entry = {**_row(0, ORDER_APP, 2_000, 40, 9, 1), 'billable_input_tokens': 2_000,
+             'cache_read_tokens': 8_000, 'cache_creation_tokens': 500}
+    ledger = usage.ledger_agents([entry, _row(0, EVAL, 10, 1, 1, 1)], PRID)
+    assert ledger[0][53]['input_tokens'] == 10_500
+
+
 # --- models per agent (#7297) -----------------------------------------------------------------
 
 def test_each_agent_lists_the_models_its_llm_steps_ran_on(execution):

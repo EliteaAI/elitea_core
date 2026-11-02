@@ -239,6 +239,18 @@ def test_sub_agent_tools_from_prefetch_are_covered(svc):
     assert f"uuid-sub:{AUTHORITY}" in payload["mcp_tokens"]
 
 
+def test_7309_v2_discovery_endpoint_does_not_double_the_version_in_the_token_url(svc):
+    # The browser login accepts ".../<tenant>/v2.0"; the refresh must not hit ".../v2.0/oauth2/v2.0/token" (404)
+    tool = outlook_tool()
+    tool["settings"]["outlook_configuration"]["oauth_discovery_endpoint"] = f"{AUTHORITY}/v2.0"
+    payload, refresh = {"tools": [tool], "mcp_tokens": {}}, Refresh()
+
+    assert inject(svc, payload, FakeRedis(), refresh) == 1
+
+    assert refresh.calls[0]["token_endpoint"] == f"{AUTHORITY}/oauth2/v2.0/token"
+    assert list(payload["mcp_tokens"]) == [f"uuid-o:{AUTHORITY}/v2.0"]  # still the key the toolkit reads
+
+
 def test_graph_scope_defaults_when_credential_has_none(svc):
     refresh = Refresh()
     inject(svc, {"tools": [outlook_tool(scopes=())]}, FakeRedis(), refresh)

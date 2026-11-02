@@ -358,8 +358,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _table_present(session, name=SETTINGS_TABLE) -> bool:
-    return inspect(session.connection()).has_table(name, schema=c.POSTGRES_SCHEMA)
+_TABLES_SEEN = set()   # settings tables seen present: the refresher's read asks the catalog again only after a failure
+
+
+def _table_present(session, name=SETTINGS_TABLE, remember=False) -> bool:
+    """Is the table there? ``remember`` (the refresher's read, every 10 s per replica, #7294): one catalog read per
+    process while it is; a read that fails afterwards forgets it (``read_settings``)."""
+    if remember and name in _TABLES_SEEN:
+        return True
+    present = inspect(session.connection()).has_table(name, schema=c.POSTGRES_SCHEMA)
+    if present and remember:
+        _TABLES_SEEN.add(name)
+    return present
 
 
 _ROW = (Settings.mode, Settings.policy_revision, Settings.admit_legacy_pat, Settings.allow_runtime_domain_binding,
@@ -388,18 +398,24 @@ def _stored_of(row) -> Stored:
                   revision=row.revision, updated_by=row.updated_by, updated_at=row.updated_at)
 
 
-def read_settings():
+def read_settings(_again=True):
     """``(read, stored)``: ``ok`` with the row (or None), ``missing_table``, or ``error`` (logged by type only). A table
     that predates a column is read without it (the flag then takes its default): a deploy before the task is not an
-    error."""
+    error. A read that fails where the table was seen before is read once more with the catalog asked again (a dropped
+    table is ``missing_table``, as it was)."""
+    seen = SETTINGS_TABLE in _TABLES_SEEN
     try:
         with db.get_session(None) as session:
-            if not _table_present(session):
+            if not _table_present(session, remember=True):
                 return READ_MISSING_TABLE, None
             columns = _ROW + _ADDED if added_columns_present(session) else _ROW
             row = session.execute(select(*columns).where(*_PLATFORM)).one_or_none()
             return READ_OK, _stored_of(row) if row is not None else None
     except Exception as exc:  # pylint: disable=W0703
+        if seen and _again:
+            _TABLES_SEEN.discard(SETTINGS_TABLE)
+            _COLUMNS_SEEN.discard(SETTINGS_TABLE)
+            return read_settings(_again=False)
         log.error("governance settings: the stored switch could not be read (%s)", type(exc).__name__)
         return READ_ERROR, None
 

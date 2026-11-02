@@ -247,3 +247,28 @@ def test_7011_r2_3_fill_is_one_pass_keeps_unknown_names_and_runs_no_template_log
     world.schedule.variables = [{"name": "team", "value": "{{region}}"}, {"name": "region", "value": "US"}]
     _run(world)
     assert world.call("create")[1]["trigger_message"] == expected
+
+
+def test_the_runs_of_one_owner_ask_the_identity_service_for_the_name_once_a_minute(world, monkeypatch):
+    """#7294 P-07: every run start asked pylon_auth for its owner's name (a cross-pylon RPC); the label is kept per
+    owner for OWNER_LABEL_TTL_S. A failed lookup is not kept."""
+    starter = world.module
+    asked = []
+    authors = SimpleNamespace(get_authors_data=lambda ids: asked.append(list(ids)) or [{"id": OWNER, "name": "Ann Smith"}])
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.authors", authors)
+    assert [starter._owner_label(OWNER) for _ in range(5)] == ["Ann Smith (schedule owner)"] * 5   # pylint: disable=W0212
+    assert asked == [[OWNER]]
+    clock = [starter.time.monotonic() + starter.OWNER_LABEL_TTL_S + 1]
+    monkeypatch.setattr(starter.time, "monotonic", lambda: clock[0])
+    starter._owner_label(OWNER)   # pylint: disable=W0212
+    assert len(asked) == 2
+
+    def down(ids):
+        asked.append("down")
+        raise RuntimeError("auth down")
+
+    authors.get_authors_data = down
+    starter._OWNER_LABELS.clear()   # pylint: disable=W0212
+    assert starter._owner_label(OWNER) == f"user {OWNER} (schedule owner)"   # pylint: disable=W0212
+    starter._owner_label(OWNER)   # pylint: disable=W0212
+    assert asked[-2:] == ["down", "down"]

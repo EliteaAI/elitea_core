@@ -74,16 +74,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def governed_check_connection_many(  # pylint: disable=R0913
-        self, project_id, items, user_id, actor_user_id=None, onboarding=False,
+        self, project_id, items, user_id, actor_user_id=None, onboarding=False, reuse=False,
     ):
         """ Same process (the batch check-connection route of ``configurations``): test several saved credentials of a
         project through the governed path, the probes running at the same time (at most a few at once). ``items``:
         ``[{"configuration_uuid", "config_type"}]``; the other arguments are those of ``governed_check_connection`` and
-        are the same for every item. Returns one answer per item, in order, each as ``governed_check_connection``
-        answers. Never raises. """
+        are the same for every item (``reuse``: the validators, #7294). Returns one answer per item, in order, each as
+        ``governed_check_connection`` answers. Never raises. """
         from ..utils.credential_probe import governed_check_connection_many  # pylint: disable=C0415
         #
-        return governed_check_connection_many(self, project_id, items, user_id, actor_user_id, onboarding)
+        return governed_check_connection_many(self, project_id, items, user_id, actor_user_id, onboarding, reuse=reuse)
 
     @web.method()
     def entra_delegated_probe(self, project_id, reference_id, delegation, person):  # pylint: disable=R0913

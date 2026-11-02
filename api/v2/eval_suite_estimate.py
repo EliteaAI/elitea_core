@@ -1,8 +1,9 @@
 """Eval suite **pre-run estimate** — what a run of this suite would likely cost (design Q-S6).
 
 ``cases × per-case usage of the last finished run of this suite on the same version``, agent plus
-judge, as a low / expected / high range. Only the same suite + version counts as history (#6716);
-without it the answer is ``available: false`` ("No estimate (first run)"). The caller's remaining
+judge, as a low / expected / high range. A version with no finished run yet borrows the suite's
+last finished run on another version (#7311); only a suite that has never finished a run answers
+``available: false`` ("No estimate (first run)"). The caller's remaining
 monthly budget comes along, so the UI can warn before launch when the estimate is over it.
 """
 
@@ -34,7 +35,7 @@ def _remaining_budget(project_id: int, user_id):
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Estimate an eval suite run",
-        description="Estimates what a run of this suite would use: case count × per-case tokens and cost of the last finished run of the same suite and version (agent + judge), as a low / expected / high range, plus the caller's remaining monthly budget. available=false when this suite has not finished a run on that version.",
+        description="Estimates what a run of this suite would use: case count × per-case tokens and cost of the last finished run of the same suite and version (agent + judge), as a low / expected / high range, plus the caller's remaining monthly budget. A version with no finished run yet uses the suite's last finished run on another version (history_application_version_id says which). available=false when this suite has never finished a run.",
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "suite_id", "in": "path", "schema": {"type": "integer"}},
@@ -68,6 +69,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "application_version_id": inputs["application_version_id"],
             "cases": inputs["cases"],
             "history_run_id": inputs["history_run_id"],
+            "history_application_version_id": inputs["history_application_version_id"],
             "history_finished_at": inputs["history_finished_at"],
             "estimate": estimate,
             "budget": budget,

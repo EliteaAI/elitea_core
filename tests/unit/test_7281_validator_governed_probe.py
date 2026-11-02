@@ -19,7 +19,9 @@ SOURCE_PATH = pathlib.Path(__file__).resolve().parents[2] / "utils" / "applicati
 SOURCE = SOURCE_PATH.read_text()
 TREE = ast.parse(SOURCE)
 NAMES = ("_find_configurations_in_settings", "_inject_oauth_tokens", "_governed_connection_error",
-         "_check_configurations_connection_from_expanded_settings")
+         "_check_configurations_connection_from_expanded_settings", "_connection_error_of", "_resolved",
+         "_toolkit_connection_entry", "governed_refusal_of", "_DeferredProbe", "_ProbeBatch")
+ASSIGNED = ("NOT_CHECKED", "_PROBE_BATCH", "PROBE_BATCH_SIZE")
 SECRET = "stored-value-made-up-for-the-test"
 CFG = "0c780530-1311-4f01-be16-1f6ad2d6d284"
 
@@ -40,11 +42,18 @@ class Module:
     def __init__(self, enabled, answer=None):
         self.governance_profile = types.SimpleNamespace(enabled=enabled)
         self.answer, self.probes = answer if answer is not None else {"success": True}, []
+        self.batches = []
 
     def governed_check_connection(self, project_id, configuration_uuid, config_type, user_id, reuse=False):
         assert reuse is True   # the validators may be answered from a kept outcome
         self.probes.append((project_id, configuration_uuid, config_type, user_id))
         return dict(self.answer)
+
+    def governed_check_connection_many(self, project_id, items, user_id, reuse=False):
+        assert reuse is True
+        self.batches.append((project_id, [item["configuration_uuid"] for item in items], user_id))
+        answers = self.answers if hasattr(self, "answers") else {}
+        return [dict(answers.get(item["configuration_uuid"], self.answer)) for item in items]
 
 
 def load(module, rpc):
@@ -55,12 +64,18 @@ def load(module, rpc):
     registry.CONFIG_TYPE_REGISTRY = {"github": entry("credentials"), "pgvector": entry("vectorstorage")}
     sys.modules["plugins.configurations.models.pd.registry"] = registry
     namespace = {"this": types.SimpleNamespace(module=module), "context": types.SimpleNamespace(rpc_manager=rpc),
-                 "log": types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)}
+                 "log": types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None),
+                 "contextvars": __import__("contextvars"), "json": __import__("json")}
     for node in TREE.body:
-        named = isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "NOT_CHECKED" for t in node.targets)
-        if named or (isinstance(node, ast.FunctionDef) and node.name in NAMES):
+        named = isinstance(node, ast.Assign) and any(getattr(t, "id", None) in ASSIGNED for t in node.targets)
+        if named or (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in NAMES):
             exec(textwrap.dedent(ast.get_source_segment(SOURCE, node)), namespace)  # noqa: S102
+    LOADED.clear()
+    LOADED.update(namespace)
     return namespace["_check_configurations_connection_from_expanded_settings"]
+
+
+LOADED = {}
 
 
 def settings():
@@ -163,3 +178,168 @@ def test_a_parent_agents_card_names_the_sub_agent_whose_credential_was_refused()
         namespace["_validate_toolkit_type_application"](None, tool, 5, 9, set())
     assert __import__("json").loads(str(raised.value)) == {
         "code": "DENIED_ASSERTION_UNAVAILABLE", "error": "obo-sharepoint-reader: Sign in with Microsoft again, then retry."}
+
+
+# --- #7294 P-01: one batch per version ---------------------------------------------------------------------------
+
+def configuration(index, project_id=2):
+    return {"configuration_type": "github", "elitea_title": f"gh{index}", "configuration_uuid": f"uuid-{index}",
+            "configuration_project_id": project_id, "access_token": SECRET}
+
+
+def test_inside_a_validation_the_probe_is_deferred_and_asked_with_the_others_in_batches():
+    """100 credential toolkits: no probe while the toolkits are walked, then two batch calls (64 + 36), where main asked
+    100 single probes one after the other. A credential two toolkits use is probed once."""
+    module, rpc = Module(enabled=True), Rpc()
+    check = load(module, rpc)
+    batch = LOADED["_ProbeBatch"]()
+    token = LOADED["_PROBE_BATCH"].set(batch)
+    try:
+        per_toolkit = [check({"github_configuration": configuration(index)}, {}, 5, 9) for index in range(100)]
+        repeat = check({"github_configuration": configuration(7)}, {}, 5, 9)
+    finally:
+        LOADED["_PROBE_BATCH"].reset(token)
+    assert module.probes == [] and module.batches == []
+    assert all(len(errors) == 1 and isinstance(errors[0], LOADED["_DeferredProbe"]) for errors in per_toolkit + [repeat])
+    batch.run()
+    assert [(project, len(uuids), user) for project, uuids, user in module.batches] == [(2, 64, 9), (2, 36, 9)]
+    assert sorted(uuid for _, uuids, _ in module.batches for uuid in uuids) == sorted(f"uuid-{i}" for i in range(100))
+    assert LOADED["_resolved"](repeat) == [] and all(LOADED["_resolved"](errors) == [] for errors in per_toolkit)
+
+
+def test_a_batch_answer_becomes_the_same_entry_a_single_probe_gave():
+    refused = {"success": False, "code": "DENIED_GRANT", "message": "You hold no grant."}
+    failed = {"success": False, "message": "Authentication failed"}
+    module, rpc = Module(enabled=True), Rpc()
+    module.answers = {"uuid-1": refused, "uuid-2": failed, "uuid-3": {"success": False, "code": "RATE_LIMITED"}}
+    check = load(module, rpc)
+    batch = LOADED["_ProbeBatch"]()
+    token = LOADED["_PROBE_BATCH"].set(batch)
+    try:
+        deferred = {index: check({"github_configuration": configuration(index)}, {}, 5, 9) for index in (1, 2, 3, 4)}
+    finally:
+        LOADED["_PROBE_BATCH"].reset(token)
+    batch.run()
+    entry = LOADED["_toolkit_connection_entry"]
+    resolved = {index: LOADED["_resolved"](errors) for index, errors in deferred.items()}
+    # what the single-probe path gives for the same answers
+    single = {}
+    for index, answer in ((1, refused), (2, failed), (3, module.answers["uuid-3"]), (4, {"success": True})):
+        one = Module(enabled=True, answer=answer)
+        single[index] = load(one, Rpc())({"github_configuration": configuration(index)}, {}, 5, 9) or []
+    assert resolved == single
+    assert entry(11, None, resolved[1])["type"] == "value_error"            # the governed refusal shape (#7281)
+    assert entry(12, None, resolved[2])["type"] == "connection_error"
+    assert entry(13, None, resolved[3]) is None and entry(14, None, resolved[4]) is None   # not checked / passed
+
+
+def test_the_version_validation_opens_and_always_closes_the_batch_and_skips_the_author_lookup():
+    body = ast.get_source_segment(SOURCE, next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                                               and node.name == "validate_application_version_details"))
+    assert "batch_token = _PROBE_BATCH.set(batch)" in body and "finally:\n            _PROBE_BATCH.reset(batch_token)" in body
+    assert "batch.run()" in body.split("finally:", 1)[1]
+    loop = ast.get_source_segment(SOURCE, next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                                               and node.name == "_validate_version_toolkits"))
+    # an empty authors map: ToolDetails.add_author_data skips its per-toolkit identity-service call
+    assert "'authors_map': {}" in loop
+
+
+def _validator(module):
+    """The real ``validate_application_version_details`` and its toolkit loop, over a fake session that holds one
+    version with ``tools``, and a ToolValidatedDetails with the real connection-check hook (review S1)."""
+    import pydantic
+    from typing import ClassVar
+
+    check = load(module, Rpc())   # also fills LOADED with the helpers the loop calls
+    namespace = dict(LOADED)
+
+    class ToolValidatedDetails(pydantic.BaseModel):
+        CONNECTION_ERROR_SENTINEL: ClassVar[str] = "__connection_errors__"
+        settings: dict
+        project_id: int
+        user_id: int
+
+        @pydantic.model_validator(mode="after")
+        def check_connection(self, info):
+            if info.context and info.context.get("check_connection"):
+                errors = check(self.settings, {}, project_id=self.project_id, user_id=self.user_id)
+                if errors:
+                    raise ValueError({self.CONNECTION_ERROR_SENTINEL: errors})
+            return self
+
+    class Version:
+        tools = tool_mappings = variables = tags = skill_mappings = id = application_id = None
+
+        def __init__(self, tools):
+            self._tools = tools
+
+        def to_dict(self):
+            return {"tools": [dict(tool) for tool in self._tools]}
+
+    class Query:
+        def __init__(self, version):
+            self.version = version
+
+        def filter(self, *a):
+            return self
+
+        def options(self, *a):
+            return self
+
+        def first(self):
+            return self.version
+
+    class Session:
+        def __init__(self, version):
+            self.version = version
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def query(self, _model):
+            return Query(self.version)
+
+    state = types.SimpleNamespace(tools=[])
+    namespace.update({
+        "ValidationError": pydantic.ValidationError, "ToolValidatedDetails": ToolValidatedDetails,
+        "ApplicationVersion": Version, "selectinload": lambda x: x,
+        "ApplicationVersionDetailToolValidatedModel": types.SimpleNamespace(model_validate=lambda d: d),
+        "ApplicationVersionNonFoundError": RuntimeError,
+        "db": types.SimpleNamespace(get_session=lambda pid: Session(Version(state.tools))),
+    })
+    for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "validate_application_version_details", "_validate_version_toolkits", "connection_errors_from"):
+            exec(textwrap.dedent(ast.get_source_segment(SOURCE, node)), namespace)  # noqa: S102
+    return namespace["validate_application_version_details"], state
+
+
+def _credential_toolkit(index):
+    return {"id": index, "type": "github", "settings": {"github_configuration": configuration(index)}}
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_version_validation_asks_its_governed_probes_in_one_batch_only_under_enforce(enabled):
+    """#7294 review S1: the gate itself. Two credential toolkits under enforce: no single probe, one batch call.
+    Off: neither (the old connection-check path)."""
+    module = Module(enabled=enabled)
+    validate, state = _validator(module)
+    state.tools = [_credential_toolkit(1), _credential_toolkit(2)]
+    assert validate(5, 7, 70, 9, _visited=set()) is True
+    assert module.probes == []
+    assert module.batches == ([(2, ["uuid-1", "uuid-2"], 9)] if enabled else [])
+
+
+def test_a_refused_batch_answer_is_the_toolkits_validation_error():
+    module = Module(enabled=True)
+    module.answers = {"uuid-2": {"success": False, "code": "DENIED_GRANT", "message": "You hold no grant."}}
+    validate, state = _validator(module)
+    state.tools = [_credential_toolkit(1), _credential_toolkit(2)]
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as err:
+        validate(5, 7, 70, 9, _visited=set())
+    [entry] = err.value.errors()
+    assert entry["loc"] == ("tools", 2, "__root__") and "DENIED_GRANT" in entry["msg"]

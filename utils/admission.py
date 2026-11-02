@@ -1717,14 +1717,17 @@ def admit_dispatch(  # pylint: disable=R0911
         # a child or reconcile dispatch runs under its parent's admission, which decided the parent's credentials
         # only: its credentials are sealed against those decisions, any other credential is refused. A sub-agent that
         # was admitted with the run (#7227) runs under its own context instead, which ``_seal_inherited`` names
-        own_ref = _seal_inherited(module, view_payload, envelope["context_ref"], call_kwargs, run_id)
+        parent = {}
+        own_ref = _seal_inherited(module, view_payload, envelope["context_ref"], call_kwargs, run_id, parent)
+        # the parent's row, when the seal read it and the dispatch runs under it: the token reads nothing more (P-11)
+        parent_row = getattr(parent.get("admission"), "row", None) if own_ref == envelope["context_ref"] else None
         if own_ref != envelope["context_ref"]:
             envelope = payload["envelope"] = {**envelope, "context_ref": own_ref}
             meta["context_ref"] = own_ref
         meta.setdefault("context_ref", own_ref)
         inherited_project = meta.get("project_id") or payload.get("project_id")
         if not _deliver_run_token(payload, lambda internal: internal_obo.mint_for_context(
-                inherited_project, own_ref, task_name, view_payload, internal=internal), view_payload):
+                inherited_project, own_ref, task_name, view_payload, internal=internal, row=parent_row), view_payload):
             _refuse_dispatch(module, "INTERNAL_TOKEN_UNAVAILABLE", call_kwargs, run_id)
         return None
     if unavailable:
@@ -1854,9 +1857,14 @@ def _parent_entries(project_id, context_ref) -> list:
     return _parent_admission(project_id, context_ref)[0]
 
 
+class _ParentRead(tuple):
+    """``(allowed_bindings, profile, run_id, version_id)`` of a parent context, with ``row``: the columns the run token
+    of a dispatch under it is minted from, read in the same statement."""
+
+
 def _parent_admission(project_id, context_ref) -> tuple:
     """``(allowed_bindings, profile, run_id, version_id)`` of the parent context: one read, remembered for the fan-out
-    scope."""
+    scope (``.row`` also carries what ``internal_obo.mint_for_context`` needs, so the token costs no second read)."""
     if isinstance(project_id, bool) or not isinstance(project_id, int):
         raise _denied("STALE_CONTEXT")
     try:
@@ -1869,12 +1877,14 @@ def _parent_admission(project_id, context_ref) -> tuple:
     with db.get_session(project_id) as session:
         row = session.execute(
             select(ExecutionSecurityContext.allowed_bindings, ExecutionSecurityContext.profile,
-                   ExecutionSecurityContext.run_id, ExecutionSecurityContext.version_id)
+                   ExecutionSecurityContext.run_id, ExecutionSecurityContext.version_id,
+                   *internal_obo.MINT_COLUMNS)
             .where(ExecutionSecurityContext.id == context_id)
         ).one_or_none()
     if row is None or not isinstance(row.allowed_bindings, list):
         raise _denied("STALE_CONTEXT")
-    found = (row.allowed_bindings, row.profile, row.run_id, row.version_id)
+    found = _ParentRead((row.allowed_bindings, row.profile, row.run_id, row.version_id))
+    found.row = row   # what the run token of a dispatch under this context is minted from (#7294 P-11)
     if read is not None:
         read[(project_id, context_id)] = found
     return found
@@ -1901,14 +1911,14 @@ def _seal_dispatch(payload, entries_of, decided=False, shadow=False, children=No
     raise _denied(error.reason_code, error.audit)
 
 
-def _seal_inherited(module, payload, context_ref, call_kwargs, run_id) -> str:  # pylint: disable=R0913
+def _seal_inherited(module, payload, context_ref, call_kwargs, run_id, parent=None) -> str:  # pylint: disable=R0913
     """A dispatch under a parent context: seal the credentials the parent was admitted for (exactly: toolkit, field
     and configuration) and refuse any other credential (a credential-bearing sub-agent, a conversation toolkit). A
     configuration without a decision of the parent must be shown not to be a credential. The context the dispatch runs
     under is returned: the parent's, or (#7227) that of a sub-agent admitted with the run when the dispatch is that
     sub-agent (a fan-out child or its HITL resume)."""
     project_id = (call_kwargs.get("meta") or {}).get("project_id") or payload.get("project_id")
-    parent = {}
+    parent = {} if parent is None else parent   # the caller's dict gets the parent read, for the run token
 
     def entries():
         parent["admission"] = _parent_admission(project_id, context_ref)

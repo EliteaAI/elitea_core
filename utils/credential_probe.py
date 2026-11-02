@@ -5,7 +5,8 @@ fields themselves. This module decides whether the user may probe it, sends the 
 slot to the ``governed_ops`` pool (the ``indexer_governed_check_connection`` task), and lets the worker ask Main for the
 material through the same trusted release as a run (``credential_release``), under a single-use ticket.
 
-Order: the actor holds ``credentials.probe``; the configuration is a credential of this project and type; its reference is
+Order: the actor holds ``credentials.probe`` (or, without it, tests their own personal reference: below); the
+configuration is a credential of this project and type; its reference is
 ``validated`` or ``active`` (``pending`` too when the credential onboarding probes a value it has just written) at the
 generation the configuration is at; a worker can run the task; the ``probe`` event is
 committed, then the ticket (metadata only, 90 s, taken once by the release) is stored, then the task runs. Every refusal
@@ -16,6 +17,13 @@ tester, or the custodian when an operator tests on their behalf); only that user
 actor (``actor_user_id``, the same user unless given) is who holds ``credentials.probe``, is named as the caller of the
 events and is the user the ticket and the stored-configuration read are for. The caller that passes a different actor has
 authorised them already (the credential onboarding's REST layer).
+
+A personal reference belongs to its custodian (#7290): they may test it themselves without ``credentials.probe`` (the
+owner of a personal project holds no admin role), with ``credentials.use`` in the project, which a run of it needs too.
+That is the tester testing their own (``user_id`` = ``actor_user_id`` = the custodian), outside the credential
+onboarding; an operator acting on someone's behalf, a team reference, someone else's, a missing or inactive one still
+needs ``credentials.probe``, and the refusal is ``DENIED_RBAC`` as before the facts were read: it says nothing of the
+reference and its audit row names none.
 
 An Entra-delegated reference (#6756 step 4) holds no value: the probe acts with the tester's own Microsoft sign-in, as a
 run they start does (#7281). Its ticket names the verified subject ``(issuer, tid, oid)`` of the signed-in session the
@@ -39,7 +47,7 @@ from tools import auth, db, this
 from . import admission as adm   # audit and counter helpers
 from . import entra_obo
 from .credential_decision import (
-    CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, MAX_FACT_SELECTORS, STORE_KINDS, read_configuration_facts,
+    CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, MAX_FACT_SELECTORS, STORE_KINDS, USE_PERMISSION, read_configuration_facts,
     subject_grant_in_force, subject_grant_key,
 )
 from .credential_release import PROBE_KEY, PROBE_TASK
@@ -128,14 +136,27 @@ def _check_arguments(project_id, configuration_uuid, config_type, user_id, actor
         raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
 
 
-def _may_probe(user_id, project_id) -> None:
+def _may_probe(user_id, project_id) -> bool:
+    """``True``: the actor holds ``credentials.probe`` in the project. ``False``: only ``credentials.use``, so they may
+    test their own personal references only (``_own_personal``, #7290). ``DENIED_RBAC`` when neither,
+    ``DEPENDENCY_UNAVAILABLE`` when the permissions cannot be read."""
     try:
-        permitted = PROBE_PERMISSION in set(auth.get_user_permissions(user_id, mode="default", project_id=project_id))
+        permissions = set(auth.get_user_permissions(user_id, mode="default", project_id=project_id))
     except Exception as exc:  # pylint: disable=W0703
         log.error("governed check_connection: permissions unreadable (%s)", type(exc).__name__)
         raise _deny("DEPENDENCY_UNAVAILABLE") from None
-    if not permitted:
-        raise _deny("DENIED_RBAC")
+    if PROBE_PERMISSION in permissions:
+        return True
+    if USE_PERMISSION in permissions:
+        return False
+    raise _deny("DENIED_RBAC")
+
+
+def _own_personal(reference, user_id, actor_user_id) -> bool:
+    """The tester's own personal reference, tested by themselves (#7290): its custodian may probe it without
+    ``credentials.probe``; an operator acting on their behalf may not."""
+    return (isinstance(reference, dict) and reference.get("ownership_class") == "personal"
+            and reference.get("custodian_user_id") == user_id == actor_user_id)
 
 
 def _reference_of(project_id, configuration_uuid, config_type, user_id, known, onboarding=False, prefetched=None) -> tuple:  # pylint: disable=R0913
@@ -376,10 +397,24 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
         audit_allowed = False
     if not audit_allowed:
         raise _deny("AUDIT_UNAVAILABLE")
-    if shared is None:   # a batch has asked once for all its probes
-        _may_probe(actor_user_id, project_id)
-    _configuration, reference = _reference_of(
-        project_id, configuration_uuid, config_type, user_id, known, onboarding, None if shared is None else shared.facts)
+    permitted = _may_probe(actor_user_id, project_id) if shared is None else shared.permitted   # a batch asked once
+    if permitted:
+        _configuration, reference = _reference_of(
+            project_id, configuration_uuid, config_type, user_id, known, onboarding,
+            None if shared is None else shared.facts)
+    else:   # only the custodian's own test of their personal reference goes on (#7290); anything else is DENIED_RBAC
+        if onboarding or user_id != actor_user_id:   # an operator's probe (onboarding, on behalf): before any facts
+            raise _deny("DENIED_RBAC")
+        facts = {}   # merged into the audit row only once admitted: a refusal names no reference, as before
+        try:
+            _configuration, reference = _reference_of(
+                project_id, configuration_uuid, config_type, user_id, facts, onboarding,
+                None if shared is None else shared.facts)
+        except Exception:  # pylint: disable=W0703
+            raise _deny("DENIED_RBAC") from None
+        if not _own_personal(reference, user_id, actor_user_id):
+            raise _deny("DENIED_RBAC")
+        known.update(facts)
     delegated = reference.get("auth_mode") == DELEGATED_AUTH_MODE
     person = grant = None
     if delegated:   # acts with the tester's own Microsoft sign-in (#7281)
@@ -445,7 +480,8 @@ def governed_check_connection(  # pylint: disable=R0913
     reuse=False,
 ) -> dict:
     """Test a saved credential through the governed path. Never raises. ``user_id``: whose personal reference is
-    preferred; ``actor_user_id`` (default ``user_id``): who holds ``credentials.probe``; ``onboarding``: a ``pending``
+    preferred; ``actor_user_id`` (default ``user_id``): who holds ``credentials.probe`` (not needed to test one's own
+    personal reference: see the module docstring); ``onboarding``: a ``pending``
     reference may be probed (see the module docstring); ``reuse``: a validator's check, answered from a kept outcome
     while it stands (``OUTCOME_TTL_S``).
 
@@ -473,38 +509,51 @@ def _refuse(module, code, known) -> dict:
     return refusal(code)
 
 
-def _shared_checks(module, project_id, uuids, user_id, actor_user_id) -> types.SimpleNamespace:
+def _shared_checks(module, project_id, uuids, user_id, actor_user_id, onboarding=False) -> types.SimpleNamespace:
     """What every probe of a batch needs and the batch can ask once: the actor's permission, the facts of all the
-    configurations (``read_configuration_facts``) and of their references, and, when one is Entra-delegated, the
-    verified person (here, on the request's own greenlet: the probes run on others), or the code that refused it.
-    Raises ``AdmissionDenied`` or whatever the reads raise."""
-    _may_probe(actor_user_id, project_id)
-    configurations = read_configuration_facts([(item, project_id) for item in uuids])
-    ids = sorted({fact["id"] for fact in configurations.values() if isinstance(fact, dict) and "id" in fact})
-    references = {}
-    secrets = this.for_module("secrets").module
-    for start in range(0, len(ids), MAX_FACT_SELECTORS):
-        found = secrets.credential_use_facts(
-            project_id, ids[start:start + MAX_FACT_SELECTORS], [], None, personal_user_id=user_id)
-        references.update(found.get("references") or {})
+    configurations (``read_configuration_facts``) and of their references, and, when one is Entra-delegated and may be
+    probed (the actor holds the permission, or it is their own personal one: #7290), the verified person (here, on the
+    request's own greenlet: the probes run on others), or the code that refused it. Raises ``AdmissionDenied`` or
+    whatever the reads raise; for an actor without the permission, ``DENIED_RBAC`` instead (as a single probe)."""
+    permitted = _may_probe(actor_user_id, project_id)
+    if not permitted and (onboarding or user_id != actor_user_id):   # as a single probe: before any facts
+        raise _deny("DENIED_RBAC")
+    try:
+        configurations = read_configuration_facts([(item, project_id) for item in uuids])
+        ids = sorted({fact["id"] for fact in configurations.values() if isinstance(fact, dict) and "id" in fact})
+        references = {}
+        secrets = this.for_module("secrets").module
+        for start in range(0, len(ids), MAX_FACT_SELECTORS):
+            found = secrets.credential_use_facts(
+                project_id, ids[start:start + MAX_FACT_SELECTORS], [], None, personal_user_id=user_id)
+            references.update(found.get("references") or {})
+    except Exception as exc:  # pylint: disable=W0703
+        if permitted:
+            raise
+        log.error("governed check_connection: the batch facts could not be read (%s)", type(exc).__name__)
+        raise _deny("DENIED_RBAC") from None
     person = None
-    if any(isinstance(item, dict) and item.get("auth_mode") == DELEGATED_AUTH_MODE for item in references.values()):
+    if any(isinstance(item, dict) and item.get("auth_mode") == DELEGATED_AUTH_MODE
+           and (permitted or _own_personal(item, user_id, actor_user_id)) for item in references.values()):
         try:
             person = _probe_person(module, actor_user_id)
         except AdmissionDenied as denied:
             person = denied.reason_code
     return types.SimpleNamespace(
-        facts=types.SimpleNamespace(configurations=configurations, found={"references": references}), person=person)
+        facts=types.SimpleNamespace(configurations=configurations, found={"references": references}), person=person,
+        permitted=permitted)
 
 
 def governed_check_connection_many(  # pylint: disable=R0913,R0914
-    module, project_id, items, user_id, actor_user_id=None, onboarding=False, parallel=PROBE_PARALLEL,
+    module, project_id, items, user_id, actor_user_id=None, onboarding=False, parallel=PROBE_PARALLEL, reuse=False,
 ) -> list:
     """Test several saved credentials of one project: ``items`` is ``[{"configuration_uuid", "config_type"}]``. The
     actor's permission and the facts of all the configurations are read once; the probes then run at the same time, at
     most ``parallel`` of them (each is a task of the ``governed_ops`` pool, which has as many slots), instead of one
     after the other on the greenlet of the request. One answer per item, in order, each as ``governed_check_connection``
-    answers it (a refusal of one item does not touch the others). Never raises."""
+    answers it (a refusal of one item does not touch the others, and an actor without the permission is refused item
+    by item, their own personal references probed: #7290); ``reuse`` as there (a validator's batch, #7294).
+    Never raises."""
     answers = [None] * len(items) if isinstance(items, (list, tuple)) else []
     if not answers:
         return answers
@@ -526,7 +575,8 @@ def governed_check_connection_many(  # pylint: disable=R0913,R0914
     try:
         if not module.governance_profile.enabled:
             raise _deny("DEPENDENCY_UNAVAILABLE")
-        shared = _shared_checks(module, project_id, sorted({item[1] for item in valid}), user_id, actor_user_id)
+        shared = _shared_checks(
+            module, project_id, sorted({item[1] for item in valid}), user_id, actor_user_id, onboarding)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703
@@ -542,7 +592,7 @@ def governed_check_connection_many(  # pylint: disable=R0913,R0914
     def probe(item):
         index, configuration_uuid, config_type = item
         answers[index] = governed_check_connection(
-            module, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, shared)
+            module, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, shared, reuse)
 
     with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(valid)))) as pool:
         list(pool.map(probe, valid))

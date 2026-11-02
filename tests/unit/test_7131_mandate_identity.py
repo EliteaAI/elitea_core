@@ -512,6 +512,23 @@ def test_a_second_release_is_served_from_the_cache_after_the_consent_is_read_aga
     assert [call[0] for call in env.offline.calls] == ["release", "release"]   # the consent is checked every time
 
 
+def test_a_mandate_run_with_two_slots_of_one_descriptor_redeems_the_consent_once(ns, env, monkeypatch):
+    """#7294 review M1: a mandate run's slots stay on the sequential loop (they redeem one consent); the second slot is
+    served from the token the first one minted. The consent is still read for each slot."""
+    ns.need_transport()
+    binding = env.seed_agent()
+    mandate = new_mandate(env, ns, binding)
+    run = admitted(ns, env, mandate, Delegated(env, binding, mandate), Delegated(env, binding, mandate, tool_id=2))
+    real = env.oidc.auth_oidc_obo_offline_assertion
+    monkeypatch.setattr(env.oidc, "auth_oidc_obo_offline_assertion",   # a redemption takes real time
+                        lambda *a, **k: time.sleep(0.05) or real(*a, **k))
+    reply = run.release()
+    assert reply["ok"] is True, reply
+    assert len(reply["releases"]) == 2
+    assert [call[0] for call in env.offline.calls] == ["release", "release"]
+    assert len(env.oidc.redeemed) == 1 and len(env.entra.posts) == 1
+
+
 def test_a_withdrawn_consent_stops_the_next_release_even_with_a_cached_token(ns, env):
     ns.need_transport()   # the release seals its reply (the shared transport; absent in a lone checkout)
     binding = env.seed_agent()

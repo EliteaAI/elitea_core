@@ -51,6 +51,10 @@ MIN_CUSTODY_KEY_CHARS = 32
 SLOT_MARGIN_S = 60                         # the slot stops being usable this long before the token does
 MAX_CACHE_ENTRIES = 1024
 PROBE_TTL_S = 60
+# An exchange Entra refused (a status-coded answer of its token endpoint) is not asked again for the same key this long
+# (#7294 P-04): a run that retries at once gets the same refusal without a second assertion RPC and token POST. A
+# transport error or a timeout is not remembered. A cached token still wins
+NEGATIVE_TTL_S = 5
 MAX_TOKEN_CHARS = 16_384
 ENTRA_ISSUER = re.compile(r"^https://(login\.microsoftonline\.com|sts\.windows\.net)/[0-9a-fA-F-]{36}(/v2\.0)?/?$")
 ASSERTION_SOURCES = frozenset({"login", "connected_account"})
@@ -85,11 +89,13 @@ OFFLINE_RPC = "auth_oidc_obo_offline_assertion"
 
 
 class DelegationRefused(Exception):
-    """The delegated value cannot be produced; ``code`` says why (no secret, no dependency text)."""
+    """The delegated value cannot be produced; ``code`` says why (no secret, no dependency text). ``answered``: Entra's
+    token endpoint itself gave this answer (a status-coded refusal), not a transport error or this request's timeout."""
 
-    def __init__(self, code):
+    def __init__(self, code, answered=False):
         super().__init__(code)
         self.code = code
+        self.answered = answered
 
 
 # --- the subject of the run ------------------------------------------------------------------
@@ -337,33 +343,65 @@ def _exchange(url, client, assertion, scopes, left) -> tuple:
             expires_in = 0
         if not isinstance(token, str) or not token or expires_in <= 0 or \
                 str(body.get("token_type", "")).lower() != "bearer":
-            raise DelegationRefused(EXCHANGE_FAILED)
+            raise DelegationRefused(EXCHANGE_FAILED, answered=True)
         return "ok", token, time.time() + expires_in
     error = body.get("error") if isinstance(body.get("error"), str) else None
     codes = [code for code in body.get("error_codes") or [] if isinstance(code, int)][:4]
     log.warning("entra obo: the exchange was refused (status=%s error=%s codes=%s)", response.status_code,
                 error if error and re.fullmatch(r"[a-z_]{1,40}", error) else "other", codes)
     if response.status_code >= 500 or response.status_code in (408, 429):
-        raise DelegationRefused(UNAVAILABLE)
+        raise DelegationRefused(UNAVAILABLE, answered=True)
     if error == "invalid_grant":
         return "invalid_grant", None, None
     if error in ("invalid_client", "unauthorized_client"):
-        raise DelegationRefused(APP_UNAVAILABLE)
-    raise DelegationRefused(EXCHANGE_FAILED)
+        raise DelegationRefused(APP_UNAVAILABLE, answered=True)
+    raise DelegationRefused(EXCHANGE_FAILED, answered=True)
 
 
 # (tid, oid, client id, resource, scopes[, "offline:<consent>"]) -> (token, expires_at, custody end or None): this
 # process only. A token redeemed from a mandate owner's offline consent (#7131) carries the consent in its key
 _CACHE = {}
 _PROBES = {}  # (reference id, tid, oid) -> (code or None, until)
+_FAILED = {}  # a key of _CACHE -> (the code of the exchange that failed, monotonic until)
 _LOCK = threading.Lock()
 
 
 def forget() -> None:
-    """Drop every cached token and probe outcome (tests, and a process that wants to)."""
+    """Drop every cached token, failed exchange and probe outcome (tests, and a process that wants to)."""
     with _LOCK:
         _CACHE.clear()
         _PROBES.clear()
+        _FAILED.clear()
+
+
+def _failed_recently(key) -> Optional[str]:
+    """The code of an exchange of this key that failed less than ``NEGATIVE_TTL_S`` ago, else None."""
+    with _LOCK:
+        failed = _FAILED.get(key)
+        if failed is not None and failed[1] > time.monotonic():
+            return failed[0]
+        _FAILED.pop(key, None)
+        return None
+
+
+def _remember_failure(key, code) -> None:
+    now = time.monotonic()
+    with _LOCK:
+        if len(_FAILED) >= MAX_CACHE_ENTRIES:
+            for stale in [item for item, (_, until) in _FAILED.items() if until <= now] or list(_FAILED)[:MAX_CACHE_ENTRIES // 4]:
+                _FAILED.pop(stale, None)
+        _FAILED[key] = (code, now + NEGATIVE_TTL_S)
+
+
+def _exchange_once(key, url, client, assertion, scopes, timeout_s) -> tuple:
+    """``_exchange``, a refusal Entra gave remembered for the key (``NEGATIVE_TTL_S``). A transport error or a timeout
+    (bounded by this request's own time left) is not remembered: the next request, with its own budget, asks again."""
+    try:
+        return _exchange(url, client, assertion, scopes, timeout_s)
+    except DelegationRefused as refused:
+        if refused.answered:
+            _remember_failure(key, refused.code)
+        raise
 
 
 def forget_material(material_ref) -> int:
@@ -373,6 +411,8 @@ def forget_material(material_ref) -> int:
         mine = [key for key in _CACHE if len(key) > 5 and key[5] == tag]
         for key in mine:
             del _CACHE[key]
+        for key in [key for key in _FAILED if len(key) > 5 and key[5] == tag]:
+            del _FAILED[key]
     return len(mine)
 
 
@@ -386,6 +426,8 @@ def forget_subject(tid, oid) -> int:
         mine = [key for key in _CACHE if key[0] == tid and key[1] == oid]
         for key in mine:
             del _CACHE[key]
+        for key in [key for key in _FAILED if key[0] == tid and key[1] == oid]:
+            del _FAILED[key]
         for key in [key for key in _PROBES if key[1] == tid and key[2] == oid]:
             del _PROBES[key]
     return len(mine)
@@ -449,6 +491,9 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
     hit = _cached(key, now)
     if hit is not None:
         return hit
+    failed = _failed_recently(key)
+    if failed is not None:   # Entra refused this a moment ago: the same answer, nothing asked (P-04)
+        raise DelegationRefused(failed)
     url = f"https://{AUTHORITY_HOST}/{tenant}/oauth2/v2.0/token"
     deadline = deadline if deadline is not None else time.monotonic() + BUDGET_S
     left = lambda: max(0.0, deadline - time.monotonic())  # noqa: E731
@@ -459,7 +504,7 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
         assertion, custody["ends"] = _assertion(module, person, refresh, left, client[0])
         if left() < MIN_CALL_S:
             raise DelegationRefused(UNAVAILABLE)   # not started: it would end after the worker stopped waiting
-        return _exchange(url, client, assertion, scopes, left())
+        return _exchange_once(key, url, client, assertion, scopes, left())
 
     outcome, token, expires_at = exchange(False)
     if outcome == "invalid_grant":   # the assertion expired (or was revoked): renew it once, try once more
@@ -468,6 +513,7 @@ def acquire(module, person: dict, delegation: dict, project_id, deadline=None) -
         log.info("entra obo: the assertion was refreshed once")
         outcome, token, expires_at = exchange(True)
         if outcome != "ok":
+            _remember_failure(key, EXCHANGE_FAILED)
             raise DelegationRefused(EXCHANGE_FAILED)
     _keep(key, token, expires_at, custody["ends"], now)
     return token, expires_at
@@ -548,14 +594,18 @@ def acquire_offline(module, person: dict, delegation: dict, project_id, material
     hit = _cached(key, now)
     if hit is not None:
         return hit
+    failed = _failed_recently(key)
+    if failed is not None:   # as in acquire (P-04): the consent is not redeemed again for a refusal of a moment ago
+        raise DelegationRefused(failed)
     deadline = deadline if deadline is not None else time.monotonic() + BUDGET_S
     left = lambda: max(0.0, deadline - time.monotonic())  # noqa: E731
     assertion = _offline_assertion(module, person, material, left, client[0])
     if left() < MIN_CALL_S:
         raise DelegationRefused(UNAVAILABLE)
-    outcome, token, expires_at = _exchange(
-        f"https://{AUTHORITY_HOST}/{tenant}/oauth2/v2.0/token", client, assertion, scopes, left())
+    outcome, token, expires_at = _exchange_once(
+        key, f"https://{AUTHORITY_HOST}/{tenant}/oauth2/v2.0/token", client, assertion, scopes, left())
     if outcome != "ok":   # a freshly redeemed assertion: nothing to renew
+        _remember_failure(key, EXCHANGE_FAILED)
         raise DelegationRefused(EXCHANGE_FAILED)
     _keep(key, token, expires_at, None, now)
     return token, expires_at
