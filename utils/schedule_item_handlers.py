@@ -19,7 +19,7 @@ from ..models.pd.entity_schedule import (
     ScheduleRiskCheck,
     ScheduleUpdate,
 )
-from ..models.pd.schedule_list import DbId, RunStatus
+from ..models.pd.schedule_list import DbId, RunStatus, RunTrigger
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .error_text import public_event, public_reason
 from .schedule_access import (
@@ -86,6 +86,8 @@ class RunsQuery(BaseModel):
     limit: int = Field(default=20, ge=1)
     offset: int = Field(default=0, ge=0)
     status: RunStatus | None = None
+    trigger: RunTrigger | None = None
+    version_id: DbId | None = None
 
 
 def _iso(moment) -> str | None:
@@ -537,8 +539,14 @@ class ScheduleItemHandlers:
         """Answer the run records of a schedule, newest first, with the total before paging.
 
         Who may call: the owner with `schedules.details`, or a schedules admin.
-        Errors: 400 invalid query option; 403; 404.
+        Each row has `version_label`, `duration_ms`, `tokens` and `cost_usd` (null while the version is gone or
+        the usage store has no row). `trigger` is the stored value: `cron`, `manual` or `test`.
+        Filters: `status`, `trigger` and `version_id`; they combine.
+        Errors: 400 invalid query option (an unknown `status` or `trigger`, or a `version_id` that is not an id);
+        403; 404.
         """
+        # Late, like the run detail: only the run routes read the usage store
+        from .schedule_run_detail import usage_summaries, version_labels
         try:
             query = RunsQuery.model_validate(dict(request.args))
         except ValidationError as e:
@@ -552,13 +560,24 @@ class ScheduleItemHandlers:
             where = [EntityScheduleRun.schedule_id == schedule_id]
             if query.status:
                 where.append(EntityScheduleRun.status == query.status)
+            if query.trigger:
+                where.append(EntityScheduleRun.trigger == query.trigger)
+            if query.version_id:
+                where.append(EntityScheduleRun.version_id == query.version_id)
             rows = session.execute(
                 select(*(getattr(EntityScheduleRun, name) for name in RUN_FIELDS)).where(*where)
                 .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc())
                 .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
             ).mappings().all()
             total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
-            return {"total": total, "rows": [_run_row(row) for row in rows]}, 200
+            # One lookup for the whole page: a call per row would cost a query per run
+            labels = version_labels(session, [row["version_id"] for row in rows])
+            usage = usage_summaries(session, project_id, [SimpleNamespace(**row) for row in rows])
+            return {"total": total, "rows": [
+                {**_run_row(row), "version_label": labels.get(row["version_id"]),
+                 "tokens": usage[row["id"]][0], "cost_usd": usage[row["id"]][1]}
+                for row in rows
+            ]}, 200
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _run_detail(self, project_id: int, schedule_id: int, run_id: int):

@@ -8,6 +8,7 @@ DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]  # the database integer range
 # The values the list and runs options accept; Swagger reads them with typing.get_args (US-55 D3)
 EntityType = Literal['agent', 'pipeline']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
+RunTrigger = Literal['cron', 'manual', 'test']
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled']
 SortOrder = Literal['asc', 'desc']
 

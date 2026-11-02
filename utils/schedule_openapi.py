@@ -8,7 +8,7 @@ from typing import get_args
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
-from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
+from ..models.pd.schedule_list import EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
@@ -58,6 +58,10 @@ RUNS_QUERY_PARAMS = [
      "description": "Rows to skip"},
     {"name": "status", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunStatus))},
      "description": "Only runs with this status"},
+    {"name": "trigger", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunTrigger))},
+     "description": "Only runs with this stored trigger; `cron` is a scheduled run"},
+    {"name": "version_id", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1},
+     "description": "Only runs of this version"},
 ]
 EXPORT_QUERY_PARAMS = [
     {"name": "ids", "in": "query", "schema": {"type": "string"},
@@ -96,7 +100,7 @@ LIST_EXAMPLE = {"total": 1, "run_without_asking_allowed": False, "rows": [{
 RUNS_EXAMPLE = {"total": 1, "rows": [{
     "id": 77, "trigger": "cron", "status": "success", "reason": None, "conversation_id": 901, "requested_by": 20,
     "started_at": "2026-10-21T07:00:00+00:00", "finished_at": "2026-10-21T07:01:10+00:00",
-    "version_id": 420, "duration_ms": 70000,
+    "version_id": 420, "duration_ms": 70000, "version_label": "v3", "tokens": 2140, "cost_usd": 0.03,
 }]}
 RUN_DETAIL_EXAMPLE = {
     "id": 78, "trigger": "test", "status": "success", "reason": None, "conversation_id": 902, "requested_by": 20,
@@ -397,7 +401,9 @@ OPERATIONS = {
         "description": _text(
             "Answer the run records of one schedule, newest first, with the total before paging.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
-            "400 an invalid query option; 403 no permission; 404 not found"),
+            "Each row has `version_label`, `duration_ms`, `tokens` and `cost_usd`; they are null when unknown.",
+            "400 an invalid query option (an unknown `status` or `trigger`, or a `version_id` that is not an id); "
+            "403 no permission; 404 not found"),
         "parameters": ITEM_PARAMS + RUNS_QUERY_PARAMS,
         "responses": _responses(200, "`total` and one page of `rows`", RUNS_EXAMPLE, {400: None, 403: None, 404: None}),
     },
