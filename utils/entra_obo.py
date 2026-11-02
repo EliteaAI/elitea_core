@@ -83,8 +83,12 @@ STALE = "STALE_CONTEXT"
 # a mandate run acting with its owner's offline consent (#7131): none, withdrawn, or refused by Microsoft
 CONSENT_REQUIRED = "DENIED_MANDATE_CONSENT_REQUIRED"
 CONSENT_EXPIRED = "DENIED_MANDATE_CONSENT_EXPIRED"
+# the same for a scoped API token's run acting with its owner's offline consent (#7337)
+TOKEN_CONSENT_REQUIRED = "DENIED_TOKEN_CONSENT_REQUIRED"
+TOKEN_CONSENT_EXPIRED = "DENIED_TOKEN_CONSENT_EXPIRED"
 CODES = (SUBJECT_MISMATCH, MANDATE_UNSUPPORTED, CALLER_UNSUPPORTED, ASSERTION_UNAVAILABLE, SOURCE_UNSUPPORTED,
-         APP_UNAVAILABLE, EXCHANGE_FAILED, CONSENT_REQUIRED, CONSENT_EXPIRED)
+         APP_UNAVAILABLE, EXCHANGE_FAILED, CONSENT_REQUIRED, CONSENT_EXPIRED, TOKEN_CONSENT_REQUIRED,
+         TOKEN_CONSENT_EXPIRED)
 OFFLINE_RPC = "auth_oidc_obo_offline_assertion"
 
 
@@ -572,8 +576,10 @@ def _offline_assertion(module, person, material, left, client_id) -> str:
 
 
 def acquire_offline(module, person: dict, delegation: dict, project_id, material, deadline=None) -> tuple:  # pylint: disable=R0913
-    """``acquire`` for a mandate run acting with its owner's offline consent (#7131): ``person`` is the owner's subject
-    frozen in the mandate, ``material`` their consent read for this mandate (``mandate_identity.release_person``). The
+    """``acquire`` for a mandate run acting with its owner's offline consent (#7131), or a scoped API token's run acting
+    with its owner's (#7337: the same, with ``token:<id>`` as the holder): ``person`` is the owner's subject frozen in the
+    mandate (the token's: the owner's linked one), ``material`` their consent read for this holder
+    (``mandate_identity.release_person``, ``token_identity.release_person``). The
     same descriptor checks and exchange; the assertion is redeemed from the consent, not from a live sign-in. Tokens are
     cached apart from the owner's own sign-in (the key names the consent), so withdrawing it stops them and a run of the
     owner's never gets one. Raises ``DelegationRefused``."""

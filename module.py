@@ -789,6 +789,12 @@ class Module(module.ModuleModel):
             except Exception:  # pylint: disable=W0703
                 log.exception("mandate identity schema: auto-migration failed")
             try:
+                from .utils import token_identity  # pylint: disable=C0415
+                if token_identity.allowed(self):   # (#7337) only where API tokens may act with their owner's consent
+                    token_identity.ensure_table()
+            except Exception:  # pylint: disable=W0703
+                log.exception("token identity schema: the consent table could not be created")
+            try:
                 from .utils.mandate_toolkit_schema import (  # pylint: disable=C0415
                     apply_toolkit_mandates, project_ids_missing_toolkit_mandates,
                 )

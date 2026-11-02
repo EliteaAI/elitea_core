@@ -21,7 +21,8 @@ DEFAULT_LIMIT, MAX_LIMIT, MAX_SEARCH = 20, 50, 128
 STATUS = {
     "INVALID_REQUEST": 400, "APPROVAL_REQUIRED": 400, "DIGEST_REQUIRED": 400,
     "UNAUTHENTICATED": 401,
-    "FORBIDDEN": 403, "SELF_APPROVAL": 403, "DENIED_BINDING": 403,
+    "FORBIDDEN": 403, "SELF_APPROVAL": 403, "DENIED_BINDING": 403, "DENIED_DELEGATION_UNSUPPORTED_CALLER": 403,
+    "GOVERNANCE_NOT_ENFORCED": 409,
     "NOT_FOUND": 404, "VERSION_NOT_FOUND": 404,
     "PAYLOAD_TOO_LARGE": 413,
     "INVALID_STATE": 409, "CONCURRENT_CHANGE": 409, "BINDING_EXISTS": 409, "INVALID_TRANSITION": 409,
@@ -32,6 +33,9 @@ MESSAGES = {
     "INVALID_REQUEST": "the request is not valid",
     "UNAUTHENTICATED": "sign in to continue",
     "FORBIDDEN": "you are not allowed to do this",
+    # (#7337) an owner's consent actions: their own signed-in session only, and only while governance is enforced
+    "DENIED_DELEGATION_UNSUPPORTED_CALLER": "Consent needs your own signed-in session, not an API token.",
+    "GOVERNANCE_NOT_ENFORCED": "Consent applies only while credential governance is enforced; nothing was changed.",
     "NOT_FOUND": "no such record",
     "PAYLOAD_TOO_LARGE": "the request body is too large",
     "DEPENDENCY_UNAVAILABLE": "the request could not be completed; nothing was changed",
@@ -72,6 +76,17 @@ def current_actor():
     user = auth.current_user() or {}
     actor = user.get("id")
     return actor if isinstance(actor, int) and not isinstance(actor, bool) and actor > 0 else None
+
+
+def session_actor():
+    """The signed-in person asking (``flask.g.auth`` of type user, the actor itself), or None: never a token's owner,
+    whatever the token (an owner's consent is their act in their own session, #7337)."""
+    from .credential_probe import _session_holder  # pylint: disable=C0415
+    actor = current_actor()
+    holder = _session_holder()
+    if actor is None or getattr(holder, "type", None) != "user" or str(getattr(holder, "id", None)) != str(actor):
+        return None
+    return actor
 
 
 def has_permission(permission, project_id):

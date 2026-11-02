@@ -24,6 +24,8 @@ from fixtures.governed_credentials import Credential  # noqa: E402  pylint: disa
 from fixtures.helpers import load_module_with_stubs  # noqa: E402  pylint: disable=C0413
 
 PKG = admission_env.PKG
+HOLDER_PATTERN = __import__("re").compile(
+    r"^(mandate:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|token:[1-9][0-9]{0,9})$")
 TID = "11111111-2222-3333-4444-555555555555"
 OID = "oid-owner-5"
 ENTRA = f"https://login.microsoftonline.com/{TID}/v2.0"
@@ -38,6 +40,8 @@ ACTORS = {
     "token_manage": (11, "admin", {"governance.bindings.manage"}),
     "owner_view": (OWNER, "admin", {"governance.bindings.view"}),   # the owner, who may only read mandates
     "anonymous": (None, "admin", set()),
+    # #7337 owner mode: a project editor who is neither platform nor project admin (the schedule rights only)
+    "owner_member": (OWNER, "editor", None), "member": (22, "editor", None),
 }
 
 
@@ -102,9 +106,11 @@ def ns(tmp_path_factory):
                                                f"{PKG}.models.pd.mandate_api")
     ns.mandate_queries = load_module_with_stubs(PLUGIN_ROOT / "utils" / "mandate_queries.py",
                                                 f"{PKG}.utils.mandate_queries")
+    for name in ("constants", "schedule_access"):   # the owner mode's project gate (#7337)
+        load_module_with_stubs(PLUGIN_ROOT / "utils" / f"{name}.py", f"{PKG}.utils.{name}")
     ns.endpoints = types.SimpleNamespace(**{
         name: load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / f"{name}.py", f"{PKG}.api.v2.{name}")
-        for name in ("autonomous_mandates", "autonomous_mandate_action", "governance_toolkits")})
+        for name in ("autonomous_mandates", "autonomous_mandate_action", "governance_toolkits", "token_identity")})
     yield ns
     sys.modules.clear()
     sys.modules.update(saved)
@@ -120,6 +126,8 @@ class Fakes:
         return self
 
     def auth_oidc_obo_offline_grant(self, tid, oid, holder, iat, nonce, signature):
+        if not HOLDER_PATTERN.match(holder):   # auth_oidc's own holder check (#7337)
+            return {"ok": False, "code": "REQUEST_REFUSED"}
         assert signature == self.obo.sign_fields(CUSTODY_KEY, ("v1-offline-grant", tid, oid, holder), iat, nonce)
         self.granted.append((tid, oid, holder))
         sealed = self.obo.seal(self.obo.seal_key(CUSTODY_KEY), REFRESH,
@@ -435,3 +443,152 @@ def test_the_toolkit_picker_lists_the_projects_toolkits_by_name_for_who_may_view
         assert hit(ns, env, "governance_toolkits", "get", args={"search": "nothing"})[0] == {"total": 0, "rows": []}
         other, _ = _in_project(ns, env, 2, "governance_toolkits", "get")
         assert other == {"total": 0, "rows": []}   # another project's toolkits are its own
+
+
+# --- owner mode (#7337 item 8): the consent is the owner's own act, with no governance permission ----------------------
+
+def owner_hit(ns, env, endpoint, method, *, actor="owner_member", body=None, governed=True, **path):
+    ns.actor, ns.request.body, ns.request.args = actor, body, {}
+    ns.request.content_length = None if body is None else len(json.dumps(body))
+    if env.holder.type == "user":   # the session is the actor's own unless a test says otherwise
+        env.holder = types.SimpleNamespace(type="user", id=ACTORS[actor][0], reference="session-reference-made-up")
+    built = module(ns, env) if governed else _ungoverned(ns, env)
+    handler = getattr(ns.endpoints, endpoint).OwnerAPI(built)
+    payload, status = getattr(handler, method)(project_id=1, **path)
+    json.dumps(payload)
+    return payload, status
+
+
+def owner_act(ns, env, mandate_id, action, actor="owner_member", governed=True, **more):
+    return owner_hit(ns, env, "autonomous_mandate_action", "post", actor=actor, mandate_id=uuid.UUID(str(mandate_id)),
+                     body={"action": action, **more}, governed=governed)
+
+
+def _ungoverned(ns, env):
+    built = ns.env.module(governed=False)
+    built.descriptor = types.SimpleNamespace(config={"mandate_identity_sources": list(env.sources)})
+    built.context = types.SimpleNamespace(rpc_manager=env.fakes)
+    return built
+
+
+def test_the_owner_without_any_admin_role_consents_previews_and_withdraws_in_owner_mode(ns, env):
+    mandate_id = active_mandate(ns, env)
+    assert act(ns, env, mandate_id, "consent", actor="owner_member")[1] == 403   # administration mode is not theirs
+    preview, status = owner_act(ns, env, mandate_id, "consent_preview")
+    assert status == 200 and preview["covered"] == [{"toolkits": ["sharepoint"]}]
+    answer, status = owner_act(ns, env, mandate_id, "consent")
+    assert status == 200 and answer["ok"] is True and answer["id"] == mandate_id
+    assert env.fakes.granted == [(TID, OID, f"mandate:{mandate_id}")]
+    page, status = owner_hit(ns, env, "autonomous_mandates", "get")
+    assert status == 200 and [(row["id"], row["consented"]) for row in page["rows"]] == [(mandate_id, True)]
+    assert REFRESH not in json.dumps([answer, page])
+    assert owner_act(ns, env, mandate_id, "withdraw_consent") == ({"ok": True, "id": mandate_id}, 200)
+    assert [reason for _, reason in env.fakes.retired] == ["CONSENT_WITHDRAWN"]
+
+
+@pytest.mark.parametrize("case, status, code", [
+    ("other_member", 403, "CONSENT_OWNER_ONLY"),                   # a member who is not the owner
+    ("token", 403, "DENIED_DELEGATION_UNSUPPORTED_CALLER"),        # the owner's API token
+    ("other_subject", 403, "DENIED_SUBJECT_MISMATCH"),
+    ("unverified", 409, "DENIED_ASSERTION_UNAVAILABLE"),
+])
+def test_owner_mode_consent_keeps_the_same_session_and_subject_checks(ns, env, case, status, code):
+    mandate_id = active_mandate(ns, env)
+    actor = "member" if case == "other_member" else "owner_member"
+    if case == "token":
+        env.holder = types.SimpleNamespace(type="token", id=OWNER, reference="token-reference")
+    if case == "other_subject":
+        env.verify_result["principal"]["evidence"]["oid"] = "someone-else"
+    if case == "unverified":
+        env.verify_result = {"ok": False, "reason_code": "IDENTITY_EXPIRED"}
+    refused, got = owner_act(ns, env, mandate_id, "consent", actor=actor)
+    assert (got, refused["code"]) == (status, code)
+    assert env.fakes.granted == [] and env.fakes.kept == []
+
+
+def test_owner_mode_is_for_the_owners_consent_only(ns, env):
+    mandate_id = active_mandate(ns, env)
+    owner_act(ns, env, mandate_id, "consent")
+    for action, more in (("approve", {"approval_ref": "C", "policy_revision": "r"}), ("revoke", {}), ("suspend", {})):
+        refused, status = owner_act(ns, env, mandate_id, action, **more)
+        assert (status, refused["code"]) == (403, "FORBIDDEN")   # approvals and the lifecycle stay operator acts
+    refused, status = owner_act(ns, env, mandate_id, "withdraw_consent", actor="member")
+    assert (status, refused["code"]) == (403, "WITHDRAW_NOT_ALLOWED")   # no operator withdrawal in owner mode
+    assert owner_hit(ns, env, "autonomous_mandates", "get", actor="member")[0]["rows"] == []   # only one's own
+    assert owner_hit(ns, env, "autonomous_mandates", "get", actor="anonymous")[1] == 403
+    assert owner_act(ns, env, mandate_id, "consent", actor="anonymous")[1] == 403
+
+
+def test_the_list_says_whether_api_tokens_may_act_with_their_owners_sign_in(ns, env):
+    assert hit(ns, env, "autonomous_mandates", "get")[0]["token_identity"] is False
+    env.sources = ["owner_delegated", "token_owner_delegated"]
+    page = hit(ns, env, "autonomous_mandates", "get")[0]
+    assert page["token_identity"] is True and page["identity_sources"] == ["owner_delegated"]   # not a mandate's
+
+
+# --- fix round (#7337 review M-2, S-3): owner mode is the owner's own session, and only under enforce -----------------
+
+TOKEN_HOLDERS = {
+    "unscoped token": types.SimpleNamespace(type="token", id=21, reference=None),
+    "admin-scoped token": types.SimpleNamespace(type="token", id=22, reference=None),
+}
+
+
+@pytest.mark.parametrize("holder", sorted(TOKEN_HOLDERS))
+@pytest.mark.parametrize("route", ["consent", "consent_preview", "withdraw_consent", "list", "token_consent",
+                                   "token_withdraw", "token_status"])
+def test_no_api_token_reaches_an_owner_consent_route(ns, env, holder, route):
+    """Whatever the token: unscoped, or scoped with admin on the project (the hook lets both through to owner mode)."""
+    mandate_id = active_mandate(ns, env)
+    owner_act(ns, env, mandate_id, "consent")   # a consent given in the owner's own session
+    retired = list(env.fakes.retired)
+    env.holder = TOKEN_HOLDERS[holder]
+    ns.actor = "owner_member"
+    if route == "list":
+        refused, status = owner_hit(ns, env, "autonomous_mandates", "get")
+    elif route.startswith("token_"):
+        ns.request.body = None if route == "token_status" else {
+            "action": "consent" if route == "token_consent" else "withdraw", "token_id": 21}
+        ns.request.content_length = None if ns.request.body is None else len(json.dumps(ns.request.body))
+        handler = ns.endpoints.token_identity.DefaultAPI(module(ns, env))
+        refused, status = handler.get() if route == "token_status" else handler.post()
+    else:
+        refused, status = owner_act(ns, env, mandate_id, route)
+    expected = "FORBIDDEN" if route == "token_status" else "DENIED_DELEGATION_UNSUPPORTED_CALLER"
+    assert (status, refused["code"]) == (403, expected)
+    assert env.fakes.retired == retired and len(env.fakes.granted) == 1   # nothing withdrawn, nothing asked
+
+
+@pytest.mark.parametrize("route", ["consent", "consent_preview", "withdraw_consent", "list"])
+def test_owner_mode_refuses_under_off_and_audit_only_with_nothing_read(ns, env, monkeypatch, route):
+    mandate_id = active_mandate(ns, env)
+    reads = []
+    real = ns.tools.db.get_session
+    monkeypatch.setattr(ns.tools.db, "get_session", lambda project_id=None: reads.append(project_id) or real(project_id))
+    if route == "list":
+        refused, status = owner_hit(ns, env, "autonomous_mandates", "get", governed=False)
+    else:
+        refused, status = owner_act(ns, env, mandate_id, route, governed=False)
+    assert (status, refused["code"]) == (409, "GOVERNANCE_NOT_ENFORCED")
+    assert reads == [] and env.fakes.granted == [] and env.fakes.kept == [] and env.fakes.retired == []
+
+
+def test_the_token_consent_route_parses_the_projects_and_the_named_credentials_strictly(ns, env):
+    """(#7337, C9-SEC-81) The handler's own parsing; the consent logic is test_7337_token_delegated_consent's."""
+    env.sources = ["owner_delegated", "token_owner_delegated"]
+    env.user_rows[OWNER] = {"id": OWNER, "idp_issuer": ENTRA, "idp_tid": TID, "idp_oid": OID}
+    env.holder = types.SimpleNamespace(type="user", id=OWNER, reference="session-reference-made-up")
+    ns.actor = "owner_member"
+    handler = ns.endpoints.token_identity.DefaultAPI(module(ns, env))
+    for projects in ("1,abc", "0", ",".join(str(n) for n in range(1, 23))):
+        ns.request.args, ns.request.body, ns.request.content_length = {"projects": projects}, None, None
+        assert handler.get()[1] == 400
+    ns.request.args = {}
+    for body in ({"action": "consent", "token_id": 21, "credentials": [{"project_id": 1, "credential_ref": "x",
+                                                                         "refresh_token": "x"}]},
+                 {"action": "consent", "token_id": 21, "credentials": [{"project_id": True, "credential_ref": "x"}]},
+                 {"action": "consent", "token_id": 21, "credentials": [{"project_id": 1}] * 65}):
+        ns.request.body, ns.request.content_length = body, len(json.dumps(body))
+        refused, status = handler.post()
+        assert status == 400 and refused["code"] == "INVALID_REQUEST"
+    assert env.fakes.granted == [] and env.fakes.kept == []
