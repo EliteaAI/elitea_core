@@ -18,14 +18,16 @@ def _iso(moment):
     return moment.isoformat() if moment else None
 
 
-def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0):
+def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, owner_user_id=None):
     """``{total, rows, identity_sources}``: one page of the project's mandates, newest change first, and which
-    identities the deployment lets a mandate name."""
+    identities the deployment lets a mandate name. ``owner_user_id``: that owner's only (the owner's own view, #7337)."""
     from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
     sources = allowed_sources(module)
     identity = (Mandate.identity_source, Mandate.identity_material_ref, Mandate.identity_consented_at) if sources else ()
     conditions = [Mandate.project_id == project_id] + ([Mandate.state == state] if state in MANDATE_STATES else [])
+    if owner_user_id is not None:
+        conditions.append(Mandate.owner_user_id == owner_user_id)
     statement = (
         select(Mandate.id, Mandate.application_id, Mandate.agent_version, Mandate.owner_user_id, Mandate.state,
                Mandate.suspended_reason, Mandate.revision, Mandate.allowed_operations, Mandate.max_runtime_s,

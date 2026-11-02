@@ -38,6 +38,8 @@ ACTORS = {
     "token_manage": (11, "admin", {"governance.bindings.manage"}),
     "owner_view": (OWNER, "admin", {"governance.bindings.view"}),   # the owner, who may only read mandates
     "anonymous": (None, "admin", set()),
+    # #7337 owner mode: a project editor who is neither platform nor project admin (the schedule rights only)
+    "owner_member": (OWNER, "editor", None), "member": (22, "editor", None),
 }
 
 
@@ -102,6 +104,8 @@ def ns(tmp_path_factory):
                                                f"{PKG}.models.pd.mandate_api")
     ns.mandate_queries = load_module_with_stubs(PLUGIN_ROOT / "utils" / "mandate_queries.py",
                                                 f"{PKG}.utils.mandate_queries")
+    for name in ("constants", "schedule_access"):   # the owner mode's project gate (#7337)
+        load_module_with_stubs(PLUGIN_ROOT / "utils" / f"{name}.py", f"{PKG}.utils.{name}")
     ns.endpoints = types.SimpleNamespace(**{
         name: load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / f"{name}.py", f"{PKG}.api.v2.{name}")
         for name in ("autonomous_mandates", "autonomous_mandate_action", "governance_toolkits")})
@@ -435,3 +439,67 @@ def test_the_toolkit_picker_lists_the_projects_toolkits_by_name_for_who_may_view
         assert hit(ns, env, "governance_toolkits", "get", args={"search": "nothing"})[0] == {"total": 0, "rows": []}
         other, _ = _in_project(ns, env, 2, "governance_toolkits", "get")
         assert other == {"total": 0, "rows": []}   # another project's toolkits are its own
+
+
+# --- owner mode (#7337 item 8): the consent is the owner's own act, with no governance permission ----------------------
+
+def owner_hit(ns, env, endpoint, method, *, actor="owner_member", body=None, **path):
+    ns.actor, ns.request.body, ns.request.args = actor, body, {}
+    ns.request.content_length = None if body is None else len(json.dumps(body))
+    handler = getattr(ns.endpoints, endpoint).OwnerAPI(module(ns, env))
+    payload, status = getattr(handler, method)(project_id=1, **path)
+    json.dumps(payload)
+    return payload, status
+
+
+def owner_act(ns, env, mandate_id, action, actor="owner_member", **more):
+    return owner_hit(ns, env, "autonomous_mandate_action", "post", actor=actor, mandate_id=uuid.UUID(str(mandate_id)),
+                     body={"action": action, **more})
+
+
+def test_the_owner_without_any_admin_role_consents_previews_and_withdraws_in_owner_mode(ns, env):
+    mandate_id = active_mandate(ns, env)
+    assert act(ns, env, mandate_id, "consent", actor="owner_member")[1] == 403   # administration mode is not theirs
+    preview, status = owner_act(ns, env, mandate_id, "consent_preview")
+    assert status == 200 and preview["covered"] == [{"toolkits": ["sharepoint"]}]
+    answer, status = owner_act(ns, env, mandate_id, "consent")
+    assert status == 200 and answer["ok"] is True and answer["id"] == mandate_id
+    assert env.fakes.granted == [(TID, OID, f"mandate:{mandate_id}")]
+    page, status = owner_hit(ns, env, "autonomous_mandates", "get")
+    assert status == 200 and [(row["id"], row["consented"]) for row in page["rows"]] == [(mandate_id, True)]
+    assert REFRESH not in json.dumps([answer, page])
+    assert owner_act(ns, env, mandate_id, "withdraw_consent") == ({"ok": True, "id": mandate_id}, 200)
+    assert [reason for _, reason in env.fakes.retired] == ["CONSENT_WITHDRAWN"]
+
+
+@pytest.mark.parametrize("case, status, code", [
+    ("other_member", 403, "CONSENT_OWNER_ONLY"),                   # a member who is not the owner
+    ("token", 403, "DENIED_DELEGATION_UNSUPPORTED_CALLER"),        # the owner's API token
+    ("other_subject", 403, "DENIED_SUBJECT_MISMATCH"),
+    ("unverified", 409, "DENIED_ASSERTION_UNAVAILABLE"),
+])
+def test_owner_mode_consent_keeps_the_same_session_and_subject_checks(ns, env, case, status, code):
+    mandate_id = active_mandate(ns, env)
+    actor = "member" if case == "other_member" else "owner_member"
+    if case == "token":
+        env.holder = types.SimpleNamespace(type="token", id=OWNER, reference="token-reference")
+    if case == "other_subject":
+        env.verify_result["principal"]["evidence"]["oid"] = "someone-else"
+    if case == "unverified":
+        env.verify_result = {"ok": False, "reason_code": "IDENTITY_EXPIRED"}
+    refused, got = owner_act(ns, env, mandate_id, "consent", actor=actor)
+    assert (got, refused["code"]) == (status, code)
+    assert env.fakes.granted == [] and env.fakes.kept == []
+
+
+def test_owner_mode_is_for_the_owners_consent_only(ns, env):
+    mandate_id = active_mandate(ns, env)
+    owner_act(ns, env, mandate_id, "consent")
+    for action, more in (("approve", {"approval_ref": "C", "policy_revision": "r"}), ("revoke", {}), ("suspend", {})):
+        refused, status = owner_act(ns, env, mandate_id, action, **more)
+        assert (status, refused["code"]) == (403, "FORBIDDEN")   # approvals and the lifecycle stay operator acts
+    refused, status = owner_act(ns, env, mandate_id, "withdraw_consent", actor="member")
+    assert (status, refused["code"]) == (403, "WITHDRAW_NOT_ALLOWED")   # no operator withdrawal in owner mode
+    assert owner_hit(ns, env, "autonomous_mandates", "get", actor="member")[0]["rows"] == []   # only one's own
+    assert owner_hit(ns, env, "autonomous_mandates", "get", actor="anonymous")[1] == 403
+    assert owner_act(ns, env, mandate_id, "consent", actor="anonymous")[1] == 403

@@ -56,6 +56,7 @@ PROFILE_GOVERNED, PROFILE_DEVELOPMENT = "governed", "development"
 DELEGATED_AUTH_MODE = "entra_delegated"   # a reference with no value: a token is minted at release (#6756 step 4)
 MANDATE_DELEGATION_UNSUPPORTED = "DENIED_MANDATE_DELEGATION_UNSUPPORTED"
 MANDATE_CONSENT_REQUIRED = "DENIED_MANDATE_CONSENT_REQUIRED"
+TOKEN_CONSENT_REQUIRED = "DENIED_TOKEN_CONSENT_REQUIRED"
 OWNER_DELEGATED = "owner_delegated"   # a mandate whose runs act with the owner's offline consent (#7131)
 WHOLE_TARGET = "*"
 MANDATE_SUBJECT_PREFIX = "mandate:"
@@ -108,6 +109,10 @@ class CredentialDecisionContext:
     # ``idp:<tid>:<oid>`` of the mandate's owner when the deployment allows an owner identity: their own grants on the
     # credentials are read with the decision's facts (a shared delegated credential needs one, #7131)
     mandate_owner_ref: Optional[str] = None
+    # A scoped API token's run (#7337): whether the token's owner consented to its runs acting with their Microsoft
+    # sign-in, asked only once a delegated credential reaches check 4b; None (the deployment does not allow the source):
+    # nothing is asked and the decision is the one before (such a credential is refused at release)
+    token_identity: Optional[Callable[[], bool]] = None
 
 
 @dataclass(frozen=True)
@@ -503,6 +508,8 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
             if ctx.mandate_owner_ref is None or owner_grant is None:
                 return verdict(False, "DENIED_GRANT")
             known.update(owner_grant_id=owner_grant.get("grant_id"), owner_grant_epoch=owner_grant.get("revocation_epoch"))
+    if known.get("auth_mode") and ctx.token_identity is not None and not ctx.token_identity():   # 4b. a scoped
+        return verdict(False, TOKEN_CONSENT_REQUIRED)                              #     token: its owner's consent (#7337)
     if reference.get("ownership_class") == "personal" and not holds_personal(ctx, reference):   # 5. a personal one
         return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")                  #    only its custodian may use
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval

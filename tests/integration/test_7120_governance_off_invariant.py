@@ -211,3 +211,19 @@ def test_off_the_token_scope_checker_reads_nothing_and_lets_every_token_request_
         assert ns.token_scope.check(module, 21) is None   # without the request parts: still nothing read
     spies.assert_untouched()
     assert env.denied == [] and env.recorded == []
+
+
+@pytest.mark.parametrize("source", OFF_SOURCES)
+def test_off_a_tokens_consent_is_neither_read_nor_retired_even_with_the_token_source_listed(ns, env, source):
+    """#7337: under off nothing about a token's consent is read: the owner's status answers "not allowed", the token
+    delete event retires nothing (no table read), and a token's consent route passes the checker untouched (the
+    handler itself answers sessions only)."""
+    module = env.module(effective=effective_from(ns, source))
+    module.descriptor = type("D", (), {"config": {"mandate_identity_sources": ["token_owner_delegated"]}})()
+    with Spies(ns) as spies:
+        assert ns.token_identity.status(module, 42) == {"allowed": False, "linked": False, "consents": {},
+                                                        "mandates": False}
+        assert ns.token_scope.check(module, 21, ("api.v2.elitea_core.token_identity", "POST", {}, "/x", {}, {})) is None
+        assert ns.token_identity.on_auth_invalidate(module, {"kind": "token", "id": 21, "epoch": None}) is False
+    spies.assert_untouched()
+    assert env.denied == [] and env.recorded == []

@@ -1,7 +1,10 @@
 """Autonomous mandates of a project: the operator list and create (#7131, C-1009).
 
-Platform administration only. Create runs the same code as the ``manage_autonomous_mandate`` admin task
+Platform administration. Create runs the same code as the ``manage_autonomous_mandate`` admin task
 (``utils/mandate_admin.manage_mandate``), with the body turned into the task's parameter after strict validation.
+
+Owner mode (``prompt_lib``, #7337 item 8): the caller's own mandates in the project (read only), so the schedule card
+shows its owner the consent state and the consent actions (``autonomous_mandate_action`` owner mode).
 """
 from flask import request
 from pylon.core.tools import log
@@ -10,7 +13,9 @@ from tools import api_tools, auth, config as c, register_openapi
 from ...models.pd.mandate_api import CreateMandateRequest
 from ...utils import binding_api as api
 from ...utils.mandate_admin import manage_mandate
+from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.mandate_queries import DEFAULT_LIMIT, MAX_LIMIT, list_page
+from ...utils.schedule_access import schedule_check_spec
 
 PROJECT_ID_PARAM = {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}}
 STATUS = {"VERSION_NOT_FOUND": 404, "TOOLKIT_NOT_FOUND": 404, "TOOLKIT_CHANGED": 403, "MANDATE_NOT_FOUND": 404, "OWNER_NOT_FOUND": 404, "MANDATE_EXISTS": 409,
@@ -89,6 +94,27 @@ class AdminAPI(api_tools.APIModeHandler):
                            lambda result: {"ok": True, "id": result["mandate_ref"], "state": result["state"]})
 
 
+class OwnerAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="List My Autonomous Mandates",
+        description=("The caller's own mandates in the project (as the owner), with the identity their runs act with and "
+                     "whether the caller consented (never the consent itself). Returns {total, rows, identity_sources}."),
+        tags=[api.OPENAPI_TAG], parameters=[PROJECT_ID_PARAM],
+        responses={"200": {"description": "{total, rows, identity_sources}"}, "403": {"description": "Not allowed."}},
+        mcp_tool=False, available_to_users=False,
+    )
+    @auth.decorators.check_api(schedule_check_spec("details"))
+    def get(self, project_id: int, **kwargs):
+        actor = api.current_actor()
+        if actor is None:
+            return api.refusal("FORBIDDEN")
+        try:
+            return list_page(self.module, project_id, limit=MAX_LIMIT, owner_user_id=actor), 200
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("autonomous mandates: the owner's list failed (%s)", type(exc).__name__)
+            return api.refusal("DEPENDENCY_UNAVAILABLE")
+
+
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes(["<int:project_id>"])
-    mode_handlers = {c.ADMINISTRATION_MODE: AdminAPI}
+    mode_handlers = {c.ADMINISTRATION_MODE: AdminAPI, PROMPT_LIB_MODE: OwnerAPI}

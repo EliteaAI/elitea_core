@@ -553,3 +553,10 @@ Run admin task seed_eval_trajectory_dimensions
 # as approved, stamped by approve and resume of a toolkit mandate. Added by the same startup safety net (the catalog
 # query also looks for it). A toolkit mandate approved before it has none: its runs are refused TOOLKIT_CHANGED until it
 # is resumed or a new revision is approved.
+
+# Issue #7337 (C-1009): a scoped API token's owner consents to its runs acting with their Microsoft sign-in. New table
+# api_token_identity_consent in the shared schema (token_id PK, owner_user_id, material_project_id, material_ref,
+# consented_at), with its own MetaData (not db.Base). No task: created at start (CREATE TABLE IF NOT EXISTS through
+# create_all checkfirst) only where elitea_core's plugin config lists token_owner_delegated in mandate_identity_sources;
+# without the source no table is created and nothing reads one. The material itself is the secrets plugin's
+# credential_offline_material row (holder_ref token:<id>), no change there.
