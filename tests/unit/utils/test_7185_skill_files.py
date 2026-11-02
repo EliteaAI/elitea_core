@@ -7,6 +7,7 @@ renames and deletes are checked against what each bucket really holds.
 import hashlib
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,11 +66,42 @@ class TestStore:
         assert env.storage.buckets == {f'p--{PROJECT}.skill-files': {'type': 'system', 'retention_days': None}}
         assert env.storage.keys(PROJECT) == ['a' * 64]
 
-    def test_putting_a_held_hash_again_writes_nothing(self, env):
+    def test_putting_a_held_hash_again_writes_nothing(self, env, monkeypatch):
         env.store.put_content(PROJECT, 'a' * 64, b'x')
-        env.store.put_content(PROJECT, 'a' * 64, b'changed')
+        uploads = []
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda *args: uploads.append(args))
 
-        assert env.storage.objects[(f'p--{PROJECT}.skill-files', 'a' * 64)] == b'x'
+        env.store.put_content(PROJECT, 'a' * 64, b'x')
+
+        assert uploads == []
+
+    def test_an_object_cut_short_under_the_hash_is_stored_again(self, env):
+        data = b'# Forms\n' * 100
+        env.storage.buckets[f'p--{PROJECT}.skill-files'] = {'type': 'system', 'retention_days': None}
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] = data[:10]
+
+        env.store.put_content(PROJECT, _sha(data), data)
+
+        assert env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] == data
+
+    def test_on_s3_the_size_comes_from_one_head_of_the_object(self, env, monkeypatch):
+        data = b'# Forms\n' * 100
+        env.storage.buckets[f'p--{PROJECT}.skill-files'] = {'type': 'system', 'retention_days': None}
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] = data[:10]
+        heads = []
+
+        def head_object(Bucket, Key):
+            heads.append((Bucket, Key))
+            return {'ContentLength': len(env.storage.objects[(Bucket, Key)])}
+
+        monkeypatch.setattr(env.store.MinioClient, 's3_client', SimpleNamespace(head_object=head_object), raising=False)
+        monkeypatch.setattr(env.store.MinioClient, 'get_file_size', None)
+
+        env.store.put_content(PROJECT, _sha(data), data)
+        env.store.put_content(PROJECT, _sha(data), data)
+
+        assert heads == [(f'p--{PROJECT}.skill-files', _sha(data))] * 2
+        assert env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] == data
 
     def test_each_project_has_its_own_bucket(self, env):
         env.store.put_content(PROJECT, 'a' * 64, b'x')

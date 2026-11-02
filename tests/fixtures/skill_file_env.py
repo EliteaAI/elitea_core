@@ -293,6 +293,9 @@ class FakeMinioClient:
         self.storage.objects[(name, file_name)] = file_obj
         self.storage.modified[(name, file_name)] = '2026-01-01T00:00:00+00:00'
 
+    def get_file_size(self, bucket, filename):
+        return len(self.storage.objects.get((self.format_bucket_name(bucket), filename), b''))
+
     def download_file(self, bucket, file_name, project_id=None):
         if self.storage.broken_reads:
             raise RuntimeError('storage unavailable')
