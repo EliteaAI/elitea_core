@@ -247,6 +247,8 @@ class Storage:
         self.objects = {}
         self.modified = {}
         self.clients = []
+        self.bucket_listings = 0
+        self.lifecycle_reads = 0
         self.broken_reads = False
         self.broken_deletes = False
 
@@ -274,7 +276,20 @@ class FakeMinioClient:
         return bucket if bucket.startswith(self.bucket_prefix) else f'{self.bucket_prefix}{bucket}'
 
     def list_bucket(self):
+        self.storage.bucket_listings += 1
         return [name[len(self.bucket_prefix):] for name in self.storage.buckets if name.startswith(self.bucket_prefix)]
+
+    def get_bucket_lifecycle(self, bucket):
+        self.storage.lifecycle_reads += 1
+        days = self.storage.buckets[self.format_bucket_name(bucket)]['retention_days']
+        return {'Rules': [{'Expiration': {'Days': days}}]} if days else {}
+
+    def _load_meta(self, bucket):
+        days = self.storage.buckets[self.format_bucket_name(bucket)]['retention_days']
+        return {'lifecycle': days} if days else {}
+
+    def _save_meta(self, bucket, meta):
+        self.storage.buckets[self.format_bucket_name(bucket)]['retention_days'] = meta.get('lifecycle')
 
     def create_bucket(self, bucket, bucket_type=None, retention_days=None):
         self.storage.buckets[self.format_bucket_name(bucket)] = {'type': bucket_type, 'retention_days': retention_days}

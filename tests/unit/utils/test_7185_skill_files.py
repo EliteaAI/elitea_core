@@ -124,6 +124,60 @@ class TestStore:
         assert list(env.storage.buckets) == [f'p--{PROJECT}.skill-files']
 
 
+class TestBucket:
+    BUCKET = f'p--{PROJECT}.skill-files'
+
+    def test_the_bucket_is_looked_up_once_per_process_not_on_every_write(self, env):
+        for data in (b'a', b'b', b'c'):
+            env.store.put_content(PROJECT, _sha(data), data)
+        env.store.content_exists(PROJECT, _sha(b'a'))
+
+        assert env.storage.bucket_listings == 1
+
+    def test_an_expiry_rule_on_a_bucket_made_elsewhere_is_removed_once(self, env):
+        env.storage.buckets[self.BUCKET] = {'type': 'local', 'retention_days': 30}
+
+        env.store.put_content(PROJECT, _sha(b'a'), b'a')
+        env.store.put_content(PROJECT, _sha(b'b'), b'b')
+
+        assert env.storage.buckets[self.BUCKET]['retention_days'] is None
+        assert env.storage.lifecycle_reads == 1
+
+    def test_on_s3_the_expiry_rule_is_deleted_and_a_bucket_without_one_is_left_alone(self, env, monkeypatch):
+        env.storage.buckets[self.BUCKET] = {'type': 'local', 'retention_days': 30}
+        env.storage.buckets[f'p--{OTHER}.skill-files'] = {'type': 'system', 'retention_days': None}
+        deleted = []
+
+        def get_bucket_lifecycle(client, bucket):
+            if client.project_id == OTHER:
+                raise _missing_lifecycle()
+            return {'Rules': [{'Expiration': {'Days': 30}}]}
+
+        monkeypatch.setattr(env.store.MinioClient, 'get_bucket_lifecycle', get_bucket_lifecycle)
+        monkeypatch.setattr(env.store.MinioClient, 's3_client',
+                            SimpleNamespace(delete_bucket_lifecycle=lambda Bucket: deleted.append(Bucket)),
+                            raising=False)
+
+        env.store.ensure_bucket(PROJECT)
+        env.store.ensure_bucket(OTHER)
+
+        assert deleted == [self.BUCKET]
+
+    def test_a_bucket_that_could_not_be_created_is_looked_up_again(self, env, monkeypatch):
+        monkeypatch.setattr(env.store.MinioClient, 'create_bucket', lambda *args, **kwargs: {'error': 'busy'})
+
+        env.store.ensure_bucket(PROJECT)
+        env.store.ensure_bucket(PROJECT)
+
+        assert env.storage.bucket_listings == 2
+
+
+def _missing_lifecycle():
+    error = Exception('NoSuchLifecycleConfiguration')
+    error.response = {'Error': {'Code': 'NoSuchLifecycleConfiguration'}}
+    return error
+
+
 class TestPathRules:
     @pytest.mark.parametrize('given, stored', [
         ('references/guide.md', 'references/guide.md'),

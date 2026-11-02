@@ -8,11 +8,48 @@ from pylon.core.tools import log
 from tools import MinioClient
 
 SKILL_FILES_BUCKET = 'skill-files'
+MISSING_LIFECYCLE_CODE = 'NoSuchLifecycleConfiguration'
+
+_ensured_buckets = set()
+
+
+def _is_missing_lifecycle(exc: Exception) -> bool:
+    response = getattr(exc, 'response', None)
+    return isinstance(response, dict) and response.get('Error', {}).get('Code') == MISSING_LIFECYCLE_CODE
+
+
+def _lifecycle_rules(client) -> list:
+    try:
+        return (client.get_bucket_lifecycle(SKILL_FILES_BUCKET) or {}).get('Rules') or []
+    except Exception as exc:  # pylint: disable=W0703
+        if _is_missing_lifecycle(exc):
+            return []
+        raise
+
+
+def _drop_lifecycle(client) -> None:
+    s3_client = getattr(client, 's3_client', None)
+    if s3_client is not None:
+        s3_client.delete_bucket_lifecycle(Bucket=client.format_bucket_name(SKILL_FILES_BUCKET))
+        return
+    meta = client._load_meta(SKILL_FILES_BUCKET)  # pylint: disable=W0212
+    meta.pop('lifecycle', None)
+    client._save_meta(SKILL_FILES_BUCKET, meta)  # pylint: disable=W0212
 
 
 def _ensure_bucket(client) -> None:
-    if SKILL_FILES_BUCKET not in client.list_bucket():
-        client.create_bucket(SKILL_FILES_BUCKET, bucket_type='system')
+    bucket_name = client.format_bucket_name(SKILL_FILES_BUCKET)
+    if bucket_name in _ensured_buckets:
+        return
+    if SKILL_FILES_BUCKET in client.list_bucket():
+        if _lifecycle_rules(client):
+            log.warning('skill files: bucket %s had an expiry rule; removing it', bucket_name)
+            _drop_lifecycle(client)
+    else:
+        response = client.create_bucket(SKILL_FILES_BUCKET, bucket_type='system')
+        if isinstance(response, dict) and 'error' in response:
+            return
+    _ensured_buckets.add(bucket_name)
 
 
 def _has_object(client, sha256: str) -> bool:
@@ -36,7 +73,8 @@ def _holds_whole_object(client, sha256: str, size: int) -> bool:
 
 
 def ensure_bucket(project_id: int) -> None:
-    """Create the project's skill-files bucket when it does not exist yet, without lifecycle expiry."""
+    """Create the project's skill-files bucket when it does not exist yet, or strip the expiry rule of one that
+    does, once per process: the objects of skill versions must never expire."""
     _ensure_bucket(MinioClient.from_project_id(project_id))
 
 
@@ -65,7 +103,8 @@ def get_content(project_id: int, sha256: str) -> bytes:
 def content_exists(project_id: int, sha256: str) -> bool:
     """Whether the project's bucket holds ``sha256``."""
     client = MinioClient.from_project_id(project_id)
-    return SKILL_FILES_BUCKET in client.list_bucket() and _has_object(client, sha256)
+    _ensure_bucket(client)
+    return _has_object(client, sha256)
 
 
 def delete_contents(project_id: int, hashes) -> None:
