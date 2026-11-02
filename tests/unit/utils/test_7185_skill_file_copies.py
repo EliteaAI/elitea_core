@@ -108,6 +108,32 @@ class TestPublish:
 
         assert events[:3] == ['upload', 'upload', ('transaction', PUBLIC)] and events.count('upload') == 2
 
+    @pytest.mark.parametrize('additional', [False, True])
+    def test_a_publish_restores_an_object_lost_after_staging_from_the_staged_bytes_not_the_source(
+            self, env, publish, monkeypatch, additional):
+        _, _, snapshot, result = _published_twin(env, publish)
+        env.storage.objects = {key: value for key, value in env.storage.objects.items()
+                               if key[0] != f'p--{PUBLIC}.skill-files'}
+        rows_phase_reads = []
+        download = env.store.MinioClient.download_file
+        add_version_files = publish.add_version_files
+
+        def lose_an_object_then_add(session, project_id, *args):
+            del env.storage.objects[(f'p--{PUBLIC}.skill-files', _sha(b'# Guide'))]
+            monkeypatch.setattr(env.store.MinioClient, 'download_file', lambda client, bucket, name, project_id=None: (
+                rows_phase_reads.append((client.project_id, name)) or download(client, bucket, name)))
+            return add_version_files(session, project_id, *args)
+
+        monkeypatch.setattr(publish, 'add_version_files', lose_an_object_then_add)
+
+        if additional:
+            publish.publish_skill_additional_version(PUBLIC, result['skill_id'], snapshot, 'v2', 1, snapshot['source'])
+        else:
+            publish.publish_skill_first_version(PUBLIC, snapshot, 'v1', 1, snapshot['source'])
+
+        assert env.storage.objects[(f'p--{PUBLIC}.skill-files', _sha(b'# Guide'))] == b'# Guide'
+        assert rows_phase_reads == []
+
     def test_the_source_clone_gets_the_rows_and_no_new_object(self, env, publish):
         source = _seed(env)
         objects_before = dict(env.storage.objects)
