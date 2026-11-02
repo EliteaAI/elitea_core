@@ -666,3 +666,63 @@ class TestDeletesWaitForOpenWrites:
 
         assert env.utils.release_unreferenced_contents(PROJECT, {_sha(b'x')}) == []
         assert env.storage.keys(PROJECT) == [_sha(b'x')]
+
+
+class TestDeletesAreHeldOffAroundTheirCriticalSections:
+    def test_a_write_holds_deletes_off_before_it_looks_for_a_reusable_object(self, env, session, monkeypatch):
+        _version(session)
+        held = []
+        monkeypatch.setattr(env.files, 'put_content',
+                            lambda project_id, sha256, data: held.append(session in FakeSession.locks.get(project_id, ())))
+
+        _write(env, session, 'forms.md', b'x')
+
+        assert held == [True]
+
+    def test_an_add_holds_deletes_off_before_it_stores_or_copies_objects(self, env, session, monkeypatch):
+        _version(session)
+        held = []
+        monkeypatch.setattr(env.files, 'put_contents',
+                            lambda project_id, contents: held.append(session in FakeSession.locks.get(project_id, ())))
+        monkeypatch.setattr(env.files, 'copy_contents',
+                            lambda source, target, hashes: held.append(session in FakeSession.locks.get(target, ())))
+        entries = [env.files.build_file_entry('a.md', b'a'), env.files.build_file_entry('b.md', b'b')]
+        entries[1].pop('data')
+
+        env.files.add_version_files(session, PROJECT, 10, entries, source_project_id=OTHER)
+
+        assert held == [True, True]
+
+    def test_a_save_as_version_holds_deletes_off_before_it_reads_the_source_rows(self, env, session, monkeypatch):
+        session.add(FakeSkill())
+        _version(session, id=20)
+        held = []
+        monkeypatch.setattr(env.utils, 'copy_version_files',
+                            lambda s, source_id, target_id: held.append(s in FakeSession.locks.get(PROJECT, ())))
+        version_data = types.SimpleNamespace(
+            name='v2', instructions='Body.', author_id=1, tags=None, meta=None, run_settings=None,
+            files_from_version_id=20,
+        )
+
+        env.utils.create_skill_version(PROJECT, SKILL, version_data, session=session, instructions_already_saved=True)
+
+        assert held == [True]
+
+    def test_the_sweep_deletes_only_while_it_holds_writes_off(self, env, monkeypatch):
+        env.store.put_content(PROJECT, _sha(b'old'), b'old')
+        claimed = []
+        monkeypatch.setattr(env.files, 'delete_contents',
+                            lambda project_id, hashes: claimed.append(bool(FakeSession.locks.get(project_id))))
+
+        env.files.sweep_skill_files(PROJECT, now=TestSweep.NOW)
+
+        assert claimed == [True]
+
+    def test_a_release_deletes_only_while_it_holds_writes_off(self, env, monkeypatch):
+        claimed = []
+        monkeypatch.setattr(env.utils, 'delete_contents',
+                            lambda project_id, hashes: claimed.append(bool(FakeSession.locks.get(project_id))))
+
+        env.utils.release_unreferenced_contents(PROJECT, {_sha(b'old')})
+
+        assert claimed == [True]

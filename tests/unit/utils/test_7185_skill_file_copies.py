@@ -293,6 +293,13 @@ class TestAgentExport:
             {'path', 'size', 'sha256', 'content_type', 'is_text'}] * 2
         assert skill['owner_id'] == SOURCE and skill['versions'][0]['id'] == 10
 
+    def test_a_plain_export_lists_no_files_it_cannot_carry(self, env, agent_export):
+        _seed(env)
+
+        [skill] = _export(agent_export, forked=False)
+
+        assert 'files' not in skill['versions'][0]
+
     @pytest.mark.parametrize('forked', [True, False])
     def test_an_agent_export_tells_the_skill_export_whether_it_is_a_fork(self, agent_export, monkeypatch, forked):
         asked = []
