@@ -677,3 +677,27 @@ def test_7011_us32_r2_2_a_failed_name_lookup_keeps_the_details(harness, monkeypa
     schedule_id = harness.seed()
     body, status = harness.call('get', schedule_id=schedule_id)
     assert (status, body['owner']) == (200, {'id': OWNER_ID, 'name': None})
+
+
+# --- one required-field check for Save and for the draft test run
+
+def test_check_schedule_body_is_the_check_a_create_runs(harness):
+    service = sys.modules[f'{PACKAGE}.utils.schedule_service']
+    models = sys.modules[f'{PACKAGE}.models.pd.entity_schedule']
+    bad = models.ScheduleCreate.model_validate(agent_body(prompt='  ', variables=[]))
+    good = models.ScheduleCreate.model_validate(agent_body())
+
+    with harness.session_factory() as session:
+        service.check_schedule_body(session, PROJECT_ID, good)
+        with pytest.raises(service.ScheduleError) as refused:
+            service.check_schedule_body(session, PROJECT_ID, bad)
+
+    assert refused.value.response[0]['field'] == 'prompt'
+    assert_400_names(harness.call('post', agent_body(prompt='  ', variables=[])), 'prompt')
+
+
+@pytest.mark.parametrize('field', ['name', 'application_id', 'version_id', 'cron', 'timezone'])
+def test_schedule_body_without_a_required_field_is_400_on_that_field(harness, field):
+    body = agent_body()
+    del body[field]
+    assert_400_names(harness.call('post', body), field)

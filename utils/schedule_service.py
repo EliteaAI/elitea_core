@@ -124,6 +124,20 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
         raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
 
 
+def check_schedule_body(session, project_id: int, body: ScheduleCreate) -> None:
+    """The required-field rules of a Save and of a draft test run, in one place.
+
+    The body model already needs name, entity, version, cron and time zone. This adds what a model cannot
+    state: the entity and version exist and fit, and the starting input (prompt, run mode, variables) fits
+    the entity type.
+
+    Raises:
+        ScheduleError: A 400, 403 or 404 refusal that names the broken field.
+    """
+    check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+    check_run_input(body.entity_type, body.run_mode, body.prompt, [v.model_dump() for v in body.variables])
+
+
 def load_schedule_in_scope(session, schedule_id: int, scope: ScheduleScope) -> EntitySchedule:
     """Return the schedule when the caller owns it or holds `schedules.admin`.
 
@@ -191,9 +205,8 @@ def create_schedule(
         ScheduleError: When an entity or run input rule fails.
         ScheduleLimitError: When an enabled schedule passes the project cap.
     """
-    check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+    check_schedule_body(session, project_id, body)
     values = body.model_dump(exclude={'risk_ack'})
-    check_run_input(body.entity_type, body.run_mode, body.prompt, values['variables'])
     if body.enabled:
         check_enabled_cap(session)
     values['expires_at'] = body.expires_at and end_of_day(body.expires_at, body.timezone)
