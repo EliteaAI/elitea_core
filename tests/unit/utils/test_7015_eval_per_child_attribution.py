@@ -335,3 +335,22 @@ def test_agents_stored_without_models_get_them_from_the_trajectory(execution):
     current = execution.agent_breakdown(_fanout())
     assert execution.with_agent_models(current, None) is current
     assert execution.with_agent_models(None, _fanout()) is None
+
+
+def test_backfill_matches_a_sub_agent_by_its_id_not_its_name(execution):
+    trajectory = {**_fanout(), 'dispatched_agents': [{'name': ORDER, 'application_id': 53}]}
+    sonnet = {**_llm((5, 1), ORDER), 'model': 'sonnet'}
+    trajectory['steps'] = [*trajectory['steps'][:-1], sonnet, trajectory['steps'][-1]]
+    stored = [{'agent': None},                                     # the agent under test
+              {'agent': None, 'application_id': 99},               # ledger-only, no name
+              {'agent': 'renamed', 'application_id': 53},          # ORDER, renamed since
+              {'agent': DECISION}]                                 # stored before ids
+    models = [a['models'] for a in execution.with_agent_models(stored, trajectory)]
+    assert models == [['haiku'], None, ['haiku', 'sonnet'], ['haiku']]
+
+
+def test_a_ledger_only_agent_has_unknown_models(usage, execution):
+    agents = [a for a in execution.agent_breakdown(_fanout()) if a['agent'] != ORDER]
+    settled = usage.settle_agents(agents, usage.ledger_agents(LEDGER_219, PRID)[0])
+    appended = [a for a in settled if a.get('application_id') == 53]
+    assert [a['models'] for a in appended] == [None]
