@@ -14,7 +14,7 @@ makes, after the token's own admission:
 
 Off and audit only: nothing is read, everything passes as before. An unscoped (legacy) token: only the token-management
 rule applies; its runs are refused or admitted by admission as before. A refusal is 403 with a fixed message, counted,
-and audited at most once per (token, code, route, project) per ``AUDIT_EVERY_S``.
+and audited at most once per (token, code, method, route, project) per ``AUDIT_EVERY_S``.
 """
 import threading
 import time
@@ -95,7 +95,7 @@ ADMIN_PREFIXES = ("api.v2.admin.", "admin.", "admin_ui.")
 
 AUDIT_EVERY_S = 60.0
 MAX_AUDITED = 4096
-_AUDITED = {}   # (token id, code, endpoint, project) -> monotonic time until which no new row is written
+_AUDITED = {}   # (token id, code, method, endpoint, project) -> monotonic time until which no new row is written
 _AUDITED_LOCK = threading.Lock()
 _COUNTER = {}
 
@@ -153,7 +153,7 @@ def _first_audit(key) -> bool:
 
 def _refuse(module, token_id, code, endpoint, method, project) -> dict:  # pylint: disable=R0913
     _COUNTER[code] = _COUNTER.get(code, 0) + 1
-    if code != DEPENDENCY_UNAVAILABLE and _first_audit((token_id, code, endpoint, project)):
+    if code != DEPENDENCY_UNAVAILABLE and _first_audit((token_id, code, method, endpoint, project)):
         log.info("security_metric name=token_scope_refusal_total reason_code=%s", code)
         try:
             from .admission import _record_deny  # pylint: disable=C0415

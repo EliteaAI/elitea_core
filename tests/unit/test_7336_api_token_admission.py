@@ -377,6 +377,8 @@ def test_the_checker_refuses_with_a_readable_403_and_one_audit_row_per_window(ns
     assert check(ns, env, Holder("api.v2.elitea_core.predict", view_args={"project_id": 3}))["code"] == \
         "TOKEN_SCOPE_PROJECT"
     assert len(env.denied) == 2   # another project is another row
+    check(ns, env, Holder("api.v2.elitea_core.predict", "GET", view_args={"project_id": 2}))
+    assert len(env.denied) == 3   # and another method
 
 
 def test_the_checker_reads_the_llm_proxys_project_from_its_header(ns, env):
