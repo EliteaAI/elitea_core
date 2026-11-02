@@ -72,11 +72,42 @@ class TestStore:
         assert env.storage.buckets == {f'p--{PROJECT}.skill-files': {'type': 'system', 'retention_days': None}}
         assert env.storage.keys(PROJECT) == ['a' * 64]
 
-    def test_putting_a_held_hash_again_writes_nothing(self, env):
+    def test_putting_a_held_hash_again_writes_nothing(self, env, monkeypatch):
         env.store.put_content(PROJECT, 'a' * 64, b'x')
-        env.store.put_content(PROJECT, 'a' * 64, b'changed')
+        uploads = []
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda *args: uploads.append(args))
 
-        assert env.storage.objects[(f'p--{PROJECT}.skill-files', 'a' * 64)] == b'x'
+        env.store.put_content(PROJECT, 'a' * 64, b'x')
+
+        assert uploads == []
+
+    def test_an_object_cut_short_under_the_hash_is_stored_again(self, env):
+        data = b'# Forms\n' * 100
+        env.storage.buckets[f'p--{PROJECT}.skill-files'] = {'type': 'system', 'retention_days': None}
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] = data[:10]
+
+        env.store.put_content(PROJECT, _sha(data), data)
+
+        assert env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] == data
+
+    def test_on_s3_the_size_comes_from_one_head_of_the_object(self, env, monkeypatch):
+        data = b'# Forms\n' * 100
+        env.storage.buckets[f'p--{PROJECT}.skill-files'] = {'type': 'system', 'retention_days': None}
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] = data[:10]
+        heads = []
+
+        def head_object(Bucket, Key):
+            heads.append((Bucket, Key))
+            return {'ContentLength': len(env.storage.objects[(Bucket, Key)])}
+
+        monkeypatch.setattr(env.store.MinioClient, 's3_client', types.SimpleNamespace(head_object=head_object), raising=False)
+        monkeypatch.setattr(env.store.MinioClient, 'get_file_size', None)
+
+        env.store.put_content(PROJECT, _sha(data), data)
+        env.store.put_content(PROJECT, _sha(data), data)
+
+        assert heads == [(f'p--{PROJECT}.skill-files', _sha(data))] * 2
+        assert env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] == data
 
     def test_each_project_has_its_own_bucket(self, env):
         env.store.put_content(PROJECT, 'a' * 64, b'x')
@@ -111,6 +142,80 @@ class TestStore:
         env.store.ensure_bucket(PROJECT)
 
         assert list(env.storage.buckets) == [f'p--{PROJECT}.skill-files']
+
+
+class TestBucket:
+    BUCKET = f'p--{PROJECT}.skill-files'
+
+    def test_the_bucket_is_looked_up_once_per_process_not_on_every_write(self, env):
+        for data in (b'a', b'b', b'c'):
+            env.store.put_content(PROJECT, _sha(data), data)
+        env.store.content_exists(PROJECT, _sha(b'a'))
+
+        assert env.storage.bucket_listings == 1
+
+    def test_an_expiry_rule_on_a_bucket_made_elsewhere_is_removed_once(self, env):
+        env.storage.buckets[self.BUCKET] = {'type': 'local', 'retention_days': 30}
+
+        env.store.put_content(PROJECT, _sha(b'a'), b'a')
+        env.store.put_content(PROJECT, _sha(b'b'), b'b')
+
+        assert env.storage.buckets[self.BUCKET]['retention_days'] is None
+        assert env.storage.lifecycle_reads == 1
+
+    def test_on_s3_the_expiry_rule_is_deleted_and_a_bucket_without_one_is_left_alone(self, env, monkeypatch):
+        env.storage.buckets[self.BUCKET] = {'type': 'local', 'retention_days': 30}
+        env.storage.buckets[f'p--{OTHER}.skill-files'] = {'type': 'system', 'retention_days': None}
+        deleted = []
+
+        def get_bucket_lifecycle(client, bucket):
+            if client.project_id == OTHER:
+                raise _missing_lifecycle()
+            return {'Rules': [{'Expiration': {'Days': 30}}]}
+
+        monkeypatch.setattr(env.store.MinioClient, 'get_bucket_lifecycle', get_bucket_lifecycle)
+        monkeypatch.setattr(env.store.MinioClient, 's3_client',
+                            types.SimpleNamespace(delete_bucket_lifecycle=lambda Bucket: deleted.append(Bucket)),
+                            raising=False)
+
+        env.store.ensure_bucket(PROJECT)
+        env.store.ensure_bucket(OTHER)
+
+        assert deleted == [self.BUCKET]
+
+    def test_a_bucket_that_could_not_be_created_is_looked_up_again(self, env, monkeypatch):
+        monkeypatch.setattr(env.store.MinioClient, 'create_bucket', lambda *args, **kwargs: {'error': 'busy'})
+
+        env.store.ensure_bucket(PROJECT)
+        env.store.ensure_bucket(PROJECT)
+
+        assert env.storage.bucket_listings == 2
+
+
+class TestClients:
+    def test_store_calls_given_a_client_build_no_other(self, env):
+        client = env.store.project_client(PROJECT)
+
+        env.store.put_contents(PROJECT, {_sha(b'a'): b'a'}, client)
+        env.store.put_content(PROJECT, _sha(b'b'), b'b', client)
+        env.store.get_content(PROJECT, _sha(b'a'), client)
+        env.store.content_exists(PROJECT, _sha(b'b'), client)
+
+        assert env.storage.clients == [PROJECT]
+
+    def test_a_write_and_a_read_build_one_client_each(self, env, session):
+        _version(session)
+
+        _write(env, session, 'forms.md', b'x')
+        env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+
+        assert env.storage.clients == [PROJECT, PROJECT]
+
+
+def _missing_lifecycle():
+    error = Exception('NoSuchLifecycleConfiguration')
+    error.response = {'Error': {'Code': 'NoSuchLifecycleConfiguration'}}
+    return error
 
 
 class TestPathRules:
@@ -276,6 +381,39 @@ class TestWrite:
         assert entry['sha256'] == _sha(b'new') and _paths(session, 10) == ['FORMS.md']
 
 
+class TestConcurrentPaths:
+    def _take_the_path_first(self, env, session, monkeypatch):
+        def flush():
+            raise env.files.IntegrityError('uq_skill_version_files_path_ci')
+        monkeypatch.setattr(session, 'flush', flush)
+
+    def test_a_write_racing_another_for_the_same_path_in_any_case_is_a_409(self, env, session, monkeypatch):
+        _version(session)
+        self._take_the_path_first(env, session, monkeypatch)
+
+        with pytest.raises(env.files.SkillFilePathTakenError, match="'forms.md' already exists in skill version 10") as info:
+            _write(env, session, 'forms.md', b'x')
+        assert info.value.http_status == 409
+
+    def test_a_rename_racing_a_write_onto_the_new_path_is_a_409(self, env, session, monkeypatch):
+        _version(session)
+        _write(env, session, 'a.md', b'a')
+        self._take_the_path_first(env, session, monkeypatch)
+
+        with pytest.raises(env.files.SkillFilePathTakenError, match="'b.md' already exists") as info:
+            env.files.rename_version_file(PROJECT, SKILL, 10, 'a.md', 'b.md', session=session)
+        assert info.value.http_status == 409
+
+
+class TestConcurrentWrites:
+    def test_a_write_reads_the_files_it_checks_the_caps_against_only_once_it_holds_the_version_row(self, env, session):
+        _version(session)
+
+        _write(env, session, 'forms.md', b'x')
+
+        assert session.file_reads == [(10, True)]
+
+
 class TestRead:
     def test_read_returns_the_entry_and_the_bytes_from_the_bucket(self, env, session):
         _version(session)
@@ -287,9 +425,9 @@ class TestRead:
 
     def test_an_exact_match_wins_over_a_case_insensitive_one(self, env, session):
         _version(session)
-        env.store.put_contents(PROJECT, {'a' * 64: b'A', 'b' * 64: b'B'})
-        session.add(FakeSkillVersionFile(10, 'Forms.md', 1, 'a' * 64, 'text/plain', True))
-        session.add(FakeSkillVersionFile(10, 'forms.md', 1, 'b' * 64, 'text/plain', True))
+        env.store.put_contents(PROJECT, {_sha(b'A'): b'A', _sha(b'B'): b'B'})
+        session.add(FakeSkillVersionFile(10, 'Forms.md', 1, _sha(b'A'), 'text/plain', True))
+        session.add(FakeSkillVersionFile(10, 'forms.md', 1, _sha(b'B'), 'text/plain', True))
 
         _, content = env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
 
@@ -305,6 +443,15 @@ class TestRead:
         _version(session)
         _write(env, session, 'forms.md', b'x')
         env.storage.broken_reads = True
+
+        with pytest.raises(env.files.SkillFileContentUnavailableError, match="'forms.md'") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 503
+
+    def test_bytes_that_do_not_match_the_rows_hash_are_a_503_naming_the_path(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms\n'))] = b'# Forms'
 
         with pytest.raises(env.files.SkillFileContentUnavailableError, match="'forms.md'") as info:
             env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
@@ -336,8 +483,9 @@ class TestRenameAndDelete:
         _write(env, session, 'a.md', b'a')
         _write(env, session, 'b.md', b'b')
 
-        with pytest.raises(env.utils.SkillFileError, match="'b.md' already exists"):
+        with pytest.raises(env.utils.SkillFileError, match="'b.md' already exists") as info:
             env.files.rename_version_file(PROJECT, SKILL, 10, 'a.md', 'B.md', session=session)
+        assert info.value.http_status == 409
 
     def test_rename_may_change_only_the_case(self, env, session):
         _version(session)
@@ -673,7 +821,8 @@ class TestDeletesAreHeldOffAroundTheirCriticalSections:
         _version(session)
         held = []
         monkeypatch.setattr(env.files, 'put_content',
-                            lambda project_id, sha256, data: held.append(session in FakeSession.locks.get(project_id, ())))
+                            lambda project_id, sha256, data, client=None: held.append(
+                                session in FakeSession.locks.get(project_id, ())))
 
         _write(env, session, 'forms.md', b'x')
 

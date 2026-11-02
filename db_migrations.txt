@@ -558,6 +558,11 @@ Run admin task seed_eval_trajectory_dimensions
 # content by sha256) in every project schema. The bytes live in object storage, in the project's `skill-files`
 # bucket (created on first write, system type, no retention). New projects get the table from create_all(); the
 # startup safety net creates it where missing (one catalog query, CREATE TABLE ... checkfirst per schema).
+# The table carries the unique index uq_skill_version_files_path_ci (skill_version_id, lower(path)): one path per
+# version whatever its case. It is created with the table; nothing was released before it, so no data migrates. Only a
+# schema whose table came from an earlier build of this work lacks it (it has _skill_version_file_path_uc instead):
+CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_version_files_path_ci ON {pid}.skill_version_files (skill_version_id, lower(path));
+ALTER TABLE {pid}.skill_version_files DROP CONSTRAINT IF EXISTS _skill_version_file_path_uc;
 # Operator re-run and dry run:
 Run admin task create_skill_file_tables with param: project_id=all;dry_run
 Run admin task create_skill_file_tables with param: project_id=all

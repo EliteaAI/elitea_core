@@ -10,11 +10,15 @@ import sys
 import types
 
 import pytest
+from werkzeug.exceptions import RequestEntityTooLarge
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
 READ = 'models.applications.skills.details'
 WRITE = 'models.applications.skills.update'
+MAX_FILE_BYTES = 1000
+ENVELOPE_BYTES = 64 * 1024
+MAX_BODY_BYTES = MAX_FILE_BYTES + ENVELOPE_BYTES
 ENTRY = {'path': 'forms.md', 'size': 3, 'sha256': 'abc', 'content_type': 'text/markdown', 'is_text': True,
          'created_at': '2026-02-02T00:00:00'}
 
@@ -49,8 +53,38 @@ class SentFile:
         self.headers = {}
 
 
+class FakeRequest:
+    """Flask's request as far as an upload goes: the body is read when ``files`` or ``get_json`` is first touched,
+    and reading more than ``max_content_length`` raises 413 the way Werkzeug's limited stream does."""
+
+    def __init__(self, harness):
+        self.harness = harness
+        self.max_content_length = None
+        self.body_reads = []
+
+    @property
+    def content_length(self):
+        return self.harness.declared_length
+
+    def _read_body(self):
+        self.body_reads.append(self.max_content_length)
+        if self.max_content_length is not None and self.harness.body_size > self.max_content_length:
+            raise RequestEntityTooLarge()
+
+    @property
+    def files(self):
+        self._read_body()
+        return self.harness.files
+
+    def get_json(self, silent=False):
+        self._read_body()
+        return self.harness.json
+
+
 class Harness:
     def __init__(self):
+        self.body_size = 0
+        self.declared_length = None
         self.user_permissions = set()
         self.folder_writes = []
         self.calls = []
@@ -104,7 +138,8 @@ def harness(isolated_sys_modules):
         _package(name)
 
     flask = types.ModuleType('flask')
-    flask.request = types.SimpleNamespace(files=harness.files, get_json=lambda silent=False: harness.json)
+    harness.request = FakeRequest(harness)
+    flask.request = harness.request
     flask.send_file = SentFile
     sys.modules['flask'] = flask
 
@@ -124,10 +159,10 @@ def harness(isolated_sys_modules):
     stubs = {
         'utils.constants': {'PROMPT_LIB_MODE': 'prompt_lib'},
         'utils.folder_access': {'require_folder_access': harness.require_folder_access},
-        'utils.skill_utils': {'SkillError': SkillError},
-        'utils.skill_files': {name: harness.storage(name) for name in (
+        'utils.skill_utils': {'SkillError': SkillError, 'get_max_file_bytes': lambda: MAX_FILE_BYTES},
+        'utils.skill_files': {'describe_size': lambda size: f'{size} B', **{name: harness.storage(name) for name in (
             'list_version_files', 'read_version_file', 'write_version_file', 'rename_version_file',
-            'delete_version_file')},
+            'delete_version_file')}},
     }
     for name, attrs in stubs.items():
         module = types.ModuleType(f'{PACKAGE}.{name}')
@@ -240,6 +275,37 @@ class TestWrite:
         response, status = _call(harness, 'put')
 
         assert status == 400 and 'error' in response and harness.calls == []
+
+
+class TestUploadSize:
+    TOO_LARGE = ({'error': f'the upload is too large: a skill file can be at most {MAX_FILE_BYTES} B'}, 413)
+
+    def _send(self, harness, kind, size, declared):
+        harness.user_permissions = {WRITE}
+        harness.body_size = size
+        harness.declared_length = size if declared else None
+        if kind == 'multipart':
+            harness.files['file'] = FakeUpload(b'x')
+        else:
+            harness.json = {'content': 'x'}
+        return _call(harness, 'put')
+
+    @pytest.mark.parametrize('declared', [True, False])
+    @pytest.mark.parametrize('kind', ['multipart', 'json'])
+    def test_a_body_up_to_the_cap_plus_its_envelope_is_read(self, harness, kind, declared):
+        assert self._send(harness, kind, MAX_BODY_BYTES, declared) == (ENTRY, 200)
+        assert harness.request.body_reads[0] == MAX_BODY_BYTES
+
+    @pytest.mark.parametrize('declared', [True, False])
+    @pytest.mark.parametrize('kind', ['multipart', 'json'])
+    def test_one_byte_more_is_a_413_and_nothing_is_stored(self, harness, kind, declared):
+        assert self._send(harness, kind, MAX_BODY_BYTES + 1, declared) == self.TOO_LARGE
+        assert harness.calls == []
+
+    def test_a_declared_length_over_the_bound_is_refused_before_the_body_is_touched(self, harness):
+        self._send(harness, 'multipart', MAX_BODY_BYTES + 1, declared=True)
+
+        assert harness.request.body_reads == []
 
 
 class TestRenameAndDelete:

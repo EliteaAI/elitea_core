@@ -74,13 +74,18 @@ class Row(tuple):
 
 
 class FakeQuery:
-    def __init__(self, session, model, target, predicates=(), order=(), distinct=False):
+    def __init__(self, session, model, target, predicates=(), order=(), distinct=False, for_update=False):
         self.session, self.model, self.target = session, model, target
         self.predicates, self.order, self.is_distinct = predicates, order, distinct
+        self.for_update = for_update
 
     def _copy(self, **changes):
-        values = {'predicates': self.predicates, 'order': self.order, 'distinct': self.is_distinct, **changes}
+        values = {'predicates': self.predicates, 'order': self.order, 'distinct': self.is_distinct,
+                  'for_update': self.for_update, **changes}
         return FakeQuery(self.session, self.model, self.target, **values)
+
+    def with_for_update(self):
+        return self._copy(for_update=True)
 
     def filter(self, *predicates):
         return self._copy(predicates=self.predicates + predicates)
@@ -96,6 +101,8 @@ class FakeQuery:
 
     def _rows(self):
         rows = [row for row in self.session.rows[self.model] if all(p.test(row) for p in self.predicates)]
+        if self.for_update:
+            self.session.locked_rows.extend(rows)
         for column in reversed(self.order):
             rows.sort(key=lambda row, name=column.name: getattr(row, name), reverse=getattr(column, 'descending', False))
         return rows
@@ -155,6 +162,8 @@ class FakeSession:
         self.rows = {FakeSkill: [], FakeSkillVersion: [], FakeSkillVersionFile: [], FakeEntitySkillMapping: []}
         self.next_id = 100
         self.commits = 0
+        self.locked_rows = []
+        self.file_reads = []
 
     def execute(self, statement, params):
         holders = self.locks.setdefault(params['project_id'], set())
@@ -211,6 +220,7 @@ def _init_version(self, id=None, skill_id=3, name='base', status='draft', instru
 
 
 def _version_files(self):
+    self.session.file_reads.append((self.id, self in self.session.locked_rows))
     return sorted(
         (f for f in self.session.rows[FakeSkillVersionFile] if f.skill_version_id == self.id),
         key=lambda f: f.path,
@@ -253,6 +263,8 @@ class Storage:
         self.objects = {}
         self.modified = {}
         self.clients = []
+        self.bucket_listings = 0
+        self.lifecycle_reads = 0
         self.broken_reads = False
         self.broken_deletes = False
 
@@ -280,7 +292,20 @@ class FakeMinioClient:
         return bucket if bucket.startswith(self.bucket_prefix) else f'{self.bucket_prefix}{bucket}'
 
     def list_bucket(self):
+        self.storage.bucket_listings += 1
         return [name[len(self.bucket_prefix):] for name in self.storage.buckets if name.startswith(self.bucket_prefix)]
+
+    def get_bucket_lifecycle(self, bucket):
+        self.storage.lifecycle_reads += 1
+        days = self.storage.buckets[self.format_bucket_name(bucket)]['retention_days']
+        return {'Rules': [{'Expiration': {'Days': days}}]} if days else {}
+
+    def _load_meta(self, bucket):
+        days = self.storage.buckets[self.format_bucket_name(bucket)]['retention_days']
+        return {'lifecycle': days} if days else {}
+
+    def _save_meta(self, bucket, meta):
+        self.storage.buckets[self.format_bucket_name(bucket)]['retention_days'] = meta.get('lifecycle')
 
     def create_bucket(self, bucket, bucket_type=None, retention_days=None):
         self.storage.buckets[self.format_bucket_name(bucket)] = {'type': bucket_type, 'retention_days': retention_days}
@@ -298,6 +323,9 @@ class FakeMinioClient:
         assert name in self.storage.buckets, f'upload into missing bucket {name}'
         self.storage.objects[(name, file_name)] = file_obj
         self.storage.modified[(name, file_name)] = '2026-01-01T00:00:00+00:00'
+
+    def get_file_size(self, bucket, filename):
+        return len(self.storage.objects.get((self.format_bucket_name(bucket), filename), b''))
 
     def download_file(self, bucket, file_name, project_id=None):
         if self.storage.broken_reads:
@@ -443,6 +471,7 @@ def install(monkeypatch, limits: dict):
 
     load(monkeypatch, 'models/pd/skill_file.py', f'{PKG}.models.pd.skill_file')
     load(monkeypatch, 'utils/skill_frontmatter.py', f'{PKG}.utils.skill_frontmatter')
+    load(monkeypatch, 'utils/platform_buckets.py', f'{PKG}.utils.platform_buckets')
     store = load(monkeypatch, 'utils/skill_file_store.py', f'{PKG}.utils.skill_file_store')
     skill_utils = load(monkeypatch, 'utils/skill_utils.py', f'{PKG}.utils.skill_utils')
     skill_files = load(monkeypatch, 'utils/skill_files.py', f'{PKG}.utils.skill_files')
