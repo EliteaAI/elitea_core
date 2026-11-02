@@ -45,6 +45,9 @@ class EntityScheduleRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     schedule_id: Mapped[int] = mapped_column(Integer)
     conversation_id: Mapped[int] = mapped_column(Integer)
+    trigger: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String)
+    version_id: Mapped[int] = mapped_column(Integer)
 
 
 class Participant(Base):
@@ -238,6 +241,7 @@ def api(isolated_sys_modules):
     for name in ('models.pd.conversation', 'utils.conversation_utils', 'utils.skill_participant_utils',
                  'utils.constants'):
         _fuzzy(f'{PACKAGE}.{name}')
+    load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'schedule_list.py', f'{PACKAGE}.models.pd.schedule_list')
     module = load_module_with_stubs(PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py',
                                     f'{PACKAGE}.api.v2.conversations')
     return types.SimpleNamespace(args=flask.request.args, calls=calls, module=module)
@@ -268,3 +272,46 @@ def test_7011_r2_3_api_rejects_a_non_integer_schedule_id(api, value):
     assert body['field'] == 'schedule_id'
     assert body['error']
     assert api.calls == []
+
+
+def _run_filter_sql(rpc_module, **kwargs):
+    return ' '.join(_list(rpc_module, **kwargs).base.sql().split())
+
+
+def test_run_options_share_one_semi_join_on_the_run_row_with_the_schedule(rpc_module):
+    sql = _run_filter_sql(rpc_module, schedule_id=5, run_status='failed', run_trigger_type='scheduled',
+                          run_version_id=9)
+    assert (
+        "chat_conversations.id IN (SELECT entity_schedule_runs.conversation_id FROM entity_schedule_runs "
+        "WHERE entity_schedule_runs.schedule_id = 5 AND entity_schedule_runs.status = 'failed' "
+        "AND entity_schedule_runs.trigger = 'cron' AND entity_schedule_runs.version_id = 9)"
+    ) in sql
+    assert sql.count('entity_schedule_runs.conversation_id') == 1
+
+
+@pytest.mark.parametrize(('trigger_type', 'stored'), [('scheduled', 'cron'), ('manual', 'manual'), ('test', 'test')])
+def test_the_trigger_type_filter_reads_the_stored_trigger(rpc_module, trigger_type, stored):
+    sql = _run_filter_sql(rpc_module, run_trigger_type=trigger_type)
+    assert f"entity_schedule_runs.trigger = '{stored}'" in sql
+    assert 'schedule_id' not in sql
+
+
+def test_a_list_without_run_options_adds_no_run_filter(rpc_module):
+    assert 'entity_schedule_runs' not in _run_filter_sql(rpc_module)
+
+
+@pytest.mark.parametrize(('args', 'field'), [
+    ({'status': 'done'}, 'status'), ({'trigger_type': 'cron'}, 'trigger_type'), ({'trigger_type': ''}, 'trigger_type'),
+    ({'version_id': 'x'}, 'version_id'), ({'version_id': '0'}, 'version_id'),
+])
+def test_an_unknown_run_option_is_400_and_the_rpc_is_not_called(api, args, field):
+    body, status = _get(api, **args)
+    assert (status, body['code'], body['field']) == (400, 'invalid_input', field)
+    assert api.calls == []
+
+
+def test_valid_run_options_reach_the_rpc(api):
+    _, status = _get(api, status='running', trigger_type='test', version_id='12', schedule_id='5')
+    assert status == 200
+    assert {k: api.calls[0][k] for k in ('schedule_id', 'run_status', 'run_trigger_type', 'run_version_id')} == {
+        'schedule_id': 5, 'run_status': 'running', 'run_trigger_type': 'test', 'run_version_id': 12}

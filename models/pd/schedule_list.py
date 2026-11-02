@@ -9,6 +9,7 @@ DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]  # the database integer range
 EntityType = Literal['agent', 'pipeline']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
 RunTrigger = Literal['cron', 'manual', 'test']
+RunTriggerType = Literal['scheduled', 'manual', 'test']  # Run History names `cron` as scheduled
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled']
 SortOrder = Literal['asc', 'desc']
 
