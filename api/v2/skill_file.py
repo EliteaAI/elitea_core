@@ -3,17 +3,19 @@ from pathlib import PurePosixPath
 
 from flask import request, send_file
 from pydantic import ValidationError
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from tools import api_tools, config as c, auth, register_openapi
 
 from ...models.pd.skill_file import SkillFileRenameModel, SkillFileTextWriteModel
 from ...utils.skill_files import (
     delete_version_file,
+    describe_size,
     read_version_file,
     rename_version_file,
     write_version_file,
 )
-from ...utils.skill_utils import SkillError
+from ...utils.skill_utils import SkillError, get_max_file_bytes
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.folder_access import require_folder_access
 
@@ -28,6 +30,8 @@ PATH_PARAMETERS = [
      "description": "File path under the skill root, such as references/guide.md"},
 ]
 
+UPLOAD_ENVELOPE_BYTES = 64 * 1024
+
 WRITE_ROLES = {
     c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
     c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -35,11 +39,21 @@ WRITE_ROLES = {
 
 
 def read_uploaded_bytes():
-    """The bytes a write carries: a multipart ``file`` part, or UTF-8 text in a JSON ``content`` field."""
-    uploaded = request.files.get('file')
-    if uploaded is not None:
-        return uploaded.read(), None
-    body = request.get_json(silent=True)
+    """The bytes a write carries: a multipart ``file`` part, or UTF-8 text in a JSON ``content`` field. The body
+    is read only up to the per-file cap plus room for its envelope; a larger one is a 413 before any of it is kept."""
+    max_file_bytes = get_max_file_bytes()
+    max_body_bytes = max_file_bytes + UPLOAD_ENVELOPE_BYTES
+    too_large = {"error": f"the upload is too large: a skill file can be at most {describe_size(max_file_bytes)}"}, 413
+    if request.content_length is not None and request.content_length > max_body_bytes:
+        return None, too_large
+    request.max_content_length = max_body_bytes
+    try:
+        uploaded = request.files.get('file')
+        if uploaded is not None:
+            return uploaded.read(), None
+        body = request.get_json(silent=True)
+    except RequestEntityTooLarge:
+        return None, too_large
     if not isinstance(body, dict):
         return None, ({"error": "send the file as a multipart 'file' part or as JSON {\"content\": \"...\"}"}, 400)
     try:
