@@ -19,6 +19,7 @@ from .file_utils import (
     CHUNKS_TEMP_DIR,
 )
 from .internal_tools import get_default_attachment_bucket, ATTACHMENT_TOOLKIT_NAME
+from .platform_buckets import is_platform_managed_bucket
 from ..models.conversation import Conversation
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..models.message_items.text import TextMessageItem
@@ -31,11 +32,13 @@ DEFAULT_SEARCH_TOP=10
 
 
 def parse_filepath(filepath: str) -> tuple[str, str]:
-    """Parse /{bucket}/{filename} into (bucket, filename)."""
+    """Parse /{bucket}/{filename} into (bucket, filename); a bucket the platform manages is never an attachment's."""
     path = filepath.lstrip('/')
     parts = path.split('/', 1)
     if len(parts) != 2:
         raise ValueError(f"Invalid filepath format: {filepath}. Expected /{'{bucket}'}/{'{filename}'}")
+    if is_platform_managed_bucket(parts[0]):
+        raise ValueError(f"Invalid filepath: {filepath}. The bucket is managed by the platform")
     return parts[0], parts[1]
 
 

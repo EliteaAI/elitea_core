@@ -7,7 +7,8 @@ Server-side clients only: callers have already checked the user's access to the 
 from pylon.core.tools import log
 from tools import MinioClient
 
-SKILL_FILES_BUCKET = 'skill-files'
+from .platform_buckets import SKILL_FILES_BUCKET
+
 MISSING_LIFECYCLE_CODE = 'NoSuchLifecycleConfiguration'
 
 _ensured_buckets = set()
