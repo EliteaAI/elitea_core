@@ -25,7 +25,9 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
 from tools import db, config as c  # pylint: disable=E0401
 
+from ..models.skill import SKILL_FILE_TABLES
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
+from ..utils.agent_identity_schema import apply_tables, project_ids_missing_tables
 from ..utils.toolkit_migration import (
     run_selected_tools_migration,
     migrate_project_pipeline_instructions,
@@ -712,6 +714,36 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             [pid for pid in project_ids if pid in missing], dry_run=values["dry_run"])
         log.info(
             "%screate_mandate_tables: migrated=%s failed=%s",
+            "[DRY RUN] " if values["dry_run"] else "", len(migrated), len(failed),
+        )
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,
+                "dry_run": values["dry_run"]}
+
+    @web.method()
+    def create_skill_file_tables(self, *args, **kwargs):
+        """Admin task: create the skill file manifest table in each project schema (R-2.0.9, #7185).
+
+        Creates ``skill_version_files`` where it is missing. New projects get it from ``create_all`` and a startup
+        guard covers the rest, so this is the operator's way to report (dry run) and re-run. Idempotent.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+        """
+        param = kwargs.get("param", "") or ""
+        values, error = _parse_project_param("create_skill_file_tables", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+            missing = set(project_ids_missing_tables(SKILL_FILE_TABLES))
+        except Exception:  # pylint: disable=W0703
+            log.exception("create_skill_file_tables: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_tables(
+            [pid for pid in project_ids if pid in missing], SKILL_FILE_TABLES, dry_run=values["dry_run"])
+        log.info(
+            "%screate_skill_file_tables: migrated=%s failed=%s",
             "[DRY RUN] " if values["dry_run"] else "", len(migrated), len(failed),
         )
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,

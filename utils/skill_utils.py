@@ -40,6 +40,9 @@ from ..models.pd.skill_run_settings import dump_run_settings
 DEFAULT_MAX_SKILLS_PER_AGENT = 50
 DEFAULT_MAX_INVOKED_SKILLS_PER_TURN = 5
 DEFAULT_MAX_INSTRUCTIONS_LENGTH = 50000
+DEFAULT_MAX_PACKAGE_SIZE_MB = 30
+DEFAULT_MAX_FILE_SIZE_MB = 10
+DEFAULT_MAX_PACKAGE_FILES = 500
 
 
 def _skill_limit(key: str, default: int) -> int:
@@ -61,6 +64,21 @@ def get_max_invoked_skills_per_turn() -> int:
 
 def get_max_instructions_length() -> int:
     return _skill_limit('max_instructions_length', DEFAULT_MAX_INSTRUCTIONS_LENGTH)
+
+
+def get_max_package_bytes() -> int:
+    """Admin cap on the bundled files of one skill version, in bytes."""
+    return _skill_limit('max_package_size_mb', DEFAULT_MAX_PACKAGE_SIZE_MB) * 1024 * 1024
+
+
+def get_max_file_bytes() -> int:
+    """Admin cap on one bundled file, in bytes."""
+    return _skill_limit('max_file_size_mb', DEFAULT_MAX_FILE_SIZE_MB) * 1024 * 1024
+
+
+def get_max_package_files() -> int:
+    """Admin cap on the number of bundled files of one skill version."""
+    return _skill_limit('max_package_files', DEFAULT_MAX_PACKAGE_FILES)
 
 
 _SKILL_SORT_WHITELIST = frozenset({'created_at', 'name', 'id'})
@@ -195,6 +213,17 @@ def validate_instructions_length(instructions: str) -> None:
     max_allowed = get_max_instructions_length()
     if len(instructions) > max_allowed:
         raise SkillInstructionsTooLongError(len(instructions), max_allowed)
+
+
+class SkillFileError(SkillError):
+    """A bundled-file request the version cannot honour; the message names the cause."""
+
+
+class SkillFileNotFoundError(SkillError):
+    http_status = 404
+
+    def __init__(self, version_id: int, path: str):
+        super().__init__(f"File '{path}' not found in skill version {version_id}")
 
 
 class SkillAlreadyAttachedError(SkillError):

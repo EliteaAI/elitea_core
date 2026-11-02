@@ -16,6 +16,8 @@ import arbiter  # pylint: disable=E0401
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import AdmissionSettings, admit_dispatch, track_context
 from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
+from .models.skill import SKILL_FILE_TABLES
+from .utils.agent_identity_schema import apply_tables, project_ids_missing_tables
 from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
@@ -574,6 +576,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.8",
             )
             this.for_module("admin").module.register_admin_task(
+                "create_skill_file_tables", self.create_skill_file_tables,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "manage_autonomous_mandate", self.manage_autonomous_mandate,
                 group="R-2.0.8",
             )
@@ -594,6 +600,7 @@ class Module(module.ModuleModel):
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
+        self._ensure_skill_file_schema()
         self._ensure_schedule_streak_column()
         self._ensure_agent_identity_schema()
         self._start_governance()
@@ -837,6 +844,26 @@ class Module(module.ModuleModel):
                     log.info("schedule streak schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
             except Exception:  # pylint: disable=W0703
                 log.exception("schedule streak schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
+    def _ensure_skill_file_schema(self):
+        """Startup safety net: create the skill file manifest table in any project schema that predates it (#7185).
+        Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL. New projects are already
+        covered by create_all."""
+        def _run():
+            try:
+                pending = project_ids_missing_tables(SKILL_FILE_TABLES)
+                if not pending:
+                    return
+                log.info("skill file schema: auto-migrating %s project(s)", len(pending))
+                migrated, failed = apply_tables(pending, SKILL_FILE_TABLES)
+                log.info(
+                    "skill file schema: auto-migration done (migrated=%s failed=%s)",
+                    len(migrated), len(failed),
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("skill file schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
 
@@ -1431,6 +1458,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_mandate_tables", self.create_mandate_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_skill_file_tables", self.create_skill_file_tables
             )
             this.for_module("admin").module.unregister_admin_task(
                 "manage_autonomous_mandate", self.manage_autonomous_mandate
