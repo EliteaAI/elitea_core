@@ -74,13 +74,18 @@ class Row(tuple):
 
 
 class FakeQuery:
-    def __init__(self, session, model, target, predicates=(), order=(), distinct=False):
+    def __init__(self, session, model, target, predicates=(), order=(), distinct=False, for_update=False):
         self.session, self.model, self.target = session, model, target
         self.predicates, self.order, self.is_distinct = predicates, order, distinct
+        self.for_update = for_update
 
     def _copy(self, **changes):
-        values = {'predicates': self.predicates, 'order': self.order, 'distinct': self.is_distinct, **changes}
+        values = {'predicates': self.predicates, 'order': self.order, 'distinct': self.is_distinct,
+                  'for_update': self.for_update, **changes}
         return FakeQuery(self.session, self.model, self.target, **values)
+
+    def with_for_update(self):
+        return self._copy(for_update=True)
 
     def filter(self, *predicates):
         return self._copy(predicates=self.predicates + predicates)
@@ -96,6 +101,8 @@ class FakeQuery:
 
     def _rows(self):
         rows = [row for row in self.session.rows[self.model] if all(p.test(row) for p in self.predicates)]
+        if self.for_update:
+            self.session.locked_rows.extend(rows)
         for column in reversed(self.order):
             rows.sort(key=lambda row, name=column.name: getattr(row, name), reverse=getattr(column, 'descending', False))
         return rows
@@ -151,6 +158,8 @@ class FakeSession:
         self.rows = {FakeSkill: [], FakeSkillVersion: [], FakeSkillVersionFile: [], FakeEntitySkillMapping: []}
         self.next_id = 100
         self.commits = 0
+        self.locked_rows = []
+        self.file_reads = []
 
     def query(self, target):
         model = target if isinstance(target, type) else target.owner
@@ -195,6 +204,7 @@ def _init_version(self, id=None, skill_id=3, name='base', status='draft', instru
 
 
 def _version_files(self):
+    self.session.file_reads.append((self.id, self in self.session.locked_rows))
     return sorted(
         (f for f in self.session.rows[FakeSkillVersionFile] if f.skill_version_id == self.id),
         key=lambda f: f.path,

@@ -150,11 +150,12 @@ def build_file_entry(path: str, data: bytes) -> dict:
     }
 
 
-def _load_version(session, skill_id: int, version_id: int) -> SkillVersion:
-    version = session.query(SkillVersion).filter(
+def _load_version(session, skill_id: int, version_id: int, for_update: bool = False) -> SkillVersion:
+    query = session.query(SkillVersion).filter(
         SkillVersion.skill_id == skill_id,
         SkillVersion.id == version_id,
-    ).first()
+    )
+    version = (query.with_for_update() if for_update else query).first()
     if not version:
         raise SkillVersionNotFoundError(skill_id, version_id=version_id)
     return version
@@ -213,9 +214,10 @@ def read_version_file(project_id: int, skill_id: int, version_id: int, path: str
 
 
 def write_version_file(project_id: int, skill_id: int, version_id: int, path: str, data: bytes, session=None) -> dict:
-    """Store ``data`` at ``path`` in a draft version, replacing a file already there (case-insensitively)."""
+    """Store ``data`` at ``path`` in a draft version, replacing a file already there (case-insensitively).
+    Writers of one version queue on its row, so each one checks the caps against the files the previous one left."""
     with _skill_session(session, project_id) as s:
-        version = _load_version(s, skill_id, version_id)
+        version = _load_version(s, skill_id, version_id, for_update=True)
         _ensure_version_updatable(version)
         entry = build_file_entry(path, data)
         replaced = find_version_file(s, version.id, entry['path'])

@@ -268,6 +268,15 @@ class TestConcurrentPaths:
         assert info.value.http_status == 409
 
 
+class TestConcurrentWrites:
+    def test_a_write_reads_the_files_it_checks_the_caps_against_only_once_it_holds_the_version_row(self, env, session):
+        _version(session)
+
+        _write(env, session, 'forms.md', b'x')
+
+        assert session.file_reads == [(10, True)]
+
+
 class TestRead:
     def test_read_returns_the_entry_and_the_bytes_from_the_bucket(self, env, session):
         _version(session)
