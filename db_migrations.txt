@@ -556,7 +556,11 @@ Run admin task seed_eval_trajectory_dimensions
 
 # Issue #7337 (C-1009): a scoped API token's owner consents to its runs acting with their Microsoft sign-in. New table
 # api_token_identity_consent in the shared schema (token_id PK, owner_user_id, material_project_id, material_ref,
-# consented_at), with its own MetaData (not db.Base). No task: created at start (CREATE TABLE IF NOT EXISTS through
-# create_all checkfirst) only where elitea_core's plugin config lists token_owner_delegated in mandate_identity_sources;
-# without the source no table is created and nothing reads one. The material itself is the secrets plugin's
-# credential_offline_material row (holder_ref token:<id>), no change there.
+# consented_at; index ix_api_token_identity_consent_owner on owner_user_id), with its own MetaData (not db.Base). No
+# task: created at start only where elitea_core's plugin config lists token_owner_delegated in mandate_identity_sources
+# (SQLAlchemy create_all / Index.create with checkfirst: a catalog look-up, then a plain CREATE TABLE / CREATE INDEX; a
+# second replica starting at the same moment may fail its CREATE, which is logged and harmless: the table is there).
+# Without the source no table is created and nothing reads one. The material itself is the secrets plugin's
+# credential_offline_material row (holder_ref token:<id>, kept in the owner's personal project); secrets adds the retire
+# reason OWNER_RETIRED (no schema change). The hourly elitea_core_check_pat_expiration task also retires the consents of
+# deleted or expired tokens and of deleted or suspended owners (bounded per run).

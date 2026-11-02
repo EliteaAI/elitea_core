@@ -19,7 +19,8 @@ OPENAPI_TAG = "elitea_core/governance"
 STATUS = {"IDENTITY_SOURCE_NOT_ALLOWED": 403, "TOKEN_NOT_FOUND": 404, "TOKEN_NOT_SCOPED": 409, "INVALID_STATE": 409,
           "CONSENT_NOT_GIVEN": 409, "OWNER_NOT_LINKED": 409, "DENIED_SUBJECT_MISMATCH": 403,
           "DENIED_ASSERTION_UNAVAILABLE": 409, "DENIED_DELEGATION_UNSUPPORTED_CALLER": 403,
-          "DEPENDENCY_UNAVAILABLE": 503, "AUDIT_UNAVAILABLE": 503, "CONCURRENT_CHANGE": 409}
+          "DEPENDENCY_UNAVAILABLE": 503, "AUDIT_UNAVAILABLE": 503, "CONCURRENT_CHANGE": 409,
+          "GOVERNANCE_NOT_ENFORCED": 409}
 
 
 class TokenIdentityAction(BaseModel):
@@ -27,16 +28,6 @@ class TokenIdentityAction(BaseModel):
 
     action: Literal["consent", "withdraw"]
     token_id: StrictInt = Field(gt=0)
-
-
-def _session_actor():
-    """The signed-in person asking (``flask.g.auth`` of type user), never a token's owner."""
-    from ...utils.credential_probe import _session_holder  # pylint: disable=C0415
-    actor = api.current_actor()
-    holder = _session_holder()
-    if actor is None or getattr(holder, "type", None) != "user":
-        return None
-    return actor
 
 
 class DefaultAPI(api_tools.APIModeHandler):
@@ -50,7 +41,7 @@ class DefaultAPI(api_tools.APIModeHandler):
         mcp_tool=False, available_to_users=False,
     )
     def get(self, **kwargs):
-        actor = _session_actor()
+        actor = api.session_actor()
         if actor is None:
             return api.refusal("FORBIDDEN")
         try:
@@ -69,7 +60,7 @@ class DefaultAPI(api_tools.APIModeHandler):
         mcp_tool=False, available_to_users=False,
     )
     def post(self, **kwargs):
-        actor = _session_actor()
+        actor = api.session_actor()
         if actor is None:
             return {"error": token_identity.MESSAGES["DENIED_DELEGATION_UNSUPPORTED_CALLER"],
                     "code": "DENIED_DELEGATION_UNSUPPORTED_CALLER"}, 403
@@ -80,7 +71,7 @@ class DefaultAPI(api_tools.APIModeHandler):
             if body.action == "consent":
                 result = token_identity.consent(self.module, body.token_id, actor)
             else:
-                result = token_identity.withdraw(body.token_id, actor)
+                result = token_identity.withdraw(self.module, body.token_id, actor)
         except token_identity.IdentityRefused as refused:
             message = token_identity.MESSAGES.get(refused.code, token_identity.MESSAGES["DEPENDENCY_UNAVAILABLE"])
             return {"error": message, "code": refused.code}, \

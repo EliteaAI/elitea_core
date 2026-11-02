@@ -49,6 +49,7 @@ MESSAGES = {
     "DEPENDENCY_UNAVAILABLE": "A service did not answer; nothing was changed. Try again.",
     "AUDIT_UNAVAILABLE": "The audit trail is unavailable; nothing was changed. Try again later.",
     "CONCURRENT_CHANGE": "The token's consent changed while this ran; read it again and retry.",
+    "GOVERNANCE_NOT_ENFORCED": "Consent applies only while credential governance is enforced; nothing was changed.",
 }
 
 
@@ -73,9 +74,14 @@ def token_id_of(caller) -> Optional[int]:
 
 
 def ensure_table() -> None:
-    """Create the consent table where it is missing (the start of a deployment that lists the source). Idempotent."""
+    """Create the consent table and its index where missing (the start of a deployment that lists the source).
+    Idempotent: ``create_all`` and the index creation look at the catalog first (a plain ``CREATE`` then); a second
+    replica that loses the race fails here, is logged by the caller, and finds the table in place."""
     with db.get_session(None) as session:
-        METADATA.create_all(session.connection(), checkfirst=True)
+        connection = session.connection()
+        METADATA.create_all(connection, checkfirst=True)
+        for index in ApiTokenIdentityConsent.__table__.indexes:   # a table created before its index (#7337 review N-2)
+            index.create(connection, checkfirst=True)
         session.commit()
 
 
@@ -110,7 +116,8 @@ def identity_reader(module, token_id, owner_user_id):
 
 def _token_live(token_id, owner_user_id) -> None:
     """The token still exists, has not expired and is its owner's (the auth plugin's admission verdict, epoch-cached):
-    a deleted or expired token's consent is retired here if no event did it yet, and nothing is released."""
+    a deleted or expired token's consent (or one of a deleted or suspended owner) is retired here if neither an event
+    nor the sweep did it yet, and nothing is released."""
     try:
         epochs = auth.read_identity_epochs("token", token_id)
     except Exception as exc:  # pylint: disable=W0703
@@ -120,8 +127,9 @@ def _token_live(token_id, owner_user_id) -> None:
         raise entra_obo.DelegationRefused(entra_obo.UNAVAILABLE)
     if epochs.get("active") is True and epochs.get("user_id") == owner_user_id:
         return
-    if epochs.get("reason") in ("token_missing", "token_expired"):
-        retire(token_id, "TOKEN_IDENTITY_RETIRED", RELEASE_ACTOR)
+    ended = _ENDED.get(epochs.get("reason"))
+    if ended is not None:
+        retire(token_id, ended[0], RELEASE_ACTOR, retire_reason=ended[1])
     raise entra_obo.DelegationRefused(CONSENT_REQUIRED)
 
 
@@ -207,8 +215,15 @@ def _clear(token_id, material_ref, reason_code, caller_ref, *, retire_reason, ac
     return bool(moved)
 
 
+def _governed_or_refuse(module) -> None:
+    from .governance import is_governed  # pylint: disable=C0415
+    if not is_governed(module):
+        raise IdentityRefused("GOVERNANCE_NOT_ENFORCED")
+
+
 def _owned_token(module, token_id, actor_user_id) -> dict:
     """The token's scope (``{projects, operations, user_id}``) when it is the actor's, scoped and live."""
+    _governed_or_refuse(module)
     if not allowed(module):
         raise IdentityRefused("IDENTITY_SOURCE_NOT_ALLOWED")
     try:
@@ -229,6 +244,20 @@ def _owned_token(module, token_id, actor_user_id) -> dict:
     return scope
 
 
+def _personal_project(module, user_id) -> int:
+    """Where the owner's material is kept: their personal project, which every user has, whose member they always are,
+    and which no token scope or project removal can take away (#7337 review S-1)."""
+    rpc = getattr(getattr(module, "context", None), "rpc_manager", None)
+    try:
+        project_id = rpc.timeout(4).projects_get_personal_project_id(user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("token identity: the owner's personal project could not be read (%s)", type(exc).__name__)
+        raise IdentityRefused("DEPENDENCY_UNAVAILABLE") from None
+    if isinstance(project_id, bool) or not isinstance(project_id, int) or project_id <= 0:
+        raise IdentityRefused("DEPENDENCY_UNAVAILABLE")
+    return project_id
+
+
 def _linked_subject(actor_user_id) -> tuple:
     try:
         user = auth.get_user(actor_user_id)
@@ -244,7 +273,8 @@ def _linked_subject(actor_user_id) -> tuple:
 
 def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
     """The token's owner consents, in their own signed-in session, to the token's runs acting with their Microsoft
-    sign-in: ``{"token_id", "consented_at"}``, or raises ``IdentityRefused``. Given again, it replaces the earlier one
+    sign-in (the material kept in their personal project): ``{"token_id", "consented_at"}``, or raises
+    ``IdentityRefused``. Given again, it replaces the earlier one
     (retired ``CONSENT_REPLACED``); two at once: one wins, the other's material is retired and it reads
     ``CONCURRENT_CHANGE``."""
     scope = _owned_token(module, token_id, actor_user_id)
@@ -252,7 +282,7 @@ def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
     person = _verified_person(module, actor_user_id)
     if (person["issuer"], person["tid"], person["oid"]) != linked:
         raise IdentityRefused("DENIED_SUBJECT_MISMATCH")   # signed in as another identity than the account's link
-    holder, material_project = holder_of(token_id), min(scope["projects"])
+    holder, material_project = holder_of(token_id), _personal_project(module, actor_user_id)
     earlier = _read(token_id)
     granted = _grant(module, person, holder)
     user_ref = f"idp:{person['tid']}:{person['oid']}"
@@ -303,9 +333,11 @@ def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
     return {"token_id": token_id, "consented_at": now.isoformat()}
 
 
-def withdraw(token_id, actor_user_id) -> dict:
-    """The token's owner withdraws its consent; works whatever the switch says (withdrawing is always safe). The next
-    delegated release of the token's runs is refused ``DENIED_TOKEN_CONSENT_REQUIRED``."""
+def withdraw(module, token_id, actor_user_id) -> dict:
+    """The token's owner withdraws its consent; works whatever the switch says (withdrawing is always safe), but only
+    while governance is enforced (off and audit only read and write nothing). The next delegated release of the token's
+    runs is refused ``DENIED_TOKEN_CONSENT_REQUIRED``."""
+    _governed_or_refuse(module)
     try:
         row = _read(token_id)
     except Exception as exc:  # pylint: disable=W0703
@@ -324,13 +356,14 @@ def withdraw(token_id, actor_user_id) -> dict:
     return {"token_id": token_id}
 
 
-def retire(token_id, reason_code, caller_ref) -> bool:
-    """The token was deleted or expired: its consent goes with it (``HOLDER_REVOKED``). Best effort; one read."""
+def retire(token_id, reason_code, caller_ref, retire_reason="HOLDER_REVOKED") -> bool:
+    """The token was deleted or expired (``HOLDER_REVOKED``), or its owner is gone (``OWNER_RETIRED``): its consent
+    goes with it. Best effort; one read."""
     try:
         row = _read(token_id)
         if row is None:
             return False
-        return _clear(token_id, row.material_ref, reason_code, caller_ref, retire_reason="HOLDER_REVOKED")
+        return _clear(token_id, row.material_ref, reason_code, caller_ref, retire_reason=retire_reason)
     except Exception as exc:  # pylint: disable=W0703
         log.error("token identity: the consent of an ended token was not retired (%s)", type(exc).__name__)
         return False
@@ -369,3 +402,45 @@ def status(module, actor_user_id) -> dict:
             ApiTokenIdentityConsent.owner_user_id == actor_user_id)).all()
     return {"allowed": True, "linked": linked, "mandates": mandates,
             "consents": {str(row.token_id): row.consented_at.isoformat() for row in rows}}
+
+
+# --- the hourly sweep (#7337 review S-2) --------------------------------------------------------------------------
+
+SWEEP_LIMIT = 200   # consents looked at per run; the next run goes on after the last one seen
+SWEEP_ACTOR = "elitea_core:token_consent_sweep"
+_SWEEP_CURSOR = [0]
+# the auth plugin's verdict reason -> (audit reason, material retire reason)
+_ENDED = {"token_missing": ("TOKEN_IDENTITY_RETIRED", "HOLDER_REVOKED"),
+          "token_expired": ("TOKEN_IDENTITY_RETIRED", "HOLDER_REVOKED"),
+          "user_missing": ("TOKEN_IDENTITY_OWNER_RETIRED", "OWNER_RETIRED"),
+          "user_suspended": ("TOKEN_IDENTITY_OWNER_RETIRED", "OWNER_RETIRED")}
+
+
+def sweep(module, limit=SWEEP_LIMIT) -> dict:
+    """Retire the consents whose token is gone (deleted, expired) or whose owner is (deleted, suspended), so no
+    refresh token outlives its holder at rest. At most ``limit`` consents per run, in token order from where the last
+    run stopped (round robin). Under off and audit only, or without the source, nothing is read. The release-time check
+    (``_token_live``) stays the first line; this only cleans up. ``{"seen", "retired"}``."""
+    from .governance import is_governed  # pylint: disable=C0415
+    if not is_governed(module) or not allowed(module):
+        return {"seen": 0, "retired": 0}
+    with db.get_session(None) as session:
+        rows = session.execute(select(ApiTokenIdentityConsent.token_id, ApiTokenIdentityConsent.owner_user_id).where(
+            ApiTokenIdentityConsent.token_id > _SWEEP_CURSOR[0]).order_by(ApiTokenIdentityConsent.token_id)
+            .limit(limit)).all()
+    _SWEEP_CURSOR[0] = rows[-1].token_id if len(rows) == limit else 0   # wrap around after the last page
+    retired = 0
+    for row in rows:
+        try:
+            epochs = auth.read_identity_epochs("token", row.token_id)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("token identity sweep: a token could not be read (%s)", type(exc).__name__)
+            continue
+        if not isinstance(epochs, dict):
+            continue
+        ended = _ENDED.get(epochs.get("reason"))
+        if ended is None and epochs.get("active") is True and epochs.get("user_id") not in (None, row.owner_user_id):
+            ended = ("TOKEN_IDENTITY_RETIRED", "HOLDER_REVOKED")   # the token is not its owner's any more
+        if ended is not None and retire(row.token_id, ended[0], SWEEP_ACTOR, retire_reason=ended[1]):
+            retired += 1
+    return {"seen": len(rows), "retired": retired}

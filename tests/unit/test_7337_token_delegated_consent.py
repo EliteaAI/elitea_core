@@ -30,6 +30,7 @@ TOKEN = 21
 OWNER = 42
 OTHER = 43
 OWNER_REF = f"idp:{TID}:{OID}"
+PERSONAL = 7   # the owner's personal project: where their consent material is kept
 KEY = "test-master-key-not-a-secret"
 PREDICT = "models.applications.predict.post"
 SOURCES = ["owner_delegated", "token_owner_delegated"]
@@ -75,6 +76,9 @@ def env(ns, monkeypatch):
         return built
 
     monkeypatch.setattr(env, "module", module)
+    env.personal_calls = []
+    env.oidc.projects_get_personal_project_id = lambda user_id: env.personal_calls.append(user_id) or PERSONAL
+    ns.token_identity._SWEEP_CURSOR[0] = 0  # pylint: disable=W0212
     ns.token_identity.ensure_table()
     with ns.sa_orm.Session(env.engine(None)) as session:
         session.execute(ns.sa.delete(ns.token_models.ApiTokenIdentityConsent))
@@ -122,12 +126,12 @@ def consent_row(ns, env, token_id=TOKEN):
             ns.token_models.ApiTokenIdentityConsent.token_id == token_id)).scalar_one_or_none()
 
 
-def consented(ns, env, holder=f"token:{TOKEN}", custodian=OWNER_REF, owner=OWNER, project=1):
+def consented(ns, env, holder=f"token:{TOKEN}", custodian=OWNER_REF, owner=OWNER, project=PERSONAL, token_id=TOKEN):
     """A consent as ``consent`` records it: the material at the secrets plugin, the row naming it."""
     material = env.offline.add(holder, custodian)
     with ns.sa_orm.Session(env.engine(None)) as session:
         session.add(ns.token_models.ApiTokenIdentityConsent(
-            token_id=TOKEN, owner_user_id=owner, material_project_id=project, material_ref=uuid.UUID(material),
+            token_id=token_id, owner_user_id=owner, material_project_id=project, material_ref=uuid.UUID(material),
             consented_at=datetime.now(timezone.utc)))
         session.commit()
     return material
@@ -218,7 +222,7 @@ def test_a_consented_token_run_is_released_a_token_minted_from_the_owners_offlin
     reply = run.release()
     assert reply["ok"] is True, reply
     assert run.opened(reply["releases"][0])["fields"] == {"access_token": GRAPH_TOKEN}
-    assert env.offline.calls == [("release", 1, material, f"token:{TOKEN}", OWNER_REF)]
+    assert env.offline.calls == [("release", PERSONAL, material, f"token:{TOKEN}", OWNER_REF)]
     assert env.oidc.redeemed == [(TID, OID, f"token:{TOKEN}", "login", REFRESH)]
     [(_, event)] = env.recorded
     assert (event["reason_code"], event["caller_ref"], event["approver_ref"], event["target_ref"], event["user_ref"]) == (
@@ -236,7 +240,7 @@ def test_the_consent_is_read_at_every_release_and_a_withdrawal_stops_a_cached_to
     run = admitted(ns, env, Delegated(env, binding))
     assert run.release()["ok"] is True and run.release()["ok"] is True
     assert len(env.oidc.redeemed) == 1 and [c[0] for c in env.offline.calls] == ["release", "release"]
-    assert ns.token_identity.withdraw(TOKEN, OWNER) == {"token_id": TOKEN}
+    assert ns.token_identity.withdraw(env.module(), TOKEN, OWNER) == {"token_id": TOKEN}
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert len(env.oidc.redeemed) == 1
     assert refused(ns, env, Delegated(env, binding, tool_id=2)) == "DENIED_TOKEN_CONSENT_REQUIRED"
@@ -405,14 +409,13 @@ def test_a_mandates_material_never_satisfies_a_token_holder(ns, env):
     assert env.oidc.redeemed == []
 
 
-def test_a_tokens_material_never_satisfies_a_mandate_holder(ns, env):
-    material = env.offline.add(f"token:{TOKEN}")
-    answer = env.offline.release_offline_material(1, material, holder_ref=f"mandate:{uuid.uuid4()}",
-                                                  custodian_subject_ref=OWNER_REF, release_id="r", actor_ref="a")
-    assert answer == {"ok": False, "reason_code": "OFFLINE_MATERIAL_MISMATCH"}
+def test_holder_strings_never_collide(ns):
+    """The holder strings elitea_core sends. That the secrets plugin never releases one holder's material to another is
+    proven against its real code there (secrets ``test_a_mandate_holder_never_matches_a_token_holder_and_back``)."""
     assert ns.token_identity.holder_of(TOKEN) == "token:21" and ns.mandate_identity.holder_of(TOKEN) == "mandate:21"
     assert ns.token_identity.token_id_of({"kind": "api_token", "ref": "mandate:21"}) is None
     assert ns.token_identity.token_id_of({"kind": "trigger", "ref": "token:21"}) is None
+    assert ns.token_identity.token_id_of({"kind": "api_token", "ref": "token:21"}) == 21
 
 
 # --- caches: the owner's interactive tokens and the token's offline ones never mix -------------------------------------
@@ -468,9 +471,12 @@ def test_the_owner_consents_in_their_own_session_and_only_a_reference_is_kept(ns
     assert answer["token_id"] == TOKEN and answer["consented_at"]
     assert env.oidc.granted == [(TID, OID, f"token:{TOKEN}")]
     [keep] = env.offline.calls
-    assert keep == ("keep", 1, f"token:{TOKEN}", OWNER, OWNER_REF, "login", OWNER)   # kept in the lowest project
+    # kept in the owner's personal project, whatever the token's scope (no scope project can strand it)
+    assert keep == ("keep", PERSONAL, f"token:{TOKEN}", OWNER, OWNER_REF, "login", OWNER)
+    assert env.personal_calls == [OWNER]
     row = consent_row(ns, env)
-    assert (row.owner_user_id, row.material_project_id, str(row.material_ref) in env.offline.rows) == (OWNER, 1, True)
+    assert (row.owner_user_id, row.material_project_id, str(row.material_ref) in env.offline.rows) == (
+        OWNER, PERSONAL, True)
     [(_, event)] = env.recorded
     assert (event["event_type"], event["reason_code"], event["target_ref"], event["user_ref"], event["caller_ref"]) == (
         "approval", "TOKEN_IDENTITY_CONSENTED", f"token:{TOKEN}", OWNER_REF, f"user:{OWNER}")
@@ -556,29 +562,198 @@ def test_a_consent_that_is_not_the_owners_own_live_sign_in_is_refused_with_nothi
 def test_withdrawing_is_the_owners_and_works_with_the_source_removed(ns, env):
     material = consented(ns, env)
     with pytest.raises(ns.token_identity.IdentityRefused) as other:
-        ns.token_identity.withdraw(TOKEN, OTHER)
+        ns.token_identity.withdraw(env.module(), TOKEN, OTHER)
     assert other.value.code == "CONSENT_NOT_GIVEN"   # another user's token reads as none
     env.sources = []
-    assert ns.token_identity.withdraw(TOKEN, OWNER) == {"token_id": TOKEN}
+    assert ns.token_identity.withdraw(env.module(), TOKEN, OWNER) == {"token_id": TOKEN}
     assert consent_row(ns, env) is None
     assert ("retire", material, "CONSENT_WITHDRAWN") in env.offline.calls
     [(_, event)] = env.recorded
     assert (event["event_type"], event["reason_code"], event["target_ref"], event["caller_ref"]) == (
         "withdrawal", "TOKEN_IDENTITY_WITHDRAWN", f"token:{TOKEN}", f"user:{OWNER}")
     with pytest.raises(ns.token_identity.IdentityRefused) as again:
-        ns.token_identity.withdraw(TOKEN, OWNER)
+        ns.token_identity.withdraw(env.module(), TOKEN, OWNER)
     assert again.value.code == "CONSENT_NOT_GIVEN"
 
 
 @pytest.mark.parametrize("scope", [None, {"projects": [1], "operations": ["run", "build", "admin"]}])
 @pytest.mark.parametrize("method", ["GET", "POST"])
-def test_an_api_token_never_reaches_the_consent_route(ns, scope, method):
+def test_the_hook_closes_the_token_consent_route_to_api_tokens(ns, scope, method):
+    """The hook's half. That every owner-mode consent route refuses every API token, whatever its scope, in the
+    handler as well, is pinned in test_7131_mandate_api (``test_no_api_token_reaches_an_owner_consent_route``)."""
     code = ns.token_scope.decide(scope, "api.v2.elitea_core.token_identity", method)
     if scope is None and method == "GET":
         assert code is None   # a legacy token's read is the handler's to refuse (signed-in sessions only)
     else:
         assert code == "TOKEN_SCOPE_OPERATION"
-    for endpoint in ("api.v2.elitea_core.autonomous_mandate_action", "api.v2.elitea_core.autonomous_mandates"):
-        if scope is not None:
-            assert ns.token_scope.decide(scope, endpoint, method, {"mode": "prompt_lib"}, project=1) == (
-                None if "admin" in scope["operations"] else "TOKEN_SCOPE_OPERATION")
+
+
+# --- fix round (#7337 review) ------------------------------------------------------------------------------------------
+
+def test_a_token_run_admitted_without_the_source_is_stale_when_released_with_it(ns, env):
+    binding = env.seed_agent()
+    consented(ns, env)
+    env.sources = ["owner_delegated"]
+    run = admitted(ns, env, Delegated(env, binding))   # admitted as after #7336: no issuer/oid in the context
+    env.sources = list(SOURCES)
+    assert run.release()["reason_code"] == "STALE_CONTEXT"
+    assert env.offline.calls == [] and env.oidc.redeemed == []
+
+
+def test_a_consent_racing_a_replacement_of_an_earlier_one_loses_and_its_material_is_retired(ns, env, monkeypatch):
+    earlier = consented(ns, env)
+    signed_in_as(ns, monkeypatch)
+    real_grant = ns.token_identity._grant  # pylint: disable=W0212
+    winner = []
+
+    def racing(module, person, holder):   # another consent replaces the earlier one while this one asks
+        granted = real_grant(module, person, holder)
+        if not winner:
+            monkeypatch.setattr(ns.token_identity, "_grant", real_grant)
+            winner.append(ns.token_identity.consent(env.module(), TOKEN, OWNER))
+        return granted
+
+    monkeypatch.setattr(ns.token_identity, "_grant", racing)
+    with pytest.raises(ns.token_identity.IdentityRefused) as lost:
+        ns.token_identity.consent(env.module(), TOKEN, OWNER)
+    assert lost.value.code == "CONCURRENT_CHANGE"
+    row = consent_row(ns, env)
+    kept = [call for call in env.offline.calls if call[0] == "keep"]
+    retired = [(ref, reason) for name, ref, reason in (c for c in env.offline.calls if c[0] == "retire")]
+    assert len(kept) == 2 and str(row.material_ref) not in (earlier, *[ref for ref, _ in retired])
+    assert sorted(reason for _, reason in retired) == ["CONSENT_REPLACED", "CONSENT_REPLACED"]   # earlier + loser
+    assert earlier in [ref for ref, _ in retired]
+
+
+def test_the_owners_personal_project_is_asked_and_a_failure_keeps_nothing(ns, env, monkeypatch):
+    signed_in_as(ns, monkeypatch)
+    for answer in (RuntimeError("down"), None, 0, True):
+        def personal(user_id, answer=answer):
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        env.oidc.projects_get_personal_project_id = personal
+        with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
+            ns.token_identity.consent(env.module(), TOKEN, OWNER)
+        assert refusal.value.code == "DEPENDENCY_UNAVAILABLE"
+    assert env.offline.calls == [] and env.oidc.granted == [] and consent_row(ns, env) is None
+
+
+def test_a_consent_kept_in_the_personal_project_releases_whatever_project_the_run_is_in(ns, env):
+    """The token's scope project (1) is not where the material is: leaving or deleting a scope project cannot strand
+    the consent, and the release reads the material from the personal project the row names."""
+    ns.need_transport()
+    binding = env.seed_agent()
+    material = consented(ns, env)
+    run = admitted(ns, env, Delegated(env, binding))
+    assert run.release()["ok"] is True
+    assert env.offline.calls == [("release", PERSONAL, material, f"token:{TOKEN}", OWNER_REF)]
+
+
+@pytest.mark.parametrize("reason, audit, retire_reason", [
+    ("user_suspended", "TOKEN_IDENTITY_OWNER_RETIRED", "OWNER_RETIRED"),
+    ("user_missing", "TOKEN_IDENTITY_OWNER_RETIRED", "OWNER_RETIRED"),
+])
+def test_a_release_for_a_gone_owner_is_refused_and_retires_the_consent(ns, env, reason, audit, retire_reason):
+    binding = env.seed_agent()
+    material = consented(ns, env)
+    run = admitted(ns, env, Delegated(env, binding))
+    env.epochs[TOKEN] = {"active": False, "user": 3, "token": 4, "user_id": OWNER, "reason": reason}
+    assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
+    assert consent_row(ns, env) is None and ("retire", material, retire_reason) in env.offline.calls
+    assert audit in [e["reason_code"] for _, e in env.recorded]
+
+
+def _verdicts(env, by_token):
+    for token_id, reason in by_token.items():
+        env.epochs[token_id] = {"active": reason is None, "user": 3, "token": 4, "user_id": OWNER, "reason": reason}
+
+
+def test_the_hourly_sweep_retires_the_consents_of_gone_tokens_and_owners_and_keeps_live_ones(ns, env):
+    materials = {token_id: consented(ns, env, token_id=token_id) for token_id in (31, 32, 33, 34, 35)}
+    _verdicts(env, {31: None, 32: "token_missing", 33: "token_expired", 34: "user_suspended", 35: "user_missing"})
+    assert ns.token_identity.sweep(env.module()) == {"seen": 5, "retired": 4}
+    retired = {ref: reason for name, ref, reason in (c for c in env.offline.calls if c[0] == "retire")}
+    assert retired == {materials[32]: "HOLDER_REVOKED", materials[33]: "HOLDER_REVOKED",
+                       materials[34]: "OWNER_RETIRED", materials[35]: "OWNER_RETIRED"}
+    assert consent_row(ns, env, 31) is not None and all(consent_row(ns, env, t) is None for t in (32, 33, 34, 35))
+    assert sorted(e["reason_code"] for _, e in env.recorded) == [
+        "TOKEN_IDENTITY_OWNER_RETIRED", "TOKEN_IDENTITY_OWNER_RETIRED", "TOKEN_IDENTITY_RETIRED", "TOKEN_IDENTITY_RETIRED"]
+    assert ns.token_identity.sweep(env.module()) == {"seen": 1, "retired": 0}   # idempotent
+
+
+def test_the_sweep_is_bounded_per_run_and_goes_round(ns, env):
+    for token_id in range(41, 46):
+        consented(ns, env, token_id=token_id)
+    _verdicts(env, {token_id: None for token_id in range(41, 46)})
+    seen = [ns.token_identity.sweep(env.module(), limit=2)["seen"] for _ in range(4)]
+    assert seen == [2, 2, 1, 2]   # 41-42, 43-44, 45, then from the start again
+    assert env.epoch_calls[:5] == [("token", t) for t in range(41, 46)]
+
+
+def test_the_sweep_reads_nothing_under_off_or_without_the_source(ns, env, monkeypatch):
+    consented(ns, env, token_id=51)
+    _verdicts(env, {51: "token_missing"})
+    reads = []
+    real = env.get_session
+    monkeypatch.setattr(ns.tools.db, "get_session", lambda project_id: reads.append(project_id) or real(project_id))
+    assert ns.token_identity.sweep(env.module(governed=False)) == {"seen": 0, "retired": 0}
+    env.sources = ["owner_delegated"]
+    assert ns.token_identity.sweep(env.module()) == {"seen": 0, "retired": 0}
+    assert reads == [] and env.offline.calls == []
+
+
+def test_the_sweep_skips_a_token_it_cannot_read_and_goes_on(ns, env):
+    first, second = consented(ns, env, token_id=61), consented(ns, env, token_id=62)
+    env.epochs[62] = {"active": False, "user": 3, "token": None, "user_id": None, "reason": "token_missing"}
+    env.epochs.pop(61, None)   # unreadable: None from the auth plugin
+    assert ns.token_identity.sweep(env.module()) == {"seen": 2, "retired": 1}
+    assert consent_row(ns, env, 61) is not None and ("retire", second, "HOLDER_REVOKED") in env.offline.calls
+    assert first in env.offline.rows and env.offline.rows[first]["state"] == "active"
+
+
+@pytest.mark.parametrize("call", ["consent", "withdraw"])
+def test_consent_and_withdraw_refuse_under_off_and_audit_only_with_nothing_read(ns, env, monkeypatch, call):
+    consented(ns, env)
+    signed_in_as(ns, monkeypatch)
+    reads = []
+    real = env.get_session
+    monkeypatch.setattr(ns.tools.db, "get_session", lambda project_id: reads.append(project_id) or real(project_id))
+    for module in (env.module(governed=False), env.module(audit=True)):
+        with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
+            if call == "consent":
+                ns.token_identity.consent(module, TOKEN, OWNER)
+            else:
+                ns.token_identity.withdraw(module, TOKEN, OWNER)
+        assert refusal.value.code == "GOVERNANCE_NOT_ENFORCED" and refusal.value.code in ns.token_identity.MESSAGES
+    assert reads == [] and env.offline.calls == [] and env.oidc.granted == []
+    assert consent_row(ns, env) is not None
+
+
+def test_the_hourly_pat_task_sweeps_first_and_a_failing_sweep_does_not_stop_the_notifications(ns, env, monkeypatch):
+    from fixtures.helpers import load_module_with_stubs  # pylint: disable=C0415
+    pkg = admission_env.PKG
+    enums = sys.modules[f"{pkg}.models.enums.all"]
+    monkeypatch.setattr(enums, "NotificationEventTypes",
+                        types.SimpleNamespace(personal_access_token_expiring="pat_expiring"), raising=False)
+    sys.modules.setdefault(f"{pkg}.rpc", types.ModuleType(f"{pkg}.rpc")).__path__ = []
+    pylon_tools = sys.modules["pylon.core.tools"]
+    monkeypatch.setattr(pylon_tools, "web", types.SimpleNamespace(rpc=lambda *names: (lambda func: func)), raising=False)
+    task = load_module_with_stubs(PLUGIN_ROOT / "rpc" / "pat_expiration.py", f"{pkg}.rpc.pat_expiration")
+    order, fired = [], []
+    rpc = types.SimpleNamespace(
+        auth_list_tokens_expiring_soon=lambda: order.append("expiring") or [{"user_id": OWNER, "uuid": "u", "name": "n"}],
+        projects_get_personal_project_id=lambda user_id: PERSONAL)
+    module = types.SimpleNamespace(context=types.SimpleNamespace(
+        rpc_manager=types.SimpleNamespace(timeout=lambda seconds: rpc),
+        event_manager=types.SimpleNamespace(fire_event=lambda name, payload: fired.append(name))))
+    for outcome in ({"seen": 1, "retired": 1}, RuntimeError("store down")):
+        def sweep(passed, outcome=outcome):
+            order.append("sweep")
+            assert passed is module
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(ns.token_identity, "sweep", sweep)
+        task.RPC.check_pat_expiration(module)
+    assert order == ["sweep", "expiring", "sweep", "expiring"] and fired == ["notifications_stream"] * 2

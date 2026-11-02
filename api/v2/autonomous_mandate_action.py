@@ -20,6 +20,7 @@ from ...models.pd.mandate_api import MandateActionRequest
 from ...utils import binding_api as api
 from ...utils import mandate_identity
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.governance import is_governed
 from ...utils.mandate_admin import manage_mandate
 from ...utils.schedule_access import schedule_check_spec
 from .autonomous_mandates import task_answer
@@ -97,7 +98,8 @@ class OwnerAPI(api_tools.APIModeHandler):
         name="Autonomous Mandate Consent (Owner)",
         description=("The mandate's owner, in their own signed-in session, gives (consent), previews (consent_preview) or "
                      "withdraws (withdraw_consent) the consent that lets its runs act with their Microsoft sign-in. "
-                     "No governance permission: the owner only. Returns {ok, id}."),
+                     "No governance permission: the owner only, signed in (no API token), while governance is enforced. "
+                     "Returns {ok, id}."),
         tags=[api.OPENAPI_TAG],
         parameters=[{"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}},
                     {"name": "mandate_id", "in": "path", "required": True, "schema": {"type": "string", "format": "uuid"}}],
@@ -108,9 +110,13 @@ class OwnerAPI(api_tools.APIModeHandler):
     )
     @auth.decorators.check_api(schedule_check_spec("details"))
     def post(self, project_id: int, mandate_id, **kwargs):
-        actor = api.current_actor()
-        if actor is None:
+        if api.current_actor() is None:
             return api.refusal("FORBIDDEN")
+        actor = api.session_actor()   # the owner's own session: never an API token, whatever its scope (C9-SEC-82)
+        if actor is None:
+            return api.refusal("DENIED_DELEGATION_UNSUPPORTED_CALLER")
+        if not is_governed(self.module):   # nothing is read or written under off and audit only
+            return api.refusal("GOVERNANCE_NOT_ENFORCED")
         body, error = api.parse_body(request, MandateActionRequest)
         if error:
             return error

@@ -14,6 +14,7 @@ from ...models.pd.mandate_api import CreateMandateRequest
 from ...utils import binding_api as api
 from ...utils.mandate_admin import manage_mandate
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.governance import is_governed
 from ...utils.mandate_queries import DEFAULT_LIMIT, MAX_LIMIT, list_page
 from ...utils.schedule_access import schedule_check_spec
 
@@ -105,9 +106,13 @@ class OwnerAPI(api_tools.APIModeHandler):
     )
     @auth.decorators.check_api(schedule_check_spec("details"))
     def get(self, project_id: int, **kwargs):
-        actor = api.current_actor()
-        if actor is None:
+        if api.current_actor() is None:
             return api.refusal("FORBIDDEN")
+        actor = api.session_actor()   # the owner's own session: never an API token (C9-SEC-82)
+        if actor is None:
+            return api.refusal("DENIED_DELEGATION_UNSUPPORTED_CALLER")
+        if not is_governed(self.module):
+            return api.refusal("GOVERNANCE_NOT_ENFORCED")
         try:
             return list_page(self.module, project_id, limit=MAX_LIMIT, owner_user_id=actor), 200
         except Exception as exc:  # pylint: disable=W0703
