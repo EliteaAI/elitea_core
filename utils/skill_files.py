@@ -12,7 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from tools import serialize
 
-from .skill_file_store import get_content, put_content
+from .skill_file_store import get_content, project_client, put_content
 from .skill_utils import (
     SkillFileError,
     SkillFileNotFoundError,
@@ -194,11 +194,11 @@ def list_version_files(project_id: int, skill_id: int, version_id: int, session=
         return [_manifest_entry(version_file) for version_file in version.files]
 
 
-def read_content(project_id: int, version_file) -> bytes:
+def read_content(project_id: int, version_file, client=None) -> bytes:
     """The bytes of one manifest row of the project, or a 503 naming the path when storage cannot serve them
     or serves bytes that are not the ones the row names."""
     try:
-        data = get_content(project_id, version_file.sha256)
+        data = get_content(project_id, version_file.sha256, client)
     except Exception as exc:
         log.exception('skill files: content %s of project %s unreadable', version_file.sha256, project_id)
         raise SkillFileContentUnavailableError(version_file.path) from exc
@@ -237,7 +237,7 @@ def write_version_file(project_id: int, skill_id: int, version_id: int, path: st
             max_package_bytes=get_max_package_bytes(),
             max_package_files=get_max_package_files(),
         )
-        put_content(project_id, entry['sha256'], data)
+        put_content(project_id, entry['sha256'], data, project_client(project_id))
         version_file = replaced or SkillVersionFile(skill_version_id=version.id)
         for field in ('path', 'size', 'sha256', 'content_type', 'is_text'):
             setattr(version_file, field, entry[field])

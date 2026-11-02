@@ -172,6 +172,26 @@ class TestBucket:
         assert env.storage.bucket_listings == 2
 
 
+class TestClients:
+    def test_store_calls_given_a_client_build_no_other(self, env):
+        client = env.store.project_client(PROJECT)
+
+        env.store.put_contents(PROJECT, {_sha(b'a'): b'a'}, client)
+        env.store.put_content(PROJECT, _sha(b'b'), b'b', client)
+        env.store.get_content(PROJECT, _sha(b'a'), client)
+        env.store.content_exists(PROJECT, _sha(b'b'), client)
+
+        assert env.storage.clients == [PROJECT]
+
+    def test_a_write_and_a_read_build_one_client_each(self, env, session):
+        _version(session)
+
+        _write(env, session, 'forms.md', b'x')
+        env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+
+        assert env.storage.clients == [PROJECT, PROJECT]
+
+
 def _missing_lifecycle():
     error = Exception('NoSuchLifecycleConfiguration')
     error.response = {'Error': {'Code': 'NoSuchLifecycleConfiguration'}}

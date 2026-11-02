@@ -72,37 +72,42 @@ def _holds_whole_object(client, sha256: str, size: int) -> bool:
     return False
 
 
+def project_client(project_id: int):
+    """One storage client of the project, for a request to hand to every store call it makes."""
+    return MinioClient.from_project_id(project_id)
+
+
 def ensure_bucket(project_id: int) -> None:
     """Create the project's skill-files bucket when it does not exist yet, or strip the expiry rule of one that
     does, once per process: the objects of skill versions must never expire."""
     _ensure_bucket(MinioClient.from_project_id(project_id))
 
 
-def put_contents(project_id: int, contents: dict) -> None:
+def put_contents(project_id: int, contents: dict, client=None) -> None:
     """Store each ``{sha256: bytes}`` the project's bucket does not hold whole: an object cut short by a failed
     write is stored again rather than shared."""
     if not contents:
         return
-    client = MinioClient.from_project_id(project_id)
+    client = client or project_client(project_id)
     _ensure_bucket(client)
     for sha256, data in contents.items():
         if not _holds_whole_object(client, sha256, len(data)):
             client.upload_file(SKILL_FILES_BUCKET, data, sha256)
 
 
-def put_content(project_id: int, sha256: str, data: bytes) -> None:
+def put_content(project_id: int, sha256: str, data: bytes, client=None) -> None:
     """Store one content in the project's bucket unless it is already there."""
-    put_contents(project_id, {sha256: data})
+    put_contents(project_id, {sha256: data}, client)
 
 
-def get_content(project_id: int, sha256: str) -> bytes:
+def get_content(project_id: int, sha256: str, client=None) -> bytes:
     """The bytes stored under ``sha256`` in the project's bucket."""
-    return MinioClient.from_project_id(project_id).download_file(SKILL_FILES_BUCKET, sha256)
+    return (client or project_client(project_id)).download_file(SKILL_FILES_BUCKET, sha256)
 
 
-def content_exists(project_id: int, sha256: str) -> bool:
+def content_exists(project_id: int, sha256: str, client=None) -> bool:
     """Whether the project's bucket holds ``sha256``."""
-    client = MinioClient.from_project_id(project_id)
+    client = client or project_client(project_id)
     _ensure_bucket(client)
     return _has_object(client, sha256)
 
