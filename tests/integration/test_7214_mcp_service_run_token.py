@@ -67,6 +67,7 @@ def mcp_service_module(monkeypatch):
 
     exceptions = types.ModuleType("plugins.elitea_core.utils.exceptions")
     exceptions.PoolSaturationError = type("PoolSaturationError", (Exception,), {})
+    exceptions.AdmissionDenied = type("AdmissionDenied", (Exception,), {})   # a refused governed run (#7336)
     exceptions.InputGuardrailBlockedError = type("InputGuardrailBlockedError", (Exception,), {})   # imported by utils/mcp_service.py (#6886)
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.exceptions", exceptions)
 
@@ -252,3 +253,29 @@ def test_an_api_tokens_api_tool_call_reaches_its_route_as_the_token_so_the_hook_
     assert environ["HTTP_AUTHORIZATION"] == "Bearer pat-not-a-secret"
     assert environ["PATH_INFO"] == "/api/v2/elitea_core/applications/prompt_lib/5"
     assert "elitea.internal_obo.claims" not in environ
+
+
+def test_a_refused_agent_call_over_the_mcp_server_says_why(mcp_service_module, monkeypatch):
+    """#7336: an agent call whose governed run is refused (an API token out of its scope, an unscoped token under
+    enforce) answers the MCP client with the refusal's code and fixed text as a tool error, not a generic failure."""
+    denied = sys.modules["plugins.elitea_core.utils.exceptions"].AdmissionDenied
+    mcp_service_module.AdmissionDenied = denied
+
+    class Refusal(denied):
+        reason_code, message = "IDENTITY_KIND_NOT_ADMITTED", "Runs started with an unscoped API token are refused."
+
+    def do_predict(**kwargs):
+        raise Refusal()
+
+    sent = []
+    session = types.SimpleNamespace(project_id=5, dispatch_message=sent.append)
+    mcp_service_module.this.module = types.SimpleNamespace(do_predict=do_predict)
+    service = mcp_service_module.McpService(session)
+    monkeypatch.setattr(service, "_McpService__get_ver_id_by_agent_name", lambda name: 6)
+    request = mcp_service_module.types.CallToolRequest(
+        method="tools/call", params={"name": "agent", "arguments": {"task": "hello"}})
+    service._McpService__handle_call_tool_request(type("R", (), {"id": "1", "params": request.params})())  # pylint: disable=W0212
+
+    reply = __import__("json").loads(sent[0])["result"]
+    assert reply["isError"] is True
+    assert reply["content"][0]["text"] == "IDENTITY_KIND_NOT_ADMITTED: Runs started with an unscoped API token are refused."

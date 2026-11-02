@@ -393,6 +393,13 @@ def test_the_checker_passes_a_token_in_scope_and_a_legacy_token(ns, env):
     assert env.denied == []
 
 
+def test_a_token_management_refusal_says_tokens_do_not_manage_tokens(ns, env):
+    refusal = check(ns, env, Holder("api.v2.auth.token", "POST"))
+    assert (refusal["code"], refusal["message"]) == ("TOKEN_SCOPE_OPERATION", ns.token_scope.TOKEN_MANAGEMENT_MESSAGE)
+    assert check(ns, env, Holder("api.v2.admin.users", "GET"))["message"] == \
+        ns.token_scope.MESSAGES["TOKEN_SCOPE_OPERATION"]
+
+
 def test_an_unreadable_token_is_a_503_without_an_audit_row(ns, env):
     env.token_scope_raises = RuntimeError("auth down")
     assert check(ns, env, Holder("api.v2.elitea_core.predict", view_args={"project_id": 1}))["status"] == 503

@@ -29,10 +29,12 @@ TOKEN_SCOPE_OPERATION = "TOKEN_SCOPE_OPERATION"
 DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
 MESSAGES = {
     TOKEN_SCOPE_PROJECT: "This API token is not scoped to this project. Use a token scoped to it, or sign in.",
-    TOKEN_SCOPE_OPERATION: "This API token may not do this here: its scope does not include the operation (API tokens "
-                           "never create or delete API tokens). Use a token scoped to it, or sign in.",
+    TOKEN_SCOPE_OPERATION: "This API token's scope does not include this operation here. Use a token scoped to it, or "
+                           "sign in.",
     DEPENDENCY_UNAVAILABLE: "The API token could not be checked right now; try again.",
 }
+# TOKEN_SCOPE_OPERATION on a token-management route says why
+TOKEN_MANAGEMENT_MESSAGE = "API tokens cannot create, list or delete API tokens; sign in to manage your tokens."
 STATUS_OF = {TOKEN_SCOPE_PROJECT: 403, TOKEN_SCOPE_OPERATION: 403, DEPENDENCY_UNAVAILABLE: 503}
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 ADMINISTRATION_MODE = "administration"
@@ -149,7 +151,7 @@ def _first_audit(key) -> bool:
         return True
 
 
-def _refuse(module, token_id, code, endpoint, method, project) -> dict:
+def _refuse(module, token_id, code, endpoint, method, project) -> dict:  # pylint: disable=R0913
     _COUNTER[code] = _COUNTER.get(code, 0) + 1
     if code != DEPENDENCY_UNAVAILABLE and _first_audit((token_id, code, endpoint, project)):
         log.info("security_metric name=token_scope_refusal_total reason_code=%s", code)
@@ -159,7 +161,8 @@ def _refuse(module, token_id, code, endpoint, method, project) -> dict:
                          target_ref=f"{method} {endpoint or '-'}"[:256])
         except Exception as exc:  # pylint: disable=W0703
             log.error("token scope: a refusal was not recorded (%s)", type(exc).__name__)
-    return {"status": STATUS_OF[code], "code": code, "message": MESSAGES[code]}
+    message = TOKEN_MANAGEMENT_MESSAGE if endpoint in TOKEN_ROUTES and code == TOKEN_SCOPE_OPERATION else MESSAGES[code]
+    return {"status": STATUS_OF[code], "code": code, "message": message}
 
 
 def _request_parts():
