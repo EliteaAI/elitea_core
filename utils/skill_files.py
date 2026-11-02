@@ -2,16 +2,19 @@
 
 The rows live in the project schema; the bytes live in the project's ``skill-files`` bucket under their sha256
 (``skill_file_store``). Bytes are written before the row that names them, so a failed row insert leaves at most an
-orphan object.
+orphan object for ``sweep_skill_files`` to reclaim.
 """
+import base64
+import binascii
 import hashlib
 import mimetypes
+from datetime import datetime, timedelta, timezone
 
 from pylon.core.tools import log
 from sqlalchemy import func
-from tools import serialize
+from tools import db, serialize
 
-from .skill_file_store import get_content, put_content
+from .skill_file_store import copy_contents, delete_contents, get_content, list_contents, put_content, put_contents
 from .skill_utils import (
     SkillFileError,
     SkillFileNotFoundError,
@@ -21,6 +24,7 @@ from .skill_utils import (
     get_max_file_bytes,
     get_max_package_bytes,
     get_max_package_files,
+    release_unreferenced_contents,
 )
 from ..models.skill import SkillVersion, SkillVersionFile
 from ..models.pd.skill_file import SkillFileModel, describe_manifest
@@ -29,6 +33,7 @@ from ..models.pd.skill_file import SkillFileModel, describe_manifest
 MAX_PATH_LENGTH = 1024
 MAX_PATH_DEPTH = 16
 INSTRUCTIONS_FILE_NAME = 'skill.md'
+SWEEP_MIN_AGE = timedelta(hours=1)
 
 
 class SkillFileContentUnavailableError(SkillFileError):
@@ -215,12 +220,15 @@ def write_version_file(project_id: int, skill_id: int, version_id: int, path: st
             max_package_files=get_max_package_files(),
         )
         put_content(project_id, entry['sha256'], data)
+        replaced_hash = replaced.sha256 if replaced else None
         version_file = replaced or SkillVersionFile(skill_version_id=version.id)
         for field in ('path', 'size', 'sha256', 'content_type', 'is_text'):
             setattr(version_file, field, entry[field])
         s.add(version_file)
         s.flush()
-        return _manifest_entry(version_file)
+        result = _manifest_entry(version_file)
+    release_unreferenced_contents(project_id, {replaced_hash} - {entry['sha256'], None})
+    return result
 
 
 def rename_version_file(project_id: int, skill_id: int, version_id: int, path: str, new_path: str, session=None) -> dict:
@@ -241,14 +249,35 @@ def rename_version_file(project_id: int, skill_id: int, version_id: int, path: s
 
 
 def delete_version_file(project_id: int, skill_id: int, version_id: int, path: str, session=None) -> None:
-    """Remove a file from a draft version."""
+    """Remove a file from a draft version and release its content when nothing else in the project uses it."""
     with _skill_session(session, project_id) as s:
         version = _load_version(s, skill_id, version_id)
         _ensure_version_updatable(version)
         version_file = find_version_file(s, version.id, normalize_skill_file_path(path))
         if not version_file:
             raise SkillFileNotFoundError(version_id, path)
+        released_hash = version_file.sha256
         s.delete(version_file)
+    release_unreferenced_contents(project_id, {released_hash})
+
+
+def add_version_files(session, project_id: int, version_id: int, entries: list, source_project_id: int = None) -> None:
+    """Give a version of ``project_id`` the entries as file rows, storing first the bytes the entries carry and
+    copying the rest from ``source_project_id``'s bucket when that is another project."""
+    put_contents(project_id, {entry['sha256']: entry['data'] for entry in entries if 'data' in entry})
+    referenced = [entry['sha256'] for entry in entries if 'data' not in entry]
+    if referenced and source_project_id is not None:
+        copy_contents(source_project_id, project_id, referenced)
+    for entry in entries:
+        session.add(SkillVersionFile(
+            skill_version_id=version_id,
+            path=entry['path'],
+            size=entry['size'],
+            sha256=entry['sha256'],
+            content_type=entry['content_type'],
+            is_text=entry['is_text'],
+        ))
+    session.flush()
 
 
 def list_version_manifest(session, version_id: int) -> list:
@@ -257,3 +286,75 @@ def list_version_manifest(session, version_id: int) -> list:
         session.query(SkillVersionFile).filter(SkillVersionFile.skill_version_id == version_id)
         .order_by(SkillVersionFile.path).all()
     )
+
+
+def _decode_payload_file(payload_file: dict) -> dict:
+    try:
+        data = base64.b64decode(payload_file['content_base64'], validate=True)
+    except (binascii.Error, TypeError, ValueError) as exc:
+        raise SkillFileError(f"'{payload_file.get('path')}' does not carry valid base64 content") from exc
+    return build_file_entry(payload_file.get('path'), data)
+
+
+def _find_source_files(source_project_id, source_version_id, payload_files: list) -> list:
+    """The source version's rows matching each listed ``(path, sha256)``; a pair the source lacks is refused."""
+    if source_project_id is None or source_version_id is None:
+        raise SkillFileError('the skill lists files without their content or the version they come from')
+    with db.get_session(source_project_id) as source_session:
+        held = {
+            (row['path'], row['sha256']): row
+            for row in list_version_manifest(source_session, source_version_id)
+        }
+    entries = []
+    for payload_file in payload_files:
+        row = held.get((payload_file.get('path'), payload_file.get('sha256')))
+        if row is None:
+            raise SkillFileError(
+                f"'{payload_file.get('path')}' is not a file of skill version {source_version_id} "
+                f"in project {source_project_id}"
+            )
+        entries.append(row)
+    return entries
+
+
+def resolve_payload_files(payload_files: list, source_project_id=None, source_version_id=None) -> list:
+    """Entries for the files a skill payload lists: decoded bytes when it carries them, checked against the caps,
+    else the source version's own rows, which copy as they are so a lowered cap never breaks an existing skill."""
+    carried = [payload_file for payload_file in payload_files if payload_file.get('content_base64') is not None]
+    referenced = [payload_file for payload_file in payload_files if payload_file.get('content_base64') is None]
+    entries = [_decode_payload_file(payload_file) for payload_file in carried]
+    validate_package(entries)
+    if referenced:
+        entries.extend(_find_source_files(source_project_id, source_version_id, referenced))
+    return entries
+
+
+def import_version_files(session, project_id: int, version_ids: dict, versions: list, source_project_id=None) -> int:
+    """Give the versions an import just created the files their payload lists; returns how many rows were added."""
+    added = 0
+    for version in versions:
+        payload_files = version.get('files') or []
+        version_id = version_ids.get(version.get('name', 'base'))
+        if not payload_files or version_id is None:
+            continue
+        entries = resolve_payload_files(payload_files, source_project_id, version.get('id'))
+        add_version_files(session, project_id, version_id, entries, source_project_id)
+        added += len(entries)
+    return added
+
+
+def sweep_skill_files(project_id: int, dry_run: bool = False, now: datetime = None) -> dict:
+    """Delete the objects of the project's bucket that no file row references and that are older than an hour,
+    so an upload whose row is still being committed survives."""
+    cutoff = (now or datetime.now(timezone.utc)) - SWEEP_MIN_AGE
+    with db.get_session(project_id) as s:
+        referenced = {sha256 for (sha256,) in s.query(SkillVersionFile.sha256).distinct().all()}
+    unreferenced = [obj for obj in list_contents(project_id) if obj['name'] not in referenced]
+    stale = [
+        obj['name'] for obj in unreferenced
+        if not obj.get('modified') or datetime.fromisoformat(obj['modified']).astimezone(timezone.utc) < cutoff
+    ]
+    if stale and not dry_run:
+        delete_contents(project_id, stale)
+    return {'project_id': project_id, 'deleted': stale, 'kept_recent': len(unreferenced) - len(stale),
+            'dry_run': dry_run}

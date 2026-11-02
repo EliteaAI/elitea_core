@@ -95,6 +95,7 @@ def export_import():
         )},
         'plugins.elitea_core.utils.utils': {'get_public_project_id': lambda: 1},
         'plugins.elitea_core.utils.skill_export_import': {'build_embedded_skill_frontmatter': lambda version: {}},
+        'plugins.elitea_core.utils.skill_files': {'list_version_manifest': lambda *a: []},
     }.items():
         install(name, _module(name, **attrs))
 

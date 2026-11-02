@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import pathlib
 import sys
@@ -128,8 +129,11 @@ def skill_rpc():
         unpack_embedded_skill_frontmatter=lambda version: version,
     )
     _module(f'{pkg}.utils.skill_publish_utils', get_default_skill_validation_rules=None)
+    _module(f'{pkg}.utils.skill_files', import_version_files=lambda *args, **kwargs: 0)
     _module('sqlalchemy', and_=None)
-    _module('tools', db=types.SimpleNamespace(), serialize=None)
+    session = types.SimpleNamespace(commit=lambda: None)
+    _module('tools', db=types.SimpleNamespace(get_session=lambda project_id: contextlib.nullcontext(session)),
+            serialize=None)
     noop = lambda *args, **kwargs: None  # noqa: E731
     _module('pylon')
     _module('pylon.core')

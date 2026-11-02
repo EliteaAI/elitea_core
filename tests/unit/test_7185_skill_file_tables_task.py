@@ -1,5 +1,6 @@
-"""#7185: the skill file admin task ``create_skill_file_tables`` creates the manifest table only where it is
-missing; the startup guard in ``module.py`` creates the table off-thread in the schemas that lack it."""
+"""#7185: the skill file admin tasks - ``create_skill_file_tables`` creates the manifest table only where it is
+missing, ``sweep_skill_files`` sweeps the buckets of the projects the parameter names; the startup guard in
+``module.py`` creates the table off-thread in the schemas that lack it."""
 import ast
 import importlib.util
 import os
@@ -35,6 +36,18 @@ def task(isolated_sys_modules):
     models_skill = types.ModuleType("elitea_core.models.skill")
     models_skill.SKILL_FILE_TABLES = TABLES
     sys.modules[models_skill.__name__] = models_skill
+    swept = []
+    skill_files = types.ModuleType("elitea_core.utils.skill_files")
+
+    def sweep(project_id, dry_run=False):
+        swept.append((project_id, dry_run))
+        if project_id == 5:
+            raise RuntimeError("storage down")
+        return {"project_id": project_id, "deleted": ["a" * 64] if project_id == 2 else [], "dry_run": dry_run}
+
+    skill_files.sweep_skill_files = sweep
+    sys.modules[skill_files.__name__] = skill_files
+
     spec = importlib.util.spec_from_file_location(
         "elitea_core.methods.admin_tasks", os.path.join(PLUGIN_ROOT, "methods", "admin_tasks.py"),
     )
@@ -49,6 +62,7 @@ def task(isolated_sys_modules):
     )
     return types.SimpleNamespace(
         run=lambda param: module.Method.create_skill_file_tables(pylon_module, param=param), created=created,
+        sweep=lambda param: module.Method.sweep_skill_files(pylon_module, param=param), swept=swept,
     )
 
 
@@ -78,6 +92,28 @@ def test_the_project_parameter_is_required(task):
     result = task.run("")
 
     assert result["migrated"] == 0 and "project_id=" in result["error"] and task.created == []
+
+
+def test_the_sweep_runs_per_project_and_reports_a_failure_without_stopping(task):
+    result = task.sweep("project_id=all")
+
+    assert task.swept == [(1, False), (2, False), (5, False)]
+    assert result == {
+        "deleted": 1, "projects": [{"project_id": 2, "deleted": ["a" * 64], "dry_run": False}],
+        "failed": 1, "failed_projects": [{"project_id": 5}], "dry_run": False,
+    }
+
+
+def test_a_dry_run_sweep_is_passed_down(task):
+    task.sweep("project_id=2;dry_run")
+
+    assert task.swept == [(2, True)]
+
+
+def test_the_sweep_needs_the_project_parameter(task):
+    result = task.sweep("dry_run")
+
+    assert result["deleted"] == 0 and "project_id=" in result["error"] and task.swept == []
 
 
 def _module_method(name):

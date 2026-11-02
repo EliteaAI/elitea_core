@@ -1741,13 +1741,16 @@ _TWIN_PARENT_AUTHOR_ID = 'agent_publish_parent_author_id'
 
 def _skill_content_sha(
     instructions: str, run_settings: Optional[dict] = None, frontmatter: Optional[dict] = None,
+    file_hashes: Optional[list] = None,
 ) -> str:
     """Fingerprint a skill version's content so publishing reuses a catalog copy only when nothing changed."""
-    if not run_settings and not frontmatter:
+    if not run_settings and not frontmatter and not file_hashes:
         return hashlib.sha256((instructions or '').encode()).hexdigest()
     content = {'instructions': instructions or '', 'run_settings': run_settings}
     if frontmatter:
         content['frontmatter'] = frontmatter
+    if file_hashes:
+        content['files'] = sorted(file_hashes)
     raw = json.dumps(content, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -1771,6 +1774,7 @@ def _resolve_or_fork_skill_twin(
     """
     content_sha = _skill_content_sha(
         skill_info.get('instructions'), skill_info.get('run_settings'), skill_info.get('frontmatter'),
+        skill_info.get('file_hashes'),
     )
     with db.get_session(public_project_id) as session:
         twin = (
@@ -1876,6 +1880,10 @@ def publish_attached_skills(
                         (mapping.skill_version.meta or {}).get(FRONTMATTER_META_KEY)
                         if mapping.skill_version else None
                     ),
+                    'file_hashes': [
+                        [version_file.path, version_file.sha256]
+                        for version_file in (mapping.skill_version.files if mapping.skill_version else [])
+                    ],
                 }
                 for entry, mapping in zip(build_skill_mappings_list(mappings), mappings)
             ]

@@ -28,6 +28,7 @@ from tools import db, config as c  # pylint: disable=E0401
 from ..models.skill import SKILL_FILE_TABLES
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.agent_identity_schema import apply_tables, project_ids_missing_tables
+from ..utils.skill_files import sweep_skill_files as sweep_project_skill_files
 from ..utils.toolkit_migration import (
     run_selected_tools_migration,
     migrate_project_pipeline_instructions,
@@ -748,6 +749,42 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         )
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,
                 "dry_run": values["dry_run"]}
+
+    @web.method()
+    def sweep_skill_files(self, *args, **kwargs):
+        """Admin task: delete skill file objects that no manifest row references (R-2.0.9, #7185).
+
+        Lists each project's ``skill-files`` bucket and removes the keys its ``skill_version_files`` rows do not
+        name, keeping objects younger than an hour (an upload whose row is not committed yet). Version and skill
+        deletes already release their own objects; this reclaims what a failed write or a cross-project delete left.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+        """
+        param = kwargs.get("param", "") or ""
+        values, error = _parse_project_param("sweep_skill_files", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"deleted": 0, "error": error}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("sweep_skill_files: failed to list projects")
+            return {"deleted": 0, "error": "failed to list projects"}
+
+        swept, failed = [], []
+        for project_id in project_ids:
+            try:
+                swept.append(sweep_project_skill_files(project_id, dry_run=values["dry_run"]))
+            except Exception:  # pylint: disable=W0703
+                log.exception("sweep_skill_files: failed for project %s", project_id)
+                failed.append({"project_id": project_id})
+        deleted = sum(len(result["deleted"]) for result in swept)
+        log.info(
+            "%ssweep_skill_files: deleted=%s failed=%s",
+            "[DRY RUN] " if values["dry_run"] else "", deleted, len(failed),
+        )
+        return {"deleted": deleted, "projects": [result for result in swept if result["deleted"]],
+                "failed": len(failed), "failed_projects": failed, "dry_run": values["dry_run"]}
 
     @web.method()
     def create_governance_settings_tables(self, *args, **kwargs):

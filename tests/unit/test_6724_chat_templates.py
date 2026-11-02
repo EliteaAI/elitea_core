@@ -728,6 +728,9 @@ def _make_migration_stubs(sessions):
     identity_schema.apply_tables = lambda *a, **kw: ([], [])
     identity_schema.project_ids_missing_tables = lambda *a, **kw: []
 
+    skill_files = types.ModuleType("elitea_core.utils.skill_files")
+    skill_files.sweep_skill_files = lambda *a, **kw: {"deleted": []}
+
     return {
         **_pylon_stubs(),
         "tools": tools_mod,
@@ -743,6 +746,7 @@ def _make_migration_stubs(sessions):
         "elitea_core.models.chat_template": ct_orm,
         "elitea_core.models.skill": models_skill,
         "elitea_core.utils.agent_identity_schema": identity_schema,
+        "elitea_core.utils.skill_files": skill_files,
     }
 
 

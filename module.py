@@ -580,6 +580,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "sweep_skill_files", self.sweep_skill_files,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "manage_autonomous_mandate", self.manage_autonomous_mandate,
                 group="R-2.0.8",
             )
@@ -1461,6 +1465,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_skill_file_tables", self.create_skill_file_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "sweep_skill_files", self.sweep_skill_files
             )
             this.for_module("admin").module.unregister_admin_task(
                 "manage_autonomous_mandate", self.manage_autonomous_mandate

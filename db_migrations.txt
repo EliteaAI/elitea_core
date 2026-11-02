@@ -561,3 +561,6 @@ Run admin task seed_eval_trajectory_dimensions
 # Operator re-run and dry run:
 Run admin task create_skill_file_tables with param: project_id=all;dry_run
 Run admin task create_skill_file_tables with param: project_id=all
+# Objects no row references (a failed write, a project-1 twin deleted elsewhere) are reclaimed by the sweep:
+Run admin task sweep_skill_files with param: project_id=all;dry_run
+Run admin task sweep_skill_files with param: project_id=all

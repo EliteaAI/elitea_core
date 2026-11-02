@@ -235,6 +235,7 @@ def modules():
             'build_embedded_skill_frontmatter': lambda version: {},
         },
         'plugins.elitea_core.utils.skill_frontmatter': {'FRONTMATTER_META_KEY': 'frontmatter'},
+        'plugins.elitea_core.utils.skill_files': {'list_version_manifest': lambda *a: []},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': noop},
     }
     for name, attrs in stubs.items():

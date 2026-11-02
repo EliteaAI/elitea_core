@@ -18,6 +18,7 @@ from pylon.core.tools import log
 
 from .export_import_utils import slugify
 from .skill_export_import import build_embedded_skill_frontmatter
+from .skill_files import list_version_manifest
 from .toolkit_meta import drop_index_schedules
 from .utils import get_public_project_id
 
@@ -236,6 +237,7 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             user_id=user_id,
             applications_serialized=applications_serialized,
             result=result,
+            forked=forked,
         )
     except Exception as ex:
         log.error(f'Skill export error: {ex}')
@@ -270,8 +272,11 @@ def _export_skills_main(
     user_id: int,
     applications_serialized: list,
     result: list,
+    forked: bool = False,
 ) -> list:
-    """Export skills attached to the given application versions."""
+    """Export skills attached to the given application versions.
+
+    A fork payload lists each version's files by hash, which the import copies from this project."""
 
     version_skill_refs = {}
     skill_ids = set()
@@ -357,6 +362,10 @@ def _export_skills_main(
             for version, version_export in zip(versions, export_dict['versions']):
                 version_export['id'] = version.id
                 version_export['author_id'] = version.author_id
+                if forked:
+                    files = list_version_manifest(session, version.id)
+                    if files:
+                        version_export['files'] = files
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
             skills_serialized.append(export_dict)
 
