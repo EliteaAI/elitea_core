@@ -289,3 +289,27 @@ def test_the_runs_of_one_owner_ask_the_identity_service_for_the_name_once_a_minu
     assert starter._owner_label(OWNER) == f"user {OWNER} (schedule owner)"   # pylint: disable=W0212
     starter._owner_label(OWNER)   # pylint: disable=W0212
     assert asked[-2:] == ["down", "down"]
+
+
+@pytest.mark.parametrize("spelled", [
+    "create_pull_request", "Create_Pull_Request", "github___create_pull_request", "GitHub:Create_Pull_Request",
+    "github___github:create_pull_request",
+])
+def test_the_runtime_tool_name_is_an_alias_key_the_risk_scan_matches(world, monkeypatch, spelled):
+    import pathlib
+    import types
+
+    import tools
+    from fixtures.helpers import load_module_with_stubs
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    config = {"toolkit_security": {"sensitive_tools": {"github": ["create_pull_request"]}}}
+    descriptor = types.SimpleNamespace(config=types.SimpleNamespace(get=lambda key, default=None: config.get(key, default)))
+    monkeypatch.setattr(tools, "this", types.SimpleNamespace(module=types.SimpleNamespace(descriptor=descriptor)))
+    security = load_module_with_stubs(root / "utils" / "toolkit_security.py", "plugins.elitea_core.utils.toolkit_security_pin")
+
+    runtime = world.module._runtime_tool_name(spelled)   # pylint: disable=W0212
+
+    assert runtime == "create_pull_request"
+    assert security.is_tool_sensitive("github", spelled) is True
+    assert security.is_tool_sensitive("github", runtime) is True

@@ -10,6 +10,7 @@ import pytest
 from unit._tool_spend_loader import load
 
 PROJECT_ID, RUN_ID, CONVERSATION_ID, AUTHOR_ID = 5, 9, 42, 17
+CHILD_PAUSE_REASON = "a step inside a parallel branch needs an answer"
 SCHEDULE_META = {"schedule_id": 3, "schedule_run_id": RUN_ID, "execution_type": "scheduled"}
 
 
@@ -116,6 +117,7 @@ def make_world(monkeypatch):
             "utils.pipeline_hitl_history": {"persist_pipeline_hitl_prompt": none},
             "utils.schedule_runs": {
                 "finish_schedule_run": world.finish, "pause_schedule_run": world.pause,
+                "CHILD_PAUSE_REASON": CHILD_PAUSE_REASON,
                 "run_failure_reason": lambda error: f"short({error})"},
         }
         for dotted, names in stubs.items():
@@ -214,11 +216,12 @@ def test_7011_r1_6_stream_pause_without_a_schedule_run_keeps_todays_path(make_wo
     {"hitl_interrupt": {"resume_strategy": "aggregate_child"}},
     {"metadata": {"child_thread_id": "child-1"}},
 ], ids=["parked-child-hitl", "durable-child-mcp-auth"])
-def test_7011_r5_1_a_pause_that_keeps_the_run_streaming_leaves_the_schedule_run_open(make_world, metadata):
+def test_a_pause_inside_a_fan_out_child_fails_the_schedule_run_with_a_reason(make_world, metadata):
     world = make_world(dict(SCHEDULE_META))
     world.pause_event(metadata)
     assert world.msg_group.is_streaming is True
-    assert world.events == ["commit"]
+    finish = ("finish", PROJECT_ID, RUN_ID, "failed", CHILD_PAUSE_REASON, CONVERSATION_ID, AUTHOR_ID)
+    assert world.events == ["commit", finish]
 
 
 def test_7011_r1_6_a_failing_finish_step_does_not_break_the_stream_end(make_world):

@@ -16,6 +16,7 @@ EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 PAUSE_REASON = 'the run needs a human answer'
+CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 DEFAULT_APPROVAL_WAIT_HOURS = 24
