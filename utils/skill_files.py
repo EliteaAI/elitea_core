@@ -317,6 +317,21 @@ def list_version_manifest(session, version_id: int) -> list:
     )
 
 
+def read_version_contents(project_id: int, version_id: int, session=None) -> list:
+    """Every file of a version as ``(manifest entry, bytes)``, for exports."""
+    with _skill_session(session, project_id) as s:
+        version_files = s.query(SkillVersionFile).filter(
+            SkillVersionFile.skill_version_id == version_id,
+        ).order_by(SkillVersionFile.path).all()
+        if not version_files:
+            return []
+        client = project_client(project_id)
+        return [
+            (describe_manifest([version_file])[0], read_content(project_id, version_file, client))
+            for version_file in version_files
+        ]
+
+
 def _decode_payload_file(payload_file: dict) -> dict:
     try:
         data = base64.b64decode(payload_file['content_base64'], validate=True)

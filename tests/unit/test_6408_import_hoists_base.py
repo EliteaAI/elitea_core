@@ -67,7 +67,7 @@ def export_import():
         get_skill_details=None,
         import_skill=None,
     )
-    _module(f'{PKG}.utils.skill_files', list_version_manifest=None)
+    _module(f'{PKG}.utils.skill_files', list_version_manifest=None, read_version_contents=None)
 
     frontmatter_name = f'{PKG}.utils.skill_frontmatter'
     frontmatter_spec = importlib.util.spec_from_file_location(

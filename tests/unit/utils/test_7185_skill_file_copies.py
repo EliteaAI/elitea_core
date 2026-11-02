@@ -293,12 +293,30 @@ class TestAgentExport:
             {'path', 'size', 'sha256', 'content_type', 'is_text'}] * 2
         assert skill['owner_id'] == SOURCE and skill['versions'][0]['id'] == 10
 
-    def test_a_plain_export_lists_no_files_it_cannot_carry(self, env, agent_export):
+    def test_an_export_file_carries_each_files_bytes(self, env, agent_export):
         _seed(env)
 
         [skill] = _export(agent_export, forked=False)
 
-        assert 'files' not in skill['versions'][0]
+        files = skill['versions'][0]['files']
+        assert [(f['path'], base64.b64decode(f['content_base64'])) for f in files] == [
+            ('assets/logo.png', b'\x89PNG\x00'), ('references/guide.md', b'# Guide')]
+        assert files[0]['sha256'] == _sha(b'\x89PNG\x00')
+
+    def test_a_skill_without_files_exports_exactly_as_before(self, env, agent_export):
+        _seed(env, files=())
+
+        [skill] = _export(agent_export, forked=False)
+
+        assert skill['versions'][0] == {'name': 'base', 'instructions': 'Body.', 'id': 10, 'author_id': 1}
+
+    def test_an_export_reads_every_file_through_one_storage_client(self, env, agent_export):
+        _seed(env)
+        env.storage.clients.clear()
+
+        _export(agent_export, forked=False)
+
+        assert env.storage.clients == [SOURCE]
 
     @pytest.mark.parametrize('forked', [True, False])
     def test_an_agent_export_tells_the_skill_export_whether_it_is_a_fork(self, agent_export, monkeypatch, forked):

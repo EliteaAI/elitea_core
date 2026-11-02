@@ -1,3 +1,4 @@
+import base64
 from collections import defaultdict
 from copy import deepcopy
 from io import BytesIO
@@ -18,7 +19,7 @@ from pylon.core.tools import log
 
 from .export_import_utils import slugify
 from .skill_export_import import build_embedded_skill_frontmatter
-from .skill_files import list_version_manifest
+from .skill_files import list_version_manifest, read_version_contents
 from .toolkit_meta import drop_index_schedules
 from .utils import get_public_project_id
 
@@ -276,7 +277,8 @@ def _export_skills_main(
 ) -> list:
     """Export skills attached to the given application versions.
 
-    A fork payload lists each version's files by hash, which the import copies from this project."""
+    A fork payload lists each version's files by hash, which the import copies from this project; an export file
+    carries each file's bytes, so it imports anywhere."""
 
     version_skill_refs = {}
     skill_ids = set()
@@ -364,8 +366,13 @@ def _export_skills_main(
                 version_export['author_id'] = version.author_id
                 if forked:
                     files = list_version_manifest(session, version.id)
-                    if files:
-                        version_export['files'] = files
+                else:
+                    files = [
+                        {**entry, 'content_base64': base64.b64encode(content).decode('ascii')}
+                        for entry, content in read_version_contents(project_id, version.id, session=session)
+                    ]
+                if files:
+                    version_export['files'] = files
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
             skills_serialized.append(export_dict)
 
