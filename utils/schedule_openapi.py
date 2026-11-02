@@ -402,7 +402,9 @@ OPERATIONS = {
             "Start a test run of the Save form. The body is the Save body. The values go to the caller's hidden "
             "draft row of this agent or pipeline, and a run with trigger `test` starts on it with the same risk, "
             "sign-in and credential checks as a saved run. The schedule list, the export, the project cap and the "
-            "tick never see the draft. Only one run is active per agent or pipeline and caller.",
+            "tick never see the draft. It is removed on Save, by the Cancel call, or after a day without a test run. "
+            "A draft that has runs is kept, so its test runs stay in Run History. Only one run is active per "
+            "agent or pipeline and caller.",
             "a project member with `schedules.run`",
             "400 an invalid field (the Save rules) or `approval_rule_not_allowed`; 403 no permission; "
             "404 the agent or pipeline is not visible; 409 `run_active` (`active_run_id`); "
@@ -414,6 +416,17 @@ OPERATIONS = {
             409: ("A test run of this agent or pipeline is active", {
                 "error": "A test run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start"}),
+    },
+    ("delete", "test_run"): {
+        "name": "Cancel a test form",
+        "summary": "Remove the hidden draft of a closed test form",
+        "description": _text(
+            "Remove the caller's draft row of the agent or pipeline in `application_id`, when the form closes "
+            "without Save. A draft that has runs stays. Safe to repeat.",
+            "a project member with `schedules.run`", "400 `application_id` missing or not an id; 403 no permission"),
+        "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
+                                         "schema": {"type": "integer"}, "description": "Agent or pipeline id"}],
+        "responses": _responses(204, "The draft is removed, or there was none", None, {400: None, 403: None}),
     },
     ("get", f"{ITEM}/runs"): {
         "name": "List the runs of a schedule",

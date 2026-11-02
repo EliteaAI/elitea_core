@@ -43,7 +43,7 @@ from .schedule_service import (
     refusal,
     update_schedule,
 )
-from .schedule_test_draft import active_run_id, find_draft, write_draft
+from .schedule_test_draft import active_run_id, drop_draft, find_draft, sweep_idle_drafts, write_draft
 from .schedule_timing import ScheduleLimitError
 from .trigger_governance import schedule_governance_notice
 
@@ -90,6 +90,11 @@ class RunsQuery(BaseModel):
     status: RunStatus | None = None
     trigger: RunTrigger | None = None
     version_id: DbId | None = None
+
+
+class ApplicationQuery(BaseModel):
+    """Query of the Cancel of a test run: the agent or pipeline whose draft goes."""
+    application_id: DbId
 
 
 def _start_run(session, project_id: int, schedule_id: int, entity_type: str, trigger: str, user_id: int,
@@ -383,6 +388,8 @@ class ScheduleItemHandlers:
                     project_id, body.version_id, scope.user_id, body.name, body.approval_rule, body.risk_ack,
                 )
                 row = create_schedule(session, project_id, body, scope, confirmed=confirmed)
+                drop_draft(session, scope.user_id, body.application_id)  # the Save replaces the test draft
+                session.commit()
             except ScheduleError as e:
                 return e.response
             except ScheduleLimitError as e:
@@ -496,7 +503,8 @@ class ScheduleItemHandlers:
 
         The body is the Save body. The values go to the caller's hidden draft row of this agent or pipeline,
         and a run of trigger `test` starts on it with the same checks as a saved run. The row never reaches the
-        list, the tick, the cap or an export.
+        list, the tick, the cap or an export, and it is removed on Save. The idle drafts of the caller are
+        removed here, after a day.
         Who may call: a project member with `schedules.run`.
         Errors: 400 invalid field (the Save rules, `approval_rule_not_allowed`); 403; 404 agent or pipeline not
         found or not visible; 409 `run_active` (a test run of this agent or pipeline is active, the body has
@@ -514,6 +522,7 @@ class ScheduleItemHandlers:
                 check_schedule_body(session, project_id, body)
             except ScheduleError as e:
                 return e.response
+            sweep_idle_drafts(session, scope.user_id)
             draft = find_draft(session, scope.user_id, body.application_id)
             if draft is not None and (active_id := active_run_id(session, draft.id)) is not None:
                 session.commit()
@@ -527,6 +536,24 @@ class ScheduleItemHandlers:
                 return refusal("run_start_failed", "The run could not start", 500)
             row = write_draft(session, scope.user_id, body)
             return _start_run(session, project_id, row.id, row.entity_type, "test", scope.user_id, owner_request)
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _cancel_test_run(self, project_id: int):
+        """Remove the caller's draft row of an agent or pipeline when its test form is closed without Save.
+
+        The query has `application_id`. A draft with runs stays, so the test runs stay in Run History.
+        Who may call: the same permission as the test run, `schedules.run`. It is safe to repeat.
+        Errors: 400 `application_id` missing or not an id; 403.
+        """
+        try:
+            application_id = ApplicationQuery.model_validate(dict(request.args)).application_id
+        except ValidationError as e:
+            return _validation_response(e)
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            drop_draft(session, scope.user_id, application_id)
+            session.commit()
+        return None, 204
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _decide_run(self, project_id: int, schedule_id: int, run_id: int):
