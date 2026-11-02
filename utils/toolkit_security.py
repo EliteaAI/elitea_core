@@ -12,6 +12,7 @@ Configuration is loaded from elitea_core.yml:
       toolkit_type: [list of tool names]
 """
 
+import re
 from typing import Optional
 from pylon.core.tools import log
 from tools import this
@@ -84,32 +85,86 @@ def is_tool_blocked(toolkit_type: str, tool_name: str) -> bool:
     return False
 
 
-def is_tool_sensitive(toolkit_type: str, tool_name: str) -> bool:
+# Same rules as the SDK guard (elitea_sdk runtime/toolkits/security.py), which this plugin cannot import.
+# Keep TOOLKIT_TYPE_ALIASES in line with elitea_sdk.tools.TOOLKIT_TYPE_ALIASES.
+TOOLKIT_TYPE_ALIASES = {'azure_devops_repos': 'ado_repos'}
+
+
+def _match_key(name) -> str:
+    """Lower case without separators: CreateFile, create_file and create-file give one key."""
+    return re.sub(r'[^a-z0-9]', '', str(name or '').strip().lower())
+
+
+_TYPE_KEYS = {_match_key(legacy): _match_key(registered) for legacy, registered in TOOLKIT_TYPE_ALIASES.items()}
+
+
+def _toolkit_key(name) -> str:
+    if str(name).strip() == '*':
+        return '*'
+    key = _match_key(name)
+    return _TYPE_KEYS.get(key, key)
+
+
+def _tool_keys(tool_name) -> set:
+    """Keys of a tool name and its aliases: `x___tool` and `x:tool` also match `tool`."""
+    keys, current = set(), str(tool_name or '').strip().lower()
+    while current:
+        keys.add(_match_key(current))
+        reduced = current.split('___', 1)[1].strip() if '___' in current else current
+        reduced = reduced.split(':', 1)[1].strip() if ':' in reduced else reduced
+        if reduced == current:
+            break
+        current = reduced
+    keys.discard('')
+    return keys
+
+
+def _entries_for(mapping: dict, toolkit_type: str, toolkit_name: str | None = None, wildcard: bool = True) -> list:
+    """The values of every entry keyed by the type, by the toolkit name, or by the `*` wildcard.
+
+    The SDK guard matches the configured toolkit name as well as the type, so an entry keyed by the name
+    applies here too. `wildcard=False` leaves the `*` entries out.
+    """
+    wanted = {_toolkit_key(toolkit_type)}
+    if toolkit_name:
+        wanted.add(_toolkit_key(toolkit_name))
+    if wildcard:
+        wanted.add('*')
+    wanted.discard('')
+    return [value for key, value in (mapping or {}).items() if _toolkit_key(key) in wanted]
+
+
+def is_tool_sensitive(toolkit_type: str, tool_name: str, toolkit_name: str | None = None) -> bool:
     """
     Check if a tool is marked as needing approval (toolkit_security.sensitive_tools).
-    Matches case-insensitively, like is_tool_blocked.
+    Matches like the SDK guard: aliases, case and separators are ignored, `*` lists any toolkit, and an entry
+    may be keyed by the toolkit type or by the toolkit name.
     """
-    toolkit_lower = toolkit_type.lower()
-    tool_lower = tool_name.lower()
-    for tk, tools in get_toolkit_security_config()['sensitive_tools'].items():
-        if tk.lower() == toolkit_lower and tool_lower in [t.lower() for t in (tools or [])]:
-            return True
-    return False
+    keys = _tool_keys(tool_name)
+    return any(keys & {_match_key(t) for t in (tools or [])}
+               for tools in _entries_for(get_toolkit_security_config()['sensitive_tools'], toolkit_type, toolkit_name))
+
+
+def listed_sensitive_tools(toolkit_type: str, toolkit_name: str | None = None, wildcard: bool = True) -> list:
+    """The tool names the global list holds for one toolkit, as written; `wildcard=False` skips the `*` entries."""
+    return [name for tools in _entries_for(get_toolkit_security_config()['sensitive_tools'], toolkit_type,
+                                           toolkit_name, wildcard)
+            for name in (tools or [])]
 
 
 SENSITIVE_BADGES = {'sends_messages', 'deletes_data', 'changes_data', 'runs_code', 'needs_approval'}
 DEFAULT_TOOL_INFO = {'badge': 'needs_approval', 'effect': 'This tool can change data outside ELITEA.'}
 
 
-def sensitive_tool_info(toolkit_type: str, tool_name: str) -> dict:
+def sensitive_tool_info(toolkit_type: str, tool_name: str, toolkit_name: str | None = None) -> dict:
     """The `badge` and `effect` text of a sensitive tool (toolkit_security.sensitive_tool_info).
 
-    Matches case-insensitively, like is_tool_sensitive. A missing value or an unknown badge takes the default.
+    Matches like is_tool_sensitive. A missing value or an unknown badge takes the default.
     """
+    keys = _tool_keys(tool_name)
     info = {}
-    for tk, tools in get_toolkit_security_config()['sensitive_tool_info'].items():
-        if tk.lower() == toolkit_type.lower():
-            info = next((value or {} for name, value in (tools or {}).items() if name.lower() == tool_name.lower()), {})
+    for tools in _entries_for(get_toolkit_security_config()['sensitive_tool_info'], toolkit_type, toolkit_name):
+        info = next((value or {} for name, value in (tools or {}).items() if _match_key(name) in keys), info)
     badge = info.get('badge') if info.get('badge') in SENSITIVE_BADGES else DEFAULT_TOOL_INFO['badge']
     return {'badge': badge, 'effect': info.get('effect') or DEFAULT_TOOL_INFO['effect']}
 

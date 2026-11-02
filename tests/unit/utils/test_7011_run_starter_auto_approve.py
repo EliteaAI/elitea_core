@@ -22,7 +22,7 @@ SENSITIVE = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_ema
 
 @pytest.fixture
 def run(monkeypatch):
-    predicts, setting_reads, blocks, scans = [], [], [], []
+    predicts, setting_reads, blocks, scans, finishes, outcomes = [], [], [], [], [], []
     state = types.SimpleNamespace(review=clean_review())
 
     def allowed(project_id):
@@ -38,8 +38,12 @@ def run(monkeypatch):
         predict=lambda **kw: predicts.append(kw),
         prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
         block=lambda *args: blocks.append(args),
+        finish=lambda *args, **kw: finishes.append(args),
         review=lambda *args: scans.append(args) or state.review,
     )
+
+    monkeypatch.setattr(starter, "record_run_events",
+                        lambda *args, **kw: outcomes.append(kw["risk_outcome"]) if "risk_outcome" in kw else None)
 
     def start(rule, setting, entity_type="pipeline", confirmed="fp-1", confirmed_by=OWNER):
         allowed.value = setting
@@ -53,6 +57,8 @@ def run(monkeypatch):
         return predicts[-1] if predicts else None, setting_reads
 
     start.state, start.blocks, start.scans, start.predicts = state, blocks, scans, predicts
+    start.finishes = finishes
+    start.outcomes = outcomes
     return start
 
 
@@ -84,7 +90,7 @@ def test_el_7011_r1_1_pause_and_ask_pauses_and_never_reads_the_setting(run):
 def test_el7011_cr_the_run_scans_its_version_as_the_owner(run):
     run("pause_and_ask", False)
 
-    assert run.scans == [(PROJECT_ID, 9, OWNER)]
+    assert run.scans == [(PROJECT_ID, 9, OWNER, 'pause_and_ask')]
 
 
 # Owner CR 2026-10-21: the confirmed fingerprint keeps "Run without asking"
@@ -158,9 +164,83 @@ def test_a_sensitive_item_without_a_toolkit_name_is_left_out_of_the_pairs(run):
     assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
 
 
+def test_a_listed_tool_with_a_different_spelling_is_still_approved_by_its_runtime_name(run):
+    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "Outlook___Send-Email", "from_list": True}
+    run.state.review = {**clean_review(), "sensitive": [listed], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
+
+    assert ("Outlook", "send-email") in kwargs["auto_approve_sensitive_actions"]
+    assert ("Outlook", "*") in kwargs["auto_approve_sensitive_actions"]
+
+
+def test_a_may_apply_tool_is_not_approved_by_another_confirmed_tool_of_the_toolkit(run):
+    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_email", "from_list": True}
+    maybe = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "delete_mail", "from_list": True,
+             "may_apply": True}
+    run.state.review = {**clean_review(), "sensitive": [listed], "notices": [maybe], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
+
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
+
+
 def test_a_confirmed_run_with_no_usable_pair_sends_false(run):
     nameless = {"code": "sensitive_action", "toolkit": "", "tool": "send_email"}
     run.state.review = {**clean_review(), "sensitive": [nameless], "fingerprint": "fp-1"}
     kwargs, _ = run("run_without_asking", True)
 
     assert kwargs["auto_approve_sensitive_actions"] is False
+
+
+# A missing credential or sign-in: "Pause and ask me" saves and starts with it; "Run without asking" never waits
+def test_a_sign_in_finding_ends_the_run_as_failed_under_run_without_asking(run):
+    reason = 'Toolkit "Docs" needs a personal sign-in; a scheduled run cannot sign in'
+    run.state.review = {**clean_review(), "blocking": [{"code": "personal_signin_required", "message": reason}]}
+
+    kwargs, _ = run("run_without_asking", True)
+
+    assert kwargs is None and run.predicts == [] and run.blocks == []
+    assert run.finishes == [(PROJECT_ID, RUN_ID, "failed", reason)]
+
+
+def test_a_human_input_step_still_blocks_the_run(run):
+    run.state.review = {**clean_review(), "blocking": [{"code": "human_input_step", "message": "x"}]}
+
+    run("run_without_asking", True)
+
+    assert run.finishes == [] and len(run.blocks) == 1
+
+
+def test_a_run_under_pause_and_ask_starts_when_the_scan_only_notices_a_sign_in(run):
+    run.state.review = {**clean_review(), "notices": [
+        {"code": "personal_signin_required", "message": "Toolkit needs a sign-in", "hint": "h"}]}
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs is not None and run.blocks == [] and run.finishes == []
+
+
+def test_pause_and_ask_without_a_sensitive_tool_starts_without_a_stop_and_with_outcome_ok(run):
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert run.outcomes == ["ok"]
+
+
+def test_pause_and_ask_with_a_listed_tool_gives_needs_approval(run):
+    run.state.review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert run.outcomes == ["needs_approval"]
+
+
+def test_a_personal_credential_alone_does_not_give_needs_approval(run):
+    personal = {"code": "personal_credential", "toolkit": "GitHub", "tool": None}
+    run.state.review = {**clean_review(), "sensitive": [personal], "fingerprint": "fp-1"}
+
+    run("pause_and_ask", True)
+
+    assert run.outcomes == ["ok"]

@@ -102,7 +102,7 @@ def world(monkeypatch):
         "models.conversation": {"Conversation": type("Conversation", (), {})},
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
                                    "EntityScheduleRun": type("EntityScheduleRun", (), {})},
-        "utils.schedule_prerun": {"run_prerun_check": prerun},
+        "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
@@ -249,6 +249,23 @@ def test_7011_r2_3_fill_is_one_pass_keeps_unknown_names_and_runs_no_template_log
     assert world.call("create")[1]["trigger_message"] == expected
 
 
+def _started_events(world):
+    logged = []
+    world.module.record_run_events = lambda _project, _run, event, **_kwargs: logged.append(event)
+    world.module.run_event = lambda kind, *args, **kwargs: kind
+    _run(world)
+    return [kind for kind in logged if kind == "started"]
+
+
+def test_a_first_start_writes_the_started_event(world):
+    assert _started_events(world) == ["started"]
+
+
+def test_a_restart_of_an_approved_parked_run_writes_no_second_started_event(world):
+    world.run.resumed_at = "2026-01-01"
+    assert _started_events(world) == []
+
+
 def test_the_runs_of_one_owner_ask_the_identity_service_for_the_name_once_a_minute(world, monkeypatch):
     """#7294 P-07: every run start asked pylon_auth for its owner's name (a cross-pylon RPC); the label is kept per
     owner for OWNER_LABEL_TTL_S. A failed lookup is not kept."""
@@ -272,3 +289,27 @@ def test_the_runs_of_one_owner_ask_the_identity_service_for_the_name_once_a_minu
     assert starter._owner_label(OWNER) == f"user {OWNER} (schedule owner)"   # pylint: disable=W0212
     starter._owner_label(OWNER)   # pylint: disable=W0212
     assert asked[-2:] == ["down", "down"]
+
+
+@pytest.mark.parametrize("spelled", [
+    "create_pull_request", "Create_Pull_Request", "github___create_pull_request", "GitHub:Create_Pull_Request",
+    "github___github:create_pull_request",
+])
+def test_the_runtime_tool_name_is_an_alias_key_the_risk_scan_matches(world, monkeypatch, spelled):
+    import pathlib
+    import types
+
+    import tools
+    from fixtures.helpers import load_module_with_stubs
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    config = {"toolkit_security": {"sensitive_tools": {"github": ["create_pull_request"]}}}
+    descriptor = types.SimpleNamespace(config=types.SimpleNamespace(get=lambda key, default=None: config.get(key, default)))
+    monkeypatch.setattr(tools, "this", types.SimpleNamespace(module=types.SimpleNamespace(descriptor=descriptor)))
+    security = load_module_with_stubs(root / "utils" / "toolkit_security.py", "plugins.elitea_core.utils.toolkit_security_pin")
+
+    runtime = world.module._runtime_tool_name(spelled)   # pylint: disable=W0212
+
+    assert runtime == "create_pull_request"
+    assert security.is_tool_sensitive("github", spelled) is True
+    assert security.is_tool_sensitive("github", runtime) is True
