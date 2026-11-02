@@ -600,3 +600,20 @@ def test_the_legacy_token_pickers_never_pick_a_scoped_token(pickers):
     state["rows"] = [{"id": 30, "expires": None}]   # tokens from before #7336 have no scope keys: unchanged
     assert get_user_token(OWNER) == "encoded-30" and resolve(OWNER) == ("VALID", "encoded-30")
 
+
+
+# Remote-pylon exposures (``pylon_exposure_<pylon>_<n>``, ``…_sub_path``) carry their project outside the path
+# parameter: admin on every method, so no project-less read rule reaches another project through them
+EXPOSURE_ROUTES = ["pylon_exposure_deepwiki_0", "pylon_exposure_deepwiki_0_sub_path"]
+
+
+@pytest.mark.parametrize("endpoint", EXPOSURE_ROUTES)
+@pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"])
+def test_a_remote_pylon_exposure_needs_admin_on_every_method(ns, endpoint, method):
+    view_args = {"sub_path": "api/v2/projects/5/wiki"}
+    assert ns.token_scope.operation_of(endpoint, method, view_args) == "admin"
+    for operations in (["run"], ["build"], ["run", "build"]):
+        scope = {"projects": [1], "operations": operations, "user_id": OWNER}
+        assert ns.token_scope.decide(scope, endpoint, method, view_args, "", None) == "TOKEN_SCOPE_OPERATION"
+    admin = {"projects": [1], "operations": ["admin"], "user_id": OWNER}
+    assert ns.token_scope.decide(admin, endpoint, method, view_args, "", None) is None

@@ -108,8 +108,10 @@ WRITE_OPERATIONS = {
     "api.v2.configurations.configuration": "admin",
     "api.v2.configurations.models": "admin",
 }
-# Whole plugins whose routes are administration (members, roles, invitations, projects, runtime)
-ADMIN_PREFIXES = ("api.v2.admin.", "admin.", "admin_ui.")
+# Whole plugins whose routes are administration (members, roles, invitations, projects, runtime), and the routes of
+# remote pylons exposed through this one (``pylon_exposure_<pylon>_<n>`` and its ``_sub_path``): they carry their
+# project outside the path parameter, where no project-less read rule may reach it
+ADMIN_PREFIXES = ("api.v2.admin.", "admin.", "admin_ui.", "pylon_exposure_")
 
 AUDIT_EVERY_S = 60.0
 MAX_AUDITED = 4096
