@@ -19,6 +19,7 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1].parent
 sys.path.insert(0, str(PLUGIN_ROOT / 'tests'))
 
 from fixtures.helpers import load_module_with_stubs  # noqa: E402  pylint: disable=C0413
+from fixtures.identity import fresh_sqlalchemy  # noqa: E402  pylint: disable=C0413
 
 PKG = 'elitea_core_7185_model'
 INDEX = 'uq_skill_version_files_path_ci'
@@ -32,6 +33,8 @@ def _package(name):
 
 @pytest.fixture
 def skill_models(isolated_sys_modules):
+    fresh_sqlalchemy()
+
     class Base(DeclarativeBase):
         pass
 

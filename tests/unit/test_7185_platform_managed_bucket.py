@@ -19,6 +19,7 @@ from werkzeug.datastructures import MultiDict
 TESTS_DIR = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TESTS_DIR))
 
+from fixtures.identity import fresh_sqlalchemy  # noqa: E402  pylint: disable=C0413
 from fixtures.skill_file_env import AnyModule, PLUGIN_ROOT, StubEverythingElse  # noqa: E402  pylint: disable=C0413
 from unit.events.test_7011_stream_end_schedule_step import Session, make_world  # noqa: E402,F401  pylint: disable=C0413
 
@@ -71,6 +72,7 @@ class Processors:
 
 @pytest.fixture
 def plugin(monkeypatch, isolated_sys_modules):
+    fresh_sqlalchemy()
     for name in [name for name in sys.modules if name == 'plugins' or name.startswith(PKG)]:
         monkeypatch.delitem(sys.modules, name)
     for name in ('plugins', PKG, f'{PKG}.utils', f'{PKG}.api', f'{PKG}.api.v2', f'{PKG}.rpc', f'{PKG}.events'):
