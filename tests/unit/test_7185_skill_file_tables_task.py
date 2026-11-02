@@ -43,7 +43,8 @@ def task(isolated_sys_modules):
         swept.append((project_id, dry_run))
         if project_id == 5:
             raise RuntimeError("storage down")
-        return {"project_id": project_id, "deleted": ["a" * 64] if project_id == 2 else [], "dry_run": dry_run}
+        return {"project_id": project_id, "deleted": ["a" * 64] if project_id == 2 else [],
+                "kept_undated": 3 if project_id == 1 else 0, "dry_run": dry_run}
 
     skill_files.sweep_skill_files = sweep
     sys.modules[skill_files.__name__] = skill_files
@@ -99,7 +100,9 @@ def test_the_sweep_runs_per_project_and_reports_a_failure_without_stopping(task)
 
     assert task.swept == [(1, False), (2, False), (5, False)]
     assert result == {
-        "deleted": 1, "projects": [{"project_id": 2, "deleted": ["a" * 64], "dry_run": False}],
+        "deleted": 1, "kept_undated": 3,
+        "projects": [{"project_id": 1, "deleted": [], "kept_undated": 3, "dry_run": False},
+                     {"project_id": 2, "deleted": ["a" * 64], "kept_undated": 0, "dry_run": False}],
         "failed": 1, "failed_projects": [{"project_id": 5}], "dry_run": False,
     }
 

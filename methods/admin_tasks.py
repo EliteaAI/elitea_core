@@ -779,11 +779,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 log.exception("sweep_skill_files: failed for project %s", project_id)
                 failed.append({"project_id": project_id})
         deleted = sum(len(result["deleted"]) for result in swept)
+        kept_undated = sum(result.get("kept_undated", 0) for result in swept)
         log.info(
-            "%ssweep_skill_files: deleted=%s failed=%s",
-            "[DRY RUN] " if values["dry_run"] else "", deleted, len(failed),
+            "%ssweep_skill_files: deleted=%s kept_undated=%s failed=%s",
+            "[DRY RUN] " if values["dry_run"] else "", deleted, kept_undated, len(failed),
         )
-        return {"deleted": deleted, "projects": [result for result in swept if result["deleted"]],
+        return {"deleted": deleted, "kept_undated": kept_undated,
+                "projects": [result for result in swept if result["deleted"] or result.get("kept_undated")],
                 "failed": len(failed), "failed_projects": failed, "dry_run": values["dry_run"]}
 
     @web.method()

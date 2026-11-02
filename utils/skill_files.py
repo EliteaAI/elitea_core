@@ -374,18 +374,22 @@ def import_version_files(session, project_id: int, version_ids: dict, versions: 
 
 def sweep_skill_files(project_id: int, dry_run: bool = False, now: datetime = None) -> dict:
     """Delete the objects of the project's bucket that no file row references and that are older than an hour,
-    so an upload whose row is still being committed survives; refused while a transaction is adding file rows."""
+    so an upload whose row is still being committed survives; refused while a transaction is adding file rows.
+    An object storage reports no time for is kept and counted, since its age cannot be told."""
     cutoff = (now or datetime.now(timezone.utc)) - SWEEP_MIN_AGE
     with db.get_session(project_id) as s:
         if not claim_skill_file_deletes(s, project_id):
             raise SkillFileError(f'skill files of project {project_id} are being written; run the sweep again')
         referenced = {sha256 for (sha256,) in s.query(SkillVersionFile.sha256).distinct().all()}
         unreferenced = [obj for obj in list_contents(project_id) if obj['name'] not in referenced]
+        undated = [obj['name'] for obj in unreferenced if not obj.get('modified')]
         stale = [
             obj['name'] for obj in unreferenced
-            if not obj.get('modified') or datetime.fromisoformat(obj['modified']).astimezone(timezone.utc) < cutoff
+            if obj.get('modified') and datetime.fromisoformat(obj['modified']).astimezone(timezone.utc) < cutoff
         ]
         if stale and not dry_run:
             delete_contents(project_id, stale)
-    return {'project_id': project_id, 'deleted': stale, 'kept_recent': len(unreferenced) - len(stale),
-            'dry_run': dry_run}
+    if undated:
+        log.warning('skill files: %s unreferenced object(s) of project %s have no time; kept', len(undated), project_id)
+    return {'project_id': project_id, 'deleted': stale, 'kept_recent': len(unreferenced) - len(stale) - len(undated),
+            'kept_undated': len(undated), 'dry_run': dry_run}

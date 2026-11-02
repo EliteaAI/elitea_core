@@ -753,7 +753,8 @@ class TestSweep:
 
         result = env.files.sweep_skill_files(PROJECT, now=self.NOW)
 
-        assert result == {'project_id': PROJECT, 'deleted': ['old' * 21 + 'o'], 'kept_recent': 1, 'dry_run': False}
+        assert result == {'project_id': PROJECT, 'deleted': ['old' * 21 + 'o'], 'kept_recent': 1, 'kept_undated': 0,
+                          'dry_run': False}
         assert env.storage.keys(PROJECT) == sorted([_sha(b'kept'), 'new' * 21 + 'n'])
 
     def test_a_dry_run_deletes_nothing(self, env, session):
@@ -762,6 +763,15 @@ class TestSweep:
         result = env.files.sweep_skill_files(PROJECT, dry_run=True, now=self.NOW)
 
         assert result['deleted'] == ['old' * 21 + 'o'] and len(env.storage.keys(PROJECT)) == 3
+
+    def test_an_object_storage_gives_no_time_for_is_kept_and_counted(self, env, session):
+        self._seed(env, session)
+        env.storage.modified[(f'p--{PROJECT}.skill-files', 'old' * 21 + 'o')] = None
+
+        result = env.files.sweep_skill_files(PROJECT, now=self.NOW)
+
+        assert (result['deleted'], result['kept_undated'], result['kept_recent']) == ([], 1, 1)
+        assert len(env.storage.keys(PROJECT)) == 3
 
     def test_a_project_without_a_bucket_sweeps_nothing(self, env):
         assert env.files.sweep_skill_files(OTHER, now=self.NOW)['deleted'] == []
