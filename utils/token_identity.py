@@ -20,14 +20,14 @@ from typing import Optional
 
 from pydantic import SecretStr
 from pylon.core.tools import log
-from sqlalchemy import delete, select
-from tools import auth, db
+from sqlalchemy import delete, inspect, select, text
+from tools import auth, config as c, db
 
 from ..models.api_token_identity import METADATA, ApiTokenIdentityConsent
 from . import entra_obo
 from .mandate_identity import (
     CONFIG_KEY, RELEASE_ACTOR, IdentityRefused, OfflineMaterial, _grant, _now, _plugin_config, _retire, _secrets,
-    _tracing, _verified_person,
+    _tracing, _verified_person, scope_keys,
 )
 
 TOKEN_SOURCE = "token_owner_delegated"
@@ -50,7 +50,12 @@ MESSAGES = {
     "AUDIT_UNAVAILABLE": "The audit trail is unavailable; nothing was changed. Try again later.",
     "CONCURRENT_CHANGE": "The token's consent changed while this ran; read it again and retry.",
     "GOVERNANCE_NOT_ENFORCED": "Consent applies only while credential governance is enforced; nothing was changed.",
+    "CREDENTIALS_REQUIRED": "Choose at least one credential the token may act with your Microsoft sign-in for.",
+    "CREDENTIAL_NOT_ELIGIBLE": "One of the chosen credentials cannot be used by this token with your Microsoft sign-in; "
+                               "choose among the ones offered for the token's projects.",
 }
+MAX_CONSENT_CREDENTIALS = 64
+MAX_CANDIDATE_PROJECTS = 20
 
 
 def allowed(module) -> bool:
@@ -82,6 +87,11 @@ def ensure_table() -> None:
         METADATA.create_all(connection, checkfirst=True)
         for index in ApiTokenIdentityConsent.__table__.indexes:   # a table created before its index (#7337 review N-2)
             index.create(connection, checkfirst=True)
+        present = {column["name"] for column in inspect(connection).get_columns(
+            ApiTokenIdentityConsent.__tablename__, schema=c.POSTGRES_SCHEMA)}
+        if "credential_refs" not in present:   # a table created before the consent named its credentials (C9-SEC-81)
+            session.execute(text(f'ALTER TABLE "{c.POSTGRES_SCHEMA}".{ApiTokenIdentityConsent.__tablename__} '
+                                 'ADD COLUMN IF NOT EXISTS credential_refs JSONB'))
         session.commit()
 
 
@@ -90,23 +100,26 @@ def _read(token_id):
         return session.execute(select(
             ApiTokenIdentityConsent.owner_user_id, ApiTokenIdentityConsent.material_project_id,
             ApiTokenIdentityConsent.material_ref, ApiTokenIdentityConsent.consented_at,
+            ApiTokenIdentityConsent.credential_refs,
         ).where(ApiTokenIdentityConsent.token_id == token_id)).one_or_none()
 
 
 # --- admission ----------------------------------------------------------------------------------------------------
 
 def identity_reader(module, token_id, owner_user_id):
-    """For the credential decision of a scoped token's run: a callable answering whether the token's owner consented
-    (read once, when a delegated credential first reaches check 4b), or ``None`` when the deployment does not allow the
-    source (nothing is ever read then, and the decision is the one before #7337)."""
+    """For the credential decision of a scoped token's run: a callable answering ``{"consented", "scope"}`` of the
+    owner's consent for the token (read once, when a delegated credential first reaches check 4b; ``scope`` the
+    ``(credential ref, credential generation, configuration generation)`` it covers, as a mandate's), or ``None`` when
+    the deployment does not allow the source (nothing is ever read then; the decision is the one before #7337)."""
     if not allowed(module):
         return None
     answers = []
 
-    def read() -> bool:
+    def read() -> dict:
         if not answers:
             row = _read(token_id)
-            answers.append(row is not None and row.owner_user_id == owner_user_id)
+            mine = row is not None and row.owner_user_id == owner_user_id
+            answers.append({"consented": mine, "scope": scope_keys(row.credential_refs) if mine else frozenset()})
         return answers[0]
 
     return read
@@ -133,10 +146,10 @@ def _token_live(token_id, owner_user_id) -> None:
     raise entra_obo.DelegationRefused(CONSENT_REQUIRED)
 
 
-def release_person(subject, tenant, caller) -> tuple:
+def release_person(subject, tenant, caller, slot=None) -> tuple:
     """``(person, OfflineMaterial)`` for an Entra-delegated slot of a scoped token's run: the owner's linked subject
-    the run was admitted with, the token still live and its owner's, and the consent kept for this token and this
-    person only (one select, then the secrets plugin's own holder and custodian check). Raises
+    the run was admitted with, the token still live and its owner's, the slot's credential (and generation) among those
+    the consent names, and the consent kept for this token and this person only (one select, then the secrets plugin's own holder and custodian check). Raises
     ``entra_obo.DelegationRefused``. Called after the release's own checks of the run (context, binding, grants)."""
     token_id = token_id_of(caller)
     owner = caller.get("user_id") if isinstance(caller, dict) else None
@@ -154,6 +167,9 @@ def release_person(subject, tenant, caller) -> tuple:
         raise entra_obo.DelegationRefused(entra_obo.UNAVAILABLE) from None
     if row is None or row.owner_user_id != owner:
         raise entra_obo.DelegationRefused(CONSENT_REQUIRED)
+    if slot is None or not any(ref == slot.get("credential_ref") and generation == slot.get("credential_generation")
+                               for ref, generation, _ in scope_keys(row.credential_refs)):
+        raise entra_obo.DelegationRefused(CONSENT_REQUIRED)   # not among the credentials the owner consented to
     holder = holder_of(token_id)
     try:
         answer = _secrets().release_offline_material(
@@ -271,7 +287,7 @@ def _linked_subject(actor_user_id) -> tuple:
     return linked
 
 
-def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
+def consent(module, token_id, actor_user_id, credentials=None) -> dict:  # pylint: disable=R0914
     """The token's owner consents, in their own signed-in session, to the token's runs acting with their Microsoft
     sign-in (the material kept in their personal project): ``{"token_id", "consented_at"}``, or raises
     ``IdentityRefused``. Given again, it replaces the earlier one
@@ -282,6 +298,7 @@ def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
     person = _verified_person(module, actor_user_id)
     if (person["issuer"], person["tid"], person["oid"]) != linked:
         raise IdentityRefused("DENIED_SUBJECT_MISMATCH")   # signed in as another identity than the account's link
+    covered = _covered(module, scope, actor_user_id, f"idp:{person['tid']}:{person['oid']}", credentials)
     holder, material_project = holder_of(token_id), _personal_project(module, actor_user_id)
     earlier = _read(token_id)
     granted = _grant(module, person, holder)
@@ -303,7 +320,7 @@ def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
             if earlier is None:
                 session.add(ApiTokenIdentityConsent(
                     token_id=token_id, owner_user_id=actor_user_id, material_project_id=material_project,
-                    material_ref=material_ref, consented_at=now))
+                    material_ref=material_ref, consented_at=now, credential_refs=covered))
                 session.flush()   # a consent given at the same moment holds the key: this one fails here
             else:
                 moved = session.execute(delete(ApiTokenIdentityConsent).where(
@@ -315,10 +332,14 @@ def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
                     raise IdentityRefused("CONCURRENT_CHANGE")
                 session.add(ApiTokenIdentityConsent(
                     token_id=token_id, owner_user_id=actor_user_id, material_project_id=material_project,
-                    material_ref=material_ref, consented_at=now))
+                    material_ref=material_ref, consented_at=now, credential_refs=covered))
                 session.flush()
             _tracing().security_audit_record(session, _event(
                 "approval", "TOKEN_IDENTITY_CONSENTED", token_id, material_project, caller_ref, user_ref, material_ref))
+            for item in covered:   # one row per credential it covers, in that credential's project
+                _tracing().security_audit_record(session, _event(
+                    "approval", "TOKEN_IDENTITY_CREDENTIAL_COVERED", token_id, item["project_id"], caller_ref,
+                    user_ref, item["credential_ref"]))
             session.commit()
     except IdentityRefused:
         _retire(material_project, material_ref, "CONSENT_REPLACED", caller_ref, actor_user_id)
@@ -330,7 +351,7 @@ def consent(module, token_id, actor_user_id) -> dict:  # pylint: disable=R0914
                               else "AUDIT_UNAVAILABLE") from None
     if earlier is not None:
         _retire(earlier.material_project_id, earlier.material_ref, "CONSENT_REPLACED", caller_ref, actor_user_id)
-    return {"token_id": token_id, "consented_at": now.isoformat()}
+    return {"token_id": token_id, "consented_at": now.isoformat(), "credentials": _shown(covered)}
 
 
 def withdraw(module, token_id, actor_user_id) -> dict:
@@ -383,7 +404,8 @@ def on_auth_invalidate(module, payload) -> bool:
 
 
 def status(module, actor_user_id) -> dict:
-    """What the owner's pages show: ``{"allowed", "linked", "consents": {token id: consented_at}, "mandates"}``
+    """What the owner's pages show: ``{"allowed", "linked", "consents": {token id: {consented_at, credentials}},
+    "mandates"}``
     (``mandates``: schedules and webhooks may act with the owner's sign-in through a mandate, #7131). Nothing is read
     but under the governed profile, and the consents only with the token source allowed."""
     from .governance import is_governed  # pylint: disable=C0415
@@ -398,10 +420,18 @@ def status(module, actor_user_id) -> dict:
     except IdentityRefused:
         linked = False
     with db.get_session(None) as session:
-        rows = session.execute(select(ApiTokenIdentityConsent.token_id, ApiTokenIdentityConsent.consented_at).where(
+        rows = session.execute(select(ApiTokenIdentityConsent.token_id, ApiTokenIdentityConsent.consented_at,
+                                      ApiTokenIdentityConsent.credential_refs).where(
             ApiTokenIdentityConsent.owner_user_id == actor_user_id)).all()
     return {"allowed": True, "linked": linked, "mandates": mandates,
-            "consents": {str(row.token_id): row.consented_at.isoformat() for row in rows}}
+            "consents": {str(row.token_id): {"consented_at": row.consented_at.isoformat(),
+                                             "credentials": _shown(row.credential_refs)} for row in rows}}
+
+
+def _shown(credentials) -> list:
+    """What the owner's pages show of the credentials a consent covers: project, reference and title."""
+    return [{key: item.get(key) for key in ("project_id", "credential_ref", "title")}
+            for item in credentials or () if isinstance(item, dict)]
 
 
 # --- the hourly sweep (#7337 review S-2) --------------------------------------------------------------------------
@@ -444,3 +474,66 @@ def sweep(module, limit=SWEEP_LIMIT) -> dict:
         if ended is not None and retire(row.token_id, ended[0], SWEEP_ACTOR, retire_reason=ended[1]):
             retired += 1
     return {"seen": len(rows), "retired": retired}
+
+
+# --- what a consent may name (C9-SEC-81 option 1) -----------------------------------------------------------------
+
+def _candidates_in(module, owner_ref, actor_user_id, project_ids) -> list:
+    """The delegated credential references the owner may use in these projects, as a consent records them, with their
+    titles: the secrets plugin's ``delegated_references_of`` per project (their personal ones and the shared ones
+    granted to them) and one configuration-facts read. No secret."""
+    from .credential_decision import read_configuration_facts  # pylint: disable=C0415
+    found = []
+    for project_id in project_ids:
+        for item in _secrets().delegated_references_of(project_id, owner_ref, actor_user_id) or ():
+            found.append((project_id, item))
+    titles = read_configuration_facts([(item["configuration_uuid"], project_id) for project_id, item in found]) \
+        if found else {}
+    return [{"project_id": project_id, "credential_ref": item["ref_id"], "credential_generation": item["generation"],
+             "configuration_generation": item["configuration_generation"],
+             "title": (titles.get(item["configuration_uuid"]) or {}).get("title") or item["ref_id"][:8]}
+            for project_id, item in found]
+
+
+def candidates(module, actor_user_id, project_ids) -> list:
+    """What the owner may name in a consent for a token of these projects (the token creation block and the token
+    list ask): ``[{project_id, credential_ref, title}]``. Nothing is read but under enforce with the source allowed;
+    another person's references are never listed. At most ``MAX_CANDIDATE_PROJECTS`` projects."""
+    _governed_or_refuse(module)
+    if not allowed(module):
+        raise IdentityRefused("IDENTITY_SOURCE_NOT_ALLOWED")
+    projects = sorted({int(project_id) for project_id in project_ids})[:MAX_CANDIDATE_PROJECTS]
+    linked = _linked_subject(actor_user_id)
+    try:
+        found = _candidates_in(module, f"idp:{linked[1]}:{linked[2]}", actor_user_id, projects)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("token identity: the credentials could not be listed (%s)", type(exc).__name__)
+        raise IdentityRefused("DEPENDENCY_UNAVAILABLE") from None
+    return [{key: item[key] for key in ("project_id", "credential_ref", "title")} for item in found]
+
+
+def _covered(module, scope, actor_user_id, owner_ref, credentials) -> list:
+    """The consent's ``credential_refs``: each chosen ``{project_id, credential_ref}`` must be one the owner may use in
+    one of the token's projects, else ``CREDENTIAL_NOT_ELIGIBLE`` (one text whatever the reason: no existence leak)."""
+    if not isinstance(credentials, (list, tuple)) or not credentials:
+        raise IdentityRefused("CREDENTIALS_REQUIRED")
+    if len(credentials) > MAX_CONSENT_CREDENTIALS:
+        raise IdentityRefused("CREDENTIAL_NOT_ELIGIBLE")
+    wanted = set()
+    for item in credentials:
+        project_id = item.get("project_id") if isinstance(item, dict) else None
+        if isinstance(project_id, bool) or not isinstance(project_id, int) or project_id not in scope["projects"]:
+            raise IdentityRefused("CREDENTIAL_NOT_ELIGIBLE")
+        try:
+            wanted.add((project_id, str(uuid.UUID(str(item.get("credential_ref"))))))
+        except ValueError:
+            raise IdentityRefused("CREDENTIAL_NOT_ELIGIBLE") from None
+    try:
+        offered = _candidates_in(module, owner_ref, actor_user_id, sorted({project for project, _ in wanted}))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("token identity: the credentials could not be checked (%s)", type(exc).__name__)
+        raise IdentityRefused("DEPENDENCY_UNAVAILABLE") from None
+    covered = [item for item in offered if (item["project_id"], item["credential_ref"]) in wanted]
+    if len(covered) != len(wanted):
+        raise IdentityRefused("CREDENTIAL_NOT_ELIGIBLE")
+    return sorted(covered, key=lambda item: (item["project_id"], item["credential_ref"]))

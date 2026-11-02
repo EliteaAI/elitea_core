@@ -238,9 +238,10 @@ MESSAGES = {
                                       "The run was not started.",
     # a scoped API token's run acting with its owner's offline consent (#7337)
     "DENIED_TOKEN_CONSENT_REQUIRED": "This API token's run uses a credential that acts with the token owner's "
-                                     "Microsoft sign-in, which needs the owner's consent for this token: it is "
-                                     "missing, was withdrawn, or the token was deleted or expired (the owner consents "
-                                     "in Settings, Personal tokens, signed in). The run was not started.",
+                                     "Microsoft sign-in, which needs the owner's consent for this token naming this "
+                                     "credential: it is missing, was withdrawn, does not cover this credential (as it "
+                                     "is now), or the token was deleted or expired (the owner consents in Settings, "
+                                     "Personal tokens, signed in). The run was not started.",
     "DENIED_TOKEN_CONSENT_EXPIRED": "Microsoft no longer accepts the token owner's consent (it expired or was revoked "
                                     "at Microsoft). The owner gives it again in Settings, Personal tokens. The run "
                                     "was not started.",

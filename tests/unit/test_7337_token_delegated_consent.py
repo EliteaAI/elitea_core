@@ -62,6 +62,14 @@ def env(ns, monkeypatch):
     env.entra, env.oidc, env.offline = Entra(), AuthOidc(ns.entra_obo), Offline()
     env.secrets_extra = {name: getattr(env.offline, name) for name in (
         "keep_offline_material", "release_offline_material", "rotate_offline_material", "retire_offline_material")}
+    env.delegated, env.offered_calls, env.offer_projects = [], [], {1}
+
+    def delegated_references_of(project_id, subject_ref, user_id):   # the secrets plugin (its own tests: secrets)
+        env.offered_calls.append((project_id, subject_ref, user_id))
+        return [cred.offered() for cred in env.delegated if project_id in env.offer_projects and subject_ref == OWNER_REF
+                and user_id == OWNER and cred.reference["state"] == "active"]
+
+    env.secrets_extra["delegated_references_of"] = delegated_references_of
     monkeypatch.setattr(ns.entra_obo, "_post", env.entra)
     monkeypatch.setenv("ELITEA_API_CLIENT_SECRET", CLIENT_SECRET)
     monkeypatch.setenv("ELITEA_OBO_CUSTODY_KEY", CUSTODY_KEY)
@@ -113,6 +121,18 @@ class Delegated(Credential):
             "valid_until": None, "operations": ["*"]}
         env.delegations[self.ref_id] = {"oauth_app_id": "platform", "tenant_id": TID, "resource": GRAPH,
                                         "scopes": [f"{GRAPH}/Sites.Selected"], "assertion_source": "login"}
+        env.configurations[(1, self.uuid)]["title"] = f"sp-{tool_id}"
+        env.delegated.append(self)
+
+    def scope_item(self):
+        """As a consent records it (``credential_refs``)."""
+        return {"project_id": 1, "credential_ref": self.ref_id, "credential_generation": 1,
+                "configuration_generation": 3, "title": f"sp-{self.tool_id}"}
+
+    def offered(self):
+        """As the secrets plugin's ``delegated_references_of`` lists it."""
+        return {"ref_id": self.ref_id, "configuration_id": self.config_id, "configuration_uuid": self.uuid,
+                "generation": 1, "configuration_generation": 3, "ownership_class": self.reference["ownership_class"]}
 
     def expanded(self):
         return {"elitea_title": "sp", "configuration_uuid": self.uuid, "configuration_project_id": 1,
@@ -126,15 +146,26 @@ def consent_row(ns, env, token_id=TOKEN):
             ns.token_models.ApiTokenIdentityConsent.token_id == token_id)).scalar_one_or_none()
 
 
-def consented(ns, env, holder=f"token:{TOKEN}", custodian=OWNER_REF, owner=OWNER, project=PERSONAL, token_id=TOKEN):
-    """A consent as ``consent`` records it: the material at the secrets plugin, the row naming it."""
+def consented(ns, env, holder=f"token:{TOKEN}", custodian=OWNER_REF, owner=OWNER, project=PERSONAL, token_id=TOKEN,
+              covers=None):
+    """A consent as ``consent`` records it: the material at the secrets plugin, the row naming it and the delegated
+    credentials it covers (``covers``; by default every one made so far)."""
     material = env.offline.add(holder, custodian)
     with ns.sa_orm.Session(env.engine(None)) as session:
         session.add(ns.token_models.ApiTokenIdentityConsent(
             token_id=token_id, owner_user_id=owner, material_project_id=project, material_ref=uuid.UUID(material),
-            consented_at=datetime.now(timezone.utc)))
+            consented_at=datetime.now(timezone.utc),
+            credential_refs=[cred.scope_item() for cred in (env.delegated if covers is None else covers)]))
         session.commit()
     return material
+
+
+def chosen(env, *creds):
+    """What the owner picks in the consent: the given credentials, else every one made so far (one is made when none
+    is: a consent always names at least one)."""
+    if not creds and not env.delegated:
+        Delegated(env, env.seed_agent())
+    return [{"project_id": 1, "credential_ref": cred.ref_id} for cred in (creds or env.delegated)]
 
 
 def token_request(env, **over):
@@ -215,8 +246,9 @@ def signed_in_as(ns, monkeypatch, person=None, code=None):
 def test_a_consented_token_run_is_released_a_token_minted_from_the_owners_offline_consent(ns, env, personal):
     ns.need_transport()
     binding = env.seed_agent()
+    cred = Delegated(env, binding, personal=personal)
     material = consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding, personal=personal))
+    run = admitted(ns, env, cred)
     subject = context_row(ns, env, run.ref).subject
     assert (subject["kind"], subject["ref"], subject["issuer"], subject["oid"]) == ("api_token", OWNER_REF, ENTRA, OID)
     reply = run.release()
@@ -236,8 +268,9 @@ def test_a_consented_token_run_is_released_a_token_minted_from_the_owners_offlin
 def test_the_consent_is_read_at_every_release_and_a_withdrawal_stops_a_cached_token(ns, env):
     ns.need_transport()
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     assert run.release()["ok"] is True and run.release()["ok"] is True
     assert len(env.oidc.redeemed) == 1 and [c[0] for c in env.offline.calls] == ["release", "release"]
     assert ns.token_identity.withdraw(env.module(), TOKEN, OWNER) == {"token_id": TOKEN}
@@ -280,8 +313,9 @@ def test_another_users_consent_on_the_token_does_not_count(ns, env):
 
 def test_a_consent_row_that_is_not_the_owners_at_release_is_refused(ns, env):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     with ns.sa_orm.Session(env.engine(None)) as session:
         session.execute(ns.sa.update(ns.token_models.ApiTokenIdentityConsent).values(owner_user_id=OTHER))
         session.commit()
@@ -348,8 +382,9 @@ def test_a_plain_string_switch_is_no_list(ns):
 @pytest.mark.parametrize("reason", ["token_missing", "token_expired"])
 def test_a_deleted_or_expired_token_releases_nothing_and_its_consent_is_retired(ns, env, reason):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     material = consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     env.epochs[TOKEN] = {"active": False, "user": 3, "token": None, "user_id": None, "reason": reason}
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert consent_row(ns, env) is None
@@ -373,8 +408,9 @@ def test_deleting_a_token_retires_its_consent_from_the_event(ns, env):
 
 def test_a_material_retired_before_the_row_is_swept_is_refused(ns, env):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     material = consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     env.offline.rows[material]["state"] = "retired"
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert env.oidc.redeemed == []
@@ -384,16 +420,18 @@ def test_a_relinked_owner_needs_a_new_consent(ns, env):
     """The consent's material is bound to the subject the owner had when consenting: a run admitted on the new link
     is refused at release (the secrets plugin's custodian check)."""
     binding = env.seed_agent()
+    cred = Delegated(env, binding, personal=False)
     consented(ns, env, custodian=f"idp:{TID}:oid-before-the-relink")
-    run = admitted(ns, env, Delegated(env, binding, personal=False))
+    run = admitted(ns, env, cred)
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert env.oidc.redeemed == []
 
 
 def test_a_token_now_someone_elses_releases_nothing(ns, env):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     env.epochs[TOKEN] = {"active": True, "user": 3, "token": 4, "user_id": OTHER, "reason": None}
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert consent_row(ns, env) is not None and env.oidc.redeemed == []
@@ -403,8 +441,9 @@ def test_a_token_now_someone_elses_releases_nothing(ns, env):
 
 def test_a_mandates_material_never_satisfies_a_token_holder(ns, env):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     consented(ns, env, holder=f"mandate:{uuid.uuid4()}")
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert env.oidc.redeemed == []
 
@@ -423,8 +462,8 @@ def test_holder_strings_never_collide(ns):
 def test_the_owners_interactive_token_is_never_served_to_the_token_run_and_back(ns, env):
     ns.need_transport()
     binding = env.seed_agent()
-    material = consented(ns, env)
     cred = Delegated(env, binding)
+    material = consented(ns, env)
     person = {"issuer": ENTRA, "tid": TID, "oid": OID}
     delegation = {**env.delegations[cred.ref_id], "ownership_class": "project_shared", "custodian_subject_ref": None}
     client = ns.entra_obo.app_client(env.module(), delegation, 1)
@@ -443,8 +482,9 @@ def test_the_owners_interactive_token_is_never_served_to_the_token_run_and_back(
 
 def test_a_consent_microsoft_refuses_is_withdrawn_and_the_run_refused_readably(ns, env):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     material = consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     env.oidc.answer = {"ok": False, "code": "CONSENT_REFUSED"}
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_EXPIRED"
     assert consent_row(ns, env) is None
@@ -455,8 +495,9 @@ def test_a_consent_microsoft_refuses_is_withdrawn_and_the_run_refused_readably(n
 @pytest.mark.parametrize("answer", [{"ok": False, "code": "ASSERTION_UNAVAILABLE"}, None])
 def test_a_redemption_that_may_work_later_keeps_the_consent(ns, env, answer):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     env.oidc.answer = answer
     assert run.release()["reason_code"] == "DEPENDENCY_UNAVAILABLE"
     assert consent_row(ns, env) is not None
@@ -467,7 +508,7 @@ def test_a_redemption_that_may_work_later_keeps_the_consent(ns, env, answer):
 def test_the_owner_consents_in_their_own_session_and_only_a_reference_is_kept(ns, env, monkeypatch):
     signed_in_as(ns, monkeypatch)
     scoped(env, projects=(3, 1))
-    answer = ns.token_identity.consent(env.module(), TOKEN, OWNER)
+    answer = ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env))
     assert answer["token_id"] == TOKEN and answer["consented_at"]
     assert env.oidc.granted == [(TID, OID, f"token:{TOKEN}")]
     [keep] = env.offline.calls
@@ -477,19 +518,25 @@ def test_the_owner_consents_in_their_own_session_and_only_a_reference_is_kept(ns
     row = consent_row(ns, env)
     assert (row.owner_user_id, row.material_project_id, str(row.material_ref) in env.offline.rows) == (
         OWNER, PERSONAL, True)
-    [(_, event)] = env.recorded
+    [(_, event), (_, covered)] = env.recorded
     assert (event["event_type"], event["reason_code"], event["target_ref"], event["user_ref"], event["caller_ref"]) == (
         "approval", "TOKEN_IDENTITY_CONSENTED", f"token:{TOKEN}", OWNER_REF, f"user:{OWNER}")
+    [cred] = env.delegated   # the audit names each credential the consent covers, in its project
+    assert (covered["reason_code"], covered["credential_ref"], covered["project_id"], covered["target_ref"]) == (
+        "TOKEN_IDENTITY_CREDENTIAL_COVERED", cred.ref_id, 1, f"token:{TOKEN}")
+    assert row.credential_refs == [cred.scope_item()]
+    assert answer["credentials"] == [{"project_id": 1, "credential_ref": cred.ref_id, "title": "sp-1"}]
     assert REFRESH not in everything_said(env, answer) and REFRESH not in "".join(env.oidc.bus)
     status = ns.token_identity.status(env.module(), OWNER)
     assert status["allowed"] is True and status["linked"] is True and list(status["consents"]) == [str(TOKEN)]
+    assert status["consents"][str(TOKEN)]["credentials"] == answer["credentials"]
     assert ns.token_identity.status(env.module(), OTHER)["consents"] == {}
 
 
 def test_a_consent_given_again_replaces_and_retires_the_earlier_one(ns, env, monkeypatch):
     earlier = consented(ns, env)
     signed_in_as(ns, monkeypatch)
-    ns.token_identity.consent(env.module(), TOKEN, OWNER)
+    ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env))
     assert str(consent_row(ns, env).material_ref) != earlier
     assert ("retire", earlier, "CONSENT_REPLACED") in env.offline.calls
 
@@ -503,12 +550,12 @@ def test_two_consents_at_once_one_wins_and_the_others_material_is_retired(ns, en
         granted = real_grant(module, person, holder)
         if not winner:
             monkeypatch.setattr(ns.token_identity, "_grant", real_grant)
-            winner.append(ns.token_identity.consent(env.module(), TOKEN, OWNER))
+            winner.append(ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env)))
         return granted
 
     monkeypatch.setattr(ns.token_identity, "_grant", racing)
     with pytest.raises(ns.token_identity.IdentityRefused) as lost:
-        ns.token_identity.consent(env.module(), TOKEN, OWNER)
+        ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env))
     assert lost.value.code == "CONCURRENT_CHANGE"
     kept = [call for call in env.offline.calls if call[0] == "keep"]
     retired = [call for call in env.offline.calls if call[0] == "retire"]
@@ -554,7 +601,7 @@ def test_a_consent_that_is_not_the_owners_own_live_sign_in_is_refused_with_nothi
     if case == "no_custody":
         env.oidc.grant_answer = {"ok": False, "code": "ASSERTION_UNAVAILABLE"}
     with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
-        ns.token_identity.consent(env.module(), TOKEN, actor)
+        ns.token_identity.consent(env.module(), TOKEN, actor, chosen(env))
     assert refusal.value.code == code and code in ns.token_identity.MESSAGES
     assert env.offline.calls == [] and consent_row(ns, env) is None
 
@@ -610,12 +657,12 @@ def test_a_consent_racing_a_replacement_of_an_earlier_one_loses_and_its_material
         granted = real_grant(module, person, holder)
         if not winner:
             monkeypatch.setattr(ns.token_identity, "_grant", real_grant)
-            winner.append(ns.token_identity.consent(env.module(), TOKEN, OWNER))
+            winner.append(ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env)))
         return granted
 
     monkeypatch.setattr(ns.token_identity, "_grant", racing)
     with pytest.raises(ns.token_identity.IdentityRefused) as lost:
-        ns.token_identity.consent(env.module(), TOKEN, OWNER)
+        ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env))
     assert lost.value.code == "CONCURRENT_CHANGE"
     row = consent_row(ns, env)
     kept = [call for call in env.offline.calls if call[0] == "keep"]
@@ -634,7 +681,7 @@ def test_the_owners_personal_project_is_asked_and_a_failure_keeps_nothing(ns, en
             return answer
         env.oidc.projects_get_personal_project_id = personal
         with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
-            ns.token_identity.consent(env.module(), TOKEN, OWNER)
+            ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env))
         assert refusal.value.code == "DEPENDENCY_UNAVAILABLE"
     assert env.offline.calls == [] and env.oidc.granted == [] and consent_row(ns, env) is None
 
@@ -644,8 +691,9 @@ def test_a_consent_kept_in_the_personal_project_releases_whatever_project_the_ru
     the consent, and the release reads the material from the personal project the row names."""
     ns.need_transport()
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     material = consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     assert run.release()["ok"] is True
     assert env.offline.calls == [("release", PERSONAL, material, f"token:{TOKEN}", OWNER_REF)]
 
@@ -656,8 +704,9 @@ def test_a_consent_kept_in_the_personal_project_releases_whatever_project_the_ru
 ])
 def test_a_release_for_a_gone_owner_is_refused_and_retires_the_consent(ns, env, reason, audit, retire_reason):
     binding = env.seed_agent()
+    cred = Delegated(env, binding)
     material = consented(ns, env)
-    run = admitted(ns, env, Delegated(env, binding))
+    run = admitted(ns, env, cred)
     env.epochs[TOKEN] = {"active": False, "user": 3, "token": 4, "user_id": OWNER, "reason": reason}
     assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
     assert consent_row(ns, env) is None and ("retire", material, retire_reason) in env.offline.calls
@@ -722,7 +771,7 @@ def test_consent_and_withdraw_refuse_under_off_and_audit_only_with_nothing_read(
     for module in (env.module(governed=False), env.module(audit=True)):
         with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
             if call == "consent":
-                ns.token_identity.consent(module, TOKEN, OWNER)
+                ns.token_identity.consent(module, TOKEN, OWNER, chosen(env))
             else:
                 ns.token_identity.withdraw(module, TOKEN, OWNER)
         assert refusal.value.code == "GOVERNANCE_NOT_ENFORCED" and refusal.value.code in ns.token_identity.MESSAGES
@@ -757,3 +806,116 @@ def test_the_hourly_pat_task_sweeps_first_and_a_failing_sweep_does_not_stop_the_
         monkeypatch.setattr(ns.token_identity, "sweep", sweep)
         task.RPC.check_pat_expiration(module)
     assert order == ["sweep", "expiring", "sweep", "expiring"] and fired == ["notifications_stream"] * 2
+
+
+# --- the consent names its credentials (C9-SEC-81, option 1) -----------------------------------------------------------
+
+def test_a_listed_credential_is_released_and_an_unlisted_one_is_refused(ns, env):
+    """The version uses two delegated credentials; a consent naming one of them does not admit the run, one naming both
+    does, and each is released."""
+    ns.need_transport()
+    binding = env.seed_agent()
+    listed, unlisted = Delegated(env, binding), Delegated(env, binding, tool_id=2)
+    consented(ns, env, covers=[listed])
+    assert refused(ns, env, listed, unlisted) == "DENIED_TOKEN_CONSENT_REQUIRED"
+    [deny] = env.denied
+    assert deny["credential_ref"] == unlisted.ref_id   # the refusal names the credential the consent does not cover
+    assert "does not cover this credential" in ns.adm.MESSAGES["DENIED_TOKEN_CONSENT_REQUIRED"]
+    with ns.sa_orm.Session(env.engine(None)) as session:
+        session.execute(ns.sa.update(ns.token_models.ApiTokenIdentityConsent).values(
+            credential_refs=[listed.scope_item(), unlisted.scope_item()]))
+        session.commit()
+    run = admitted(ns, env, listed, unlisted)
+    reply = run.release()
+    assert reply["ok"] is True and len(reply["releases"]) == 2
+
+
+def test_a_credential_changed_since_the_consent_is_not_covered(ns, env):
+    binding = env.seed_agent()
+    cred = Delegated(env, binding)
+    item = {**cred.scope_item(), "credential_generation": 2}   # consented to an earlier/later generation
+    consented(ns, env, covers=[])
+    with ns.sa_orm.Session(env.engine(None)) as session:
+        session.execute(ns.sa.update(ns.token_models.ApiTokenIdentityConsent).values(credential_refs=[item]))
+        session.commit()
+    assert refused(ns, env, cred) == "DENIED_TOKEN_CONSENT_REQUIRED"
+
+
+def test_a_release_outside_the_consent_is_refused_even_after_admission(ns, env):
+    binding = env.seed_agent()
+    cred = Delegated(env, binding)
+    consented(ns, env)
+    run = admitted(ns, env, cred)
+    with ns.sa_orm.Session(env.engine(None)) as session:   # the consent was given again for something else since
+        session.execute(ns.sa.update(ns.token_models.ApiTokenIdentityConsent).values(credential_refs=[]))
+        session.commit()
+    assert run.release()["reason_code"] == "DENIED_TOKEN_CONSENT_REQUIRED"
+    assert env.offline.calls == [] and env.oidc.redeemed == []
+
+
+@pytest.mark.parametrize("case", ["empty", "none", "outside_scope", "not_delegated", "other_custodian", "unknown",
+                                  "malformed", "too_many"])
+def test_a_consent_naming_a_credential_it_may_not_name_is_refused_readably_with_nothing_kept(
+        ns, env, monkeypatch, case):
+    signed_in_as(ns, monkeypatch)
+    binding = env.seed_agent()
+    mine = Delegated(env, binding)
+    picks = [{"project_id": 1, "credential_ref": mine.ref_id}]
+    if case == "empty":
+        picks = []
+    elif case == "none":
+        picks = None
+    elif case == "outside_scope":
+        env.offer_projects = {1, 2}   # the owner may use it there too, but the token is scoped to project 1 only
+        picks = [{"project_id": 2, "credential_ref": mine.ref_id}]
+    elif case == "not_delegated":
+        stored = Credential(env, binding, tool_id=3, config_id=30)   # a stored secret, never offered
+        picks.append({"project_id": 1, "credential_ref": stored.ref_id})
+    elif case == "other_custodian":
+        theirs = Delegated(env, binding, personal=True, tool_id=4)
+        theirs.reference["custodian_subject_ref"] = f"idp:{TID}:someone-else"
+        env.delegated.remove(theirs)   # the secrets plugin lists only the owner's own and granted ones
+        picks.append({"project_id": 1, "credential_ref": theirs.ref_id})
+    elif case == "unknown":
+        picks.append({"project_id": 1, "credential_ref": str(uuid.uuid4())})
+    elif case == "malformed":
+        picks = [{"project_id": 1, "credential_ref": "not-a-uuid"}]
+    elif case == "too_many":
+        picks = picks * 65
+    with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
+        ns.token_identity.consent(env.module(), TOKEN, OWNER, picks)
+    expected = "CREDENTIALS_REQUIRED" if case in ("empty", "none") else "CREDENTIAL_NOT_ELIGIBLE"
+    assert refusal.value.code == expected and expected in ns.token_identity.MESSAGES
+    assert env.offline.calls == [] and env.oidc.granted == [] and consent_row(ns, env) is None
+    if case in ("unknown", "other_custodian", "not_delegated"):   # one text whatever the reason: no existence leak
+        assert ns.token_identity.MESSAGES[expected].count("cannot be used") == 1
+
+
+def test_a_consent_given_again_replaces_the_list(ns, env, monkeypatch):
+    signed_in_as(ns, monkeypatch)
+    binding = env.seed_agent()
+    first, second = Delegated(env, binding), Delegated(env, binding, tool_id=2)
+    ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env, first, second))
+    earlier = str(consent_row(ns, env).material_ref)
+    ns.token_identity.consent(env.module(), TOKEN, OWNER, chosen(env, second))
+    row = consent_row(ns, env)
+    assert [item["credential_ref"] for item in row.credential_refs] == [second.ref_id]
+    assert ("retire", earlier, "CONSENT_REPLACED") in env.offline.calls
+    assert refused(ns, env, first) == "DENIED_TOKEN_CONSENT_REQUIRED"
+
+
+def test_the_candidates_are_the_owners_delegated_ones_in_the_asked_projects_only(ns, env, monkeypatch):
+    binding = env.seed_agent()
+    cred = Delegated(env, binding)
+    assert ns.token_identity.candidates(env.module(), OWNER, [1, 1, 2]) == [
+        {"project_id": 1, "credential_ref": cred.ref_id, "title": "sp-1"}]
+    assert env.offered_calls == [(1, OWNER_REF, OWNER), (2, OWNER_REF, OWNER)]
+    assert ns.token_identity.candidates(env.module(), OTHER, [1]) == []   # someone else sees none of the owner's
+    for module, code in ((env.module(governed=False), "GOVERNANCE_NOT_ENFORCED"),):
+        with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
+            ns.token_identity.candidates(module, OWNER, [1])
+        assert refusal.value.code == code
+    env.sources = ["owner_delegated"]
+    with pytest.raises(ns.token_identity.IdentityRefused) as refusal:
+        ns.token_identity.candidates(env.module(), OWNER, [1])
+    assert refusal.value.code == "IDENTITY_SOURCE_NOT_ALLOWED"

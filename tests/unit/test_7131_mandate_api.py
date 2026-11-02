@@ -571,3 +571,24 @@ def test_owner_mode_refuses_under_off_and_audit_only_with_nothing_read(ns, env, 
         refused, status = owner_act(ns, env, mandate_id, route, governed=False)
     assert (status, refused["code"]) == (409, "GOVERNANCE_NOT_ENFORCED")
     assert reads == [] and env.fakes.granted == [] and env.fakes.kept == [] and env.fakes.retired == []
+
+
+def test_the_token_consent_route_parses_the_projects_and_the_named_credentials_strictly(ns, env):
+    """(#7337, C9-SEC-81) The handler's own parsing; the consent logic is test_7337_token_delegated_consent's."""
+    env.sources = ["owner_delegated", "token_owner_delegated"]
+    env.user_rows[OWNER] = {"id": OWNER, "idp_issuer": ENTRA, "idp_tid": TID, "idp_oid": OID}
+    env.holder = types.SimpleNamespace(type="user", id=OWNER, reference="session-reference-made-up")
+    ns.actor = "owner_member"
+    handler = ns.endpoints.token_identity.DefaultAPI(module(ns, env))
+    for projects in ("1,abc", "0", ",".join(str(n) for n in range(1, 23))):
+        ns.request.args, ns.request.body, ns.request.content_length = {"projects": projects}, None, None
+        assert handler.get()[1] == 400
+    ns.request.args = {}
+    for body in ({"action": "consent", "token_id": 21, "credentials": [{"project_id": 1, "credential_ref": "x",
+                                                                         "refresh_token": "x"}]},
+                 {"action": "consent", "token_id": 21, "credentials": [{"project_id": True, "credential_ref": "x"}]},
+                 {"action": "consent", "token_id": 21, "credentials": [{"project_id": 1}] * 65}):
+        ns.request.body, ns.request.content_length = body, len(json.dumps(body))
+        refused, status = handler.post()
+        assert status == 400 and refused["code"] == "INVALID_REQUEST"
+    assert env.fakes.granted == [] and env.fakes.kept == []

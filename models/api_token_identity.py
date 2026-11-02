@@ -2,8 +2,8 @@
 
 One row per token that has one (``token_id`` = auth_core's token id): where the owner's offline material is kept at the
 secrets plugin (``material_project_id``: the owner's personal project; ``material_ref``; holder ``token:<id>``) and
-when it was given. The owner's
-subject is not copied: it is the linked IdP subject the token's admission already resolves, and the material is bound
+when it was given, and which delegated credential references it covers (``credential_refs``). The owner's subject is
+not copied: it is the linked IdP subject the token's admission already resolves, and the material is bound
 to it (its custodian). Withdrawn, replaced or retired: the row goes (a conditional delete), the material is retired.
 
 A table of the shared schema with its own ``MetaData`` (not ``db.Base``): it exists only where the deployment lists
@@ -12,9 +12,10 @@ platform without the source has no new table and nothing reads one.
 """
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import DateTime, Index, Integer, MetaData
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column
 from tools import config as c
 
@@ -33,3 +34,7 @@ class ApiTokenIdentityConsent(Base):
     material_project_id: Mapped[int] = mapped_column(Integer, nullable=False)
     material_ref: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # What the consent covers (C9-SEC-81, Roman 2026-11-02: option 1): the delegated credential references the owner
+    # named, each ``{project_id, credential_ref, credential_generation, configuration_generation, title}`` as it was at
+    # consent (the mandate's ``identity_scope`` shape). NULL only in a row written before the column: it covers nothing
+    credential_refs: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)

@@ -109,10 +109,10 @@ class CredentialDecisionContext:
     # ``idp:<tid>:<oid>`` of the mandate's owner when the deployment allows an owner identity: their own grants on the
     # credentials are read with the decision's facts (a shared delegated credential needs one, #7131)
     mandate_owner_ref: Optional[str] = None
-    # A scoped API token's run (#7337): whether the token's owner consented to its runs acting with their Microsoft
-    # sign-in, asked only once a delegated credential reaches check 4b; None (the deployment does not allow the source):
+    # A scoped API token's run (#7337): ``{"consented", "scope"}`` of the token owner's consent (the credentials it
+    # names), asked only once a delegated credential reaches check 4b; None (the deployment does not allow the source):
     # nothing is asked and the decision is the one before (such a credential is refused at release)
-    token_identity: Optional[Callable[[], bool]] = None
+    token_identity: Optional[Callable[[], Optional[Mapping]]] = None
 
 
 @dataclass(frozen=True)
@@ -469,6 +469,13 @@ def holds_personal(ctx: CredentialDecisionContext, reference: Mapping) -> bool:
     return isinstance(custodian, str) and bool(custodian) and custodian == ctx.subject_ref
 
 
+def consent_covers(identity, reference: Mapping, config: Mapping) -> bool:
+    """Does an owner's offline consent (a mandate's, #7131, or a scoped token's, #7337) cover this credential as it is
+    now: given, and naming its reference with this reference and configuration generation."""
+    covered = (reference.get("ref_id"), reference.get("generation"), config.get("generation"))
+    return bool(identity) and bool(identity.get("consented")) and covered in identity.get("scope", ())
+
+
 def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse, facts: CredentialFacts) -> Decision:
     """One use, AND of the checks, first failure wins. Pure: it reads only its arguments (``ctx.can_use`` aside)."""
     known = {}
@@ -499,8 +506,7 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
         identity = ctx.mandate_identity() if ctx.mandate_identity is not None else None   # mandate acting with its
         if not identity or identity.get("source") != OWNER_DELEGATED:              #     owner's consent (#7131)
             return verdict(False, MANDATE_DELEGATION_UNSUPPORTED)
-        covered = (reference.get("ref_id"), reference.get("generation"), config.get("generation"))
-        if not identity.get("consented") or covered not in identity.get("scope", ()):   # what the owner consented to
+        if not consent_covers(identity, reference, config):                        #     what the owner consented to
             return verdict(False, MANDATE_CONSENT_REQUIRED)
         if reference.get("ownership_class") != "personal":                         #     a shared one: the owner's own
             owner_grant = subject_grant_in_force(facts.subject_grants.get(          #     grant on it, whatever the
@@ -508,8 +514,9 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
             if ctx.mandate_owner_ref is None or owner_grant is None:
                 return verdict(False, "DENIED_GRANT")
             known.update(owner_grant_id=owner_grant.get("grant_id"), owner_grant_epoch=owner_grant.get("revocation_epoch"))
-    if known.get("auth_mode") and ctx.token_identity is not None and not ctx.token_identity():   # 4b. a scoped
-        return verdict(False, TOKEN_CONSENT_REQUIRED)                              #     token: its owner's consent (#7337)
+    if known.get("auth_mode") and ctx.token_identity is not None and \
+            not consent_covers(ctx.token_identity(), reference, config):            # 4b. a scoped token: its owner's
+        return verdict(False, TOKEN_CONSENT_REQUIRED)                              #     consent, naming it (#7337)
     if reference.get("ownership_class") == "personal" and not holds_personal(ctx, reference):   # 5. a personal one
         return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")                  #    only its custodian may use
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval

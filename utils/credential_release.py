@@ -817,7 +817,7 @@ def _token_offline(module, request: _Request, scope: _Scope, delegation: dict, d
     """``acquire_offline`` with the consent the token's owner gave the token (``token_identity``). The release event
     names the token as its caller and the consent it rests on (``approver_ref``); one Microsoft refused is withdrawn."""
     subject, _, caller = scope.person
-    person, material = token_identity.release_person(*scope.person)
+    person, material = token_identity.release_person(*scope.person, slot=request.slot)
     try:
         found = entra_obo.acquire_offline(module, person, delegation, scope.binding_project_id, material, deadline)
     except entra_obo.DelegationRefused as refused:

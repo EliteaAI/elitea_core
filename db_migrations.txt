@@ -556,7 +556,9 @@ Run admin task seed_eval_trajectory_dimensions
 
 # Issue #7337 (C-1009): a scoped API token's owner consents to its runs acting with their Microsoft sign-in. New table
 # api_token_identity_consent in the shared schema (token_id PK, owner_user_id, material_project_id, material_ref,
-# consented_at; index ix_api_token_identity_consent_owner on owner_user_id), with its own MetaData (not db.Base). No
+# consented_at, credential_refs JSONB = the delegated credentials the consent names; index
+# ix_api_token_identity_consent_owner on owner_user_id), with its own MetaData (not db.Base). A table created before
+# credential_refs gets it at start (ALTER TABLE ... ADD COLUMN IF NOT EXISTS credential_refs JSONB). No
 # task: created at start only where elitea_core's plugin config lists token_owner_delegated in mandate_identity_sources
 # (SQLAlchemy create_all / Index.create with checkfirst: a catalog look-up, then a plain CREATE TABLE / CREATE INDEX; a
 # second replica starting at the same moment may fail its CREATE, which is logged and harmless: the table is there).
