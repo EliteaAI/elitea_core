@@ -560,6 +560,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.internal_obo = load("utils", "internal_obo")   # the run token admission mints (#7214)
     ns.entra_obo = load("utils", "entra_obo")   # the on-behalf-of exchange of Entra-delegated credentials (#6756)
     ns.mandate_identity = load("utils", "mandate_identity")   # a mandate owner's offline consent (#7131)
+    ns.token_models = load("models", "api_token_identity")   # a scoped token owner's offline consent (#7337)
+    ns.token_identity = load("utils", "token_identity")
     ns.adm = load("utils", "admission")
     ns.token_scope = load("utils", "token_scope")   # what a scoped API token may do on a request (#7336)
     ns.credential_release = load("utils", "credential_release")
