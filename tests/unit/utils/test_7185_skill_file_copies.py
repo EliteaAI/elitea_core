@@ -80,6 +80,33 @@ def _published_twin(env, publish):
 
 
 class TestPublish:
+    @pytest.mark.parametrize('additional', [False, True])
+    def test_a_publish_moves_every_byte_before_it_opens_the_public_transaction(self, env, publish, monkeypatch,
+                                                                               additional):
+        _, _, snapshot, result = _published_twin(env, publish)
+        env.storage.objects = {key: value for key, value in env.storage.objects.items()
+                               if key[0] != f'p--{PUBLIC}.skill-files'}
+        events = []
+        upload = env.store.MinioClient.upload_file
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda client, bucket, data, name: events.append(
+            'upload') or upload(client, bucket, data, name))
+        get_session = publish.db.get_session
+
+        @contextlib.contextmanager
+        def recording_session(project_id):
+            events.append(('transaction', project_id))
+            with get_session(project_id) as session:
+                yield session
+
+        monkeypatch.setattr(publish.db, 'get_session', recording_session)
+
+        if additional:
+            publish.publish_skill_additional_version(PUBLIC, result['skill_id'], snapshot, 'v2', 1, snapshot['source'])
+        else:
+            publish.publish_skill_first_version(PUBLIC, snapshot, 'v1', 1, snapshot['source'])
+
+        assert events[:3] == ['upload', 'upload', ('transaction', PUBLIC)] and events.count('upload') == 2
+
     def test_the_source_clone_gets_the_rows_and_no_new_object(self, env, publish):
         source = _seed(env)
         objects_before = dict(env.storage.objects)
@@ -233,12 +260,45 @@ class TestImportRpc:
         assert env.storage.keys(CONSUMER) == sorted([_sha(b'# Guide'), _sha(b'\x89PNG\x00')])
         assert target.commits == 1
 
-    def test_a_reused_fork_gets_no_second_copy(self, env, skill_rpc):
+    def test_a_reused_fork_gets_no_rows_and_no_bytes_its_project_already_holds(self, env, skill_rpc, monkeypatch):
         manifest = env.files.list_version_manifest(_seed(env), 10)
+        env.store.put_contents(CONSUMER, {_sha(b'# Guide'): b'# Guide', _sha(b'\x89PNG\x00'): b'\x89PNG\x00'})
+        uploads = []
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda *args: uploads.append(args))
 
         skill_rpc.RPC.applications_import_skill(None, _fork_payload(manifest, name='reused'), CONSUMER, 1)
 
-        assert env.session_of(CONSUMER).rows[FakeSkillVersionFile] == [] and env.storage.keys(CONSUMER) == []
+        assert env.session_of(CONSUMER).rows[FakeSkillVersionFile] == [] and uploads == []
+
+    def test_a_fork_moves_every_byte_before_it_opens_the_targets_transaction(self, env, skill_rpc, monkeypatch):
+        manifest = env.files.list_version_manifest(_seed(env), 10)
+        events = []
+        upload = env.store.MinioClient.upload_file
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda client, bucket, data, name: events.append(
+            ('upload', client.project_id)) or upload(client, bucket, data, name))
+        get_session = skill_rpc.db.get_session
+
+        @contextlib.contextmanager
+        def recording_session(project_id):
+            events.append(('transaction', project_id))
+            with get_session(project_id) as session:
+                yield session
+
+        monkeypatch.setattr(skill_rpc.db, 'get_session', recording_session)
+
+        skill_rpc.RPC.applications_import_skill(None, _fork_payload(manifest), CONSUMER, 1)
+
+        target_events = [event for event in events if event != ('transaction', SOURCE)]
+        assert target_events == [('upload', CONSUMER), ('upload', CONSUMER), ('transaction', CONSUMER)]
+
+    def test_a_source_object_gone_meanwhile_fails_the_import_naming_the_path(self, env, skill_rpc):
+        manifest = env.files.list_version_manifest(_seed(env), 10)
+        del env.storage.objects[(f'p--{SOURCE}.skill-files', _sha(b'# Guide'))]
+
+        result, errors = skill_rpc.RPC.applications_import_skill(None, _fork_payload(manifest), CONSUMER, 1)
+
+        assert result is None and "'references/guide.md' could not be copied" in errors[0]
+        assert env.session_of(CONSUMER).commits == 0
 
     def test_a_payload_naming_content_the_source_version_lacks_imports_nothing(self, env, skill_rpc):
         _seed(env)

@@ -125,24 +125,6 @@ def delete_content(project_id: int, sha256: str) -> None:
     delete_contents(project_id, [sha256])
 
 
-def copy_contents(source_project_id: int, target_project_id: int, hashes) -> list:
-    """Copy into the target project's bucket each hash it lacks, reading from the source project's bucket."""
-    wanted = list(dict.fromkeys(hashes))
-    if not wanted or source_project_id == target_project_id:
-        return []
-    source = MinioClient.from_project_id(source_project_id)
-    target = MinioClient.from_project_id(target_project_id)
-    _ensure_bucket(target)
-    copied = []
-    for sha256 in wanted:
-        if _has_object(target, sha256):
-            continue
-        target.upload_file(SKILL_FILES_BUCKET, source.download_file(SKILL_FILES_BUCKET, sha256), sha256)
-        log.info('skill files: copied %s from project %s to project %s', sha256, source_project_id, target_project_id)
-        copied.append(sha256)
-    return copied
-
-
 def list_contents(project_id: int) -> list:
     """Every object of the project's bucket as ``{name, size, modified}``; empty when the bucket does not exist."""
     client = MinioClient.from_project_id(project_id)

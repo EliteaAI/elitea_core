@@ -22,7 +22,7 @@ from ..utils.skill_utils import (
     import_skill,
 )
 from ..utils.skill_export_import import ensure_base_version, unpack_embedded_skill_frontmatter
-from ..utils.skill_files import import_version_files
+from ..utils.skill_files import import_version_files, stage_import_files
 from ..utils.skill_publish_utils import get_default_skill_validation_rules
 
 
@@ -57,6 +57,7 @@ class RPC:
             versions = ensure_base_version([
                 unpack_embedded_skill_frontmatter(version or {}) for version in model_data.get('versions') or []
             ])
+            staged_files = stage_import_files(project_id, versions, model_data.get('owner_id'))
             with db.get_session(project_id) as session:
                 imported = import_skill(
                     project_id=project_id,
@@ -70,7 +71,7 @@ class RPC:
                 )
                 if not imported.reused:
                     import_version_files(
-                        session, project_id, imported.versions, versions, model_data.get('owner_id'),
+                        session, project_id, imported.versions, staged_files, model_data.get('owner_id'),
                     )
                 session.commit()
         except Exception as ex:

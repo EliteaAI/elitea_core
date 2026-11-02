@@ -37,7 +37,7 @@ from .publish_utils import (
     verify_validation_token,
 )
 from .constants import DEFAULT_FALLBACK_CATEGORY
-from .skill_files import add_version_files, list_version_manifest
+from .skill_files import add_version_files, list_version_manifest, stage_version_files
 from .skill_utils import list_version_file_hashes, release_unreferenced_contents
 from .skill_frontmatter import FRONTMATTER_META_KEY
 from .skill_run_settings import SHARED_MODEL_REQUIRED, unshared_model_issue
@@ -824,6 +824,8 @@ def publish_skill_first_version(
     skill_info = snapshot['skill']
     ver_info = snapshot['version']
     published_meta = _build_published_skill_meta(snapshot, version_name, user_id)
+    files = ver_info.get('files') or []
+    staged_files = stage_version_files(public_project_id, files, source['project_id'])
 
     with db.get_session(public_project_id) as session:
         skill = Skill(
@@ -851,9 +853,7 @@ def publish_skill_first_version(
         session.flush()
 
         _apply_snapshot_tags(session, version, ver_info.get('tags'))
-        add_version_files(
-            session, public_project_id, version.id, ver_info.get('files') or [], source['project_id'],
-        )
+        add_version_files(session, public_project_id, version.id, files, staged_files, source['project_id'])
 
         skill.meta['default_version_id'] = version.id
         session.commit()
@@ -871,6 +871,8 @@ def publish_skill_additional_version(
 ) -> dict:
     ver_info = snapshot['version']
     published_meta = _build_published_skill_meta(snapshot, version_name, user_id)
+    files = ver_info.get('files') or []
+    staged_files = stage_version_files(public_project_id, files, source['project_id'])
 
     with db.get_session(public_project_id) as session:
         skill = session.query(Skill).get(public_skill_id)
@@ -890,9 +892,7 @@ def publish_skill_additional_version(
         session.flush()
 
         _apply_snapshot_tags(session, version, ver_info.get('tags'))
-        add_version_files(
-            session, public_project_id, version.id, ver_info.get('files') or [], source['project_id'],
-        )
+        add_version_files(session, public_project_id, version.id, files, staged_files, source['project_id'])
         session.commit()
 
         return {'skill_id': skill.id, 'version_id': version.id}

@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from tools import db, serialize
 
 from .skill_file_store import (
-    copy_contents, delete_contents, get_content, list_contents, project_client, put_content, put_contents,
+    content_exists, delete_contents, get_content, list_contents, project_client, put_content, put_contents,
 )
 from .skill_utils import (
     SkillFileError,
@@ -46,6 +46,14 @@ class SkillFileContentUnavailableError(SkillFileError):
 
     def __init__(self, path: str):
         super().__init__(f"The stored content of '{path}' could not be read; try again later")
+
+
+class SkillFileSourceUnavailableError(SkillFileError):
+    def __init__(self, path: str):
+        super().__init__(
+            f"'{path}' could not be copied: its content is no longer stored where it is copied from "
+            "(deleted, unpublished or replaced meanwhile); copy the skill again"
+        )
 
 
 class SkillFilePathTakenError(SkillFileError):
@@ -289,14 +297,70 @@ def delete_version_file(project_id: int, skill_id: int, version_id: int, path: s
     release_unreferenced_contents(project_id, {released_hash})
 
 
-def add_version_files(session, project_id: int, version_id: int, entries: list, source_project_id: int = None) -> None:
-    """Give a version of ``project_id`` the entries as file rows, storing first the bytes the entries carry and
-    copying the rest from ``source_project_id``'s bucket when that is another project."""
+def _unique_by_hash(entries: list) -> list:
+    return list({entry['sha256']: entry for entry in entries}.values())
+
+
+def _fetch_from_source(source_project_id, project_id: int, entries: list) -> dict:
+    """The verified bytes of each entry, read from the source project's bucket."""
+    if source_project_id is None or source_project_id == project_id:
+        raise SkillFileSourceUnavailableError(entries[0]['path'])
+    source_client = project_client(source_project_id)
+    fetched = {}
+    for entry in _unique_by_hash(entries):
+        try:
+            data = get_content(source_project_id, entry['sha256'], source_client)
+        except Exception as exc:
+            log.exception('skill files: content %s of project %s unreadable for a copy', entry['sha256'],
+                          source_project_id)
+            raise SkillFileSourceUnavailableError(entry['path']) from exc
+        if hashlib.sha256(data).hexdigest() != entry['sha256']:
+            log.error('skill files: content %s of project %s does not match its hash', entry['sha256'],
+                      source_project_id)
+            raise SkillFileSourceUnavailableError(entry['path'])
+        fetched[entry['sha256']] = data
+    return fetched
+
+
+def stage_version_files(project_id: int, entries: list, source_project_id: int = None) -> dict:
+    """Store in the project's bucket, before any transaction adds rows naming them, the bytes the entries carry and
+    those the project lacks of the rest, read and verified from ``source_project_id``; returns the bytes stored, by
+    hash, for ``add_version_files`` to store again should a delete remove one meanwhile."""
+    contents = {entry['sha256']: entry['data'] for entry in entries if 'data' in entry}
+    client = project_client(project_id)
+    lacking = [
+        entry for entry in _unique_by_hash(entries)
+        if 'data' not in entry and not content_exists(project_id, entry['sha256'], client)
+    ]
+    if lacking:
+        contents.update(_fetch_from_source(source_project_id, project_id, lacking))
+    put_contents(project_id, contents, client)
+    return contents
+
+
+def _restore_missing_objects(project_id: int, entries: list, contents: dict, source_project_id) -> None:
+    client = project_client(project_id)
+    missing = [entry for entry in _unique_by_hash(entries) if not content_exists(project_id, entry['sha256'], client)]
+    if not missing:
+        return
+    log.warning('skill files: %s object(s) of project %s went missing before their rows; storing them again',
+                len(missing), project_id)
+    restored = {entry['sha256']: contents[entry['sha256']] for entry in missing if entry['sha256'] in contents}
+    unstaged = [entry for entry in missing if entry['sha256'] not in contents]
+    if unstaged:
+        restored.update(_fetch_from_source(source_project_id, project_id, unstaged))
+    put_contents(project_id, restored, client)
+
+
+def add_version_files(
+    session, project_id: int, version_id: int, entries: list, contents: dict = None, source_project_id: int = None,
+) -> None:
+    """Give a version of ``project_id`` the entries as file rows. The objects are ``stage_version_files``'s work,
+    done before this transaction; here, with the project's deletes held off, each one is checked to still be there
+    (stored again from ``contents`` or the source if a delete removed it) and the rows are added."""
     hold_skill_file_deletes(session, project_id)
-    put_contents(project_id, {entry['sha256']: entry['data'] for entry in entries if 'data' in entry})
-    referenced = [entry['sha256'] for entry in entries if 'data' not in entry]
-    if referenced and source_project_id is not None:
-        copy_contents(source_project_id, project_id, referenced)
+    carried = {entry['sha256']: entry['data'] for entry in entries if 'data' in entry}
+    _restore_missing_objects(project_id, entries, {**carried, **(contents or {})}, source_project_id)
     for entry in entries:
         session.add(SkillVersionFile(
             skill_version_id=version_id,
@@ -373,16 +437,28 @@ def resolve_payload_files(payload_files: list, source_project_id=None, source_ve
     return entries
 
 
-def import_version_files(session, project_id: int, version_ids: dict, versions: list, source_project_id=None) -> int:
-    """Give the versions an import just created the files their payload lists; returns how many rows were added."""
-    added = 0
+def stage_import_files(project_id: int, versions: list, source_project_id=None) -> dict:
+    """Resolve the files each payload version lists and store their objects, before the import's transaction:
+    ``{version name: (entries, bytes stored by hash)}``."""
+    staged = {}
     for version in versions:
         payload_files = version.get('files') or []
-        version_id = version_ids.get(version.get('name', 'base'))
-        if not payload_files or version_id is None:
+        if not payload_files:
             continue
         entries = resolve_payload_files(payload_files, source_project_id, version.get('id'))
-        add_version_files(session, project_id, version_id, entries, source_project_id)
+        staged[version.get('name', 'base')] = (entries, stage_version_files(project_id, entries, source_project_id))
+    return staged
+
+
+def import_version_files(session, project_id: int, version_ids: dict, staged: dict, source_project_id=None) -> int:
+    """Give the versions an import just created the files ``stage_import_files`` staged for them; returns how many
+    rows were added."""
+    added = 0
+    for version_name, (entries, contents) in staged.items():
+        version_id = version_ids.get(version_name)
+        if version_id is None:
+            continue
+        add_version_files(session, project_id, version_id, entries, contents, source_project_id)
         added += len(entries)
     return added
 
