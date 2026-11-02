@@ -395,6 +395,26 @@ OPERATIONS = {
                 "error": "A run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start"}),
     },
+    ("post", "test_run"): {
+        "name": "Test a schedule that is not saved",
+        "summary": "Test run of the form before a save",
+        "description": _text(
+            "Start a test run of the Save form. The body is the Save body. The values go to the caller's hidden "
+            "draft row of this agent or pipeline, and a run with trigger `test` starts on it with the same risk, "
+            "sign-in and credential checks as a saved run. The schedule list, the export, the project cap and the "
+            "tick never see the draft. Only one run is active per agent or pipeline and caller.",
+            "a project member with `schedules.run`",
+            "400 an invalid field (the Save rules) or `approval_rule_not_allowed`; 403 no permission; "
+            "404 the agent or pipeline is not visible; 409 `run_active` (`active_run_id`); "
+            "500 `run_start_failed`"),
+        "parameters": PROJECT_PARAMS,
+        "request_body": ScheduleCreate,
+        "responses": _responses(202, "The test run started", {"run_id": 77}, {
+            400: None, 403: None, 404: None,
+            409: ("A test run of this agent or pipeline is active", {
+                "error": "A test run of this schedule is active", "active_run_id": 76}),
+            500: "The run could not start"}),
+    },
     ("get", f"{ITEM}/runs"): {
         "name": "List the runs of a schedule",
         "summary": "List the runs of a schedule",

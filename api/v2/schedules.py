@@ -39,6 +39,7 @@ ROUTES = {
     ("get", "settings"): "_get_settings",
     ("put", "settings"): "_save_settings",
     ("post", "check"): "_check_risks",
+    ("post", "test_run"): "_test_run",
 }
 # The body of `schedule_service.refusal`; the handler tests load this module without the service
 NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405

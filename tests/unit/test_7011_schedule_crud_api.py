@@ -235,6 +235,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/schedule_claim.py', 'utils.schedule_claim')
     load('utils/schedule_dispatch.py', 'utils.schedule_dispatch')
     load('utils/schedule_service.py', 'utils.schedule_service')
+    load('utils/schedule_test_draft.py', 'utils.schedule_test_draft')
     harness.config = tools.this.module.descriptor.config
     harness.module = load('utils/schedule_item_handlers.py', 'utils.schedule_item_handlers')
     sys.modules.update(sqlite_db.handler_stubs(PACKAGE, real='schedule_item_handlers'))

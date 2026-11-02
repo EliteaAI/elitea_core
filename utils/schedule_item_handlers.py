@@ -36,12 +36,14 @@ from .schedule_service import (
     INVALID_INPUT,
     ScheduleError,
     check_entity,
+    check_schedule_body,
     create_schedule,
     delete_schedule,
     load_schedule_in_scope,
     refusal,
     update_schedule,
 )
+from .schedule_test_draft import active_run_id, find_draft, write_draft
 from .schedule_timing import ScheduleLimitError
 from .trigger_governance import schedule_governance_notice
 
@@ -88,6 +90,25 @@ class RunsQuery(BaseModel):
     status: RunStatus | None = None
     trigger: RunTrigger | None = None
     version_id: DbId | None = None
+
+
+def _start_run(session, project_id: int, schedule_id: int, entity_type: str, trigger: str, user_id: int,
+               owner_request):
+    """Insert the running run, start it and answer 202; 409 `run_active` when the schedule has an active run."""
+    run_id = insert_run(session, schedule_id, trigger, user_id)
+    if run_id is None:
+        session.rollback()  # a draft written for this call must not stay half-saved
+        active_id = session.scalar(select(EntityScheduleRun.id).where(
+            EntityScheduleRun.schedule_id == schedule_id,
+            EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
+        ))
+        return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
+    session.commit()
+    if not start_schedule_run(entity_type, project_id, schedule_id, run_id, owner_request):
+        fail_run(session, run_id, START_FAILED)
+        session.commit()
+        return refusal("run_start_failed", "The run could not start", 500)
+    return {"run_id": run_id}, 202
 
 
 def _iso(moment) -> str | None:
@@ -467,19 +488,45 @@ class ScheduleItemHandlers:
             except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
                 log.exception('Schedule %s: cannot build the owner run request', schedule_id)
                 return refusal("run_start_failed", "The run could not start", 500)
-            run_id = insert_run(session, schedule_id, body.trigger, scope.user_id)
-            if run_id is None:
-                active_id = session.scalar(select(EntityScheduleRun.id).where(
-                    EntityScheduleRun.schedule_id == schedule_id,
-                    EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
-                ))
-                return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
-            session.commit()
-            if not start_schedule_run(entity_type, project_id, schedule_id, run_id, owner_request):
-                fail_run(session, run_id, START_FAILED)
+            return _start_run(session, project_id, schedule_id, entity_type, body.trigger, scope.user_id, owner_request)
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _test_run(self, project_id: int):
+        """Test the form of a schedule that is not saved yet; the schedule list does not change.
+
+        The body is the Save body. The values go to the caller's hidden draft row of this agent or pipeline,
+        and a run of trigger `test` starts on it with the same checks as a saved run. The row never reaches the
+        list, the tick, the cap or an export.
+        Who may call: a project member with `schedules.run`.
+        Errors: 400 invalid field (the Save rules, `approval_rule_not_allowed`); 403; 404 agent or pipeline not
+        found or not visible; 409 `run_active` (a test run of this agent or pipeline is active, the body has
+        `active_run_id`); 500 `run_start_failed`.
+        """
+        body, error = _parse_body(ScheduleCreate)
+        if error:
+            return error
+        refused = _refuse_unallowed_rule(project_id, body)
+        if refused:
+            return refused
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                check_schedule_body(session, project_id, body)
+            except ScheduleError as e:
+                return e.response
+            draft = find_draft(session, scope.user_id, body.application_id)
+            if draft is not None and (active_id := active_run_id(session, draft.id)) is not None:
                 session.commit()
+                return refusal("run_active", "A test run of this schedule is active", 409, active_run_id=active_id)
+            try:   # the same owner request as Run now; built before the draft is written
+                from .mandate_admission import owner_run_request  # pylint: disable=C0415
+                owner_request = owner_run_request(self.module, project_id=project_id, application_id=body.application_id,
+                                                  version_id=body.version_id, schedule_id=draft and draft.id)
+            except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
+                log.exception('Test run of agent or pipeline %s: cannot build the owner run request', body.application_id)
                 return refusal("run_start_failed", "The run could not start", 500)
-            return {"run_id": run_id}, 202
+            row = write_draft(session, scope.user_id, body)
+            return _start_run(session, project_id, row.id, row.entity_type, "test", scope.user_id, owner_request)
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _decide_run(self, project_id: int, schedule_id: int, run_id: int):
