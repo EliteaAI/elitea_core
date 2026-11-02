@@ -49,6 +49,17 @@ class SkillFileContentUnavailableError(SkillFileError):
 
     def __init__(self, path: str):
         super().__init__(f"The stored content of '{path}' could not be read; try again later")
+        self.path = path
+
+
+class SkillVersionExportUnavailableError(SkillFileError):
+    http_status = 503
+
+    def __init__(self, skill_name: str, version_name: str, path: str):
+        super().__init__(
+            f"Skill '{skill_name}' version '{version_name}' could not be exported: the stored content of '{path}' "
+            "could not be read; try again later"
+        )
 
 
 class SkillFileSourceUnavailableError(SkillFileError):

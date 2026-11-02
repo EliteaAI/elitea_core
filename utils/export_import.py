@@ -19,7 +19,10 @@ from pylon.core.tools import log
 
 from .export_import_utils import slugify
 from .skill_export_import import build_embedded_skill_frontmatter
-from .skill_files import list_version_manifest, read_version_contents
+from .skill_files import (
+    SkillFileContentUnavailableError, SkillVersionExportUnavailableError, list_version_manifest,
+    read_version_contents,
+)
 from .toolkit_meta import drop_index_schedules
 from .utils import get_public_project_id
 
@@ -38,7 +41,8 @@ def _export_compound_application_tools(
     user_id: int,
     forked: bool = False,
     data_done: dict = None,
-    follow_version_ids: set = None
+    follow_version_ids: set = None,
+    with_file_bytes: bool = True,
 ):
     tool_ids = defaultdict(set)
     toolkit_ref_app_version_ids = set()
@@ -77,7 +81,8 @@ def _export_compound_application_tools(
                            application_ids=tool_ids['application'],
                            forked=forked,
                            data_done=data_done,
-                           follow_version_ids=child_follow_version_ids
+                           follow_version_ids=child_follow_version_ids,
+                           with_file_bytes=with_file_bytes,
                        )
 
         if not tools_result['ok']:
@@ -154,7 +159,8 @@ def _attach_toolkits(version: dict, published_toolkits: list, toolkits: list) ->
     version['tools'] = version_tools
 
 
-def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None):
+def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None,
+                             with_file_bytes: bool = True):
     with db.get_session(project_id) as session:
         applications = session.query(
             Application
@@ -239,7 +245,10 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             applications_serialized=applications_serialized,
             result=result,
             forked=forked,
+            with_file_bytes=with_file_bytes,
         )
+    except SkillVersionExportUnavailableError:
+        raise
     except Exception as ex:
         log.error(f'Skill export error: {ex}')
         skills_export_error = f'Skill export failed: {ex}'
@@ -260,8 +269,11 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             user_id=user_id,
             forked=forked,
             data_done=data_done,
-            follow_version_ids=follow_version_ids
+            follow_version_ids=follow_version_ids,
+            with_file_bytes=with_file_bytes,
         )
+    except SkillVersionExportUnavailableError:
+        raise
     except Exception as ex:
         res = {'ok': False, 'msg': f"Tool error. {ex}"}
 
@@ -274,11 +286,13 @@ def _export_skills_main(
     applications_serialized: list,
     result: list,
     forked: bool = False,
+    with_file_bytes: bool = True,
 ) -> list:
     """Export skills attached to the given application versions.
 
     A fork payload lists each version's files by hash, which the import copies from this project; an export file
-    carries each file's bytes, so it imports anywhere."""
+    carries each file's bytes, so it imports anywhere, unless ``with_file_bytes`` is off (the Markdown export). A
+    file whose bytes cannot be read fails the whole export, naming the skill, version and path."""
 
     version_skill_refs = {}
     skill_ids = set()
@@ -364,13 +378,9 @@ def _export_skills_main(
             for version, version_export in zip(versions, export_dict['versions']):
                 version_export['id'] = version.id
                 version_export['author_id'] = version.author_id
-                if forked:
-                    files = list_version_manifest(session, version.id)
-                else:
-                    files = [
-                        {**entry, 'content_base64': base64.b64encode(content).decode('ascii')}
-                        for entry, content in read_version_contents(project_id, version.id, session=session)
-                    ]
+                files = _version_files_for_export(
+                    session, project_id, skill, version, with_file_bytes=with_file_bytes and not forked,
+                )
                 if files:
                     version_export['files'] = files
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
@@ -412,14 +422,30 @@ def _deduplicate_by_import_uuid(toolkits):
     return res
 
 
-def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None):
+def _version_files_for_export(session, project_id: int, skill, version, with_file_bytes: bool) -> list:
+    if not with_file_bytes:
+        return list_version_manifest(session, version.id)
+    try:
+        contents = read_version_contents(project_id, version.id, session=session)
+    except SkillFileContentUnavailableError as exc:
+        raise SkillVersionExportUnavailableError(skill.name, version.name, exc.path) from exc
+    return [
+        {**entry, 'content_base64': base64.b64encode(content).decode('ascii')}
+        for entry, content in contents
+    ]
+
+
+def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None,
+                       with_file_bytes: bool = True):
     # maps id/version ids to import uuid/import version uuids of already processed entities
     data_done = defaultdict(dict)
     if follow_version_ids is not None:
         follow_version_ids = set(follow_version_ids)
     else:
         follow_version_ids = None
-    result = _export_application_main(project_id, user_id, application_ids, forked, data_done, follow_version_ids)
+    result = _export_application_main(
+        project_id, user_id, application_ids, forked, data_done, follow_version_ids, with_file_bytes,
+    )
 
     if not result.get('ok'):
         return result
@@ -1203,7 +1229,8 @@ def export_application_md(
         user_id=user_id,
         application_ids=application_ids,
         forked=False,
-        follow_version_ids=follow_version_ids
+        follow_version_ids=follow_version_ids,
+        with_file_bytes=False,
     )
 
     if not json_export.get('ok', True):

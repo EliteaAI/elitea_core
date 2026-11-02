@@ -14,6 +14,7 @@ import types
 from unittest import mock
 
 import pytest
+from werkzeug.datastructures import MultiDict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
@@ -462,6 +463,94 @@ class TestAgentExport:
 
         assert env.storage.clients == [SOURCE]
 
+    def test_an_unreadable_file_fails_the_export_naming_the_skill_version_and_path(self, env, agent_export):
+        _seed(env)
+        env.storage.broken_reads = True
+
+        with pytest.raises(env.files.SkillVersionExportUnavailableError,
+                           match="Skill 'forms' version 'base' could not be exported: the stored content of "
+                                 "'assets/logo.png' could not be read") as info:
+            _export(agent_export, forked=False)
+        assert info.value.http_status == 503
+
+    def test_bytes_that_do_not_match_their_hash_fail_the_export_too(self, env, agent_export):
+        _seed(env)
+        env.storage.objects[(f'p--{SOURCE}.skill-files', _sha(b'# Guide'))] = b'# Tampered'
+
+        with pytest.raises(env.files.SkillVersionExportUnavailableError, match="'references/guide.md'"):
+            _export(agent_export, forked=False)
+
+    def test_an_export_without_file_bytes_lists_the_manifest_and_reads_nothing(self, env, agent_export, monkeypatch):
+        _seed(env)
+        env.storage.broken_reads = True
+        monkeypatch.setattr(agent_export, 'read_version_contents', lambda *a, **k: pytest.fail('bytes were read'))
+        applications = [{'versions': [{'name': 'base', 'skills': [{'skill_id': SKILL, 'version_name': 'base'}]}]}]
+        result = [{'versions': [{'name': 'base', 'import_version_uuid': 'agent-v'}]}]
+
+        [skill] = agent_export._export_skills_main(SOURCE, 1, applications, result, with_file_bytes=False)
+
+        assert [set(f) for f in skill['versions'][0]['files']] == [
+            {'path', 'size', 'sha256', 'content_type', 'is_text'}] * 2
+
+    def _agent_export_with_skills(self, agent_export, monkeypatch, skills_export):
+        applications = types.SimpleNamespace(options=lambda *a: types.SimpleNamespace(all=lambda: []))
+        session = types.SimpleNamespace(query=lambda model: types.SimpleNamespace(filter=lambda *a: applications))
+        monkeypatch.setattr(agent_export, 'db', types.SimpleNamespace(
+            get_session=lambda project_id: contextlib.nullcontext(session)))
+        monkeypatch.setattr(agent_export, '_export_skills_main', skills_export)
+        monkeypatch.setattr(agent_export, '_export_compound_application_tools', lambda res, **kwargs: res)
+        monkeypatch.setattr(agent_export, 'serialize', lambda res: res)
+
+    def test_an_unreadable_file_fails_the_agent_export_instead_of_dropping_every_skill(self, env, agent_export,
+                                                                                     monkeypatch):
+        def unreadable(**kwargs):
+            raise env.files.SkillVersionExportUnavailableError('forms', 'base', 'assets/logo.png')
+
+        self._agent_export_with_skills(agent_export, monkeypatch, unreadable)
+
+        with pytest.raises(env.files.SkillVersionExportUnavailableError):
+            agent_export.export_application(SOURCE, 1, [], forked=False)
+
+    def test_an_unreadable_file_of_a_nested_agents_skill_fails_the_export_too(self, env, agent_export, monkeypatch):
+        def unreadable(res, **kwargs):
+            raise env.files.SkillVersionExportUnavailableError('forms', 'base', 'assets/logo.png')
+
+        self._agent_export_with_skills(agent_export, monkeypatch, lambda **kwargs: [])
+        monkeypatch.setattr(agent_export, '_export_compound_application_tools', unreadable)
+
+        with pytest.raises(env.files.SkillVersionExportUnavailableError):
+            agent_export.export_application(SOURCE, 1, [], forked=False)
+
+    def test_any_other_skill_export_error_still_becomes_a_warning(self, agent_export, monkeypatch):
+        def broken(**kwargs):
+            raise ValueError('boom')
+
+        self._agent_export_with_skills(agent_export, monkeypatch, broken)
+
+        result = agent_export._export_application_main(SOURCE, 1, [], False, {})
+
+        assert result['warnings'] == ['Skill export failed: boom'] and 'skills' not in result
+
+    def test_the_markdown_export_asks_for_no_file_bytes(self, agent_export, monkeypatch):
+        asked = []
+        monkeypatch.setattr(agent_export, 'export_application', lambda **kwargs: asked.append(kwargs) or {
+            'ok': True, 'applications': [], 'toolkits': []})
+
+        agent_export.export_application_md(project_id=SOURCE, user_id=1, application_ids=[5])
+
+        assert [kwargs['with_file_bytes'] for kwargs in asked] == [False]
+
+    @pytest.mark.parametrize('with_file_bytes', [True, False])
+    def test_an_agent_export_tells_the_skill_export_whether_to_read_file_bytes(self, agent_export, monkeypatch,
+                                                                              with_file_bytes):
+        asked = []
+        self._agent_export_with_skills(
+            agent_export, monkeypatch, lambda **kwargs: asked.append(kwargs['with_file_bytes']) or [])
+
+        agent_export.export_application(SOURCE, 1, [], with_file_bytes=with_file_bytes)
+
+        assert asked == [with_file_bytes]
+
     @pytest.mark.parametrize('forked', [True, False])
     def test_an_agent_export_tells_the_skill_export_whether_it_is_a_fork(self, agent_export, monkeypatch, forked):
         asked = []
@@ -476,6 +565,45 @@ class TestAgentExport:
         agent_export._export_application_main(SOURCE, 1, [], forked, {})
 
         assert asked == [forked]
+
+
+@pytest.fixture
+def export_api(env, monkeypatch):
+    request = types.SimpleNamespace(args=MultiDict())
+    flask = types.ModuleType('flask')
+    flask.request, flask.send_file, flask.Response = request, mock.MagicMock(), mock.MagicMock()
+    monkeypatch.setitem(sys.modules, 'flask', flask)
+    passthrough = lambda *args, **kwargs: (lambda func: func)
+    monkeypatch.setattr(env.tools, 'api_tools', types.SimpleNamespace(
+        APIModeHandler=object, APIBase=object, endpoint_metrics=lambda func: func, with_modes=lambda params: params),
+        raising=False)
+    monkeypatch.setattr(env.tools, 'register_openapi', passthrough, raising=False)
+    monkeypatch.setattr(env.tools.auth, 'decorators', types.SimpleNamespace(check_api=passthrough), raising=False)
+    monkeypatch.setattr(env.tools.config, 'ADMINISTRATION_MODE', 'administration', raising=False)
+    api_package = types.ModuleType(f'{PKG}.api')
+    api_package.__path__ = []
+    monkeypatch.setitem(sys.modules, api_package.__name__, api_package)
+    v2_package = types.ModuleType(f'{PKG}.api.v2')
+    v2_package.__path__ = []
+    monkeypatch.setitem(sys.modules, v2_package.__name__, v2_package)
+    monkeypatch.setattr(sys.modules[f'{PKG}.utils.export_import_utils'], 'content_disposition_attachment', None,
+                        raising=False)
+    module = load(monkeypatch, 'api/v2/export_import.py', f'{PKG}.api.v2.export_import')
+    monkeypatch.setattr(module, 'entities_access_error', lambda *args: None)
+    return module
+
+
+class TestExportEndpoint:
+    def test_an_unreadable_skill_file_is_a_503_naming_it_with_no_partial_payload(self, env, export_api, monkeypatch):
+        def unreadable(**kwargs):
+            raise env.files.SkillVersionExportUnavailableError('forms', 'base', 'assets/logo.png')
+
+        monkeypatch.setattr(export_api, 'export_application', unreadable)
+
+        response = export_api.PromptLibAPI().get(project_id=SOURCE, application_ids='5')
+
+        assert response == ({'error': "Skill 'forms' version 'base' could not be exported: the stored content of "
+                                      "'assets/logo.png' could not be read; try again later"}, 503)
 
 
 @pytest.fixture
