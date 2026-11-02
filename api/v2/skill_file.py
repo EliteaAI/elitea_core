@@ -31,6 +31,8 @@ PATH_PARAMETERS = [
 ]
 
 UPLOAD_ENVELOPE_BYTES = 64 * 1024
+JSON_ESCAPED_BYTES_PER_BYTE = 6
+JSON_MIMETYPE = 'application/json'
 
 WRITE_ROLES = {
     c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -40,9 +42,11 @@ WRITE_ROLES = {
 
 def read_uploaded_bytes():
     """The bytes a write carries: a multipart ``file`` part, or UTF-8 text in a JSON ``content`` field. The body
-    is read only up to the per-file cap plus room for its envelope; a larger one is a 413 before any of it is kept."""
+    is read only up to the per-file cap plus room for its envelope, a JSON one with room for every byte escaped as
+    ``\\uXXXX``; a larger one is a 413 before any of it is kept. The decoded content is held to the cap after parsing."""
     max_file_bytes = get_max_file_bytes()
-    max_body_bytes = max_file_bytes + UPLOAD_ENVELOPE_BYTES
+    encoded_bytes_per_byte = JSON_ESCAPED_BYTES_PER_BYTE if request.mimetype == JSON_MIMETYPE else 1
+    max_body_bytes = encoded_bytes_per_byte * max_file_bytes + UPLOAD_ENVELOPE_BYTES
     too_large = {"error": f"the upload is too large: a skill file can be at most {describe_size(max_file_bytes)}"}, 413
     if request.content_length is not None and request.content_length > max_body_bytes:
         return None, too_large
