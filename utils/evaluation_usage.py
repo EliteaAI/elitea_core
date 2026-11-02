@@ -346,10 +346,10 @@ def budget_verdict(agent_rows: List[dict], budget: Optional[dict]) -> Optional[d
     """Check the agent rows against ``consumption_budget`` → ``EvalRun.meta.budget_verdict``.
 
     Only the agent role is checked (§5.4). Judge spend is recorded but not gated. Tokens are input
-    plus output, because cache tokens are already part of input. Cases refused by the
-    project/member gate, and cases where no agent ran, spent nothing and are left out. Any other
-    case without a figure makes its limit ``unknown``, never ``pass``. Returns None when the suite
-    sets no limit."""
+    plus output, because cache tokens are already part of input, in settled rows too (see
+    :func:`_ledger_entry`). Cases refused by the project/member gate, and cases where no agent ran,
+    spent nothing and are left out. Any other case without a figure makes its limit ``unknown``,
+    never ``pass``. Returns None when the suite sets no limit."""
     budget = budget or {}
     limits = [(scope, kind, (budget.get(scope) or {}).get(kind))
               for scope in _BUDGET_SCOPES for kind in _BUDGET_LIMITS]
@@ -428,6 +428,22 @@ def parse_case_stream(conversation_id, platform_run_id: str) -> Optional[tuple]:
     return None
 
 
+def _ledger_entry(entry: dict) -> dict:
+    """A breakdown row with ``input_tokens`` counting cache, as the runtime and the budget stop do.
+
+    The ledger keeps each provider's own convention, so its ``input_tokens`` leaves cache out for
+    Anthropic and Bedrock. ``billable_input_tokens`` is input without cache for every provider, and
+    adding the cache reads and writes back gives one convention (#7300). A breakdown from a usage
+    plugin that does not send it keeps its ``input_tokens``. The rebuilt figure is never below the
+    ledger's own ``input_tokens`` in either convention, so a zero or missing billable value cannot
+    make it under-count."""
+    if 'billable_input_tokens' not in entry:
+        return entry
+    rebuilt = (_count(entry.get('billable_input_tokens'))
+               + _count(entry.get('cache_read_tokens')) + _count(entry.get('cache_creation_tokens')))
+    return {**entry, 'input_tokens': max(rebuilt, _count(entry.get('input_tokens')))}
+
+
 def _expects_ledger(row: dict) -> bool:
     """Rows where a model call was attempted. A refused or skipped case has nothing to settle."""
     return (row.get('case_status') != STATUS_BUDGET_BLOCKED
@@ -450,7 +466,7 @@ def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_
             continue
         bucket = ledger.setdefault(key, {'llm_calls': 0, 'cost_nano_usd': 0, 'unpriced_calls': 0,
                                          'unparsed_calls': 0, 'model_name': None, **_empty_bucket()})
-        _add(bucket, entry)
+        _add(bucket, _ledger_entry(entry))
         for field in ('llm_calls', 'cost_nano_usd', 'unpriced_calls', 'unparsed_calls'):
             bucket[field] += _count(entry.get(field))
         bucket['model_name'] = bucket['model_name'] or entry.get('model_name')
@@ -514,7 +530,7 @@ def ledger_agents(breakdown: Iterable[dict], platform_run_id: str) -> dict:
         bucket = cases.setdefault(key[0], {}).setdefault(child, {
             'llm_calls': 0, 'cost_nano_usd': 0, 'unpriced_calls': 0, 'unparsed_calls': 0,
             'name': None, **_empty_bucket()})
-        _add(bucket, entry)
+        _add(bucket, _ledger_entry(entry))
         for field in ('llm_calls', 'cost_nano_usd', 'unpriced_calls', 'unparsed_calls'):
             bucket[field] += _count(entry.get(field))
         if child is not None:
