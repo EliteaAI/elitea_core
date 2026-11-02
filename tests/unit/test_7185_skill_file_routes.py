@@ -4,6 +4,7 @@ Loads the real ``api/v2/skill_file.py`` and ``api/v2/skill_files.py`` over a har
 storage calls and the OpenAPI registration, so the handlers run for real.
 """
 import functools
+import json
 import importlib.util
 import pathlib
 import sys
@@ -19,6 +20,7 @@ WRITE = 'models.applications.skills.update'
 MAX_FILE_BYTES = 1000
 ENVELOPE_BYTES = 64 * 1024
 MAX_BODY_BYTES = MAX_FILE_BYTES + ENVELOPE_BYTES
+MAX_JSON_BODY_BYTES = 6 * MAX_FILE_BYTES + ENVELOPE_BYTES
 ENTRY = {'path': 'forms.md', 'size': 3, 'sha256': 'abc', 'content_type': 'text/markdown', 'is_text': True,
          'created_at': '2026-02-02T00:00:00'}
 
@@ -66,6 +68,10 @@ class FakeRequest:
     def content_length(self):
         return self.harness.declared_length
 
+    @property
+    def mimetype(self):
+        return self.harness.mimetype
+
     def _read_body(self):
         self.body_reads.append(self.max_content_length)
         if self.max_content_length is not None and self.harness.body_size > self.max_content_length:
@@ -84,7 +90,9 @@ class FakeRequest:
 class Harness:
     def __init__(self):
         self.body_size = 0
+        self.max_file_bytes = MAX_FILE_BYTES
         self.declared_length = None
+        self.mimetype = 'application/json'
         self.user_permissions = set()
         self.folder_writes = []
         self.calls = []
@@ -159,7 +167,7 @@ def harness(isolated_sys_modules):
     stubs = {
         'utils.constants': {'PROMPT_LIB_MODE': 'prompt_lib'},
         'utils.folder_access': {'require_folder_access': harness.require_folder_access},
-        'utils.skill_utils': {'SkillError': SkillError, 'get_max_file_bytes': lambda: MAX_FILE_BYTES},
+        'utils.skill_utils': {'SkillError': SkillError, 'get_max_file_bytes': lambda: harness.max_file_bytes},
         'utils.skill_files': {'describe_size': lambda size: f'{size} B', **{name: harness.storage(name) for name in (
             'list_version_files', 'read_version_file', 'write_version_file', 'rename_version_file',
             'delete_version_file')}},
@@ -285,25 +293,46 @@ class TestUploadSize:
         harness.body_size = size
         harness.declared_length = size if declared else None
         if kind == 'multipart':
+            harness.mimetype = 'multipart/form-data'
             harness.files['file'] = FakeUpload(b'x')
         else:
+            harness.mimetype = 'application/json'
             harness.json = {'content': 'x'}
         return _call(harness, 'put')
 
+    LIMITS = {'multipart': MAX_BODY_BYTES, 'json': MAX_JSON_BODY_BYTES}
+
     @pytest.mark.parametrize('declared', [True, False])
     @pytest.mark.parametrize('kind', ['multipart', 'json'])
-    def test_a_body_up_to_the_cap_plus_its_envelope_is_read(self, harness, kind, declared):
-        assert self._send(harness, kind, MAX_BODY_BYTES, declared) == (ENTRY, 200)
-        assert harness.request.body_reads[0] == MAX_BODY_BYTES
+    def test_a_body_up_to_its_bound_is_read(self, harness, kind, declared):
+        assert self._send(harness, kind, self.LIMITS[kind], declared) == (ENTRY, 200)
+        assert harness.request.body_reads[0] == self.LIMITS[kind]
 
     @pytest.mark.parametrize('declared', [True, False])
     @pytest.mark.parametrize('kind', ['multipart', 'json'])
     def test_one_byte_more_is_a_413_and_nothing_is_stored(self, harness, kind, declared):
-        assert self._send(harness, kind, MAX_BODY_BYTES + 1, declared) == self.TOO_LARGE
+        assert self._send(harness, kind, self.LIMITS[kind] + 1, declared) == self.TOO_LARGE
         assert harness.calls == []
 
-    def test_a_declared_length_over_the_bound_is_refused_before_the_body_is_touched(self, harness):
-        self._send(harness, 'multipart', MAX_BODY_BYTES + 1, declared=True)
+    @pytest.mark.parametrize('declared', [True, False])
+    def test_escaped_json_text_under_the_cap_is_accepted_though_its_body_is_over_cap_plus_envelope(self, harness,
+                                                                                                  declared):
+        harness.max_file_bytes = 1024 * 1024
+        text = 'ж' * (harness.max_file_bytes // 4)
+        body = json.dumps({'content': text})
+        harness.user_permissions = {WRITE}
+        harness.mimetype = 'application/json'
+        harness.json = json.loads(body)
+        harness.body_size = len(body)
+        harness.declared_length = len(body) if declared else None
+
+        assert len(text.encode('utf-8')) < harness.max_file_bytes < harness.max_file_bytes + ENVELOPE_BYTES < len(body)
+        assert _call(harness, 'put') == (ENTRY, 200)
+        assert harness.calls[0][1]['data'] == text.encode('utf-8')
+
+    @pytest.mark.parametrize('kind', ['multipart', 'json'])
+    def test_a_declared_length_over_the_bound_is_refused_before_the_body_is_touched(self, harness, kind):
+        assert self._send(harness, kind, self.LIMITS[kind] + 1, declared=True) == self.TOO_LARGE
 
         assert harness.request.body_reads == []
 
