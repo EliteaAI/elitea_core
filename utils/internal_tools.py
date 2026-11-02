@@ -586,7 +586,13 @@ def run_identity_applies(sid=None, mandate=False) -> bool:
         return True
     from ..models.pd.admission import _holder  # pylint: disable=C0415
     try:
-        return getattr(_holder(sid), "type", None) == "user"
+        holder = _holder(sid)
+        kind = getattr(holder, "type", None)
+        if kind == "token":
+            # a scoped API token (#7336) is admitted as its owner's interactive run, which gets the run token: its
+            # owner's personal token is not looked up. An unscoped one keeps the legacy path
+            return auth.token_scope(int(holder.id)) is not None
+        return kind == "user"
     except Exception:  # pylint: disable=W0703
         return False
 

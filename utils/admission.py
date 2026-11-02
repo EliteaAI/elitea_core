@@ -155,9 +155,15 @@ MESSAGES = {
     "RUNTIME_LIMIT_EXCEEDED": "The run exceeded the time its mandate allows and was stopped.",
     "IDENTITY_EVIDENCE_MISSING": "No verifiable user identity came with this run; it was not started.",
     "IDENTITY_SUBJECT_UNLINKED": "The signed-in user does not match the verified identity; the run was not started.",
-    "IDENTITY_KIND_NOT_ADMITTED": "Runs started with an API token (the built-in Elitea tools included) are refused until "
-                                  "legacy API tokens are admitted or the run carries its own identity (#7214); the run "
-                                  "was not started.",
+    "IDENTITY_KIND_NOT_ADMITTED": "Runs started with an unscoped API token (the built-in Elitea tools included) are "
+                                  "refused: create a scoped, expiring API token for this project with the run "
+                                  "operation (Settings, Tokens), or ask an administrator to admit legacy API tokens. "
+                                  "The run was not started.",
+    # a scoped API token (#7336) used outside its scope
+    "TOKEN_SCOPE_PROJECT": "This API token is not scoped to this project; the run was not started. Use a token scoped "
+                           "to it, or sign in.",
+    "TOKEN_SCOPE_OPERATION": "This API token is not scoped to run agents or tools; the run was not started. Use a token "
+                             "with the run operation, or sign in.",
     "IDENTITY_REVOKED": "This session or token was revoked; the run was not started.",
     "IDENTITY_EXPIRED": "Sign in again to run governed agents.",
     "IDENTITY_SIGNATURE_INVALID": "The user identity could not be verified; the run was not started.",
@@ -186,11 +192,12 @@ MESSAGES = {
                                  "Run now / Test run of a schedule on an unbound version) are switched off on this "
                                  "platform; an administrator can switch them on in Admin → "
                                  "Governance. The run was not started.",
-    "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an API token (the MCP server's toolkit tools "
-                                      "included) are not admitted yet; run the toolkit from the Elitea UI or through a "
-                                      "governed agent. The run was not started.",
-    "SCHEDULE_RUN_TOKEN_NOT_ADMITTED": "Run now and Test run of a schedule started with an API token are not admitted "
-                                       "yet; start them from the Elitea UI. The run was not started.",
+    "TOOLKIT_RUN_TOKEN_NOT_ADMITTED": "Toolkit runs started with an unscoped API token (the MCP server's toolkit tools "
+                                      "included) are not admitted; use a scoped, expiring API token with the run "
+                                      "operation, or run the toolkit from the Elitea UI. The run was not started.",
+    "SCHEDULE_RUN_TOKEN_NOT_ADMITTED": "Run now and Test run of a schedule started with an unscoped API token are not "
+                                       "admitted; use a scoped, expiring API token with the run operation, or start "
+                                       "them from the Elitea UI. The run was not started.",
     "SUB_AGENT_CREDENTIAL_NOT_ADMITTED": "Sub-agents that use credentials are not admitted yet for scheduled or webhook "
                                          "runs; the run was not started.",
     "DENIED_ENTRY_POINT": "This kind of run cannot be started from here; the run was not started.",
@@ -454,16 +461,35 @@ def _aware(moment: datetime) -> datetime:
 
 # --- admission -------------------------------------------------------------------------------
 
-def _verify_identity(request: AdmissionRequest, settings: AdmissionSettings) -> dict:
-    """Step 3: the verified principal of the caller, from evidence built out of the trusted holder only."""
+def _token_evidence(request: AdmissionRequest) -> Optional[dict]:
+    """The evidence of a token caller (#7336): ``api_token`` when its row is scoped (projects, operations and an
+    expiry), else ``legacy_pat`` as before; None for any other caller. One read of the token row, through the auth
+    plugin's epoch-keyed cache; a row that cannot be read refuses the run (``DEPENDENCY_UNAVAILABLE``)."""
+    if request.caller_type != "token" or isinstance(request.caller_id, bool) or not isinstance(request.caller_id, int):
+        return None
+    try:
+        scope = auth.token_scope(request.caller_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the token could not be read (%s)", type(exc).__name__)
+        raise _denied("DEPENDENCY_UNAVAILABLE") from None
+    if scope is None:
+        return {"kind": "legacy_pat", "token_id": request.caller_id}
+    return {"kind": "api_token", "token_id": request.caller_id, "user_id": scope["user_id"],
+            "projects": scope["projects"], "operations": scope["operations"]}
+
+
+def _verify_identity(request: AdmissionRequest, settings: AdmissionSettings, evidence=None) -> dict:
+    """Step 3: the verified principal of the caller, from evidence built out of the trusted holder only (a token
+    caller's: ``_token_evidence``, read once by the caller). A scoped API token (``api_token``, #7336) is admitted
+    whatever ``admit_legacy_pat`` says; an unscoped one stays ``legacy_pat``, behind it."""
     if request.caller_type == "user":
         reference = request.caller_reference.get_secret_value() if request.caller_reference else ""
         evidence = {"kind": "session_user", "user_id": request.caller_id, "auth_reference": reference}
     elif request.caller_type == "token":
-        evidence = {"kind": "legacy_pat", "token_id": request.caller_id}
+        evidence = evidence or _token_evidence(request)
     else:
         raise _denied("IDENTITY_EVIDENCE_MISSING")
-    admitted = {"session_user"} | ({"legacy_pat"} if settings.admit_legacy_pat else set())
+    admitted = {"session_user", "api_token"} | ({"legacy_pat"} if settings.admit_legacy_pat else set())
     try:
         result = auth.verify_identity(evidence, admitted_kinds=admitted)
     except Exception as exc:  # pylint: disable=W0703
@@ -839,8 +865,35 @@ def _author_permissions(request: AdmissionRequest) -> set:
         raise _denied("DEPENDENCY_UNAVAILABLE") from None
 
 
+def _api_token_subject(principal: dict) -> dict:
+    """Step 5 of a scoped API token's run (#7336): the platform vouches that the token is its owner's, and the run acts
+    for that owner as an interactive run of theirs does: the subject reference is the owner's linked IdP subject
+    (``idp:<tid>:<oid>``), which their personal credentials and grants name. An owner with no linked subject cannot be
+    one (``IDENTITY_SUBJECT_UNLINKED``). The kind stays ``api_token``: nothing acts with the owner's sign-in (an
+    Entra-delegated credential is refused at release, ``DENIED_DELEGATION_UNSUPPORTED_CALLER``)."""
+    user_id = principal.get("user_id")
+    try:
+        user = auth.get_user(user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the token owner could not be read (%s)", type(exc).__name__)
+        raise _denied("DEPENDENCY_UNAVAILABLE") from None
+    user = user if isinstance(user, dict) else {}
+    tid, oid = user.get("idp_tid"), user.get("idp_oid")
+    if user.get("id") != user_id or not all(isinstance(value, str) and value for value in
+                                            (user.get("idp_issuer"), tid, oid)):
+        raise _denied("IDENTITY_SUBJECT_UNLINKED")
+    evidence = principal.get("evidence") if isinstance(principal.get("evidence"), dict) else {}
+    return {
+        "kind": "api_token", "ref": f"idp:{tid}:{oid}", "delegation_ref": None, "tid": tid, "user_id": user_id,
+        "evidence": {"type": "asserted_user", "issuer": evidence.get("issuer"), "subject": evidence.get("subject")},
+    }
+
+
 def _subject_of(principal: dict) -> dict:
-    """Step 5: only a verified user becomes a delegation subject; an asserted one needs a mandate (#6947)."""
+    """Step 5: only a verified user becomes a delegation subject; an asserted one needs a mandate (#6947), but for a
+    scoped API token, which acts for its owner (#7336)."""
+    if principal.get("kind") == "api_token":
+        return _api_token_subject(principal)
     evidence = principal.get("evidence")
     if not isinstance(evidence, dict) or evidence.get("type") != "verified_user":
         raise _denied("MANDATE_REQUIRED")
@@ -976,7 +1029,8 @@ def _store_admission(  # pylint: disable=R0913,R0914
     label = _binding_label(binding)
     return ExecutionSecurityContextView(
         context_ref=str(context_id), run_id=run_id, attempt=attempt, project_id=request.project_id,
-        subject_ref=subject["ref"], subject_user_id=caller.get("user_id"), binding_project_id=request.binding_project_id,
+        subject_ref=subject["ref"], subject_user_id=caller.get("user_id"), caller_kind=caller.get("kind"),
+        binding_project_id=request.binding_project_id,
         application_id=request.application_id, version_id=request.version_id,
         agent_binding_ref=label, policy_revision=policy_revision, expires_at=expires_at,
         allowed_bindings=[binding_ref(d) for d in decisions],
@@ -1307,16 +1361,32 @@ def _admit(  # pylint: disable=R0914
     # 2. a run with no person behind it needs a mandate
     if request.run_kind == "system":
         raise _denied("MANDATE_REQUIRED")
-    if request.entry_point in TOOLKIT_ENTRY_POINTS and request.caller_type == "token":
-        # a toolkit run is the development run of a signed-in person; an API token (the MCP server's toolkit tools,
-        # the REST test) is not one yet (scoped tokens, #7230): said as such, whatever the development setting is
+    evidence = _token_evidence(request)   # a token caller: scoped (api_token, #7336) or legacy
+    legacy_token = evidence is not None and evidence["kind"] == "legacy_pat"
+    if request.entry_point in TOOLKIT_ENTRY_POINTS and legacy_token:
+        # a toolkit run is the development run of a person; an unscoped API token (the MCP server's toolkit tools,
+        # the REST test) is not one: said as such, whatever the development setting is. A scoped one is (#7336)
         raise _denied("TOOLKIT_RUN_TOKEN_NOT_ADMITTED")
-    if request.entry_point == ENTRY_SCHEDULE_TEST and request.caller_type == "token":
+    if request.entry_point == ENTRY_SCHEDULE_TEST and legacy_token:
         raise _denied("SCHEDULE_RUN_TOKEN_NOT_ADMITTED")   # (#7254) a person's run, as a toolkit run is
     if not run_id:
         raise _denied("DEPENDENCY_UNAVAILABLE")
     # 3. who is asking
-    principal = _verify_identity(request, settings)
+    principal = _verify_identity(request, settings, evidence)
+    caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
+    if principal.get("kind") == "api_token":
+        # 3a. (#7336) the token's scope: the run's project (and the agent's) among its projects, and the run operation.
+        # Every entry point a token reaches starts a run (an agent, a toolkit tool, a schedule's Run now)
+        projects = evidence["projects"]
+        if request.project_id not in projects or request.binding_project_id not in projects:
+            raise _denied("TOKEN_SCOPE_PROJECT")
+        if "run" not in evidence["operations"]:
+            raise _denied("TOKEN_SCOPE_OPERATION")
+        # from here on the run is its owner's interactive run, as a session's is (PLAN §21.1): the steps below that
+        # ask for the person read the token's owner. The audit keeps naming the token (``caller``)
+        caller = {"kind": "api_token", "ref": _caller_ref(request), "user_id": principal["user_id"]}
+        request = request.model_copy(update={"caller_type": "user", "caller_id": principal["user_id"],
+                                             "caller_reference": None})
     can_use = None
     children_of_drafts = None
     decide = True
@@ -1411,7 +1481,6 @@ def _admit(  # pylint: disable=R0914
         module, request, subject, payload, expires_at, context_id,
         development=binding.id is None and children_of_drafts is not False, shadow=shadow,
         can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions)
-    caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     if request.trigger_ref:   # an owner's Run now or Test run (#7254): which schedule it ran
         caller["trigger_ref"] = request.trigger_ref
     if shadow:
@@ -1762,9 +1831,11 @@ def admit_dispatch(  # pylint: disable=R0911
         # the task meta is a tracking surface: it gets the sealed toolkit, never the one expansion left material in
         meta["toolkit_config"] = copy.deepcopy(payload.get("toolkit_config"))
     if internal_obo.signing_key() is not None and (
-            (admission.run_kind == "interactive" and admission.caller_type == "user") or admission.run_kind == "mandate"):
-        # the run token is its only platform identity: an interactive run of a signed-in person (#7229) and a run
-        # admitted under an autonomous mandate (C9-SEC-47), whose token keeps the mandate's deadline
+            (admission.run_kind == "interactive" and admission.caller_type == "user")
+            or view.caller_kind == "api_token" or admission.run_kind == "mandate"):
+        # the run token is its only platform identity: an interactive run of a signed-in person (#7229) or of a scoped
+        # API token (#7336), and a run admitted under an autonomous mandate (C9-SEC-47), whose token keeps the
+        # mandate's deadline
         _strip_platform_tokens(payload, meta)
     if not _deliver_run_token(payload, lambda internal: internal_obo.mint_for_admission(
             view, task_name, view_payload, internal=internal), view_payload):

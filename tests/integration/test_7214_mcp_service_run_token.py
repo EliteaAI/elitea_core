@@ -87,6 +87,10 @@ def mcp_service_module(monkeypatch):
     mcp_versioning.INTERNAL_MCP_ENVIRON_KEY = 'elitea.internal_mcp_request'
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.mcp_versioning", mcp_versioning)
 
+    pipeline_execution = types.ModuleType("plugins.elitea_core.utils.pipeline_execution")
+    pipeline_execution.TriggerType = types.SimpleNamespace(MCP="mcp", API="api")   # imported by mcp_service (agent calls)
+    monkeypatch.setitem(sys.modules, pipeline_execution.__name__, pipeline_execution)
+
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.mcp_service",
         PLUGIN_ROOT / "utils" / "mcp_service.py",
@@ -231,3 +235,20 @@ def test_without_a_run_token_nothing_is_checked_or_marked(service):
                                       {"project_id": 1})
     assert result == {"result": {}} and service.checks == []
     assert "elitea.internal_obo.claims" not in service.sent[0]
+
+
+def test_an_api_tokens_api_tool_call_reaches_its_route_as_the_token_so_the_hook_holds_it_to_its_scope(service):
+    """#7336: Elitea as an MCP server for a client with an API token. The MCP route itself is a ``run`` route of the
+    token's project (``token_scope``); an API tool it exposes is the in-process request of that route, which carries the
+    token (its bearer and its identity), so the auth hook asks the token scope checker again for the tool's own route
+    (``build`` for this write) instead of the MCP route's ``run``. Nothing of the run token's checks applies."""
+    service.flask.g.auth = types.SimpleNamespace(type="token", id=21, reference="-")
+    service.flask.request = types.SimpleNamespace(headers={"Authorization": "Bearer pat-not-a-secret"}, cookies={})
+    result = service.executor.execute(tool("POST", "/api/v2/elitea_core/applications/{mode}/{project_id}"),
+                                      {"project_id": 5, "name": "a"})
+    assert result == {"result": {}} and service.checks == []
+    [environ] = service.sent
+    assert (environ["HTTP_X_AUTH_TYPE"], environ["HTTP_X_AUTH_ID"]) == ("token", "21")
+    assert environ["HTTP_AUTHORIZATION"] == "Bearer pat-not-a-secret"
+    assert environ["PATH_INFO"] == "/api/v2/elitea_core/applications/prompt_lib/5"
+    assert "elitea.internal_obo.claims" not in environ

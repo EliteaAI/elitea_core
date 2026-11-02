@@ -77,6 +77,7 @@ class Spies:
         boom = AssertionError("governance touched in off")
         self.names = {
             "auth.verify_identity": mock.Mock(side_effect=boom), "auth.read_identity_epochs": mock.Mock(side_effect=boom),
+            "auth.token_scope": mock.Mock(side_effect=boom), "auth.get_user": mock.Mock(side_effect=boom),
             "this.for_module (tracing, secrets, configurations)": mock.Mock(side_effect=boom),
             "secret_stores.get_store": mock.Mock(side_effect=boom), "db.get_session": mock.Mock(side_effect=boom),
             "settings read": mock.Mock(side_effect=boom), "admit_execution": mock.Mock(side_effect=boom),
@@ -87,7 +88,9 @@ class Spies:
         ns, spies = self.ns, self.names
         self.saved = (ns.tools.auth.verify_identity, ns.tools.auth.read_identity_epochs, ns.tools.this.for_module,
                       ns.tools.db.get_session, ns.adm.admit_execution, ns.adm._admit,  # pylint: disable=W0212
-                      ns.governance_settings.read_settings, ns.flask.has_request_context)
+                      ns.governance_settings.read_settings, ns.flask.has_request_context,
+                      ns.tools.auth.token_scope, ns.tools.auth.get_user)
+        ns.tools.auth.token_scope, ns.tools.auth.get_user = spies["auth.token_scope"], spies["auth.get_user"]
         ns.tools.auth.verify_identity = spies["auth.verify_identity"]
         ns.tools.auth.read_identity_epochs = spies["auth.read_identity_epochs"]
         ns.tools.this.for_module = spies["this.for_module (tracing, secrets, configurations)"]
@@ -102,7 +105,8 @@ class Spies:
         ns = self.ns
         (ns.tools.auth.verify_identity, ns.tools.auth.read_identity_epochs, ns.tools.this.for_module,
          ns.tools.db.get_session, ns.adm.admit_execution, ns.adm._admit,  # pylint: disable=W0212
-         ns.governance_settings.read_settings, ns.flask.has_request_context) = self.saved
+         ns.governance_settings.read_settings, ns.flask.has_request_context,
+         ns.tools.auth.token_scope, ns.tools.auth.get_user) = self.saved
         vars(ns.tools.secret_stores).pop("get_store", None)
         return False
 
@@ -112,11 +116,13 @@ class Spies:
             spy.assert_not_called()
 
 
-@pytest.mark.parametrize("with_request", [False, True], ids=["no request", "with a request"])
+@pytest.mark.parametrize("with_request", [False, True, "token"],
+                         ids=["no request", "with a request", "an API token's request (#7336)"])
 @pytest.mark.parametrize("source", OFF_SOURCES)
 def test_off_sends_the_worker_exactly_what_the_integration_head_sent_and_touches_nothing(ns, env, source, with_request):
     module = env.module(effective=effective_from(ns, source))
-    request = env.request() if with_request else None
+    request = env.request(caller_type="token", caller_id=21, caller_reference=None, entry_point="predict_api") \
+        if with_request == "token" else (env.request() if with_request else None)
     with Spies(ns) as spies:
         out = run_matrix(ns, module, admission=request)
     spies.assert_untouched()
@@ -190,3 +196,18 @@ def test_the_lifecycle_does_nothing_in_off_when_enforce_never_ran(ns, env):
         assert ns.adm.enforce_run_deadlines(module) == 0
     spies.assert_untouched()
     assert "task-1" in module._context_by_task   # pylint: disable=W0212
+
+
+@pytest.mark.parametrize("source", OFF_SOURCES)
+@pytest.mark.parametrize("endpoint, method", [("api.v2.auth.token", "POST"), ("api.v2.auth.token", "DELETE"),
+                                              ("api.v2.elitea_core.predict", "POST"), ("api.v2.admin.users", "GET")])
+def test_off_the_token_scope_checker_reads_nothing_and_lets_every_token_request_through(ns, env, source, endpoint,
+                                                                                       method):
+    """#7336: the auth hook asks the checker for every API token request; off, it answers "go on" from the module's
+    state alone (no token row, no flask request, no audit), so a token, scoped or not, does what it did before."""
+    module = env.module(effective=effective_from(ns, source))
+    with Spies(ns) as spies:
+        assert ns.token_scope.check(module, 21, (endpoint, method, {"project_id": 99}, "/x", {}, {})) is None
+        assert ns.token_scope.check(module, 21) is None   # without the request parts: still nothing read
+    spies.assert_untouched()
+    assert env.denied == [] and env.recorded == []
