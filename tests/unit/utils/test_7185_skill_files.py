@@ -244,6 +244,30 @@ class TestWrite:
         assert entry['sha256'] == _sha(b'new') and _paths(session, 10) == ['FORMS.md']
 
 
+class TestConcurrentPaths:
+    def _take_the_path_first(self, env, session, monkeypatch):
+        def flush():
+            raise env.files.IntegrityError('uq_skill_version_files_path_ci')
+        monkeypatch.setattr(session, 'flush', flush)
+
+    def test_a_write_racing_another_for_the_same_path_in_any_case_is_a_409(self, env, session, monkeypatch):
+        _version(session)
+        self._take_the_path_first(env, session, monkeypatch)
+
+        with pytest.raises(env.files.SkillFilePathTakenError, match="'forms.md' already exists in skill version 10") as info:
+            _write(env, session, 'forms.md', b'x')
+        assert info.value.http_status == 409
+
+    def test_a_rename_racing_a_write_onto_the_new_path_is_a_409(self, env, session, monkeypatch):
+        _version(session)
+        _write(env, session, 'a.md', b'a')
+        self._take_the_path_first(env, session, monkeypatch)
+
+        with pytest.raises(env.files.SkillFilePathTakenError, match="'b.md' already exists") as info:
+            env.files.rename_version_file(PROJECT, SKILL, 10, 'a.md', 'b.md', session=session)
+        assert info.value.http_status == 409
+
+
 class TestRead:
     def test_read_returns_the_entry_and_the_bytes_from_the_bucket(self, env, session):
         _version(session)
@@ -304,8 +328,9 @@ class TestRenameAndDelete:
         _write(env, session, 'a.md', b'a')
         _write(env, session, 'b.md', b'b')
 
-        with pytest.raises(env.utils.SkillFileError, match="'b.md' already exists"):
+        with pytest.raises(env.utils.SkillFileError, match="'b.md' already exists") as info:
             env.files.rename_version_file(PROJECT, SKILL, 10, 'a.md', 'B.md', session=session)
+        assert info.value.http_status == 409
 
     def test_rename_may_change_only_the_case(self, env, session):
         _version(session)

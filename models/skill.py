@@ -139,10 +139,7 @@ class SkillVersion(db_tools.AbstractBaseMixin, db.Base):
 class SkillVersionFile(db_tools.AbstractBaseMixin, db.Base):
     """One bundled file of a skill version: a path under the skill root naming content in object storage by hash."""
     __tablename__ = SKILL_VERSION_FILE_TABLE_NAME
-    __table_args__ = (
-        UniqueConstraint('skill_version_id', 'path', name='_skill_version_file_path_uc'),
-        {'schema': c.POSTGRES_TENANT_SCHEMA},
-    )
+    __table_args__ = {'schema': c.POSTGRES_TENANT_SCHEMA}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     skill_version_id: Mapped[int] = mapped_column(
@@ -157,6 +154,13 @@ class SkillVersionFile(db_tools.AbstractBaseMixin, db.Base):
     is_text: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
+
+Index(
+    'uq_skill_version_files_path_ci',
+    SkillVersionFile.skill_version_id,
+    func.lower(SkillVersionFile.path),
+    unique=True,
+)
 
 SKILL_FILE_TABLES = (SkillVersionFile,)
 

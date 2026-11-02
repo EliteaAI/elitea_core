@@ -9,6 +9,7 @@ import mimetypes
 
 from pylon.core.tools import log
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from tools import serialize
 
 from .skill_file_store import get_content, put_content
@@ -36,6 +37,13 @@ class SkillFileContentUnavailableError(SkillFileError):
 
     def __init__(self, path: str):
         super().__init__(f"The stored content of '{path}' could not be read; try again later")
+
+
+class SkillFilePathTakenError(SkillFileError):
+    http_status = 409
+
+    def __init__(self, path: str, version_id: int):
+        super().__init__(f"'{path}' already exists in skill version {version_id}")
 
 
 def normalize_skill_file_path(path: str) -> str:
@@ -166,6 +174,14 @@ def find_version_file(session, version_id: int, path: str):
     ).first()
 
 
+def _flush_file_row(session, version_file: SkillVersionFile) -> None:
+    """Write the row now, turning a path another request took first (in any case) into a 409."""
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        raise SkillFilePathTakenError(version_file.path, version_file.skill_version_id) from exc
+
+
 def _manifest_entry(version_file: SkillVersionFile) -> dict:
     return serialize(SkillFileModel.model_validate(version_file))
 
@@ -219,7 +235,7 @@ def write_version_file(project_id: int, skill_id: int, version_id: int, path: st
         for field in ('path', 'size', 'sha256', 'content_type', 'is_text'):
             setattr(version_file, field, entry[field])
         s.add(version_file)
-        s.flush()
+        _flush_file_row(s, version_file)
         return _manifest_entry(version_file)
 
 
@@ -234,9 +250,9 @@ def rename_version_file(project_id: int, skill_id: int, version_id: int, path: s
         stored_path = normalize_skill_file_path(new_path)
         occupant = find_version_file(s, version.id, stored_path)
         if occupant and occupant is not version_file:
-            raise SkillFileError(f"'{occupant.path}' already exists in skill version {version_id}")
+            raise SkillFilePathTakenError(occupant.path, version_id)
         version_file.path = stored_path
-        s.flush()
+        _flush_file_row(s, version_file)
         return _manifest_entry(version_file)
 
 
