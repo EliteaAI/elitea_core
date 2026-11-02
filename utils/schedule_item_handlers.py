@@ -97,8 +97,8 @@ class ApplicationQuery(BaseModel):
     application_id: DbId
 
 
-def _start_run(session, project_id: int, schedule_id: int, entity_type: str, trigger: str, user_id: int,
-               owner_request):
+def _start_run(session, project_id: int, schedule_id: int, entity_type: str, application_id: int, trigger: str,
+               user_id: int, owner_request):
     """Insert the running run, start it and answer 202; 409 `run_active` when the schedule has an active run."""
     run_id = insert_run(session, schedule_id, trigger, user_id)
     if run_id is None:
@@ -113,7 +113,67 @@ def _start_run(session, project_id: int, schedule_id: int, entity_type: str, tri
         fail_run(session, run_id, START_FAILED)
         session.commit()
         return refusal("run_start_failed", "The run could not start", 500)
-    return {"run_id": run_id}, 202
+    return {"run_id": run_id, "application_id": application_id}, 202
+
+
+def _runs_page(session, project_id: int, schedule_id: int, query: "RunsQuery") -> dict:
+    """The `{total, rows}` page of the runs of one schedule row, newest first, for the runs list and the test list."""
+    # Late: only the run routes read the usage store
+    from .schedule_run_detail import usage_summaries, version_labels
+    where = [EntityScheduleRun.schedule_id == schedule_id]
+    if query.status:
+        where.append(EntityScheduleRun.status == query.status)
+    if query.trigger:
+        where.append(EntityScheduleRun.trigger == query.trigger)
+    if query.version_id:
+        where.append(EntityScheduleRun.version_id == query.version_id)
+    rows = session.execute(
+        select(*(getattr(EntityScheduleRun, name) for name in RUN_FIELDS)).where(*where)
+        .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc())
+        .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
+    ).mappings().all()
+    total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
+    # One lookup for the whole page: a call per row would cost a query per run
+    labels = version_labels(session, [row["version_id"] for row in rows])
+    usage = usage_summaries(session, project_id, [SimpleNamespace(**row) for row in rows])
+    return {"total": total, "rows": [
+        {**_run_row(row), "version_label": labels.get(row["version_id"]),
+         "tokens": usage[row["id"]][0], "cost_usd": usage[row["id"]][1]}
+        for row in rows
+    ]}
+
+
+def _run_detail_body(session, project_id: int, schedule, run_id: int):
+    """The `(body, status)` of one run of `schedule`, or the 404 when the run is on another row."""
+    # Late: only the detail routes read the conversation and the usage store
+    from .schedule_run_detail import tool_call_events, usage_summary, version_label
+    run = session.scalar(select(EntityScheduleRun).where(
+        EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule.id))
+    if run is None:
+        return RUN_NOT_FOUND
+    row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
+    tokens, cost_usd = usage_summary(session, project_id, run)
+    events = [public_event(e) for e in merge_events(run.events, tool_call_events(session, run.conversation_id))]
+    return {
+        **row,
+        "version_label": version_label(session, run.version_id),
+        "principal_label": run.principal_label,
+        "risk_outcome": run.risk_outcome,
+        "approval_rule": schedule.approval_rule,
+        "approval_expires_at": _iso(run.approval_expires_at),
+        "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
+        "events": events,
+    }, 200
+
+
+class ApplicationQuery(BaseModel):
+    """The agent or pipeline whose draft a test run read is about."""
+    application_id: DbId
+
+
+class DraftRunsQuery(RunsQuery):
+    """Query of the test run list: the runs list options and the agent or pipeline."""
+    application_id: DbId
 
 
 def _iso(moment) -> str | None:
@@ -495,7 +555,9 @@ class ScheduleItemHandlers:
             except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
                 log.exception('Schedule %s: cannot build the owner run request', schedule_id)
                 return refusal("run_start_failed", "The run could not start", 500)
-            return _start_run(session, project_id, schedule_id, entity_type, body.trigger, scope.user_id, owner_request)
+            return _start_run(
+                session, project_id, schedule_id, entity_type, row.application_id, body.trigger, scope.user_id,
+                owner_request)
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _test_run(self, project_id: int):
@@ -535,7 +597,8 @@ class ScheduleItemHandlers:
                 log.exception('Test run of agent or pipeline %s: cannot build the owner run request', body.application_id)
                 return refusal("run_start_failed", "The run could not start", 500)
             row = write_draft(session, scope.user_id, body)
-            return _start_run(session, project_id, row.id, row.entity_type, "test", scope.user_id, owner_request)
+            return _start_run(
+                session, project_id, row.id, row.entity_type, row.application_id, "test", scope.user_id, owner_request)
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _cancel_test_run(self, project_id: int):
@@ -608,6 +671,45 @@ class ScheduleItemHandlers:
             return refusal("run_start_failed", "The run could not start", 500)
         return {"run_id": run_id, "status": "running" if decision == "approve" else "failed"}, 200
 
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _test_runs(self, project_id: int):
+        """List the runs of the caller's own test draft of an agent or pipeline, newest first.
+
+        Query: `application_id` (required), `limit`, `offset`, and the `status`, `trigger`, `version_id` filters of the
+        runs list. The answer is `{rows, total}` with the row fields of the runs list; no draft means no rows.
+        Who may call: a project member with `schedules.run`; only the caller's own draft is read.
+        Errors: 400 invalid query option; 403.
+        """
+        try:
+            query = DraftRunsQuery.model_validate(dict(request.args))
+        except ValidationError as e:
+            return _validation_response(e)
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            draft = find_draft(session, scope.user_id, query.application_id)
+            if draft is None:
+                return {"total": 0, "rows": []}, 200
+            return _runs_page(session, project_id, draft.id, query), 200
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _test_run_detail(self, project_id: int, run_id: int):
+        """Answer one run of the caller's own test draft, with the body of the run detail of a saved schedule.
+
+        Query: `application_id` (required).
+        Who may call: a project member with `schedules.run`; another owner's run and a run of a saved schedule are 404.
+        Errors: 400 invalid `application_id`; 403; 404 `run_not_found`.
+        """
+        try:
+            query = ApplicationQuery.model_validate(dict(request.args))
+        except ValidationError as e:
+            return _validation_response(e)
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            draft = find_draft(session, scope.user_id, query.application_id)
+            if draft is None:
+                return RUN_NOT_FOUND
+            return _run_detail_body(session, project_id, draft, run_id)
+
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _runs(self, project_id: int, schedule_id: int):
         """Answer the run records of a schedule, newest first, with the total before paging.
@@ -619,8 +721,6 @@ class ScheduleItemHandlers:
         Errors: 400 invalid query option (an unknown `status` or `trigger`, or a `version_id` that is not an id);
         403; 404.
         """
-        # Late, like the run detail: only the run routes read the usage store
-        from .schedule_run_detail import usage_summaries, version_labels
         try:
             query = RunsQuery.model_validate(dict(request.args))
         except ValidationError as e:
@@ -631,27 +731,7 @@ class ScheduleItemHandlers:
                 load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            where = [EntityScheduleRun.schedule_id == schedule_id]
-            if query.status:
-                where.append(EntityScheduleRun.status == query.status)
-            if query.trigger:
-                where.append(EntityScheduleRun.trigger == query.trigger)
-            if query.version_id:
-                where.append(EntityScheduleRun.version_id == query.version_id)
-            rows = session.execute(
-                select(*(getattr(EntityScheduleRun, name) for name in RUN_FIELDS)).where(*where)
-                .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc())
-                .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
-            ).mappings().all()
-            total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
-            # One lookup for the whole page: a call per row would cost a query per run
-            labels = version_labels(session, [row["version_id"] for row in rows])
-            usage = usage_summaries(session, project_id, [SimpleNamespace(**row) for row in rows])
-            return {"total": total, "rows": [
-                {**_run_row(row), "version_label": labels.get(row["version_id"]),
-                 "tokens": usage[row["id"]][0], "cost_usd": usage[row["id"]][1]}
-                for row in rows
-            ]}, 200
+            return _runs_page(session, project_id, schedule_id, query), 200
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _run_detail(self, project_id: int, schedule_id: int, run_id: int):
@@ -663,31 +743,13 @@ class ScheduleItemHandlers:
         Who may call: the owner with `schedules.details`, or a schedules admin.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
         """
-        # Late, like schedule_risk: only this route reads the conversation and the usage store
-        from .schedule_run_detail import tool_call_events, usage_summary, version_label
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
                 schedule = load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            run = session.scalar(select(EntityScheduleRun).where(
-                EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule_id))
-            if run is None:
-                return RUN_NOT_FOUND
-            row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
-            tokens, cost_usd = usage_summary(session, project_id, run)
-            events = [public_event(e) for e in merge_events(run.events, tool_call_events(session, run.conversation_id))]
-            return {
-                **row,
-                "version_label": version_label(session, run.version_id),
-                "principal_label": run.principal_label,
-                "risk_outcome": run.risk_outcome,
-                "approval_rule": schedule.approval_rule,
-                "approval_expires_at": _iso(run.approval_expires_at),
-                "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
-                "events": events,
-            }, 200
+            return _run_detail_body(session, project_id, schedule, run_id)
 
     @auth.decorators.check_api(schedule_check_spec("admin"))
     def _change_owner(self, project_id: int, schedule_id: int):

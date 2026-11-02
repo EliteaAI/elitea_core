@@ -17,6 +17,7 @@ from ...utils.schedule_project_handlers import ScheduleProjectHandlers
 
 ITEM = "<int:schedule_id>"
 RUN = f"{ITEM}/runs/<int:run_id>"
+TEST_RUN = "test_run/<int:run_id>"  # a run of the caller's draft: no schedule id in the URL
 # (HTTP method, URL tail after the project id): handler method. The Swagger table has the same keys.
 ROUTES = {
     ("get", ""): "_list",
@@ -40,6 +41,8 @@ ROUTES = {
     ("put", "settings"): "_save_settings",
     ("post", "check"): "_check_risks",
     ("post", "test_run"): "_test_run",
+    ("get", "test_run"): "_test_runs",
+    ("get", TEST_RUN): "_test_run_detail",
     ("delete", "test_run"): "_cancel_test_run",
 }
 # The body of `schedule_service.refusal`; the handler tests load this module without the service
@@ -48,6 +51,8 @@ NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
 
 def _tail(schedule_id: int | None, run_id: int | None) -> str:
     """The URL tail after the project id, in the form of the `ROUTES` keys."""
+    if run_id is not None and schedule_id is None:
+        return TEST_RUN
     if run_id is not None:
         return f"{RUN}/decision" if request.path.rstrip("/").endswith("/decision") else RUN
     last = request.path.rstrip("/").rsplit("/", 1)[-1]

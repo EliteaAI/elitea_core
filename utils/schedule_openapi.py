@@ -389,7 +389,7 @@ OPERATIONS = {
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,
-        "responses": _responses(202, "The run started", {"run_id": 77}, {
+        "responses": _responses(202, "The run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: "No permission, or not the owner", 404: None,
             409: ("The version is deleted, or a run is active", {
                 "error": "A run of this schedule is active", "active_run_id": 76}),
@@ -411,7 +411,7 @@ OPERATIONS = {
             "500 `run_start_failed`"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleCreate,
-        "responses": _responses(202, "The test run started", {"run_id": 77}, {
+        "responses": _responses(202, "The test run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: None, 404: None,
             409: ("A test run of this agent or pipeline is active", {
                 "error": "A test run of this schedule is active", "active_run_id": 76}),
@@ -427,6 +427,33 @@ OPERATIONS = {
         "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
                                          "schema": {"type": "integer"}, "description": "Agent or pipeline id"}],
         "responses": _responses(204, "The draft is removed, or there was none", None, {400: None, 403: None}),
+    },
+    ("get", "test_run"): {
+        "name": "List the test runs of the Save form",
+        "summary": "List the runs of the caller's test draft",
+        "description": _text(
+            "Answer the test runs of the caller's own draft for `application_id`, newest first, with the total "
+            "before paging. The rows have the fields of the runs list. No draft means `total` 0 and no rows.",
+            "a project member with `schedules.run`; only the caller's own draft is read",
+            "400 an invalid query option or a missing `application_id`; 403 no permission"),
+        "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
+                                         "schema": {"type": "integer"}, "description": "Agent or pipeline id"},
+                       *RUNS_QUERY_PARAMS],
+        "responses": _responses(200, "The test runs", {"total": 0, "rows": []}, {400: None, 403: None}),
+    },
+    ("get", "test_run/<int:run_id>"): {
+        "name": "Read one test run of the Save form",
+        "summary": "Read one run of the caller's test draft",
+        "description": _text(
+            "Answer one run of the caller's own draft for `application_id`, with the body of the run detail of a "
+            "saved schedule: status, events, summary, conversation_id, version_label, tokens, cost_usd.",
+            "a project member with `schedules.run`; another owner's run and a run of a saved schedule are 404",
+            "400 a missing `application_id`; 403 no permission; 404 the run is not on the caller's draft"),
+        "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
+                                         "schema": {"type": "integer"}, "description": "Agent or pipeline id"},
+                       {"name": "run_id", "in": "path", "required": True, "schema": {"type": "integer"},
+                        "description": "Run id, from the test run answer or the test run list"}],
+        "responses": _responses(200, "The run", None, {400: None, 403: None, 404: "The run is not on the caller's draft"}),
     },
     ("get", f"{ITEM}/runs"): {
         "name": "List the runs of a schedule",

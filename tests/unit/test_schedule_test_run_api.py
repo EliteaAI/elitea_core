@@ -5,6 +5,7 @@ The thread that starts the run is replaced.
 """
 import pathlib
 import sys
+import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -241,3 +242,97 @@ def test_save_keeps_a_draft_that_has_runs_and_the_test_runs_stay_in_the_runs_tab
 
     assert len(drafts(harness)) == 1
     assert len(runs(harness)) == 1
+
+
+@pytest.fixture
+def reads(monkeypatch):
+    """The read helpers the run routes import late; their own tests read real tables."""
+    module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
+    module.version_labels = lambda session, ids: {i: 'v3' for i in ids}
+    module.usage_summaries = lambda session, project_id, rows: {row.id: (10, 0.5) for row in rows}
+    module.version_label = lambda session, version_id: 'v3'
+    module.tool_call_events = lambda session, conversation_id: []
+    module.usage_summary = lambda session, project_id, run: (10, 0.5)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
+def read_runs(harness, application_id=1, **query):
+    return harness.call('get', suffix='/test_run', query={'application_id': application_id, **query})
+
+
+def read_run(harness, run_id, application_id=1):
+    harness.body, harness.query = None, {'application_id': application_id}
+    harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/{run_id}'
+    return harness.routes.PromptLibAPI().get(project_id=PROJECT_ID, run_id=run_id)
+
+
+def test_the_post_answer_has_the_run_id_and_the_application_id(harness, started):
+    assert test_run(harness)[0] == {'run_id': 1, 'application_id': 1}
+
+
+def test_run_now_answers_with_the_same_shape(harness, started):
+    schedule_id = harness.seed()
+
+    body, status = harness.call('post', {'trigger': 'manual'}, schedule_id, suffix='/run')
+
+    assert (status, body) == (202, {'run_id': 1, 'application_id': 1})
+
+
+def test_the_test_run_list_has_the_rows_of_the_runs_list_newest_first(harness, started, reads):
+    test_run(harness)
+    with harness.session_factory() as session:
+        session.query(models().EntityScheduleRun).update({'status': 'succeeded'})
+        session.commit()
+    test_run(harness)
+
+    body, status = read_runs(harness)
+
+    assert status == 200 and body['total'] == 2
+    assert [row['id'] for row in body['rows']] == [2, 1]
+    assert {'id', 'trigger', 'status', 'conversation_id', 'duration_ms', 'version_label', 'tokens', 'cost_usd'} <= set(body['rows'][0])
+    assert read_runs(harness, limit=1, offset=1)[0]['rows'][0]['id'] == 1
+
+
+def test_the_test_run_list_is_empty_without_a_draft_and_hides_other_owners_runs(harness, started, reads):
+    assert read_runs(harness)[0] == {'total': 0, 'rows': []}
+    harness.user_id = OTHER_ID
+    test_run(harness)
+    harness.user_id = OWNER_ID
+    assert read_runs(harness)[0] == {'total': 0, 'rows': []}
+    assert read_runs(harness, application_id=2)[0]['total'] == 0
+
+
+def test_the_test_run_list_needs_the_run_permission_and_an_application_id(harness, reads):
+    assert harness.call('get', suffix='/test_run', query={})[1] == 400
+    harness.permissions.discard(PERMISSION_PREFIX + 'run')
+    assert read_runs(harness)[1] == 403
+
+
+def test_the_test_run_detail_has_the_body_of_the_run_detail(harness, started, reads):
+    run_id = test_run(harness)[0]['run_id']
+
+    body, status = read_run(harness, run_id)
+
+    assert status == 200
+    assert (body['id'], body['trigger'], body['version_label']) == (run_id, 'test', 'v3')
+    assert body['summary']['tokens'] == 10 and body['summary']['cost_usd'] == 0.5
+    assert {'events', 'status', 'conversation_id', 'approval_rule'} <= set(body)
+
+
+def test_the_test_run_detail_is_404_for_a_foreign_a_saved_or_a_missing_run(harness, started, reads):
+    own = test_run(harness)[0]['run_id']
+    saved_run = harness.call('post', {'trigger': 'manual'}, harness.seed(name='Saved'), suffix='/run')[0]['run_id']
+    harness.user_id = OTHER_ID
+    assert read_run(harness, own)[1] == 404
+    harness.user_id = OWNER_ID
+
+    for run_id in (saved_run, 999):
+        assert read_run(harness, run_id) == ({'code': 'run_not_found', 'error': 'Run not found'}, 404)
+    assert read_run(harness, own, application_id=2)[1] == 404
+
+
+def test_the_test_run_detail_needs_the_run_permission_and_an_application_id(harness, started, reads):
+    run_id = test_run(harness)[0]['run_id']
+    assert read_run(harness, run_id, application_id='x')[1] == 400
+    harness.permissions.discard(PERMISSION_PREFIX + 'run')
+    assert read_run(harness, run_id)[1] == 403
