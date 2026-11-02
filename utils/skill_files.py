@@ -195,12 +195,17 @@ def list_version_files(project_id: int, skill_id: int, version_id: int, session=
 
 
 def read_content(project_id: int, version_file) -> bytes:
-    """The bytes of one manifest row of the project, or a 503 naming the path when storage cannot serve them."""
+    """The bytes of one manifest row of the project, or a 503 naming the path when storage cannot serve them
+    or serves bytes that are not the ones the row names."""
     try:
-        return get_content(project_id, version_file.sha256)
+        data = get_content(project_id, version_file.sha256)
     except Exception as exc:
         log.exception('skill files: content %s of project %s unreadable', version_file.sha256, project_id)
         raise SkillFileContentUnavailableError(version_file.path) from exc
+    if hashlib.sha256(data).hexdigest() != version_file.sha256:
+        log.error('skill files: content %s of project %s does not match its hash', version_file.sha256, project_id)
+        raise SkillFileContentUnavailableError(version_file.path)
+    return data
 
 
 def read_version_file(project_id: int, skill_id: int, version_id: int, path: str, session=None) -> tuple:

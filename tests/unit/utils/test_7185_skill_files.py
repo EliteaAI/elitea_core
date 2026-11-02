@@ -320,9 +320,9 @@ class TestRead:
 
     def test_an_exact_match_wins_over_a_case_insensitive_one(self, env, session):
         _version(session)
-        env.store.put_contents(PROJECT, {'a' * 64: b'A', 'b' * 64: b'B'})
-        session.add(FakeSkillVersionFile(10, 'Forms.md', 1, 'a' * 64, 'text/plain', True))
-        session.add(FakeSkillVersionFile(10, 'forms.md', 1, 'b' * 64, 'text/plain', True))
+        env.store.put_contents(PROJECT, {_sha(b'A'): b'A', _sha(b'B'): b'B'})
+        session.add(FakeSkillVersionFile(10, 'Forms.md', 1, _sha(b'A'), 'text/plain', True))
+        session.add(FakeSkillVersionFile(10, 'forms.md', 1, _sha(b'B'), 'text/plain', True))
 
         _, content = env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
 
@@ -338,6 +338,15 @@ class TestRead:
         _version(session)
         _write(env, session, 'forms.md', b'x')
         env.storage.broken_reads = True
+
+        with pytest.raises(env.files.SkillFileContentUnavailableError, match="'forms.md'") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 503
+
+    def test_bytes_that_do_not_match_the_rows_hash_are_a_503_naming_the_path(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms\n'))] = b'# Forms'
 
         with pytest.raises(env.files.SkillFileContentUnavailableError, match="'forms.md'") as info:
             env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
