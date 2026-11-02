@@ -481,11 +481,24 @@ def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
 
 def with_agent_models(agents: Optional[List[dict]], trajectory: Optional[dict]) -> Optional[List[dict]]:
     """``metrics.agents`` stored before agents listed their ``models`` (#7297), with each agent's
-    models read from its trajectory. Agents that already list them are kept as they are."""
+    models read from its trajectory. Agents that already list them are kept as they are.
+
+    A sub-agent is matched by its ``application_id`` and only by it, so a ledger-only row with no
+    name never takes the agent under test's models; an agent without an id is matched by its name.
+    An agent the trajectory does not show gets ``None``: its models are not known."""
     if not agents or all('models' in agent for agent in agents):
         return agents
-    models = {entry['agent']: entry['models'] for entry in agent_breakdown(trajectory) or []}
-    return [agent if 'models' in agent else {**agent, 'models': models.get(agent.get('agent'), [])}
+    models = {}
+    for entry in agent_breakdown(trajectory) or []:
+        if entry.get('application_id') is not None:
+            models[('id', entry['application_id'])] = entry['models']
+        models.setdefault(('name', entry['agent']), entry['models'])
+
+    def key(agent):
+        app_id = agent.get('application_id')
+        return ('id', app_id) if app_id is not None else ('name', agent.get('agent'))
+
+    return [agent if 'models' in agent else {**agent, 'models': models.get(key(agent))}
             for agent in agents]
 
 
