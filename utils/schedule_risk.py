@@ -61,7 +61,10 @@ def _uses_personal_token(tool, expanded: dict) -> bool:
     if tool.type not in ('sharepoint', 'openapi'):
         return False
     if (tool.settings or {}).get(f'{tool.type}_configuration'):
-        return bool((expanded.get(f'{tool.type}_configuration') or {}).get('oauth_discovery_endpoint'))
+        credential = expanded.get(f'{tool.type}_configuration') or {}
+        # a stored Microsoft login lets the run sign in without a browser (inject_stored_logins)
+        stored_login = tool.type == 'sharepoint' and bool(credential.get('refresh_token'))
+        return bool(credential.get('oauth_discovery_endpoint')) and not stored_login
     return tool.type == 'openapi' and bool(expanded.get('oauth_discovery_endpoint'))
 
 
