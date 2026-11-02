@@ -566,6 +566,9 @@ ALTER TABLE {pid}.skill_version_files DROP CONSTRAINT IF EXISTS _skill_version_f
 # Operator re-run and dry run:
 Run admin task create_skill_file_tables with param: project_id=all;dry_run
 Run admin task create_skill_file_tables with param: project_id=all
-# Objects no row references (a failed write, a project-1 twin deleted elsewhere) are reclaimed by the sweep:
+# Objects no row references (a failed write, a project-1 twin deleted elsewhere) are reclaimed by the sweep. Schedule it
+# to run periodically (daily): a delete releases its objects at once only when no write of the project is open, and
+# otherwise leaves them to the sweep. It keeps objects younger than an hour and those storage gives no time for
+# (counted as kept_undated in the result):
 Run admin task sweep_skill_files with param: project_id=all;dry_run
 Run admin task sweep_skill_files with param: project_id=all
