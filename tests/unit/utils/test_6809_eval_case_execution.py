@@ -200,9 +200,9 @@ def test_metrics_from_recorded_run(execution):
         # The recorded run calls a sub-agent, so its steps are split by agent (#7015 P3).
         'agents': [
             {'agent': None, 'llm_calls': 2, 'tool_calls': 1, 'input_tokens': 7322, 'output_tokens': 125,
-             'cost': None, 'source': 'trajectory'},
+             'cost': None, 'models': [MODEL], 'source': 'trajectory'},
             {'agent': 'Child Writer', 'llm_calls': 1, 'tool_calls': 0, 'input_tokens': 53,
-             'output_tokens': 4376, 'cost': None, 'source': 'trajectory'},
+             'output_tokens': 4376, 'cost': None, 'models': [MODEL], 'source': 'trajectory'},
         ],
     }
     # The run diff reads this stored value instead of the trajectory (performance §3.4).

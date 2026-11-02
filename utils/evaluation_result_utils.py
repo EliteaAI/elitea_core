@@ -123,12 +123,16 @@ MAX_TRAJECTORY_PAGE = 10
 
 def _execution_row(row, include_trajectory: bool) -> dict:
     metrics = row.metrics or {}
-    if include_trajectory and 'agents' not in metrics:
-        # Executions written before the per-agent split (#7015 P3) get it from their trajectory.
-        from .evaluation_execution import agent_breakdown
-        agents = agent_breakdown(row.trajectory)
-        if agents:
-            metrics = {**metrics, 'agents': agents}
+    if include_trajectory:
+        from .evaluation_execution import agent_breakdown, with_agent_models
+        if 'agents' not in metrics:
+            # Executions written before the per-agent split (#7015 P3) get it from their trajectory,
+            agents = agent_breakdown(row.trajectory)
+            if agents:
+                metrics = {**metrics, 'agents': agents}
+        else:
+            # ... and those written before each agent listed its models (#7297) get those.
+            metrics = {**metrics, 'agents': with_agent_models(metrics['agents'], row.trajectory)}
     return {
         'id': row.id,
         'run_id': row.run_id,
