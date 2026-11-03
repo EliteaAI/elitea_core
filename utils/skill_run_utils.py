@@ -18,6 +18,7 @@ from .skill_run_settings import is_requested_model_usable, selection_mode, witho
 from .usage_attribution import skill_attribution
 from ..models.enums.all import PublishStatus
 from ..models.pd.llm import merge_llm_selection_override
+from ..models.pd.skill_file import describe_runtime_files
 from ..models.pd.skill_predict import SkillPredictMcpRequest, SkillPredictRequest
 from ..models.skill import Skill
 
@@ -49,6 +50,7 @@ class SkillRunTarget:
     icon_meta: Optional[dict]
     run_settings: dict
     description: Optional[str] = None
+    files: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,7 @@ def build_skill_run_target(skill, version_id: Optional[int], published_only: boo
         icon_meta=(version.meta or {}).get('icon_meta'),
         run_settings=saved_run_settings(version),
         description=skill.description,
+        files=tuple(describe_runtime_files(version.files)),
     )
 
 

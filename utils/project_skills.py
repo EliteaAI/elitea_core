@@ -6,6 +6,7 @@ from sqlalchemy import func
 from tools import context, db, rpc_tools, this
 
 from .folder_access import build_folder_ids_exclusion_clause
+from .skill_files import list_runtime_manifests
 from .skill_utils import SkillInvocationLimitError, get_max_invoked_skills_per_turn
 from .support_utils import get_support_config
 from ..models.enums.all import ParticipantTypes
@@ -109,6 +110,17 @@ def build_project_skill_catalog(project_id: int, sender_id, conversation) -> lis
             'icon_meta': (version['meta'] or {}).get('icon_meta'),
             'origin': SKILL_ORIGIN_PROJECT,
         })
+    if not catalog:
+        return catalog
+    try:
+        with db.with_project_schema_session(project_id) as session:
+            manifests = list_runtime_manifests(session, [entry['skill_version_id'] for entry in catalog])
+    except Exception:  # pylint: disable=W0718
+        log.exception('[Skills] File manifests of project %s skills unavailable this turn', project_id)
+        return catalog
+    for entry in catalog:
+        if entry['skill_version_id'] in manifests:
+            entry['files'] = manifests[entry['skill_version_id']]
     return catalog
 
 

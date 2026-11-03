@@ -34,7 +34,7 @@ from .skill_utils import (
 )
 from .utils import get_public_project_id
 from ..models.skill import SkillVersion, SkillVersionFile
-from ..models.pd.skill_file import SkillFileModel, describe_manifest
+from ..models.pd.skill_file import SkillFileModel, describe_manifest, describe_runtime_files
 
 
 MAX_PATH_LENGTH = 1024
@@ -400,6 +400,19 @@ def list_version_manifest(session, version_id: int) -> list:
         session.query(SkillVersionFile).filter(SkillVersionFile.skill_version_id == version_id)
         .order_by(SkillVersionFile.path).all()
     )
+
+
+def list_runtime_manifests(session, version_ids) -> dict:
+    """``{version_id: [path, size, type, text flag]}`` for the versions that have files, in one query."""
+    if not version_ids:
+        return {}
+    rows = session.query(SkillVersionFile).filter(
+        SkillVersionFile.skill_version_id.in_(list(version_ids)),
+    ).order_by(SkillVersionFile.skill_version_id, SkillVersionFile.path).all()
+    manifests = {}
+    for version_file in rows:
+        manifests.setdefault(version_file.skill_version_id, []).append(version_file)
+    return {version_id: describe_runtime_files(files) for version_id, files in manifests.items()}
 
 
 def read_version_contents(project_id: int, version_id: int, session=None) -> list:

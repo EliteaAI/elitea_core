@@ -331,7 +331,7 @@ class AttachedSkillModel(BaseModel):
     icon_meta: Optional[dict] = None
     instructions: Optional[str] = None
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, extra='allow')
 
 
 class ApplicationVersionDetailToolValidatedModel(ApplicationVersionDetailModel, ApplicationVersionArgsForwardingModel):
