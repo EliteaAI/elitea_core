@@ -782,6 +782,7 @@ def test_a_row_has_the_designed_fields_and_no_secret(ns, env):
         "policy_revision": None, "approval_ref": None, "revocation_epoch": 0,
         "created_by": {"id": 11, "email": "admin1@example.com"}, "state_changed_by": None,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "platform_operations": None,   # (#7228) what the agent may do on the platform: none proposed = read only
     }
     assert "external_agent_identity_ref" not in row and "owner_user_ref" not in row
 

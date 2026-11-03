@@ -141,7 +141,7 @@ def service(mcp_service_module, monkeypatch):
             "MATERIAL_IN", "MATERIAL_OUT", "MATERIAL_NONE", "MATERIAL_PER_REQUEST", "DECLARED_MATERIAL",
             "MAX_SCHEMA_WALK", "_MATERIALS", "PER_REQUEST_FIELDS", "MATERIAL_UNREVIEWED", "MATERIAL_UNKNOWN",
             "TOOLKIT_WRITES", "VERSION_WRITES", "PIPELINE_SECRET_KEYS", "SECRET_REFERENCE", "SECRET_NAME",
-            "REVIEWED_FIELD_NAMES", "MAX_REDACT_NODES")
+            "REVIEWED_FIELD_NAMES", "MAX_REDACT_NODES", "HEADER_MAP", "MAX_SETTINGS_DEPTH")
             for t in node.targets))
         or (isinstance(node, ast.FunctionDef) and node.name in (
             "endpoint_key", "operation_of", "projects_named_in", "material_of", "material_of_call", "listed_for_run",

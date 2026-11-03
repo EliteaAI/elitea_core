@@ -19,6 +19,7 @@ the grants), given ``governance.request`` and, for a binding, the right to edit 
 """
 import uuid
 from dataclasses import dataclass, field, replace
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -69,10 +70,12 @@ class Readiness:
     plan: dict = field(default_factory=dict)
     delegated: bool = False   # a credential of the version acts with a person's Microsoft sign-in
 
-    def add(self, key, kind, title, state, requestable=False, ref=None, for_="shared", **plan):
+    def add(self, key, kind, title, state, requestable=False, ref=None, for_="shared", operations=None, **plan):
         if len(self.items) < MAX_ITEMS and all(item["key"] != key for item in self.items):
             self.items.append({"key": key, "kind": kind, "ref": ref, "title": title, "state": state,
                                "requestable": bool(requestable), "for": for_})
+            if operations is not None:   # (#7228) a binding: what its agent may do on the platform, proposed or held
+                self.items[-1]["operations"] = list(operations)
             if plan:
                 self.plan[key] = plan
 
@@ -106,7 +109,8 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
     ``suspended`` whatever its definition: a member's rebind never lifts a suspension (an operator resumes it)."""
     rows = session.execute(
         select(AgentIdentityBinding.id, AgentIdentityBinding.state, AgentIdentityBinding.definition_digest,
-               AgentIdentityBinding.created_by, AgentIdentityBinding.state_changed_by)
+               AgentIdentityBinding.created_by, AgentIdentityBinding.state_changed_by,
+               AgentIdentityBinding.allowed_platform_operations)
         .where(AgentIdentityBinding.project_id == project_id, AgentIdentityBinding.application_id == application_id,
                AgentIdentityBinding.version_id == version_id, AgentIdentityBinding.identity_mode.in_(GOVERNED_MODES),
                AgentIdentityBinding.state.notin_(("retiring", "retired")))
@@ -118,6 +122,27 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
                 changed = wanted == "active" and row.definition_digest != current_digest
                 return row, "changed" if changed else wanted
     return None, "missing"
+
+
+# (#7228) the version meta keys of the internal Elitea toolkit (``internal_tools.MCP_BUILDER_TOOL_KEYS``)
+INTERNAL_TOOL_KEYS = frozenset({"internal_mcp", "skill_builder", "project_context_builder"})
+
+
+def proposed_operations(version, rows):
+    """What a binding request proposes the agent may do on the platform (#7228): every operation when the version uses
+    the internal Elitea toolkit (its meta's internal tools, or an internal MCP toolkit), else None (read only, as
+    before). The approver may keep part of it."""
+    from .internal_obo import OPERATIONS, _INTERNAL_PATH, client_path  # pylint: disable=C0415
+    meta = getattr(version, "meta", None) if isinstance(getattr(version, "meta", None), dict) else {}
+    if INTERNAL_TOOL_KEYS & set(meta.get("internal_tools") or []):
+        return list(OPERATIONS)
+    for _, tool in rows or []:
+        settings = getattr(tool, "settings", None) if isinstance(getattr(tool, "settings", None), dict) else {}
+        url = settings.get("url")
+        if str(getattr(tool, "type", "")).startswith("mcp") and isinstance(url, str) \
+                and _INTERNAL_PATH.match(client_path(urlsplit(url).path)):
+            return list(OPERATIONS)
+    return None
 
 
 EXPAND_TIMEOUT_S = 5
@@ -269,11 +294,14 @@ def _version_items(result, module, session, project_id, version, user_id, subjec
     binding_requestable = may_edit and (state in ("missing", "changed") or own_draft)
     title = " ".join(part for part in (getattr(version, "application_name", None), version.name) if part) or "Agent"
     if state != "active":
+        proposal = proposed_operations(version, rows) if binding is None else None
+        held = binding.allowed_platform_operations if binding is not None else None
         result.add("binding", "binding", title, state, ref=None if binding is None else str(binding.id),
-                   requestable=binding_requestable,
+                   requestable=binding_requestable, operations=proposal if binding is None else held,
                    application_id=version.application_id, version_id=version.id,
                    binding_id=None if binding is None else str(binding.id), action={
-                       "missing": "create", "changed": "rebind", "draft": "submit"}.get(state))
+                       "missing": "create", "changed": "rebind", "draft": "submit"}.get(state),
+                   platform_operations=proposal)
     tools = {str(tool.id): tool.name or tool.type for _, tool in rows}
     uses, configurations = _uses(session, project_id, version.id, user_id, rows)
     # a rebind keeps the row, and its grants; with no binding a well-formed id no grant names (the facts refuse a

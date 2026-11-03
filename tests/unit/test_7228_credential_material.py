@@ -344,3 +344,44 @@ def test_the_live_registry_has_no_unreviewed_secret_name(ns, registry):
     unreviewed = [name for name, entries in SNAPSHOT["routes"].items()
                   if obo(ns).material_of(entries[0]["method"], entries[0]["path"]) == "unreviewed"]
     assert unreviewed == []
+
+
+# --- fix round 2 (Delta 1, C9-SEC-95): header maps under other names, nested secret keys ------------------------
+
+JIRA_SCHEMA = {"properties": {"base_url": {"type": "string"}, "custom_headers": {"type": "object"},
+                              "jira_configuration": {"type": "object", "configuration_types": ["jira"]}}}
+
+
+@pytest.fixture
+def jira(ns, schemas, monkeypatch):
+    monkeypatch.setitem(TOOL_SCHEMAS, "jira", JIRA_SCHEMA)
+    return JIRA_SCHEMA
+
+
+@pytest.mark.parametrize("settings, expected", [
+    ({"base_url": "https://j", "custom_headers": {"Authorization": "Bearer made-up"}}, True),
+    ({"base_url": "https://j", "custom_headers": '{"Authorization": "Bearer made-up"}'}, True),
+    ({"base_url": "https://j", "custom_headers": "not json"}, True),
+    ({"base_url": "https://j", "custom_headers": {"Authorization": "{{secret.JIRA}}"}}, False),
+    ({"base_url": "https://j", "auth": {"token": "made-up"}}, True),                      # a nested secret key
+    ({"base_url": "https://j", "options": [{"api_key": "made-up"}]}, True),
+    ({"base_url": "https://j", "options": {"timeout": "30", "max_tokens": "100"}}, False),
+    ({"jira_configuration": {"elitea_title": "j", "private": False}}, False),             # a selector
+])
+def test_a_jira_toolkit_write_with_custom_headers_or_nested_secrets_is_material(ns, jira, settings, expected):
+    assert obo(ns).material_of_call("POST", TOOLS, {"project_id": 1}, {"type": "jira", "settings": settings},
+                                    42) is expected
+    assert obo(ns).material_of_call("PUT", VERSION, {"project_id": 1},
+                                    {"tools": [{"type": "jira", "settings": settings}]}, 42) is expected
+
+
+def test_a_run_tokens_read_redacts_custom_headers_and_nested_secrets(ns, jira):
+    answer = {"versions": [{"tools": [{"type": "jira", "settings": {
+        "base_url": "https://j", "custom_headers": {"Authorization": "Bearer made-up", "X-Ref": "{{secret.JIRA}}"},
+        "auth": {"token": "made-up", "user": "u"}, "proxy_headers": '{"X-Key": "made-up"}'}}]}]}
+    redacted = obo(ns).redact_for_run(answer, 1, 42)
+    settings = redacted["versions"][0]["tools"][0]["settings"]
+    assert "made-up" not in json.dumps(redacted)
+    assert settings["custom_headers"] == {"Authorization": "governed-reference", "X-Ref": "{{secret.JIRA}}"}
+    assert settings["auth"] == {"token": "governed-reference", "user": "u"}
+    assert settings["base_url"] == "https://j"

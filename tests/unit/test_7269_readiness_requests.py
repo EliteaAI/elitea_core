@@ -139,7 +139,15 @@ class SecretsFake:
             error = RuntimeError("refused")
             error.code, error.key = "GRANT_EXISTS", items[0]["key"]
             raise error
-        return [{"key": item["key"], "id": str(uuid.uuid4())} for item in items]
+        made = [{"key": item["key"], "id": str(uuid.uuid4())} for item in items]
+        for item, answer in zip(items, made):   # (#7228) a suite that reads its own requests back sets ``persist``
+            if getattr(self, "persist", None) is not None and item["kind"] == "grant":
+                key = "|".join((str(item["binding_ref"]), str(item["toolkit_id"]), str(item["ref"]), "*",
+                                str(item["subject_ref"])))
+                self.persist.grants[(project_id, key)] = {
+                    "grant_id": answer["id"], "state": "pending_approval", "revocation_epoch": 0,
+                    "valid_from": None, "valid_until": None, "operations": ["*"]}
+        return made
 
 
 @pytest.fixture
@@ -849,3 +857,98 @@ def test_an_unreachable_resolver_makes_readiness_unavailable_never_a_wrong_list(
     _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": TimeoutError("rpc")})
     with pytest.raises(ns.governance_readiness.ReadinessUnavailable):
         items(ns, env)
+
+
+def stored_operations(ns, env):
+    """The binding's ``allowed_platform_operations`` as stored (a deferred column, read on its own)."""
+    model = ns.models.AgentIdentityBinding
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return session.execute(ns.sa.select(model.allowed_platform_operations)).scalar_one()
+
+
+# --- #7228 fix round 2: a requested identity proposes what its agent is configured to use -----------------------
+
+INTERNAL_MCP = {"url": "http://pylon_main:8080/app/1/mcp/elitea_core/applications", "headers": {}}
+
+
+def test_a_version_with_the_internal_toolkit_proposes_every_operation_and_the_request_files_them(ns, env):
+    env.add_toolkit(1, 70, 9, "mcp", INTERNAL_MCP)
+    found = items(ns, env)
+    assert found["binding"]["operations"] == ["read", "build", "credentials", "run"]
+    filed = file(ns, env, keys=["binding"])
+    assert [item["kind"] for item in filed] == ["binding"]
+    assert stored_operations(ns, env) == ["read", "build", "credentials", "run"]
+    assert items(ns, env)["binding"]["operations"] == ["read", "build", "credentials", "run"]   # pending: held
+
+
+def test_a_version_without_the_internal_toolkit_stays_read_only(ns, env):
+    credential(env)
+    assert "operations" not in items(ns, env)["binding"]
+    file(ns, env, keys=["binding"])
+    assert stored_operations(ns, env) is None
+
+
+def test_an_external_mcp_toolkit_is_not_the_internal_one(ns, env):
+    env.add_toolkit(1, 70, 9, "mcp", {"url": "https://mcp.example.com/app/1/mcp", "headers": {}})
+    assert ns.governance_readiness.proposed_operations(types.SimpleNamespace(meta={}), []) is None
+    assert ns.governance_readiness.proposed_operations(
+        types.SimpleNamespace(meta={"internal_tools": ["internal_mcp"]}), []) == ["read", "build", "credentials", "run"]
+
+
+def test_the_internal_tool_keys_match_the_injection(ns):
+    source = (PLUGIN_ROOT / "utils" / "internal_tools.py").read_text()
+    for key in ns.governance_readiness.INTERNAL_TOOL_KEYS:
+        assert f"= '{key}'" in source
+
+
+# --- #7228 fix round 2: what a run's toolkit change files for the versions using it -----------------------------
+
+TOOL_PATCH = "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}"
+
+
+def test_linking_a_toolkit_to_a_version_files_that_versions_requests(ns, env):
+    """``PATCH tool`` links the toolkit to a version (``entity_tool_mapping``): that version's identity and the user's
+    grant are filed with the toolkit's own readiness, attributed to the run."""
+    tool_id = credential(env).tool_id
+    claims = {"uid": MEMBER, "run": "run-80"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {"ok": True},
+                                                 {"project_id": "1", "tool_id": str(tool_id)})
+    assert (result["entity_kind"], result["entity_id"]) == ("toolkit", tool_id)
+    [version] = result["versions"]
+    assert (version["entity_kind"], version["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in version["filed"]] == ["binding", "reference", "grant"]
+    filed = [event for _, event in env.recorded if event["reason_code"] == "GOVERNANCE_REQUEST_FILED"]
+    assert {event["caller_ref"] for event in filed} == {"run:run-80"}
+    assert "Requested for approval" in result["next"] and "the agent's identity" in result["next"]
+
+
+def test_a_repeated_change_files_nothing_more_and_the_version_only_waits_for_approval(ns, env):
+    tool_id = credential(env, reference=True, grants=True).tool_id
+    env.secrets.persist = env   # the grant filed is read back as pending, as the secrets plugin answers it
+    claims = {"uid": MEMBER, "run": "run-81"}
+    params = {"project_id": "1", "tool_id": str(tool_id)}
+    first = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {}, params)
+    second = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {}, params)
+    assert [item["kind"] for item in first["versions"][0]["filed"]] == ["binding", "grant"]
+    assert second["versions"][0]["filed"] == []                     # nothing filed twice
+    assert [item for item in items(ns, env).values() if item["requestable"]] == []   # only approvals left
+    assert len(bindings(env, ns)) == 1
+
+
+def test_a_new_version_a_run_creates_is_requested_like_an_agent(ns, env):
+    credential(env)
+    claims = {"uid": MEMBER, "run": "run-82"}
+    result = ns.governance_requests.file_for_run(
+        module(ns), claims, "POST", "/api/v2/elitea_core/versions/{mode}/{project_id}/{application_id}", 1,
+        {"id": 70, "application_id": 7, "name": "v2"}, {"project_id": "1", "application_id": "7"})
+    assert (result["entity_kind"], result["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in result["filed"]] == ["binding", "reference", "grant"]
+
+
+def test_every_build_write_on_a_toolkit_or_a_version_is_covered(ns):
+    """The ``build`` writes of the operation map that create or change a toolkit or a version all file requests."""
+    build = {key for key, operation in ns.internal_obo.ENDPOINT_OPERATIONS.items() if operation == "build"
+             and any(part in key[1] for part in ("elitea_core/tool", "elitea_core/version", "application",
+                                                 "elitea_core/applications"))}
+    covered = set(ns.governance_requests.CREATIONS) | set(ns.governance_requests.UPDATES)
+    assert build - covered == set()

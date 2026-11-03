@@ -738,3 +738,35 @@ def test_a_type_a_plugin_owns_is_not_created_here(world, monkeypatch):
         namespace["_type_entry"]("s3_api_credentials")
     assert found.value.code == "INVALID_REQUEST"
     assert namespace["_type_entry"]("github").managed_by is None
+
+
+# --- fix round 2: the claim's nonce and guarded clean-up --------------------------------------------------------
+
+def test_an_attempt_that_outlived_its_claim_keeps_nothing_and_leaves_the_newer_claim(world, monkeypatch):
+    real = world.cf._probe   # pylint: disable=W0212
+    newer = {"by": MEMBER, "at": "2026-11-03T12:00:00+00:00", "nonce": "newer"}
+
+    def taken_over(*args, **kwargs):   # while this attempt runs, its claim goes stale and another takes the form
+        world.message.meta = world.cf._remember(world.message.meta, INTERRUPT, newer, world.cf.CLAIM_KEY)  # pylint: disable=W0212
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(world.cf, "_probe", taken_over)
+    found = refused(world)
+    assert found.code == "FORM_IN_PROGRESS"
+    assert ("reference_action", "retire", None, MEMBER) in world.calls and ("delete_configuration", PROJECT, 9) in world.calls
+    meta = world.message.meta["hitl_interrupts"][0]
+    assert meta["credential_form_in_progress"] == newer and "credential_form_result" not in meta
+    assert [event["operation_id"] for event in world.events] == [f"credential_form:{INTERRUPT}:record"]
+
+
+def test_a_failing_clean_up_step_does_not_skip_the_others(world, monkeypatch):
+    world.store_answer = {"error": "store down", "code": "STORE_UNAVAILABLE"}
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(world.cf, "_retire", broken)
+    assert refused(world).code == "DEPENDENCY_UNAVAILABLE"
+    assert ("delete_configuration", PROJECT, 9) in world.calls and world.purged
+    assert "credential_form_in_progress" not in json.dumps(world.message.meta)
+    assert [event["reason_code"] for event in world.events] == ["CREDENTIAL_FORM_FAILED"]

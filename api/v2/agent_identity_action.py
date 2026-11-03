@@ -6,7 +6,7 @@ from tools import api_tools, auth, config as c, register_openapi
 
 from ...models.pd.binding_api import BindingActionRequest
 from ...utils import binding_api as api
-from ...utils.binding_admin import BindingActionError, run_binding_action
+from ...utils.binding_admin import BindingActionError, parse_platform_operations, run_binding_action
 from ...utils.binding_queries import find_binding
 
 
@@ -46,6 +46,8 @@ def binding_action(module, project_id, binding_id, mode):
         return error
     if body.action != "activate" and (body.approval_ref is not None or body.policy_revision is not None):
         return api.refusal("INVALID_REQUEST", "approval_ref and policy_revision belong to action activate only")
+    if body.action != "activate" and body.platform_operations is not None:   # (#7228) a rebind proposes in the app
+        return api.refusal("INVALID_REQUEST", "platform_operations belongs to action activate only")
     if not api.has_permission(api.APPROVE if body.action == "activate" else api.MANAGE, project_id, mode):
         return api.refusal("FORBIDDEN")
     try:
@@ -64,6 +66,11 @@ def binding_action(module, project_id, binding_id, mode):
         "expected_state": body.expected_state, "approval_ref": body.approval_ref,
         "policy_revision": body.policy_revision, "dry_run": False,
     }
+    if body.platform_operations is not None:   # (#7228) the same parser as create and the admin task
+        operations, error = parse_platform_operations(body.platform_operations, body.action)
+        if error:
+            return api.refusal("INVALID_REQUEST", error)
+        values["platform_operations"] = operations
     try:
         result = run_binding_action(module, values, actor)
     except BindingActionError as exc:

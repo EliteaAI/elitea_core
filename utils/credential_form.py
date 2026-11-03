@@ -363,8 +363,9 @@ def _claim_is_live(claim, now) -> bool:
 
 def _claim(project_id, conversation_uuid, body, actor):
     """Under the interrupt row's lock: the checks of the pause, then a claim (``CLAIM_KEY``) committed before any
-    effect, so a second Create meanwhile is ``FORM_IN_PROGRESS``. Returns ``(record or None, run version)``: the
-    record when this form was completed already (the same answer again, nothing created twice)."""
+    effect, so a second Create meanwhile is ``FORM_IN_PROGRESS``. Returns ``(record or None, run version, nonce)``: the
+    record when this form was completed already (the same answer again, nothing created twice); the nonce names this
+    attempt's claim (a takeover after a stale claim writes its own)."""
     now = datetime.now(timezone.utc)
     with db.get_session(project_id) as session:
         message = _message(session, conversation_uuid, body.message_id)
@@ -379,26 +380,54 @@ def _claim(project_id, conversation_uuid, body, actor):
         if isinstance(done, dict):
             if done.get("created_by") != actor:
                 raise FormRefused("NOT_RUN_USER")
-            return done, None
+            return done, None, None
         claim = interrupt.get(CLAIM_KEY)
         if isinstance(claim, dict) and _claim_is_live(claim, now):
             raise FormRefused("FORM_IN_PROGRESS")
         run_version = _run_version(session, message)
-        message.meta = _remember(message.meta, body.interrupt_id, {"by": actor, "at": now.isoformat()}, CLAIM_KEY)
+        nonce = uuid.uuid4().hex
+        message.meta = _remember(message.meta, body.interrupt_id, {"by": actor, "at": now.isoformat(), "nonce": nonce},
+                                 CLAIM_KEY)
         flag_modified(message, "meta")
         session.commit()
-    return None, run_version
+    return None, run_version, nonce
 
 
-def _settle(project_id, conversation_uuid, body, result):
-    """The claim released; on success the record written in its place (one write)."""
+def _settle(project_id, conversation_uuid, body, result, nonce) -> bool:
+    """This attempt's claim released; on success the record written in its place (one write). Only while the claim is
+    still this attempt's (``nonce``): after a takeover it is the newer attempt's, and nothing is touched (False)."""
     with db.get_session(project_id) as session:
         message = _message(session, conversation_uuid, body.message_id)
-        if message is not None:
-            meta = _remember(message.meta, body.interrupt_id, None, CLAIM_KEY)
-            message.meta = _remember(meta, body.interrupt_id, result) if result is not None else meta
-            flag_modified(message, "meta")
-            session.commit()
+        interrupt = _form_interrupt(message.meta if message else None, body.interrupt_id)
+        claim = (interrupt or {}).get(CLAIM_KEY)
+        if not isinstance(claim, dict) or claim.get("nonce") != nonce:
+            return False
+        meta = _remember(message.meta, body.interrupt_id, None, CLAIM_KEY)
+        message.meta = _remember(meta, body.interrupt_id, result) if result is not None else meta
+        flag_modified(message, "meta")
+        session.commit()
+    return True
+
+
+def _quietly(label, func, *args, **kwargs):
+    """One clean-up step: its failure is logged and the next step still runs."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential form: clean-up step %s failed (%s)", label, type(exc).__name__)
+        return None
+
+
+def _compensate(project_id, conversation_uuid, body, actor, created, ref_id, nonce, step):  # pylint: disable=R0913
+    """Nothing usable kept: the reference retired, the configuration and its Vault secrets gone, the claim released,
+    the failure recorded; each step guarded so one that fails does not skip the rest."""
+    if ref_id is not None:
+        _quietly("retire", _retire, project_id, ref_id, actor)
+    if created is not None:
+        _quietly("configuration", _delete_configuration, project_id, created)
+    _quietly("claim", _settle, project_id, conversation_uuid, body, None, nonce)
+    _quietly("audit", _record, project_id, actor, ref_id, created.get("id") if created else None, body.interrupt_id,
+             conversation_uuid, reason=FAILED_REASON, step=step)
 
 
 def complete(module, project_id, conversation_uuid, body, actor):  # pylint: disable=R0914
@@ -411,7 +440,7 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
     if body.ownership == SHARED and _is_personal_project(project_id, actor):
         raise FormRefused("OWNERSHIP_INVALID")
     delegation = _default_delegation(actor) if delegated else None
-    done, run_version = _claim(project_id, conversation_uuid, body, actor)
+    done, run_version, nonce = _claim(project_id, conversation_uuid, body, actor)
     if done is not None:   # the same form sent again: the record, nothing created twice
         return {**public_result(done), "configuration_id": done.get("configuration_id"), "requests": []}
     step, created, ref_id = "configuration", None, None
@@ -425,15 +454,9 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
             if stored.get("error") is not None:
                 log.error("credential form: the value was not stored (%s)", stored.get("code"))
                 raise FormRefused("DEPENDENCY_UNAVAILABLE")
-    except Exception as exc:   # nothing usable is kept: reference retired, configuration and its Vault secrets gone
-        if ref_id is not None:
-            _retire(project_id, ref_id, actor)
-        if created is not None:
-            _delete_configuration(project_id, created)
-        _settle(project_id, conversation_uuid, body, None)
+    except Exception as exc:   # nothing usable is kept
+        _compensate(project_id, conversation_uuid, body, actor, created, ref_id, nonce, step)
         code = exc.code if isinstance(exc, FormRefused) else "DEPENDENCY_UNAVAILABLE"
-        _record(project_id, actor, ref_id, created.get("id") if created else None, body.interrupt_id,
-                conversation_uuid, reason=FAILED_REASON, step=step)
         if isinstance(exc, FormRefused):
             raise
         log.error("credential form: failed at %s (%s)", step, type(exc).__name__)
@@ -445,7 +468,14 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
               "title": body.title, "credential_type": body.credential_type, "state": state, "created_by": actor}
     if check_code:
         result["check"] = check_code
-    _settle(project_id, conversation_uuid, body, result)
+    try:
+        settled = _settle(project_id, conversation_uuid, body, result, nonce)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential form: the record was not written (%s)", type(exc).__name__)
+        settled = False
+    if not settled:   # a takeover holds the form now (this attempt outlived its claim): this credential is not kept
+        _compensate(project_id, conversation_uuid, body, actor, created, ref_id, nonce, "record")
+        raise FormRefused("FORM_IN_PROGRESS")
     _record(project_id, actor, ref_id, created.get("id"), body.interrupt_id, conversation_uuid)
     reply = {**public_result(result), "configuration_id": created.get("id"), "requests": filed}
     if refused:

@@ -661,3 +661,63 @@ def test_the_module_registers_the_request_permission():
     text = (PLUGIN_ROOT / "module.py").read_text()
     assert '{"permissions": [BINDING_REQUEST], "recommended_roles": BINDING_REQUEST_ROLES}' in text
     assert text.index("BINDING_REQUEST_ROLES}") < text.index("self.task_node.start()")
+
+
+def stored_operations(ns, env):
+    """The binding's ``allowed_platform_operations`` as stored (a deferred column, read on its own)."""
+    model = ns.models.AgentIdentityBinding
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return session.execute(ns.sa.select(model.allowed_platform_operations)).scalar_one()
+
+
+# --- #7228 fix round 2: the operations an approval keeps -------------------------------------------------------
+
+def proposed_binding(ns, env, operations):
+    body, status = hit(ns, env, "agent_identities", "post", actor="admin_a", mode=DEFAULT,
+                       body={"application_id": 7, "version_id": 70, "identity_mode": "elitea_native",
+                             "platform_operations": operations})
+    assert status == 200, body
+    assert act(ns, env, body["id"], "submit", "draft", actor="admin_a")[1] == 200
+    return body["id"]
+
+
+def test_an_approval_keeps_part_of_the_proposed_operations_and_the_run_token_gets_that(ns, env):
+    binding_id = proposed_binding(ns, env, ["read", "build", "credentials", "run"])
+    payload, status = act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b",
+                          platform_operations=["read", "run"], **APPROVAL)
+    assert (status, payload["state"]) == (200, "active"), payload
+    assert stored_operations(ns, env) == ["read", "run"]
+    [row] = bindings(env, ns)
+    assert ns.internal_obo.binding_operations(1, str(row.id)) == ("read", "run")   # what a run token is minted from
+    listed, _ = hit(ns, env, "agent_identities", "get", actor="admin_b", mode=DEFAULT)
+    assert listed["rows"][0]["platform_operations"] == ["read", "run"]
+
+
+def test_an_approval_without_operations_keeps_the_proposal(ns, env):
+    binding_id = proposed_binding(ns, env, ["read", "build", "credentials", "run"])
+    assert act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b", **APPROVAL)[1] == 200
+    assert stored_operations(ns, env) == ["read", "build", "credentials", "run"]
+
+
+@pytest.mark.parametrize("proposed, kept", [(["read", "build"], ["read", "credentials"]), (None, ["read", "build"])])
+def test_an_approval_never_widens_what_was_proposed(ns, env, proposed, kept):
+    binding_id = proposed_binding(ns, env, proposed)
+    payload, status = act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b",
+                          platform_operations=kept, **APPROVAL)
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST")
+    [row] = bindings(env, ns)
+    assert row.state == "pending_approval"
+
+
+@pytest.mark.parametrize("action, expected", [("suspend", "active"), ("submit", "draft")])
+def test_operations_belong_to_an_activation_only(ns, env, action, expected):
+    body, _ = create_binding(ns, env)
+    payload, status = act(ns, env, body["id"], action, expected, actor="admin_a", platform_operations=["read"])
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST")
+
+
+def test_an_unknown_operation_is_refused_by_the_body(ns, env):
+    binding_id = proposed_binding(ns, env, ["read"])
+    payload, status = act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b",
+                          platform_operations=["admin"], **APPROVAL)
+    assert status == 400

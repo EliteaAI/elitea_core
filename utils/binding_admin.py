@@ -32,8 +32,9 @@ USAGE = (
 INT_KEYS = ("project_id", "application_id", "version_id")
 TEXT_KEYS = ("mode", "action", "approval_ref", "policy_revision", "platform_operations")
 # The actions that may set what the agent may do on the platform through the internal MCP (#7214): it is part of what
-# is approved, so it is set on a new binding or sent back to approval with ``rebind``
-OPERATIONS_ACTIONS = ("create", "rebind")
+# is approved, so it is set on a new binding or sent back to approval with ``rebind``; (#7228) an approval
+# (``activate``) may keep part of what was proposed, never more
+OPERATIONS_ACTIONS = ("create", "rebind", "activate")
 # The states each action walks through, by the state it starts from
 PATHS = {
     "submit": {"draft": ("provisioning", "pending_approval")},
@@ -109,9 +110,10 @@ def parse_binding_param(param):
 
 def parse_platform_operations(raw, action):
     """``(sorted list, None)`` or ``(None, readable error)`` for a ``platform_operations`` value (#7214): a comma list,
-    or a list, of ``read``/``build``/``credentials``/``run``, on a create or a rebind only. Empty means read only (as no list, §21)."""
+    or a list, of ``read``/``build``/``credentials``/``run``, on a create, a rebind or (#7228) an activation only. Empty
+    means read only (as no list, §21)."""
     if action not in OPERATIONS_ACTIONS:
-        return None, "platform_operations belongs to action=create or action=rebind only"
+        return None, "platform_operations belongs to action=create, action=rebind or action=activate only"
     items = raw.split(",") if isinstance(raw, str) else raw
     if not isinstance(items, (list, tuple)):
         return None, "invalid platform_operations"
@@ -136,7 +138,7 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch):
     if target == "active":   # what the row holds now: the approver's own text for an activation, the stored one for a resume
         event["approver_ref"] = binding.approval_ref
         event["policy_revision"] = binding.policy_revision
-    if values.get("platform_operations") is not None and target in ("draft", "pending_approval"):
+    if values.get("platform_operations") is not None and target in ("draft", "pending_approval", "active"):
         event["operation_id"] = "platform_operations:" + (",".join(values["platform_operations"]) or "none")
     return {key: value for key, value in event.items() if value is not None}
 
@@ -185,6 +187,11 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
     path = PATHS[action].get(binding.state)
     if path is None:
         raise BindingActionError("INVALID_STATE", f"cannot {action} a binding in state '{binding.state}'")
+    kept = values.get("platform_operations") if action == "activate" else None
+    if kept is not None:   # (#7228) an approval keeps part of the proposal, never more (no list proposed: read only)
+        proposed = set(binding.allowed_platform_operations or ["read"])
+        if not set(kept) <= proposed:
+            raise BindingActionError("INVALID_REQUEST", "an approval may only keep operations that were proposed")
     if values["dry_run"]:
         return {"dry_run": True, "action": action, "binding_ref": str(binding_id),
                 "from": binding.state, "to": list(path)}
@@ -212,7 +219,7 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
         tracing.security_audit_record(
             session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch))
         state = target
-    if action == "rebind" and values.get("platform_operations") is not None:
+    if action in ("rebind", "activate") and values.get("platform_operations") is not None:
         session.execute(update(AgentIdentityBinding).where(AgentIdentityBinding.id == binding_id)
                         .values(allowed_platform_operations=values["platform_operations"])
                         .execution_options(synchronize_session=False))

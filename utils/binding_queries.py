@@ -6,6 +6,7 @@ not found. Nothing here returns instruction text or toolkit settings.
 """
 from pylon.core.tools import log
 from sqlalchemy import func, select
+from sqlalchemy.orm import undefer
 from tools import auth, db
 
 from ..models.agent_identity import AgentIdentityBinding as Binding
@@ -73,6 +74,8 @@ def _row(binding, application_name, version_name, users):
         "policy_revision": binding.policy_revision,
         "approval_ref": binding.approval_ref,
         "revocation_epoch": binding.revocation_epoch,
+        # (#7228) what the agent may do on the platform through the internal MCP; null: read only
+        "platform_operations": binding.allowed_platform_operations,
         "created_by": users.get(binding.created_by),
         "state_changed_by": users.get(binding.state_changed_by),
         "created_at": _iso(binding.created_at),
@@ -88,6 +91,7 @@ def _select(project_id):
         .outerjoin(application, application.id == Binding.application_id)
         .outerjoin(version, version.id == Binding.version_id)
         .where(Binding.project_id == project_id)
+        .options(undefer(Binding.allowed_platform_operations))   # (#7228) shown on the row
     ), application
 
 

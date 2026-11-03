@@ -696,13 +696,17 @@ def test_governance_off_changes_nothing_and_mints_nothing(ns, env):
 
 # --- the binding's operations -------------------------------------------------------------------------------------
 
-def test_the_admin_task_sets_the_operations_at_create_and_rebind_only(ns, env):
+def test_the_admin_task_sets_the_operations_at_create_rebind_and_activate_only(ns, env):
     values, error = ns.binding_admin.parse_binding_param(
         "project_id=1;application_id=7;version_id=70;mode=elitea_native;action=create;platform_operations=build,read")
     assert error is None and values["platform_operations"] == ["read", "build"]
-    _, error = ns.binding_admin.parse_binding_param(
+    # (#7228) an approval may keep part of the proposal (the subset is checked at the transition)
+    values, error = ns.binding_admin.parse_binding_param(
         "project_id=1;application_id=7;version_id=70;mode=elitea_native;action=activate;platform_operations=read")
-    assert "create or action=rebind" in error
+    assert error is None and values["platform_operations"] == ["read"]
+    _, error = ns.binding_admin.parse_binding_param(
+        "project_id=1;application_id=7;version_id=70;mode=elitea_native;action=submit;platform_operations=read")
+    assert "action=create, action=rebind or action=activate only" in error
     _, error = ns.binding_admin.parse_binding_param(
         "project_id=1;application_id=7;version_id=70;mode=elitea_native;action=create;platform_operations=admin")
     assert error.startswith("invalid platform_operations")

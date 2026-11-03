@@ -30,3 +30,6 @@ class BindingActionRequest(BaseModel):
     # printable reference text, as long as the column
     approval_ref: Optional[StrictStr] = Field(default=None, pattern=REFERENCE_PATTERN)
     policy_revision: Optional[StrictStr] = Field(default=None, pattern=REFERENCE_PATTERN)
+    # (#7228) activate only: the operations the approver keeps of the proposal (a subset; the same parser as create)
+    platform_operations: Optional[list[Literal["read", "build", "credentials", "run"]]] = Field(
+        default=None, max_length=4)

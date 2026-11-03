@@ -205,6 +205,8 @@ SECRET_NAME = re.compile(r"(secret|token|passw|api_?key|private_?key|access_?key
 # Names that match ``SECRET_NAME`` and were reviewed as holding no secret (a model's token budget)
 REVIEWED_FIELD_NAMES = frozenset({"max_tokens"})
 MAX_REDACT_NODES = 50_000
+HEADER_MAP = re.compile(r"headers?$", re.IGNORECASE)   # a setting holding HTTP headers (headers, custom_headers…)
+MAX_SETTINGS_DEPTH = 6   # nested settings deeper than this are replaced (redaction) / count as material (writes)
 
 # The RBAC half of the scope: an operation is in scope only when the user holds one of these in the agent's project.
 # A coarse pre-filter: the endpoint's own decorator still decides every call. ``read`` needs no extra permission.
@@ -871,27 +873,59 @@ def _toolkit_secret_names(tool_type, project_id, user_id):
     return names, bool(schema)
 
 
+def _scrub(node, names, depth=0):
+    """``(copy, found)``: toolkit settings with every typed secret replaced by the validator marker, and whether there
+    was one. A typed secret is a plain value in a header map (any dict, or JSON-string dict, setting named like
+    ``…headers``: ``headers``, ``custom_headers``…), at a secret field of the toolkit's type (``names``, top level), or
+    at a key named like a secret (``SECRET_NAME``, not reviewed) at any depth of nested dicts and lists (bounded).
+    References (``{{secret.…}}``) and configuration selectors are kept. A header map that cannot be read counts."""
+    from .credential_slots import GOVERNED_VALUE  # pylint: disable=C0415
+    if depth > MAX_SETTINGS_DEPTH:
+        return GOVERNED_VALUE, True
+    if isinstance(node, list):
+        parts = [_scrub(item, set(), depth + 1) for item in node]
+        return [part for part, _ in parts], any(found for _, found in parts)
+    if not isinstance(node, dict):
+        return node, False
+    out, found = {}, False
+    for key, value in node.items():
+        name = str(key)
+        if HEADER_MAP.search(name) and isinstance(value, (dict, str)):
+            mapping = value
+            if isinstance(value, str):
+                try:
+                    mapping = json.loads(value) if value.strip() else {}
+                except ValueError:
+                    mapping = None
+            if not isinstance(mapping, dict):
+                out[key], found = (GOVERNED_VALUE, True) if isinstance(value, str) and value.strip() else (value, found)
+                continue
+            typed = {header: GOVERNED_VALUE if _plain_value(item) else item for header, item in mapping.items()}
+            if typed != mapping:
+                found = True
+                out[key] = typed if isinstance(value, dict) else json.dumps(typed)
+            else:
+                out[key] = value
+        elif isinstance(value, (dict, list)):
+            out[key], inner = _scrub(value, set(), depth + 1)
+            found = found or inner
+        elif _plain_value(value) and (name in names or (SECRET_NAME.search(name) and name not in REVIEWED_FIELD_NAMES)):
+            out[key], found = GOVERNED_VALUE, True
+        else:
+            out[key] = value
+    return out, found
+
+
 def toolkit_holds_secret(tool_type, settings, project_id, user_id) -> bool:
-    """Does a toolkit's ``settings`` carry a typed secret: a value at a secret field of its type, or in a header-like
-    map (``DICT_SECRET_FIELDS``)? References (``{{secret.…}}``) and configuration selectors (dicts) are not. A type with
-    no schema counts as carrying one when any setting holds a typed string."""
-    from .credential_slots import DICT_SECRET_FIELDS  # pylint: disable=C0415
+    """Does a toolkit's ``settings`` carry a typed secret (``_scrub``)? A type with no schema counts as carrying one when
+    any top-level setting holds a typed string."""
     if not isinstance(settings, dict) or not settings:
         return False
-    for name in DICT_SECRET_FIELDS:
-        found = settings.get(name)
-        if isinstance(found, str):
-            try:
-                found = json.loads(found) if found.strip() else {}
-            except ValueError:
-                return True
-        if isinstance(found, dict) and any(_plain_value(value) for value in found.values()):
-            return True
     names, known = _toolkit_secret_names(tool_type, project_id, user_id) if isinstance(tool_type, str) and tool_type \
         else (set(), False)
-    if not known:
-        return any(_plain_value(value) for value in settings.values())
-    return any(_plain_value(settings.get(name)) for name in names)
+    if not known and any(_plain_value(value) for value in settings.values()):
+        return True
+    return _scrub(settings, names)[1]
 
 
 def _pipeline_holds_secret(pipeline_settings) -> bool:
@@ -973,21 +1007,11 @@ def listed_for_run(method, path) -> bool:
 
 
 def _redact_settings(settings, tool_type, project_id, user_id) -> dict:
-    from .credential_slots import DICT_SECRET_FIELDS, GOVERNED_VALUE  # pylint: disable=C0415
     try:
         names = _toolkit_secret_names(tool_type, project_id, user_id)[0] if isinstance(tool_type, str) else set()
     except Exception:  # pylint: disable=W0703
         names = set()
-    cleaned = dict(settings)
-    for name, value in settings.items():
-        if name in DICT_SECRET_FIELDS:
-            if isinstance(value, dict):
-                cleaned[name] = {key: GOVERNED_VALUE if _plain_value(item) else item for key, item in value.items()}
-            elif isinstance(value, str) and value.strip():
-                cleaned[name] = GOVERNED_VALUE
-        elif _plain_value(value) and (name in names or (SECRET_NAME.search(name) and name not in REVIEWED_FIELD_NAMES)):
-            cleaned[name] = GOVERNED_VALUE
-    return cleaned
+    return _scrub(settings, names)[0]
 
 
 def redact_for_run(answer, project_id, user_id):
