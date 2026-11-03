@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))  # the shared harness lives beside this file
-from test_7011_schedule_crud_api import (  # noqa: F401 -- `harness` is a fixture
+from test_7011_schedule_crud_api import (
     NOT_FOUND,
     OTHER_ID,
     OWNER_ID,

@@ -38,9 +38,8 @@ def world(monkeypatch):
     return run
 
 
-# TC-US15-06 / R1.3
 @pytest.mark.parametrize(("trigger", "stored"), [("manual", "schedule_manual"), ("test", "schedule_test")])
-def test_7011_r1_3_manual_and_test_run_conversations_keep_their_own_execution_type(world, trigger, stored):
+def test_manual_and_test_run_conversations_keep_their_own_execution_type(world, trigger, stored):
     calls = world(trigger)
 
     assert calls.conversation[0]["trigger_type"] == stored

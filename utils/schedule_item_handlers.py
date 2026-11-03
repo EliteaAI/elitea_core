@@ -589,7 +589,7 @@ class ScheduleItemHandlers:
             if draft is not None and (active_id := active_run_id(session, draft.id)) is not None:
                 session.commit()
                 return refusal("run_active", "A test run of this schedule is active", 409, active_run_id=active_id)
-            try:   # the same owner request as Run now; built before the draft is written
+            try:   # built before the draft is written, so a failure leaves nothing stored
                 from .mandate_admission import owner_run_request  # pylint: disable=C0415
                 owner_request = owner_run_request(self.module, project_id=project_id, application_id=body.application_id,
                                                   version_id=body.version_id, schedule_id=draft and draft.id)
