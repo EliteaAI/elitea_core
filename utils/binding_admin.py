@@ -45,8 +45,10 @@ PATHS = {
         "active": ("retiring", "retired"), "suspended": ("retiring", "retired"), "retiring": ("retired",),
         "draft": ("retired",), "provisioning": ("retired",), "pending_approval": ("retired",),
     },
-    # back to approval for the definition as it is now: the digest is recomputed, the approval cleared, the epoch raised
-    "rebind": {"active": ("pending_approval",), "suspended": ("pending_approval",)},
+    # back to approval for the definition as it is now: the digest is recomputed, the approval cleared, the epoch raised;
+    # (#7228) a waiting binding stays waiting with the digest brought up to date (nothing raised: it was never in use)
+    "rebind": {"active": ("pending_approval",), "suspended": ("pending_approval",),
+               "pending_approval": ("pending_approval",)},
 }
 # Fixed readable text for the codes the lifecycle raises with a message that names an id
 FIXED_MESSAGES = {"VERSION_NOT_FOUND": "the version does not exist in this application"}
@@ -128,7 +130,9 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch):
     """The ``lifecycle`` audit event of one state change, with only the fields the event schema has today. The rebind
     event therefore does not carry the definition digests (new and previous); a ``definition_digest`` and
     ``previous_digest`` pair is to be added to the tracing event model as a follow-up (#7105)."""
-    reason = "BINDING_REBIND_PENDING_APPROVAL" if values["action"] == "rebind" else f"BINDING_{target.upper()}"
+    reason = ("BINDING_REBIND_PENDING_APPROVAL" if values["action"] == "rebind" else
+              "BINDING_REVIVED" if values["action"] == "create" and binding.state == "retired" else
+              f"BINDING_{target.upper()}")
     event = {
         "event_type": "lifecycle", "reason_code": reason, "outcome": "success",
         "project_id": values["project_id"], "application_id": values["application_id"],
@@ -144,11 +148,14 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch):
 
 
 def _create(session, tracing, values, actor_user_id):
-    if session.execute(_find(values)).scalar_one_or_none() is not None:
+    existing = session.execute(_find(values)).scalar_one_or_none()
+    if existing is not None and existing.state != "retired":
         raise BindingActionError("BINDING_EXISTS", "binding already exists; use another action")
     digest = digest_for_version(session, values["version_id"])
     if values["dry_run"]:
         return {"dry_run": True, "action": "create", "state": "draft", "definition_digest": digest}
+    if existing is not None:
+        return _revive(session, tracing, values, existing, digest, actor_user_id)
     binding = AgentIdentityBinding(
         project_id=values["project_id"], application_id=values["application_id"],
         version_id=values["version_id"], identity_mode=values["mode"],
@@ -161,6 +168,25 @@ def _create(session, tracing, values, actor_user_id):
     tracing.security_audit_record(session, _lifecycle_event(values, binding, "draft", actor_user_id, 0))
     session.commit()
     return {"action": "create", "binding_ref": binding_ref, "state": "draft",
+            "definition_digest": digest, "dry_run": False}
+
+
+def _revive(session, tracing, values, binding, digest, actor_user_id):  # pylint: disable=R0913
+    """(#7228) A create of a version whose binding was retired takes the same row back to ``draft`` (one row per
+    version and mode, so its audit trail stays one chain): the definition as it is now, no approval, the operations
+    of this request, the requester as its creator. Its epoch stays raised. Audit ``BINDING_REVIVED``."""
+    binding_id = binding.id
+    event = _lifecycle_event(values, binding, "draft", actor_user_id, binding.revocation_epoch)  # reads "retired"
+    if not transition_binding(session, binding_id, "retired", "draft", actor_user_id=actor_user_id,
+                              current_digest=digest):
+        session.rollback()
+        raise BindingActionError("CONCURRENT_CHANGE", "the binding changed while this ran; read it again and retry")
+    session.execute(update(AgentIdentityBinding).where(AgentIdentityBinding.id == binding_id)
+                    .values(allowed_platform_operations=values.get("platform_operations"))
+                    .execution_options(synchronize_session=False))
+    tracing.security_audit_record(session, event)
+    session.commit()
+    return {"action": "create", "binding_ref": str(binding_id), "state": "draft",
             "definition_digest": digest, "dry_run": False}
 
 

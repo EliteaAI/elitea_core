@@ -320,6 +320,22 @@ def test_create_twice_is_a_conflict(ns, env):
     assert (status, payload["code"]) == (409, "BINDING_EXISTS") and len(rows(env, ns)) == 1
 
 
+def test_a_create_after_retirement_requests_the_same_row_again(ns, env):
+    """(#7228) one row per version and mode: a retired binding is requested again as a draft (same id, audited)."""
+    binding_id = reach(ns, env, "retired")
+    payload, status = create(ns)
+    assert status == 200 and len(rows(env, ns)) == 1
+    assert (str(binding(env, ns).id), binding(env, ns).state) == (binding_id, "draft")
+    assert env.recorded[-1][1]["reason_code"] == "BINDING_REVIVED"
+
+
+def test_a_waiting_binding_for_an_older_definition_is_brought_up_to_date_by_a_rebind(ns, env):
+    binding_id = str(env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64))
+    payload, status = act(ns, binding_id, "rebind", "pending_approval")
+    assert (status, payload["state"]) == (200, "pending_approval")
+    assert (binding(env, ns).definition_digest, binding(env, ns).revocation_epoch) == (DIGEST, 0)
+
+
 def test_create_for_a_version_that_is_not_in_the_application_or_project_is_not_found(ns, env):
     seed_agent(env, 2, 8, "Other", 80)
     for body in ({"application_id": 8, "version_id": 70}, {"application_id": 7, "version_id": 80},
@@ -347,7 +363,7 @@ ACTION_RESULT = {   # action -> {state it applies to: state it ends in}
     "resume": {"suspended": "active"},
     "retire": {"draft": "retired", "provisioning": "retired", "pending_approval": "retired", "active": "retired",
                "suspended": "retired", "retiring": "retired"},
-    "rebind": {"active": "pending_approval", "suspended": "pending_approval"},
+    "rebind": {"active": "pending_approval", "suspended": "pending_approval", "pending_approval": "pending_approval"},
 }
 
 

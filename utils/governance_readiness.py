@@ -105,7 +105,7 @@ def _permissions(user_id, project_id):
 
 def _binding_of(session, project_id, application_id, version_id, current_digest):
     """The version's binding as admission sees it: ``(row, state)``, ``state`` one of missing, draft, provisioning,
-    pending_approval, active, suspended, changed (active but approved for another definition). A suspended binding stays
+    pending_approval, active, suspended, changed (active or waiting, for another definition). A suspended binding stays
     ``suspended`` whatever its definition: a member's rebind never lifts a suspension (an operator resumes it)."""
     rows = session.execute(
         select(AgentIdentityBinding.id, AgentIdentityBinding.state, AgentIdentityBinding.definition_digest,
@@ -119,7 +119,9 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
     for wanted in ("active", "suspended", "pending_approval", "provisioning", "draft"):
         for row in rows:
             if row.state == wanted:
-                changed = wanted == "active" and row.definition_digest != current_digest
+                # (#7228) a waiting binding for another definition is changed too: its approval would be refused
+                # (BINDING_DIGEST_MISMATCH), so it is brought up to date (a rebind in place) before anyone approves it
+                changed = wanted in ("active", "pending_approval") and row.definition_digest != current_digest
                 return row, "changed" if changed else wanted
     return None, "missing"
 
@@ -299,7 +301,8 @@ def _version_items(result, module, session, project_id, version, user_id, subjec
         result.add("binding", "binding", title, state, ref=None if binding is None else str(binding.id),
                    requestable=binding_requestable, operations=proposal if binding is None else held,
                    application_id=version.application_id, version_id=version.id,
-                   binding_id=None if binding is None else str(binding.id), action={
+                   binding_id=None if binding is None else str(binding.id),
+                   binding_state=None if binding is None else binding.state, action={
                        "missing": "create", "changed": "rebind", "draft": "submit"}.get(state),
                    platform_operations=proposal)
     tools = {str(tool.id): tool.name or tool.type for _, tool in rows}

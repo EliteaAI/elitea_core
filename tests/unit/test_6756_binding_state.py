@@ -19,9 +19,12 @@ ALLOWED = {
     ("active", "retiring"), ("suspended", "retiring"), ("retiring", "retired"),
     ("draft", "retired"), ("provisioning", "retired"), ("pending_approval", "retired"),
     ("active", "pending_approval"), ("suspended", "pending_approval"),   # rebind (#7105)
+    ("pending_approval", "pending_approval"), ("retired", "draft"),     # bring up to date, request again (#7228)
 }
 ENTERING_REVOKED = {"suspended", "retiring", "retired"}
 REBINDS = {("active", "pending_approval"), ("suspended", "pending_approval")}
+# (#7228) bringing a waiting binding up to date and requesting a retired one again clear the approval too (no epoch)
+CLEARS = REBINDS | {("pending_approval", "pending_approval"), ("retired", "draft")}
 DIGEST = "adv1:" + "a" * 64
 GOOD = dict(actor_user_id=7, approval_ref="appr-1", policy_revision="rev-3", current_digest=DIGEST)
 
@@ -81,8 +84,18 @@ def test_the_table_is_exactly_the_designed_one(state):
     assert set(state.BUMPS_EPOCH) == ENTERING_REVOKED
 
 
-def test_nothing_leaves_retired(state):
-    assert not [pair for pair in state.TRANSITIONS if pair[0] == "retired"]
+def test_only_a_new_request_leaves_retired_and_only_to_draft(state):
+    """(#7228) a retired binding is requested again on the same row, back to draft: never straight back into use."""
+    assert [pair for pair in state.TRANSITIONS if pair[0] == "retired"] == [("retired", "draft")]
+
+
+@pytest.mark.parametrize("expected,target", [("pending_approval", "pending_approval"), ("retired", "draft")])
+def test_bringing_up_to_date_and_requesting_again_need_the_digest_clear_the_approval_and_raise_nothing(
+        state, expected, target):
+    with pytest.raises(state.InvalidTransition) as err:
+        state.transition_binding(FakeSession(), "b1", expected, target, actor_user_id=7)
+    assert err.value.reason_code == "DIGEST_REQUIRED"
+    assert not state.bumps_epoch(expected, target)   # never in use since (retired already raised it)
 
 
 @pytest.mark.parametrize("expected,target", list(itertools.product(STATES, STATES)))
@@ -312,7 +325,7 @@ def test_no_other_change_writes_the_approval_columns_even_when_it_is_handed_some
     session = FakeSession()
     state.transition_binding(session, "b1", expected, target, **{**GOOD, "approval_ref": "EVIL", "policy_revision": "EVIL"})
     sql, params = compiled(session.updates[0])
-    if (expected, target) in REBINDS:   # a rebind clears them
+    if (expected, target) in CLEARS:   # a rebind clears them
         assert params["approval_ref"] is None and params["policy_revision"] is None
     else:
         assert "approval_ref" not in sql and "policy_revision" not in sql

@@ -87,10 +87,13 @@ def _file_binding(module, session, tracing, project_id, plan, actor):
             create["platform_operations"] = list(plan["platform_operations"])
         binding_id = create_binding(session, tracing, create, actor)["binding_ref"]
     action = "rebind" if plan["action"] == "rebind" else "submit"
-    # a member rebinds an active binding only (never a suspended one) and submits a draft only: anything else since
-    # readiness is CONCURRENT_CHANGE, nothing written
+    # a member rebinds an active or a waiting binding (never a suspended one) and submits a draft only: anything else
+    # since readiness is CONCURRENT_CHANGE, nothing written
+    expected = "draft"
+    if action == "rebind":
+        expected = plan.get("binding_state") if plan.get("binding_state") in ("active", "pending_approval") else "active"
     change_binding(module, session, tracing, {**values, "action": action, "binding_id": uuid.UUID(str(binding_id)),
-                                              "expected_state": "active" if action == "rebind" else "draft"}, actor)
+                                              "expected_state": expected}, actor)
     return str(binding_id)
 
 

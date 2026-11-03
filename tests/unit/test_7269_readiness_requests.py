@@ -365,6 +365,59 @@ def test_a_changed_agent_is_rebound_by_its_editor(ns, env):
     assert (row.id, row.state, row.definition_digest, row.approval_ref) == (binding, "pending_approval", DIGEST, None)
 
 
+def approve(ns, binding_id, actor=OTHER):
+    values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native",
+              "binding_id": binding_id, "action": "activate", "approval_ref": "A", "policy_revision": "B",
+              "dry_run": False}
+    return ns.binding_admin.run_binding_action(module(ns), values, actor)
+
+
+def test_a_waiting_identity_for_an_older_definition_is_changed_and_brought_up_to_date_in_place(ns, env):
+    """(#7228) The binding a run filed waits for approval; then a toolkit was attached, so its digest is old. The card
+    says it changed (never merely "waits for approval"), and the request brings it up to date on the same row, still
+    waiting, nothing raised; the approver then approves the definition as it is."""
+    binding = env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64)
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        approve(ns, binding)
+    assert refused.value.code == "BINDING_DIGEST_MISMATCH"
+    found = items(ns, env)["binding"]
+    assert (found["state"], found["requestable"]) == ("changed", True)
+    assert [item["kind"] for item in file(ns, env, keys=["binding"])] == ["binding"]
+    [row] = bindings(env, ns)
+    assert (row.id, row.state, row.definition_digest, row.revocation_epoch) == (binding, "pending_approval", DIGEST, 0)
+    after = items(ns, env)["binding"]   # up to date: it only waits now, and is not requested again
+    assert (after["state"], after["requestable"]) == ("pending_approval", False)
+    assert approve(ns, binding)["state"] == "active"
+
+
+def test_attaching_a_toolkit_to_a_waiting_identity_brings_it_up_to_date(ns, env):
+    binding = env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64)
+    tool_id = credential(env, binding, reference=True).tool_id
+    claims = {"uid": MEMBER, "run": "run-83"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {"ok": True},
+                                                 {"project_id": "1", "tool_id": str(tool_id)})
+    [version] = result["versions"]
+    assert "binding" in [item["kind"] for item in version["filed"]]
+    [row] = bindings(env, ns)
+    assert (row.state, row.definition_digest) == ("pending_approval", DIGEST)
+    assert approve(ns, binding)["state"] == "active"
+
+
+def test_a_retired_identity_is_requested_again_on_its_row_and_approved(ns, env):
+    binding = env.add_binding(1, 7, 70, state="retired", digest="adv1:" + "9" * 64, epoch=2)
+    credential(env, binding)
+    assert (items(ns, env)["binding"]["state"], items(ns, env)["binding"]["requestable"]) == ("missing", True)
+    assert [item["kind"] for item in file(ns, env, keys=["binding"])] == ["binding"]
+    [row] = bindings(env, ns)   # the same row: one audit chain per version
+    assert (row.id, row.state, row.definition_digest, row.created_by, row.revocation_epoch) == (
+        binding, "pending_approval", DIGEST, MEMBER, 2)
+    assert "BINDING_REVIVED" in [event["reason_code"] for _, event in env.recorded]
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        approve(ns, binding, actor=MEMBER)
+    assert refused.value.code == "SELF_APPROVAL"
+    assert approve(ns, binding)["state"] == "active"
+
+
 def test_off_refuses_the_batch(ns, env):
     credential(env)
     with pytest.raises(ns.governance_requests.RequestRefused) as refused:

@@ -469,7 +469,7 @@ def test_rebind_works_from_suspended_and_raises_the_epoch_once_more(ns, env):
     assert reasons(env)[-2:] == ["BINDING_SUSPENDED", "BINDING_REBIND_PENDING_APPROVAL"]
 
 
-@pytest.mark.parametrize("state", ["draft", "pending_approval", "retired"])
+@pytest.mark.parametrize("state", ["draft", "retired"])
 def test_rebind_is_refused_where_there_is_nothing_live_to_rebind(ns, env, state):
     run(ns, env, f"{ONE};action=create")
     if state != "draft":
@@ -479,6 +479,49 @@ def test_rebind_is_refused_where_there_is_nothing_live_to_rebind(ns, env, state)
     before = (binding(env, ns).state, binding(env, ns).definition_digest, len(env.recorded))
     assert run(ns, env, f"{ONE};action=rebind") == {"error": f"cannot rebind a binding in state '{state}'"}
     assert (binding(env, ns).state, binding(env, ns).definition_digest, len(env.recorded)) == before
+
+
+# --- (#7228) a waiting binding for an older definition, and a retired one requested again --------------
+
+def test_a_waiting_binding_is_brought_up_to_date_in_place_and_then_approved(ns, env):
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST   # a toolkit was attached while it waited
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["error"].startswith(
+        "BINDING_DIGEST_MISMATCH")
+    assert run(ns, env, f"{ONE};action=rebind", actor=9)["state"] == "pending_approval"
+    row = binding(env, ns)
+    assert (row.state, row.definition_digest, row.revocation_epoch, row.approval_ref) == (
+        "pending_approval", NEW_DIGEST, 0, None)   # nothing raised: it was never in use
+    assert reasons(env)[-1] == "BINDING_REBIND_PENDING_APPROVAL"
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_retired_binding_is_requested_again_on_the_same_row_and_approved(ns, env):
+    activate(ns, env)
+    first = binding(env, ns).id
+    run(ns, env, f"{ONE};action=retire")
+    epoch = binding(env, ns).revocation_epoch
+    env.digests[70] = NEW_DIGEST
+    result = run(ns, env, f"{ONE};action=create;platform_operations=read", actor=9)
+    assert (result["binding_ref"], result["state"], result["definition_digest"]) == (str(first), "draft", NEW_DIGEST)
+    row = binding(env, ns)   # still one row per version and mode: one audit chain
+    assert (row.state, row.created_by, row.approval_ref, row.policy_revision, row.revocation_epoch) == (
+        "draft", 9, None, None, epoch)   # its epoch stays raised: nothing admitted before is accepted again
+    assert reasons(env)[-1] == "BINDING_REVIVED"
+    assert run(ns, env, f"{ONE};action=create") == {"error": "binding already exists; use another action"}
+    run(ns, env, f"{ONE};action=submit", actor=9)
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_dry_run_create_after_retirement_writes_nothing(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=retire")
+    before = (binding(env, ns).state, len(env.recorded))
+    assert run(ns, env, f"{ONE};action=create;dry_run")["dry_run"] is True
+    assert (binding(env, ns).state, len(env.recorded)) == before
 
 
 def test_rebind_dry_run_reports_the_plan_and_writes_nothing(ns, env):

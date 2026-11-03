@@ -16,6 +16,9 @@ TRANSITIONS = frozenset({
     ("draft", "retired"), ("provisioning", "retired"), ("pending_approval", "retired"),
     # rebind (#7105): a live binding is approved again for the definition as it is now
     ("active", "pending_approval"), ("suspended", "pending_approval"),
+    # (#7228) a waiting binding is brought up to date with the definition as it is now (the approver always approves
+    # the current one), and a retired binding is requested again: the same row, back to draft
+    ("pending_approval", "pending_approval"), ("retired", "draft"),
 })
 BUMPS_EPOCH = frozenset({"suspended", "retiring", "retired"})
 REBIND_FROM = frozenset({"active", "suspended"})
@@ -23,6 +26,17 @@ REBIND_FROM = frozenset({"active", "suspended"})
 
 def is_rebind(expected: str, target: str) -> bool:
     return target == "pending_approval" and expected in REBIND_FROM
+
+
+def is_redigest(expected: str, target: str) -> bool:
+    """(#7228) a waiting binding takes the definition as it is now; it was never in use, so no epoch is raised."""
+    return expected == target == "pending_approval"
+
+
+def is_revival(expected: str, target: str) -> bool:
+    """(#7228) a retired binding requested again: back to draft for the definition as it is now. Its epoch stays
+    raised, so nothing admitted before the retirement is accepted again."""
+    return expected == "retired" and target == "draft"
 
 
 def bumps_epoch(expected: str, target: str) -> bool:
@@ -55,7 +69,7 @@ def transition_binding(  # pylint: disable=R0913
     """
     if (expected, target) not in TRANSITIONS:
         raise InvalidTransition("INVALID_TRANSITION", f"{expected} -> {target} is not a legal binding change")
-    rebind = is_rebind(expected, target)
+    rebind = is_rebind(expected, target) or is_redigest(expected, target) or is_revival(expected, target)
     approving = expected == "pending_approval" and target == "active"
     if rebind and not current_digest:
         raise InvalidTransition("DIGEST_REQUIRED", "a rebind needs the current definition digest")
@@ -89,6 +103,8 @@ def transition_binding(  # pylint: disable=R0913
         values["policy_revision"] = policy_revision
     if rebind:   # approved again from scratch, for the definition as it is now
         values.update(definition_digest=current_digest, approval_ref=None, policy_revision=None)
+    if is_revival(expected, target):   # who requests it again is its creator (four eyes: another operator approves)
+        values["created_by"] = actor_user_id or None
     if bumps_epoch(expected, target):
         values["revocation_epoch"] = AgentIdentityBinding.revocation_epoch + 1
     result = session.execute(
