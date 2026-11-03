@@ -32,6 +32,7 @@ from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
 from ..models.pd.tool import ToolValidatedDetails
+from ..models.pd.skill_file import describe_runtime_files
 from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
 from .trigger_write_rule import sanitize_trigger_for_write
@@ -134,19 +135,25 @@ def apply_selected_tools_intersection(tools, tool_mappings):
             settings['selected_tools'] = tool_selected_from_mapping
 
 
-def build_skill_mappings_list(skill_mappings) -> list:
-    return [
-        {
+def build_skill_mappings_list(skill_mappings, skill_project_id=None) -> list:
+    entries = []
+    for mapping in skill_mappings:
+        version = mapping.skill_version
+        entry = {
             'skill_id': mapping.skill_id,
             'skill_version_id': mapping.skill_version_id,
             'name': mapping.skill.name if mapping.skill else None,
             'description': mapping.skill.description if mapping.skill else None,
-            'version_name': mapping.skill_version.name if mapping.skill_version else None,
-            'icon_meta': (mapping.skill_version.meta or {}).get('icon_meta') if mapping.skill_version else None,
-            'instructions': mapping.skill_version.instructions if mapping.skill_version else None,
+            'version_name': version.name if version else None,
+            'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
+            'instructions': version.instructions if version else None,
         }
-        for mapping in skill_mappings
-    ]
+        if skill_project_id is not None:
+            entry['skill_project_id'] = skill_project_id
+        if version and version.files:
+            entry['files'] = describe_runtime_files(version.files)
+        entries.append(entry)
+    return entries
 
 
 class ApplicationVersionNonFoundError(Exception):

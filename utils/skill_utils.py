@@ -1892,7 +1892,7 @@ def consume_invoked_skills(
             seen.add(key)
             continue
         seen.add(key)
-        invoked.append({
+        entry = {
             'skill_id': skill.get('skill_id'),
             'skill_version_id': skill.get('skill_version_id'),
             'skill_project_id': skill.get('skill_project_id'),
@@ -1900,7 +1900,10 @@ def consume_invoked_skills(
             'version_name': skill.get('version_name'),
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
-        })
+        }
+        if skill.get('files'):
+            entry['files'] = skill['files']
+        invoked.append(entry)
 
     return cleaned_text, invoked
 
@@ -1993,7 +1996,7 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             continue
         # A flag, not text appended to the description: the SDK shortens long
         # descriptions to fit the registry budget, and the hint must survive that.
-        disclosable.append({
+        entry = {
             'skill_id': s.get('skill_id'),
             'skill_version_id': s.get('skill_version_id'),
             'name': s.get('name'),
@@ -2001,7 +2004,12 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             'instruction_referenced': s.get('skill_id') in referenced_ids,
             'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
-        })
+        }
+        if s.get('skill_project_id') is not None:
+            entry['skill_project_id'] = s['skill_project_id']
+        if s.get('files'):
+            entry['files'] = s['files']
+        disclosable.append(entry)
     return disclosable
 
 

@@ -59,6 +59,7 @@ class FakeVersion:
         self.created_at = datetime.datetime(2026, 1, created_at)
         self.meta = meta or {}
         self.run_settings = run_settings
+        self.files = []
 
 
 class FakeSkill:
@@ -186,6 +187,7 @@ def env(isolated_sys_modules):
     _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
           build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)
     _stub('utils.support_utils', get_support_config=lambda: {'enabled': False, 'project_id': None})
+    _stub('utils.skill_files', list_runtime_manifests=lambda session, version_ids: {})
     _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None, name=Column(),
                                                       description=Column(), meta=Column()),
           SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column(), name=Column(), meta=Column(),
@@ -198,7 +200,7 @@ def env(isolated_sys_modules):
     ), Participant=types.SimpleNamespace(id=Column(), entity_name=Column()))
 
     _load('models/enums/all.py', f'{PACKAGE}.models.enums.all')
-    for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant'):
+    for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant', 'skill_file'):
         _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
                  'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override',

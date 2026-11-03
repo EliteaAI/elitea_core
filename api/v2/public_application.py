@@ -75,7 +75,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if serve_runtime_skills:
                 version_details = result_dict['version_details']
                 version_details['skills'] = build_skill_mappings_list(
-                    application_version.skill_mappings
+                    application_version.skill_mappings, skill_project_id=project_id,
                 )
                 apply_runtime_skills(version_details)
 

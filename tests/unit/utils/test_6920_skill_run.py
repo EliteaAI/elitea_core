@@ -54,6 +54,7 @@ class FakeVersion:
         self.instructions = instructions
         self.created_at = datetime.datetime(2026, 1, created_at)
         self.meta = meta or {}
+        self.files = []
         if run_settings is not None:
             self.run_settings = run_settings
 
@@ -173,7 +174,7 @@ def env(isolated_sys_modules):
     sys.modules[models_skill.__name__] = models_skill
 
     _load('models/enums/all.py', f'{PACKAGE}.models.enums.all')
-    for name in ('skill_predict', 'llm', 'skill_run_settings'):
+    for name in ('skill_predict', 'llm', 'skill_run_settings', 'skill_file'):
         _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
                  'skill_run_settings'):

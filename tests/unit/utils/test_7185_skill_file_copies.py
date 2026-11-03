@@ -632,6 +632,31 @@ class TestExportEndpoint:
                                       "'assets/logo.png' could not be read; try again later"}, 503)
 
 
+class TestRuntimeManifests:
+    def test_the_registry_entry_announces_files_without_hash_or_bytes(self, env):
+        version_details = {'skills': [
+            {'skill_id': 3, 'skill_version_id': 10, 'name': 'forms', 'instructions': 'Body.',
+             'files': [{'path': 'a.md', 'size': 1, 'content_type': 'text/markdown', 'is_text': True}]},
+            {'skill_id': 4, 'skill_version_id': 11, 'name': 'plain', 'instructions': 'Body.'},
+        ]}
+
+        registry = env.utils.resolve_runtime_skills(version_details)
+
+        assert registry[0]['files'] == [{'path': 'a.md', 'size': 1, 'content_type': 'text/markdown', 'is_text': True}]
+        assert 'files' not in registry[1]
+
+    def test_manifests_for_many_versions_come_from_one_query_and_skip_file_less_versions(self, env):
+        session = _seed(env)
+        _seed(env, version_id=11, files=())
+
+        manifests = env.files.list_runtime_manifests(session, [10, 11])
+
+        assert manifests == {10: [
+            {'path': 'assets/logo.png', 'size': 5, 'content_type': 'image/png', 'is_text': False},
+            {'path': 'references/guide.md', 'size': 7, 'content_type': 'text/markdown', 'is_text': True},
+        ]}
+
+
 @pytest.fixture
 def agent_publish(env, monkeypatch):
     return load(monkeypatch, 'utils/publish_utils.py', f'{PKG}.utils.publish_utils')
@@ -687,3 +712,88 @@ class TestAgentPublishTwin:
 
         assert agent_publish.publish_attached_skills(SOURCE, PUBLIC, 20, 10, 1) is None
         assert resolved[0]['file_hashes'] == [['a.md', 'x' * 64]]
+
+
+@pytest.fixture
+def application_utils(env, monkeypatch):
+    env.tools.store_secrets = None
+    return load(monkeypatch, 'utils/application_utils.py', f'{PKG}.utils.application_utils')
+
+
+class TestAgentVersionSkillList:
+    def _mapping(self, files):
+        version = types.SimpleNamespace(name='base', meta={}, instructions='Body.', files=files)
+        return types.SimpleNamespace(skill_id=3, skill_version_id=10, skill=types.SimpleNamespace(
+            name='forms', description='Fill forms.'), skill_version=version)
+
+    def test_an_attached_skill_with_files_lists_them_without_hash(self, application_utils):
+        version_file = types.SimpleNamespace(path='a.md', size=1, sha256='x' * 64, content_type='text/markdown',
+                                             is_text=True)
+
+        [entry] = application_utils.build_skill_mappings_list([self._mapping([version_file])])
+
+        assert entry['files'] == [{'path': 'a.md', 'size': 1, 'content_type': 'text/markdown', 'is_text': True}]
+
+    def test_an_attached_skill_without_files_is_listed_as_before(self, application_utils):
+        [entry] = application_utils.build_skill_mappings_list([self._mapping([])])
+
+        assert entry == {'skill_id': 3, 'skill_version_id': 10, 'name': 'forms', 'description': 'Fill forms.',
+                         'version_name': 'base', 'icon_meta': None, 'instructions': 'Body.'}
+
+    def test_a_public_agents_attached_skills_name_the_public_project(self, application_utils):
+        [entry] = application_utils.build_skill_mappings_list([self._mapping([])], skill_project_id=PUBLIC)
+
+        assert entry['skill_project_id'] == PUBLIC
+
+
+@pytest.fixture
+def public_application(env, application_utils, monkeypatch):
+    env.tools.api_tools = types.SimpleNamespace(APIModeHandler=object, APIBase=object,
+                                                endpoint_metrics=lambda handler: handler, with_modes=lambda urls: urls)
+    env.tools.auth.decorators = types.SimpleNamespace(check_api=lambda spec: lambda handler: handler)
+    env.tools.config.ADMINISTRATION_MODE = 'administration'
+    sys.modules[f'{PKG}.utils.utils'].add_public_project_id = lambda handler: handler
+    monkeypatch.setitem(sys.modules, 'flask', types.SimpleNamespace(request=None))
+    module = load(monkeypatch, 'api/v2/public_application.py', f'{PKG}.api.v2.public_application')
+    monkeypatch.setattr(module, 'build_skill_mappings_list', application_utils.build_skill_mappings_list)
+    monkeypatch.setattr(module, 'apply_runtime_skills', env.utils.apply_runtime_skills)
+    monkeypatch.setattr(module, 'request', types.SimpleNamespace(args={'runtime': 'true'}))
+    monkeypatch.setattr(module, 'joinedload', mock.MagicMock())
+    monkeypatch.setattr(module, 'selectinload', mock.MagicMock())
+    return module
+
+
+class TestPublicAgentRuntimeSkills:
+    def _serve(self, public_application, monkeypatch, files):
+        version = types.SimpleNamespace(name='base', meta={}, instructions='Body.', files=files)
+        mapping = types.SimpleNamespace(skill_id=3, skill_version_id=10, skill=types.SimpleNamespace(
+            name='forms', description='Fill forms.'), skill_version=version)
+        application_version = types.SimpleNamespace(application=None, skill_mappings=[mapping])
+        query = mock.MagicMock()
+        query.filter.return_value.options.return_value.order_by.return_value.first.return_value = application_version
+
+        @contextlib.contextmanager
+        def with_project_schema_session(project_id):
+            yield types.SimpleNamespace(query=lambda model: query)
+
+        result = types.SimpleNamespace(
+            get_likes=lambda project_id: None, check_is_liked=lambda project_id: None,
+            model_dump=lambda mode=None: {'version_details': {'instructions': 'Help.', 'agent_type': 'react'}},
+        )
+        monkeypatch.setattr(public_application, 'db', types.SimpleNamespace(
+            with_project_schema_session=with_project_schema_session))
+        monkeypatch.setattr(public_application, 'PublishedApplicationDetailModel',
+                            types.SimpleNamespace(from_orm=lambda application: result))
+        monkeypatch.setattr(public_application, 'ApplicationVersionDetailModel',
+                            types.SimpleNamespace(from_orm=lambda version: types.SimpleNamespace(tools=[])))
+        payload, status = public_application.PromptLibAPI().get(PUBLIC, 5)
+        assert status == 200
+        return payload['version_details']['attached_skills']
+
+    def test_a_skill_with_files_is_read_from_the_public_project(self, public_application, monkeypatch):
+        version_file = types.SimpleNamespace(path='a.md', size=1, sha256='x' * 64, content_type='text/markdown',
+                                             is_text=True)
+
+        [entry] = self._serve(public_application, monkeypatch, [version_file])
+
+        assert entry['skill_project_id'] == PUBLIC and [f['path'] for f in entry['files']] == ['a.md']
