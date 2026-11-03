@@ -322,7 +322,26 @@ def _action_rows(ns, env):
     until = datetime.now(timezone.utc) + timedelta(days=20)
     rows["m_pending"] = str(mandate_env.add_mandate(env, ns, state="pending_approval", binding_ref=binding,
                                                     created_by=PLATFORM, valid_until=until))
+    # (S-8) an active mandate to suspend, and one suspended by admin_a (a project admin) to resume
+    rows["m_active"] = str(mandate_env.add_mandate(env, ns, version=81, state="active", binding_ref=uuid.UUID(rows[81]),
+                                                   created_by=PLATFORM, valid_until=until))
+    env.add_version(1, 84, 7, "v84")
+    env.digests[84] = DIGEST
+    suspended_binding = env.add_binding(1, 7, 84, state="active", digest=DIGEST)
+    rows["m_suspended"] = _suspended_mandate(ns, env, ADMIN_A, version=84, binding=suspended_binding, until=until)
     return rows
+
+
+def _suspended_mandate(ns, env, suspended_by, *, version=70, binding=None, until=None):
+    until = until or datetime.now(timezone.utc) + timedelta(days=20)
+    mandate_id = mandate_env.add_mandate(env, ns, version=version, state="suspended", created_by=PLATFORM,
+                                         binding_ref=binding or env.add_binding(1, 7, version, state="active",
+                                                                                digest=DIGEST),
+                                         valid_until=until, suspended_reason="MANUAL")
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.get(ns.Mandate, mandate_id).state_changed_by = suspended_by
+        session.commit()
+    return str(mandate_id)
 
 
 ACTION_CALLS = {  # (S-7 a) every project-mode lifecycle action
@@ -335,6 +354,8 @@ ACTION_CALLS = {  # (S-7 a) every project-mode lifecycle action
                                                              **APPROVAL),
     "mandate_reject": lambda ns, env, actor, r: mandate_act(ns, env, r["m_pending"], "reject", actor=actor),
     "mandate_revoke": lambda ns, env, actor, r: mandate_act(ns, env, r["m_pending"], "revoke", actor=actor),
+    "mandate_suspend": lambda ns, env, actor, r: mandate_act(ns, env, r["m_active"], "suspend", actor=actor),
+    "mandate_resume": lambda ns, env, actor, r: mandate_act(ns, env, r["m_suspended"], "resume", actor=actor),
 }
 
 
@@ -396,6 +417,39 @@ def test_the_resume_rule_reads_the_membership_and_fails_closed(ns, env):
     payload, status = act(ns, env, binding_id, "resume", "suspended", actor="admin_b")
     assert (status, payload["code"]) == (503, "DEPENDENCY_UNAVAILABLE")
     assert [row.state for row in bindings(env, ns)] == ["suspended"]
+
+
+def _mandates(env, ns):
+    return sorted((str(row.id), row.state) for row in env.query(1, ns.Mandate))
+
+
+def test_a_project_admin_cannot_resume_a_mandate_a_platform_operator_suspended(ns, env):
+    """(S-8, D-3) Who suspended counts, not only who owns it: admin_b is neither the owner nor the creator."""
+    mandate_id = _suspended_mandate(ns, env, PLATFORM)
+    before = (_mandates(env, ns), len(env.recorded))
+    payload, status = mandate_act(ns, env, mandate_id, "resume", actor="admin_b")
+    assert (status, payload["code"]) == (403, "RESUME_NEEDS_OPERATOR"), payload
+    assert (_mandates(env, ns), len(env.recorded)) == before
+    payload, status = mandate_act(ns, env, mandate_id, "resume", actor="platform_admin", mode=ADMINISTRATION)
+    assert (status, payload["state"]) == (200, "active"), payload
+
+
+def test_a_project_admin_resumes_a_mandate_another_admin_of_the_project_suspended(ns, env):
+    env.add_binding(1, 7, 70, state="active", digest=DIGEST)
+    mandate_id = create_mandate(ns, env, actor="admin_a")[0]["id"]
+    assert mandate_act(ns, env, mandate_id, "submit", actor="admin_a")[1] == 200
+    assert mandate_act(ns, env, mandate_id, "approve", actor="admin_b", **APPROVAL)[1] == 200
+    assert mandate_act(ns, env, mandate_id, "suspend", actor="admin_a")[1] == 200
+    payload, status = mandate_act(ns, env, mandate_id, "resume", actor="admin_b")
+    assert (status, payload["state"]) == (200, "active"), payload
+
+
+def test_the_mandate_resume_rule_reads_the_membership_and_fails_closed(ns, env):
+    mandate_id = _suspended_mandate(ns, env, ADMIN_A)
+    env.membership.down = True
+    payload, status = mandate_act(ns, env, mandate_id, "resume", actor="admin_b")
+    assert (status, payload["code"]) == (503, "DEPENDENCY_UNAVAILABLE")
+    assert [state for _, state in _mandates(env, ns)] == ["suspended"]
 
 
 # --- a project mandate's owner is a member (N-11) ----------------------------------------------------------------
