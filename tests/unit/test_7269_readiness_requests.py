@@ -390,6 +390,70 @@ def test_other_internal_mcp_calls_and_off_file_nothing(ns, env):
     assert env.recorded == []
 
 
+@pytest.mark.parametrize("method, path, params", [
+    ("PUT", "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+     {"project_id": "1", "application_id": "7", "version_id": "70"}),
+    ("PATCH", "/api/v2/elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}",
+     {"project_id": "1", "application_id": "7", "version_id": "70"}),
+])
+def test_a_version_a_run_changed_is_requested_again_for_its_user(ns, env, method, path, params):
+    """(#7228 item 8 a) a version given a toolkit: what it now needs is filed, attributed to the run's user."""
+    credential(env)
+    claims = {"uid": MEMBER, "run": "run-78"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, method, path, "1", {"id": 70}, params)
+    assert (result["entity_kind"], result["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in result["filed"]] == ["binding", "reference", "grant"]
+    filed = [event for _, event in env.recorded if event["reason_code"] == "GOVERNANCE_REQUEST_FILED"]
+    assert {event["caller_ref"] for event in filed} == {"run:run-78"}
+    # (item 8 e) one sentence for the model: what waits for whom, never a value
+    assert result["next"].startswith("Requested for approval: the agent's identity, the credential, your use of the "
+                                     "credential.") and "nothing more is needed from you" in result["next"]
+
+
+def test_a_toolkit_a_run_changed_is_asked_again_by_its_id_from_the_path(ns, env):
+    tool_id = credential(env).tool_id
+    claims = {"uid": MEMBER, "run": "run-79"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PUT",
+                                                 "elitea_core/tool/{mode}/{project_id}/{tool_id}", 1, {},
+                                                 {"tool_id": str(tool_id)})
+    assert result is not None and result["entity_kind"] == "toolkit" and result["entity_id"] == tool_id
+    assert "next" in result
+
+
+def test_a_change_names_no_entity_without_its_path_id(ns, env):
+    claims = {"uid": MEMBER, "run": "r"}
+    for bad in (None, {"version_id": "x"}, {"version_id": "0"}, {"version_id": str(2**31)}):
+        assert ns.governance_requests.file_for_run(
+            module(ns), claims, "PUT", "elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}", 1, {},
+            bad) is None
+    assert env.recorded == []
+
+
+def test_a_refused_request_of_a_run_reads_as_a_sentence(ns, env, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ns.governance_requests.RequestRefused("STALE_READINESS")
+
+    monkeypatch.setattr(ns.governance_requests, "file_requests", refuse)
+    result = ns.governance_requests.file_for_run(module(ns), {"uid": MEMBER, "run": "r"}, "POST",
+                                                 "elitea_core/applications/{mode}/{project_id}", 1,
+                                                 {"version_details": {"id": 70}})
+    assert result["refused"] == "STALE_READINESS" and "could not be filed automatically" in result["next"]
+
+
+@pytest.mark.parametrize("summary, sentence", [
+    ({"items": []}, "Everything it needs to run governed is in place."),
+    ({"items": [{"kind": "reference", "state": "needs_value", "for": "me", "title": "jira"}]},
+     "Your own value for 'jira' is still needed; write it in the card in the chat."),
+    ({"items": [{"kind": "grant", "state": "missing", "requestable": True}]},
+     "Some of what it needs could not be requested automatically; the card in the chat lets you request it."),
+    ({"items": [{"kind": "binding", "state": "pending_approval", "escalated": True}]},
+     "Requested for approval: the agent's identity. It can be used once a platform operator approves; nothing more "
+     "is needed from you."),
+])
+def test_the_next_step_sentence(ns, summary, sentence):
+    assert ns.governance_requests.next_step(summary) == sentence
+
+
 def test_a_credential_a_run_created_is_requested_as_its_users_personal_reference(ns, env):
     cred = credential(env)
     claims = {"uid": MEMBER, "run": "run-9"}

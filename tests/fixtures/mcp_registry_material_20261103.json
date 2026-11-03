@@ -1,0 +1,4066 @@
+{
+ "generated": "2026-11-03 from the local stack: tools/list of /app/2/mcp (all API tools, form-admin session) matched to /shared/openapi/?all=true by the registry's naming rule; schemas with $refs inlined",
+ "routes": {
+  "delete_artifacts_artifacts": [
+   {
+    "method": "DELETE",
+    "path": "/api/v2/artifacts/artifacts/{mode}/{project_id}/{bucket}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "delete_elitea_core_participant": [
+   {
+    "method": "DELETE",
+    "path": "/api/v2/elitea_core/participant/{mode}/{project_id}/{conversation_id}/{participant_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "delete_elitea_core_skill_file": [
+   {
+    "method": "DELETE",
+    "path": "/api/v2/elitea_core/skill_file/{mode}/{project_id}/{skill_id}/{version_id}/{path}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "delete_project_context_project-context": [
+   {
+    "method": "DELETE",
+    "path": "/api/v2/elitea_core/project_context/{mode}/{project_id}/project-context",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_artifacts_artifact": [
+   {
+    "method": "GET",
+    "path": "/api/v2/artifacts/artifact/{mode}/{project_id}/{bucket}/{filename}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_artifacts_artifacts": [
+   {
+    "method": "GET",
+    "path": "/api/v2/artifacts/artifacts/{mode}/{project_id}/{bucket}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_artifacts_buckets": [
+   {
+    "method": "GET",
+    "path": "/api/v2/artifacts/buckets/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_artifacts_s3_credentials": [
+   {
+    "method": "GET",
+    "path": "/api/v2/artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_auth_user": [
+   {
+    "method": "GET",
+    "path": "/api/v2/auth/user/{mode}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_configurations_available": [
+   {
+    "method": "GET",
+    "path": "/api/v2/configurations/available/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_configurations_configuration": [
+   {
+    "method": "GET",
+    "path": "/api/v2/configurations/configuration/{project_id}/{config_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_configurations_configurations": [
+   {
+    "method": "GET",
+    "path": "/api/v2/configurations/configurations/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_configurations_models": [
+   {
+    "method": "GET",
+    "path": "/api/v2/configurations/models/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_configurations_types": [
+   {
+    "method": "GET",
+    "path": "/api/v2/configurations/types/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_analytics": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/analytics/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_application": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/application/{mode}/{project_id}/{application_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_application_skills": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/application_skills/{mode}/{project_id}/{app_version_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_applications": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/applications/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_conversation": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/conversation/{mode}/{project_id}/{conversation_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_conversations": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/conversations/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_folder": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_message_trace": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/message_trace/{mode}/{project_id}/{step_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_message_traces": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/message_traces/{mode}/{project_id}/{conversation_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_participant": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/participant/{mode}/{project_id}/{participant_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_project_user_activity": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/project_user_activity/{mode}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_search_options": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/search_options/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_skill": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/skill/{mode}/{project_id}/{skill_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_skill_files": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/skill_files/{mode}/{project_id}/{skill_id}/{version_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_skills": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/skills/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_tags": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/tags/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_toolkit_available_tools": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/toolkit_available_tools/{mode}/{project_id}/{toolkit_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_toolkits": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/toolkits/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_tools": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/tools/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_elitea_core_version": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_notifications_notification": [
+   {
+    "method": "GET",
+    "path": "/api/v2/notifications/notification/{mode}/{project_id}/{notification_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_notifications_notifications": [
+   {
+    "method": "GET",
+    "path": "/api/v2/notifications/notifications/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_project_context_project-context": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/project_context/{mode}/{project_id}/project-context",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_projects_project": [
+   {
+    "method": "GET",
+    "path": "/api/v2/projects/project/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_secrets_secrets": [
+   {
+    "method": "GET",
+    "path": "/api/v2/secrets/secrets/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_social_folder_items": [
+   {
+    "method": "GET",
+    "path": "/api/v2/social/folder_items/{mode}/{project_id}/{folder_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_social_folders": [
+   {
+    "method": "GET",
+    "path": "/api/v2/social/folders/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_activity": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_activity/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_agent_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_agent_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_agents": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_agents/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_costs": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_costs/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_tool_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_tool_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_tools": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_tools/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_user_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_user_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_users": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_users/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "patch_artifacts_buckets": [
+   {
+    "method": "PATCH",
+    "path": "/api/v2/artifacts/buckets/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "is_pinned": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "patch_elitea_core_application_relation": [
+   {
+    "method": "PATCH",
+    "path": "/api/v2/elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}",
+    "request": {
+     "properties": {
+      "entity_id": {
+       "type": "integer"
+      },
+      "entity_version_id": {
+       "type": "integer"
+      },
+      "has_relation": {
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "entity_id",
+      "entity_version_id",
+      "has_relation"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "patch_elitea_core_entity_settings": [
+   {
+    "method": "PATCH",
+    "path": "/api/v2/elitea_core/entity_settings/{mode}/{project_id}/{conversation_id}/{participant_id}",
+    "request": {
+     "properties": {
+      "chat_history_template": {
+       "anyOf": [
+        {
+         "enum": [
+          "all",
+          "interaction",
+          "context_managed"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "integer"
+        }
+       ],
+       "default": "all"
+      },
+      "icon_meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "id": {
+       "type": "integer"
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "properties": {
+          "chat_history_template": {
+           "anyOf": [
+            {
+             "enum": [
+              "all",
+              "context_managed"
+             ],
+             "type": "string"
+            },
+            {
+             "type": "integer"
+            }
+           ],
+           "default": "all"
+          },
+          "max_tokens": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "selection": {
+           "anyOf": [
+            {
+             "discriminator": {
+              "mapping": {
+               "auto": {},
+               "fixed": {}
+              },
+              "propertyName": "mode"
+             },
+             "oneOf": [
+              {},
+              {}
+             ]
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "variables": {
+       "anyOf": [
+        {
+         "items": {},
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "patch_elitea_core_skill": [
+   {
+    "method": "PATCH",
+    "path": "/api/v2/elitea_core/skill/{mode}/{project_id}/{skill_id}",
+    "request": {
+     "properties": {
+      "entity_type": {
+       "enum": [
+        "agent"
+       ],
+       "type": "string"
+      },
+      "entity_version_id": {
+       "type": "integer"
+      },
+      "has_relation": {
+       "default": false,
+       "type": "boolean"
+      },
+      "skill_version_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "entity_version_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "patch_elitea_core_tool": [
+   {
+    "method": "PATCH",
+    "path": "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}",
+    "request": {
+     "properties": {
+      "entity_id": {
+       "type": "integer"
+      },
+      "entity_type": {
+       "enum": [
+        "agent"
+       ],
+       "type": "string"
+      },
+      "entity_version_id": {
+       "type": "integer"
+      },
+      "has_relation": {
+       "default": false,
+       "type": "boolean"
+      },
+      "selected_tools": {
+       "anyOf": [
+        {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "entity_id",
+      "entity_version_id",
+      "entity_type"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_artifacts_artifacts": [
+   {
+    "method": "POST",
+    "path": "/api/v2/artifacts/artifacts/{mode}/{project_id}/{bucket}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "post_artifacts_buckets": [
+   {
+    "method": "POST",
+    "path": "/api/v2/artifacts/buckets/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "expiration_measure": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "expiration_value": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_artifacts_s3_credentials": [
+   {
+    "method": "POST",
+    "path": "/api/v2/artifacts/s3_credentials/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "bucket_permissions": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "expires_in_days": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "S3 Access Key"
+      },
+      "permissions": {
+       "anyOf": [
+        {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "user_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_configurations_configurations": [
+   {
+    "method": "POST",
+    "path": "/api/v2/configurations/configurations/{project_id}",
+    "request": {
+     "properties": {
+      "data": {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      "elitea_title": {
+       "type": "string"
+      },
+      "label": {
+       "type": "string"
+      },
+      "shared": {
+       "default": false,
+       "type": "boolean"
+      },
+      "type": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "elitea_title",
+      "label",
+      "type",
+      "data"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_configurations_models": [
+   {
+    "method": "POST",
+    "path": "/api/v2/configurations/models/{project_id}",
+    "request": {
+     "properties": {
+      "mode": {
+       "default": "fixed",
+       "enum": [
+        "fixed",
+        "auto"
+       ],
+       "type": "string"
+      },
+      "name": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "section": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "llm"
+      },
+      "target_project_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_applications": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/applications/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "anyOf": [
+        {
+         "maxLength": 32,
+         "minLength": 1,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "owner_id": {
+       "type": "integer"
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "shared_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "shared_owner_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_id": {
+       "type": "integer"
+      },
+      "versions": {
+       "items": {
+        "properties": {
+         "agent_type": {
+          "enum": [
+           "react",
+           "elitea",
+           "dial",
+           "openai",
+           "codemie",
+           "raw",
+           "autogen",
+           "llama",
+           "pipeline",
+           "xml"
+          ],
+          "type": "string"
+         },
+         "application_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "author_id": {
+          "type": "integer"
+         },
+         "conversation_starters": {
+          "anyOf": [
+           {
+            "items": {},
+            "type": "array"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "instructions": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": ""
+         },
+         "llm_settings": {
+          "properties": {
+           "max_tokens": {
+            "anyOf": [
+             {
+              "type": {}
+             },
+             {
+              "type": {}
+             }
+            ],
+            "default": null
+           },
+           "model_name": {
+            "anyOf": [
+             {
+              "type": {}
+             },
+             {
+              "type": {}
+             }
+            ],
+            "default": null
+           },
+           "model_project_id": {
+            "anyOf": [
+             {
+              "type": {}
+             },
+             {
+              "type": {}
+             }
+            ],
+            "default": null
+           },
+           "reasoning_effort": {
+            "anyOf": [
+             {
+              "type": {}
+             },
+             {
+              "type": {}
+             }
+            ],
+            "default": null
+           },
+           "selection": {
+            "anyOf": [
+             {
+              "discriminator": {},
+              "oneOf": {}
+             },
+             {
+              "type": {}
+             }
+            ],
+            "default": null
+           },
+           "temperature": {
+            "anyOf": [
+             {
+              "exclusiveMinimum": {},
+              "maximum": {},
+              "type": {}
+             },
+             {
+              "type": {}
+             }
+            ],
+            "default": null
+           }
+          },
+          "type": "object"
+         },
+         "meta": {
+          "anyOf": [
+           {
+            "additionalProperties": true,
+            "type": "object"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": {}
+         },
+         "name": {
+          "const": "base",
+          "default": "base",
+          "type": "string"
+         },
+         "notes": {
+          "anyOf": [
+           {
+            "maxLength": 1000,
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "pipeline_settings": {
+          "anyOf": [
+           {
+            "additionalProperties": true,
+            "type": "object"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "project_id": {
+          "type": "integer"
+         },
+         "shared_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "shared_owner_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "tags": {
+          "anyOf": [
+           {
+            "items": {
+             "properties": {
+              "data": {},
+              "name": {}
+             },
+             "required": [
+              {}
+             ],
+             "type": "object"
+            },
+            "type": "array"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "tools": {
+          "anyOf": [
+           {
+            "items": {
+             "properties": {
+              "author_id": {},
+              "id": {},
+              "meta": {},
+              "name": {},
+              "project_id": {},
+              "settings": {},
+              "type": {},
+              "user_id": {}
+             },
+             "required": [
+              {},
+              {},
+              {},
+              {},
+              {}
+             ],
+             "type": "object"
+            },
+            "type": "array"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "user_id": {
+          "type": "integer"
+         },
+         "variables": {
+          "anyOf": [
+           {
+            "items": {
+             "properties": {
+              "name": {},
+              "value": {}
+             },
+             "required": [
+              {},
+              {}
+             ],
+             "type": "object"
+            },
+            "type": "array"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "welcome_message": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         }
+        },
+        "required": [
+         "project_id",
+         "user_id",
+         "author_id",
+         "llm_settings"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "webhook_secret": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "project_id",
+      "user_id",
+      "owner_id",
+      "versions"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_continue_predict": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/continue_predict/{mode}/{project_id}/{conversation_uuid}",
+    "request": {
+     "properties": {
+      "authorization_request_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "await_task_timeout": {
+       "default": 30,
+       "maximum": 300,
+       "minimum": -1,
+       "type": "integer"
+      },
+      "conversation_uuid": {
+       "format": "uuid",
+       "type": "string"
+      },
+      "hitl_action": {
+       "anyOf": [
+        {
+         "enum": [
+          "approve",
+          "reject",
+          "edit",
+          "block_with_comment",
+          "answer"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "hitl_decisions": {
+       "anyOf": [
+        {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "hitl_resume": {
+       "default": true,
+       "type": "boolean"
+      },
+      "hitl_value": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "mcp_auth_action": {
+       "anyOf": [
+        {
+         "enum": [
+          "authorize",
+          "skip"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "mcp_auth_decisions": {
+       "anyOf": [
+        {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "mcp_auth_resume": {
+       "default": false,
+       "type": "boolean"
+      },
+      "message_id": {
+       "type": "string"
+      },
+      "thread_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_input": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "conversation_uuid",
+      "message_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_conversations": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/conversations/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "author_id": {
+       "type": "integer"
+      },
+      "instructions": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": ""
+      },
+      "is_private": {
+       "default": true,
+       "type": "boolean"
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "name": {
+       "maxLength": 50,
+       "minLength": 3,
+       "type": "string"
+      },
+      "participants": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "entity_meta": {
+            "anyOf": [
+             {
+              "additionalProperties": true,
+              "type": "object"
+             },
+             {
+              "properties": {},
+              "type": {}
+             },
+             {
+              "properties": {},
+              "required": {},
+              "type": {}
+             },
+             {
+              "properties": {},
+              "required": {},
+              "type": {}
+             },
+             {
+              "properties": {},
+              "required": {},
+              "type": {}
+             },
+             {
+              "properties": {},
+              "required": {},
+              "type": {}
+             },
+             {
+              "properties": {},
+              "required": {},
+              "type": {}
+             }
+            ]
+           },
+           "entity_name": {
+            "enum": [
+             "user",
+             "prompt",
+             "application",
+             "llm",
+             "dummy",
+             "toolkit",
+             "skill"
+            ],
+            "type": "string"
+           },
+           "entity_settings": {
+            "anyOf": [
+             {
+              "additionalProperties": true,
+              "type": "object"
+             },
+             {
+              "type": "null"
+             }
+            ]
+           }
+          },
+          "required": [
+           "entity_name",
+           "entity_meta"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "source": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "elitea"
+      }
+     },
+     "required": [
+      "name",
+      "author_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_folder": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "name": {
+       "type": "string"
+      },
+      "owner_id": {
+       "type": "integer"
+      },
+      "position": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "name",
+      "owner_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_generate_project_context_draft": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/generate_project_context_draft/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "current_activation_description": {
+       "anyOf": [
+        {
+         "maxLength": 300,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "current_project_background": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "properties": {
+          "max_tokens": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": 2048
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "maximum": 1,
+             "minimum": 0,
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": 0.7
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_description": {
+       "minLength": 1,
+       "type": "string"
+      }
+     },
+     "required": [
+      "user_description"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_generate_skill_draft": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/generate_skill_draft/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "llm_settings": {
+       "anyOf": [
+        {
+         "properties": {
+          "max_tokens": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": 2048
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "maximum": 1,
+             "minimum": 0,
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": 0.7
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "skill_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_description": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "version_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "user_description"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_messages": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/messages/{mode}/{project_id}/{conversation_uuid}",
+    "request": {
+     "properties": {
+      "attachments_info": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "filepath": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "filepath"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "await_task_timeout": {
+       "default": 30,
+       "maximum": 300,
+       "minimum": -1,
+       "type": "integer"
+      },
+      "conversation_uuid": {
+       "format": "uuid",
+       "type": "string"
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "participant_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "return_chat_history": {
+       "default": false,
+       "type": "boolean"
+      },
+      "return_task_id": {
+       "default": false,
+       "type": "boolean"
+      },
+      "tool_call_input": {
+       "anyOf": [
+        {
+         "properties": {
+          "tool_name": {
+           "type": "string"
+          },
+          "tool_params": {
+           "additionalProperties": true,
+           "type": "object"
+          }
+         },
+         "required": [
+          "tool_name"
+         ],
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_input": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "conversation_uuid"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_participants": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/participants/{mode}/{project_id}/{conversation_id}",
+    "request": {
+     "properties": {
+      "entity_meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "properties": {},
+         "type": "object"
+        },
+        {
+         "properties": {
+          "id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id"
+         ],
+         "type": "object"
+        },
+        {
+         "properties": {
+          "model_name": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "model_name"
+         ],
+         "type": "object"
+        },
+        {
+         "properties": {
+          "id": {
+           "type": "integer"
+          },
+          "project_id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id",
+          "project_id"
+         ],
+         "type": "object"
+        },
+        {
+         "properties": {
+          "id": {
+           "type": "integer"
+          },
+          "project_id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id",
+          "project_id"
+         ],
+         "type": "object"
+        },
+        {
+         "properties": {
+          "id": {
+           "type": "integer"
+          },
+          "project_id": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "id",
+          "project_id"
+         ],
+         "type": "object"
+        }
+       ]
+      },
+      "entity_name": {
+       "enum": [
+        "user",
+        "prompt",
+        "application",
+        "llm",
+        "dummy",
+        "toolkit",
+        "skill"
+       ],
+       "type": "string"
+      },
+      "entity_settings": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "required": [
+      "entity_name",
+      "entity_meta"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_public_skill_predict": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/public_skill_predict/{mode}/{project_id}/{public_skill_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "async_mode": {
+       "default": false,
+       "type": "boolean"
+      },
+      "callback_headers": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "string"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "callback_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "chat_history": {
+       "items": {
+        "additionalProperties": true,
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "additionalProperties": false,
+         "properties": {
+          "max_tokens": {
+           "anyOf": [
+            {
+             "exclusiveMinimum": 0,
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "exclusiveMinimum": 0,
+             "maximum": 1,
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "return_chat_history": {
+       "default": false,
+       "type": "boolean"
+      },
+      "sid": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_input": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "type": "array"
+        }
+       ]
+      }
+     },
+     "required": [
+      "user_input"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_skill_predict": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/skill_predict/{mode}/{project_id}/{skill_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "async_mode": {
+       "default": false,
+       "type": "boolean"
+      },
+      "callback_headers": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "string"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "callback_url": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "chat_history": {
+       "items": {
+        "additionalProperties": true,
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "additionalProperties": false,
+         "properties": {
+          "max_tokens": {
+           "anyOf": [
+            {
+             "exclusiveMinimum": 0,
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "exclusiveMinimum": 0,
+             "maximum": 1,
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "return_chat_history": {
+       "default": false,
+       "type": "boolean"
+      },
+      "sid": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_input": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "type": "array"
+        }
+       ]
+      }
+     },
+     "required": [
+      "user_input"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_skills": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/skills/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "maxLength": 64,
+       "minLength": 1,
+       "type": "string"
+      },
+      "owner_id": {
+       "type": "integer"
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "user_id": {
+       "type": "integer"
+      },
+      "versions": {
+       "items": {
+        "properties": {
+         "author_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "files_from_version_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "instructions": {
+          "minLength": 1,
+          "type": "string"
+         },
+         "meta": {
+          "anyOf": [
+           {
+            "additionalProperties": true,
+            "type": "object"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "name": {
+          "default": "base",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+         },
+         "run_settings": {
+          "anyOf": [
+           {
+            "additionalProperties": false,
+            "properties": {
+             "ignore_project_context": {
+              "default": {},
+              "type": {}
+             },
+             "llm_settings": {
+              "anyOf": {},
+              "default": {}
+             }
+            },
+            "type": "object"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "tags": {
+          "anyOf": [
+           {
+            "items": {
+             "properties": {
+              "data": {},
+              "name": {}
+             },
+             "required": [
+              {}
+             ],
+             "type": "object"
+            },
+            "type": "array"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         }
+        },
+        "required": [
+         "instructions"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "project_id",
+      "user_id",
+      "name",
+      "description",
+      "owner_id",
+      "versions"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_tools": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/tools/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "author_id": {
+       "type": "integer"
+      },
+      "id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": {}
+      },
+      "name": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "settings": {
+       "anyOf": [
+        {},
+        {
+         "additionalProperties": true,
+         "type": "object"
+        }
+       ],
+       "default": {}
+      },
+      "type": {
+       "type": "string"
+      },
+      "user_id": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "type",
+      "name",
+      "author_id",
+      "project_id",
+      "user_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_version_instruction_patch": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/version_instruction_patch/{mode}/{project_id}/{application_id}/{version_id}",
+    "request": {
+     "properties": {
+      "expected_instructions_sha256": {
+       "maxLength": 64,
+       "minLength": 64,
+       "pattern": "^[0-9a-fA-F]{64}$",
+       "type": "string"
+      },
+      "old_text": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "replace_all": {
+       "default": false,
+       "type": "boolean"
+      },
+      "replacement": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "expected_instructions_sha256",
+      "replacement"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_versions": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/versions/{mode}/{project_id}/{application_id}",
+    "request": {
+     "properties": {
+      "agent_type": {
+       "enum": [
+        "react",
+        "elitea",
+        "dial",
+        "openai",
+        "codemie",
+        "raw",
+        "autogen",
+        "llama",
+        "pipeline",
+        "xml"
+       ],
+       "type": "string"
+      },
+      "application_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "author_id": {
+       "type": "integer"
+      },
+      "conversation_starters": {
+       "anyOf": [
+        {
+         "items": {},
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "instructions": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": ""
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "properties": {
+          "max_tokens": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "selection": {
+           "anyOf": [
+            {
+             "discriminator": {
+              "mapping": {
+               "auto": {},
+               "fixed": {}
+              },
+              "propertyName": "mode"
+             },
+             "oneOf": [
+              {},
+              {}
+             ]
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "exclusiveMinimum": 0,
+             "maximum": 1,
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": {}
+      },
+      "name": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "notes": {
+       "anyOf": [
+        {
+         "maxLength": 1000,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "pipeline_settings": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "shared_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "shared_owner_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "tags": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "data": {
+            "anyOf": [
+             {
+              "additionalProperties": true,
+              "type": "object"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null
+           },
+           "name": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "name"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "tools": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "author_id": {
+            "type": "integer"
+           },
+           "id": {
+            "anyOf": [
+             {
+              "type": "integer"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null
+           },
+           "meta": {
+            "anyOf": [
+             {
+              "additionalProperties": true,
+              "type": "object"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": {}
+           },
+           "name": {
+            "minLength": 1,
+            "type": "string"
+           },
+           "project_id": {
+            "type": "integer"
+           },
+           "settings": {
+            "anyOf": [
+             {},
+             {
+              "additionalProperties": true,
+              "type": "object"
+             }
+            ],
+            "default": {}
+           },
+           "type": {
+            "type": "string"
+           },
+           "user_id": {
+            "type": "integer"
+           }
+          },
+          "required": [
+           "type",
+           "name",
+           "author_id",
+           "project_id",
+           "user_id"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "user_id": {
+       "type": "integer"
+      },
+      "variables": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "name": {
+            "type": "string"
+           },
+           "value": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "name",
+           "value"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "welcome_message": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "project_id",
+      "user_id",
+      "name",
+      "author_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_secrets_secrets": [
+   {
+    "method": "POST",
+    "path": "/api/v2/secrets/secrets/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "allow_external_access": {
+       "type": "boolean"
+      },
+      "name": {
+       "minLength": 1,
+       "pattern": "^[A-Za-z0-9_]+$",
+       "type": "string"
+      },
+      "value": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_social_folders": [
+   {
+    "method": "POST",
+    "path": "/api/v2/social/folders/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "entity_type": {
+       "type": "string"
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "name": {
+       "maxLength": 128,
+       "type": "string"
+      },
+      "owner_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "hidden": true
+      }
+     },
+     "required": [
+      "name",
+      "entity_type"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_artifacts_buckets": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/artifacts/buckets/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "expiration_measure": {
+       "type": "string"
+      },
+      "expiration_value": {
+       "type": "integer"
+      },
+      "name": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "expiration_measure",
+      "expiration_value"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_artifacts_s3_credentials": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "put_configurations_configuration": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/configurations/configuration/{project_id}/{config_id}",
+    "request": {
+     "properties": {
+      "data": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "elitea_title": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "label": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "shared": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_elitea_core_conversation": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/conversation/{mode}/{project_id}/{conversation_id}",
+    "request": {
+     "properties": {
+      "attachment_participant_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "folder_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "instructions": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "is_hidden": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "is_private": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "anyOf": [
+        {
+         "maxLength": 50,
+         "minLength": 3,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_elitea_core_folder": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}/{folder_id}",
+    "request": {
+     "properties": {
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "name": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "neighbor_above_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "neighbor_below_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "position": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_elitea_core_skill": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/skill/{mode}/{project_id}/{skill_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "anyOf": [
+        {
+         "maxLength": 64,
+         "minLength": 1,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "user_id": {
+       "type": "integer"
+      },
+      "version": {
+       "anyOf": [
+        {
+         "additionalProperties": false,
+         "properties": {
+          "id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "instructions": {
+           "anyOf": [
+            {
+             "minLength": 1,
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "meta": {
+           "anyOf": [
+            {
+             "additionalProperties": true,
+             "type": "object"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "name": {
+           "anyOf": [
+            {
+             "maxLength": 128,
+             "minLength": 1,
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "run_settings": {
+           "anyOf": [
+            {
+             "additionalProperties": false,
+             "properties": {
+              "ignore_project_context": {},
+              "llm_settings": {}
+             },
+             "type": "object"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "tags": {
+           "anyOf": [
+            {
+             "items": {
+              "properties": {},
+              "required": {},
+              "type": {}
+             },
+             "type": "array"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "project_id",
+      "user_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_elitea_core_skill_file": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/skill_file/{mode}/{project_id}/{skill_id}/{version_id}/{path}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "content"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_elitea_core_tool": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}",
+    "request": {
+     "properties": {
+      "author_id": {
+       "type": "integer"
+      },
+      "id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": {}
+      },
+      "name": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "settings": {
+       "anyOf": [
+        {},
+        {
+         "additionalProperties": true,
+         "type": "object"
+        }
+       ],
+       "default": {}
+      },
+      "type": {
+       "type": "string"
+      },
+      "user_id": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "type",
+      "name",
+      "author_id",
+      "project_id",
+      "user_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_elitea_core_version": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+    "request": {
+     "properties": {
+      "agent_type": {
+       "enum": [
+        "react",
+        "elitea",
+        "dial",
+        "openai",
+        "codemie",
+        "raw",
+        "autogen",
+        "llama",
+        "pipeline",
+        "xml"
+       ],
+       "type": "string"
+      },
+      "application_id": {
+       "type": "integer"
+      },
+      "author_id": {
+       "type": "integer"
+      },
+      "conversation_starters": {
+       "anyOf": [
+        {
+         "items": {},
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "id": {
+       "type": "integer"
+      },
+      "instructions": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": ""
+      },
+      "llm_settings": {
+       "anyOf": [
+        {
+         "properties": {
+          "max_tokens": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_name": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "model_project_id": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "reasoning_effort": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "selection": {
+           "anyOf": [
+            {
+             "discriminator": {
+              "mapping": {
+               "auto": {},
+               "fixed": {}
+              },
+              "propertyName": "mode"
+             },
+             "oneOf": [
+              {},
+              {}
+             ]
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "temperature": {
+           "anyOf": [
+            {
+             "exclusiveMinimum": 0,
+             "maximum": 1,
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "name": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "notes": {
+       "anyOf": [
+        {
+         "maxLength": 1000,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "pipeline_settings": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "project_id": {
+       "type": "integer"
+      },
+      "shared_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "shared_owner_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "tags": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "data": {
+            "anyOf": [
+             {
+              "additionalProperties": true,
+              "type": "object"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null
+           },
+           "id": {
+            "anyOf": [
+             {
+              "type": "integer"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null
+           },
+           "name": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "name"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "tools": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "author_id": {
+            "type": "integer"
+           },
+           "meta": {
+            "anyOf": [
+             {
+              "additionalProperties": true,
+              "type": "object"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": {}
+           },
+           "name": {
+            "anyOf": [
+             {
+              "type": "string"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null
+           },
+           "settings": {
+            "anyOf": [
+             {},
+             {
+              "additionalProperties": true,
+              "type": "object"
+             }
+            ],
+            "default": {}
+           },
+           "type": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "type",
+           "author_id"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "variables": {
+       "anyOf": [
+        {
+         "items": {
+          "properties": {
+           "name": {
+            "type": "string"
+           },
+           "value": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "name",
+           "value"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "welcome_message": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "name",
+      "author_id",
+      "application_id",
+      "id",
+      "project_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_notifications_notification": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/notifications/notification/{mode}/{project_id}/{notification_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "put_project_context_project-context": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/elitea_core/project_context/{mode}/{project_id}/project-context",
+    "request": {
+     "properties": {
+      "activation_description": {
+       "anyOf": [
+        {
+         "maxLength": 300,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "content": {
+       "default": "",
+       "maxLength": 2500,
+       "type": "string"
+      },
+      "enabled": {
+       "default": true,
+       "type": "boolean"
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_secrets_secret": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/secrets/secret/{mode}/{project_id}/{secret}",
+    "request": {
+     "properties": {
+      "allow_external_access": {
+       "type": "boolean"
+      },
+      "name": {
+       "minLength": 1,
+       "pattern": "^[A-Za-z0-9_]+$",
+       "type": "string"
+      },
+      "value": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_social_folder": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/social/folder/{mode}/{project_id}/{folder_id}",
+    "request": {
+     "properties": {
+      "meta": {
+       "anyOf": [
+        {
+         "additionalProperties": true,
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "name": {
+       "anyOf": [
+        {
+         "maxLength": 128,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "put_social_move_to_folder": [
+   {
+    "method": "PUT",
+    "path": "/api/v2/social/move_to_folder/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "entity_id": {
+       "type": "integer"
+      },
+      "entity_type": {
+       "type": "string"
+      },
+      "folder_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "entity_type",
+      "entity_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ]
+ }
+}

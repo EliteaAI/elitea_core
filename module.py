@@ -831,6 +831,12 @@ class Module(module.ModuleModel):
                 if missing:
                     log.error("internal OBO: MCP-exposed writes missing from the operation map (refused for runs): %s",
                               ", ".join(missing))
+                # (#7228) a route whose schema shows a credential value must be a ``credentials`` operation
+                misfiled = internal_obo.unclassified_material(openapi_registry.get_mcp_api_tools())
+                log.info("security_metric name=internal_obo_unclassified_material value=%s", len(misfiled))
+                if misfiled:
+                    log.error("internal OBO: MCP-exposed routes carry credential material outside the credentials "
+                              "operation: %s", ", ".join(misfiled))
             except Exception:  # pylint: disable=W0703
                 log.exception("internal OBO: the operation map could not be checked")
 

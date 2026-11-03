@@ -198,6 +198,17 @@ CREATIONS = {
     ("POST", "elitea_core/tools/{mode}/{project_id}"): "toolkit",
     ("POST", "configurations/configurations/{project_id}"): "configuration",
 }
+# (#7228 item 8) the changing writes, and the path parameter naming the changed entity: a toolkit given a credential, a
+# version given a toolkit (its readiness is asked again and what is now missing is filed: a rebind, a new grant)
+UPDATES = {
+    ("PUT", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): ("toolkit", "tool_id"),
+    ("PATCH", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): ("toolkit", "tool_id"),
+    ("PUT", "elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}"): ("version", "version_id"),
+    ("PATCH", "elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}"):
+        ("version", "version_id"),
+}
+WAITING_TEXT = {"binding": "the agent's identity", "reference": "the credential", "grant": "your use of the credential",
+                "mandate": "the schedule's mandate"}
 
 
 def _created_id(kind, answer):
@@ -235,30 +246,77 @@ def _file_reference(project_id, configuration_uuid, actor, subject, run_id):
     return [{**item, "id": made["id"]}]
 
 
-def file_for_run(module, claims, method, path, project_id, answer):
-    """After a governed run's internal MCP created an agent, a toolkit or a credential: its readiness for the run's
-    subject (the user, never the agent) and the request of what that user may request, filed as theirs with the run as
-    its origin. A run never approves. ``None`` for any other call, or when governance is not enforced; never raises."""
+def next_step(summary) -> str:
+    """One sentence for the model to tell the person what happens next (#7228): what waits for whom, what still needs
+    them, or that nothing does. Names kinds and titles only."""
+    if summary.get("refused"):
+        return ("The governance requests for it could not be filed automatically; the card in the chat lets you "
+                "request what is missing.")
+    filed = {item.get("key") for item in summary.get("filed") or []}
+    items = summary.get("items") or []
+    waiting = [item for item in items if item.get("state") in ("pending", "validated", "pending_approval",
+                                                               "provisioning") or item.get("key") in filed]
+    yours = [item for item in items if item.get("state") == "needs_value" and item.get("for") == "me"]
+    open_ = [item for item in items if item.get("requestable") and item.get("key") not in filed]
+    if yours:
+        return f"Your own value for '{yours[0].get('title')}' is still needed; write it in the card in the chat."
+    if open_:
+        return "Some of what it needs could not be requested automatically; the card in the chat lets you request it."
+    if waiting:
+        named = ", ".join(dict.fromkeys(WAITING_TEXT.get(item.get("kind"), item.get("kind")) for item in waiting))
+        who = "a platform operator" if any(item.get("escalated") for item in waiting) else "a project admin"
+        return (f"Requested for approval: {named}. It can be used once {who} approves; nothing more is needed from "
+                "you.")
+    if items:
+        return "Some of what it needs cannot be requested from here; the card in the chat says what."
+    if summary.get("filed"):
+        named = ", ".join(dict.fromkeys(WAITING_TEXT.get(item.get("kind"), item.get("kind"))
+                                        for item in summary["filed"]))
+        return f"Requested for approval: {named}. It can be used once a project admin approves."
+    return "Everything it needs to run governed is in place."
+
+
+def _changed_id(name, path_params):
+    value = (path_params or {}).get(name)
+    try:
+        value = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 2**31 - 1 else None
+
+
+def file_for_run(module, claims, method, path, project_id, answer, path_params=None):  # pylint: disable=R0913
+    """After a governed run's internal MCP created or changed an agent version, a toolkit or a credential: its
+    readiness for the run's subject (the user, never the agent) and the request of what that user may request, filed as
+    theirs with the run as its origin (``caller_ref run:<id>``). A run never approves. ``None`` for any other call, or
+    when governance is not enforced; never raises. The answer carries ``next``, one sentence for the model."""
     from .internal_obo import endpoint_key  # pylint: disable=C0415
-    kind = CREATIONS.get((str(method or "").upper(), endpoint_key(path)))
+    key = (str(method or "").upper(), endpoint_key(path))
+    kind, param = CREATIONS.get(key), None
+    if kind is None and key in UPDATES:
+        kind, param = UPDATES[key]
     if kind is None or not isinstance(claims, dict) or not is_governed(module):
         return None
-    user_id, run_id = claims.get("uid"), claims.get("run")
+    user_id, run_id, entity_id = claims.get("uid"), claims.get("run"), None
     try:
         project_id = int(project_id)
-        entity_id = _created_id(kind, answer)
+        entity_id = _changed_id(param, path_params) if param else _created_id(kind, answer)
         if entity_id is None or not isinstance(user_id, int):
             return None
         if kind == "configuration":
             from .governance_readiness import _person  # pylint: disable=C0415
             subject = _person(user_id)
-            return {"filed": _file_reference(project_id, entity_id, user_id, subject, run_id) if subject else [],
-                    "items": []}
-        filed = file_requests(module, project_id, kind, entity_id, user_id, run_id=run_id)
-        items = readiness(module, project_id, kind, entity_id, user_id).items
-        return {"entity_kind": kind, "entity_id": entity_id, "filed": filed, "items": items}
+            summary = {"filed": _file_reference(project_id, entity_id, user_id, subject, run_id) if subject else [],
+                       "items": []}
+        else:
+            filed = file_requests(module, project_id, kind, entity_id, user_id, run_id=run_id)
+            items = readiness(module, project_id, kind, entity_id, user_id).items
+            summary = {"entity_kind": kind, "entity_id": entity_id, "filed": filed, "items": items}
     except RequestRefused as exc:
-        return {"entity_kind": kind, "filed": [], "refused": exc.code}
+        summary = {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": exc.code}
     except Exception as exc:  # pylint: disable=W0703
         log.error("governance requests: the run's request was not filed (%s)", type(exc).__name__)
-        return {"entity_kind": kind, "filed": [], "refused": "DEPENDENCY_UNAVAILABLE"}
+        summary = {"entity_kind": kind, "entity_id": entity_id, "filed": [],
+                   "refused": "DEPENDENCY_UNAVAILABLE"}
+    summary["next"] = next_step(summary)
+    return summary

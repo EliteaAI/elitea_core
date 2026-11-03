@@ -1,7 +1,7 @@
 from uuid import UUID
 from typing import Optional, List, Dict, Any, Literal
 
-from pydantic import BaseModel, Field, conint, model_validator
+from pydantic import BaseModel, ConfigDict, Field, conint, model_validator
 
 
 class ContinuePredictPayload(BaseModel):
@@ -15,10 +15,10 @@ class ContinuePredictPayload(BaseModel):
         ..., description="UUID of the paused response message to resume (from the HITL interrupt).")
     hitl_resume: bool = Field(
         True, description="Whether this request resumes a HITL interrupt.")
-    hitl_action: Optional[Literal["approve", "reject", "edit", "block_with_comment", "answer"]] = Field(
-        None, description="HITL decision. Required when hitl_resume is true.")
+    hitl_action: Optional[Literal["approve", "reject", "edit", "block_with_comment", "answer", "created", "cancel"]] = Field(
+        None, description="HITL decision. Required when hitl_resume is true. 'created'/'cancel' answer a credential form.")
     hitl_value: Optional[str | Dict[str, Any]] = Field(
-        None, description="Edited text for 'edit', the user's note for 'block_with_comment', or the answers object for a clarifying-question 'answer'.")
+        None, description="Edited text for 'edit', the user's note for 'block_with_comment', the answers object for a clarifying-question 'answer', or {reference_id} for a credential form's 'created'.")
     hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
         None, description="Per-child HITL decisions for a parallel sub-agent resume.")
     mcp_auth_resume: bool = Field(
@@ -64,3 +64,10 @@ class ContinuePredictPayload(BaseModel):
         if self.hitl_action in ("edit", "block_with_comment") and not self.hitl_value:
             raise ValueError(f"hitl_value is required when hitl_action is '{self.hitl_action}'")
         return self
+
+
+class CredentialFormValue(BaseModel):
+    """(#7228) The only answer a credential form's ``created`` takes: the reference the form's endpoint made. Main then
+    replaces it with its own record before anything is dispatched, so the model sees only what the server says."""
+    model_config = ConfigDict(extra="forbid")
+    reference_id: UUID

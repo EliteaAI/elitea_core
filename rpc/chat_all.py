@@ -2155,6 +2155,22 @@ class RPC:
             log.info("[PARALLEL] continue refused — run stopped (message_id=%s)", parsed.message_id)
             return {"stopped": True}
 
+        # (#7228) a credential form is answered with `created` (its value replaced by the server's own
+        # record of the credential the form made) or `cancel`; anything else is refused before any resume
+        # (an internal replay carries a decision checked already)
+        if parsed.hitl_resume and _internal_token is not INTERNAL_CONTINUE_TOKEN:
+            from ..utils.credential_form import FormRefused, check_resume  # pylint: disable=C0415
+            try:
+                parsed.hitl_value, parsed.hitl_decisions = check_resume(
+                    self, parsed.project_id, parsed.message_id, parsed.hitl_action, parsed.hitl_value,
+                    parsed.hitl_decisions, current_user['id'])
+            except FormRefused as refused:
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                    error=f"{refused.code}: {refused.message}",
+                    stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+                ) from None
+
         # Checkpoint A (#6886) for a resume: the replacement input and HITL edit or
         # answer text, before a decision message is stored or any resume dispatches
         resume_question_id = None
