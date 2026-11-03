@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 
 from pylon.core.tools import log
-from sqlalchemy import Integer, String, update, case
+from sqlalchemy import Integer, String, update, case, func
 from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from tools import db, rpc_tools, context, auth, serialize, VaultClient, this
 
@@ -421,6 +421,38 @@ def get_participant_settings(
     return {'chat_history_template': chat_history_template}
 
 
+def former_participant_snapshot(participant) -> dict:
+    """Name and type a message keeps after its participant is replaced by dummy, as imported chats do."""
+    meta = participant.meta or {}
+    if not meta.get('name'):
+        return {}
+    snapshot = {'entity_name': str(participant.entity_name), 'name': meta['name']}
+    if meta.get('agent_type'):
+        snapshot['agent_type'] = meta['agent_type']
+    return snapshot
+
+
+def keep_former_participant_on_messages(participant, session):
+    snapshot = former_participant_snapshot(participant)
+    if not snapshot:
+        return
+    snapshot_json = func.jsonb_build_object(*(part for item in snapshot.items() for part in item))
+    meta = ConversationMessageGroup.meta
+    for participant_column, key in (
+        (ConversationMessageGroup.author_participant_id, 'imported_author'),
+        (ConversationMessageGroup.sent_to_id, 'imported_sent_to'),
+    ):
+        stamped_meta = func.coalesce(meta, func.jsonb_build_object()).op('||')(
+            func.jsonb_build_object(key, snapshot_json)
+        )
+        session.execute(
+            update(ConversationMessageGroup)
+            .where(participant_column == participant.id)
+            .values({meta: case((meta.has_key(key), meta), else_=stamped_meta)})
+            .execution_options(synchronize_session=False)
+        )
+
+
 def replace_participant_by_dummy(project_id, participant_id, session):
     log.debug(f"Substituting {project_id=} {participant_id=} by Dummy participant")
     dummy_id_subquery = (
@@ -577,6 +609,7 @@ def delete_entity_from_all_conversations(project_id, entity_name: ParticipantTyp
                     # Dummy already in conversation
                     pass
 
+            keep_former_participant_on_messages(participant, session)
             replace_participant_by_dummy(project_id, participant.id, session)
             session.delete(participant)
             session.commit()
