@@ -336,3 +336,75 @@ def test_the_test_run_detail_needs_the_run_permission_and_an_application_id(harn
     assert read_run(harness, run_id, application_id='x')[1] == 400
     harness.permissions.discard(PERMISSION_PREFIX + 'run')
     assert read_run(harness, run_id)[1] == 403
+
+
+def seeded_draft(harness, **fields):
+    values = dict(
+        draft=True, enabled=False, entity_type='agent', application_id=1, version_id=10, name='Old',
+        cron='0 9 * * *', timezone='UTC', prompt='x', created_by=OWNER_ID,
+        principal={'kind': 'delegation', 'ref': OWNER_ID})
+    with harness.session_factory() as session:
+        row = models().EntitySchedule(**{**values, **fields})
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+def test_a_lost_race_on_the_first_draft_reuses_the_winner_row(harness, started, monkeypatch):
+    winner_id = seeded_draft(harness)
+    module = sys.modules[f'{PACKAGE}.utils.schedule_test_draft']
+    real_find = module.find_draft
+    answers = iter([None])  # the loser looked before the winner inserted
+    monkeypatch.setattr(module, 'find_draft', lambda *args: next(answers, None) or real_find(*args))
+
+    body, status = test_run(harness, agent_body(name='Loser'))
+
+    assert status == 202
+    (draft,) = drafts(harness)
+    assert (draft.id, draft.name) == (winner_id, 'Loser')
+    assert runs(harness) == [(winner_id, 'test', 'running', OWNER_ID)]
+
+
+def test_a_first_test_run_builds_the_owner_request_with_the_real_draft_id(harness, started):
+    test_run(harness)
+
+    (draft,) = drafts(harness)
+    assert harness.owner_requests[0][1]['schedule_id'] == draft.id
+
+
+def test_a_failed_owner_request_after_the_first_write_leaves_no_draft(harness, started):
+    harness.owner_request_error = RuntimeError('down')
+
+    assert_refusal(test_run(harness), 500)
+    assert drafts(harness) == [] and runs(harness) == []
+
+
+def test_a_test_run_rewrites_a_stale_confirmation_of_the_draft(harness, started):
+    seeded_draft(harness, approval_confirmed_by=OTHER_ID, approval_confirmed_at=datetime.now(UTC),
+                 approval_fingerprint='stale', approval_rule='run_without_asking')
+
+    test_run(harness)
+
+    (draft,) = drafts(harness)
+    assert (draft.approval_confirmed_by, draft.approval_confirmed_at, draft.approval_fingerprint) == (None, None, None)
+
+
+def test_the_oldest_test_runs_beyond_the_keep_limit_are_deleted_and_an_active_run_stays(harness, started, monkeypatch):
+    monkeypatch.setattr(sys.modules[f'{PACKAGE}.utils.schedule_test_draft'], 'KEEP_TEST_RUNS', 2)
+    draft_id = seeded_draft(harness)
+    with harness.session_factory() as session:
+        for _ in range(4):
+            session.add(models().EntityScheduleRun(schedule_id=draft_id, trigger='test', status='succeeded'))
+        session.commit()
+
+    test_run(harness)
+
+    assert [row[2] for row in runs(harness)] == ['succeeded', 'succeeded', 'running']
+
+
+def test_a_schedule_or_run_id_above_the_database_range_is_404(harness):
+    huge = 2**31
+    assert harness.call('get', None, huge) == ({'code': 'not_found', 'error': 'Schedule not found'}, 404)
+    harness.body, harness.query = None, {'application_id': 1}
+    harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/{huge}'
+    assert harness.routes.PromptLibAPI().get(project_id=PROJECT_ID, run_id=huge)[1] == 404

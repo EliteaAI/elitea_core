@@ -63,3 +63,21 @@ def test_7011_r1_3_cron_run_keeps_the_scheduled_values(world):
     assert calls.conversation[0]["trigger_type"] == "scheduled"
     assert calls.conversation[0]["extra_meta"]["execution_type"] == "scheduled"
     assert calls.predict[0]["trigger_source"] == "scheduled"
+
+
+def test_a_test_run_stops_before_any_chat_when_the_pre_run_check_fails(monkeypatch):
+    calls = types.SimpleNamespace(conversation=[], predict=[])
+    starter = load_starter(
+        monkeypatch,
+        create=lambda **kw: calls.conversation.append(kw) or ("uuid-1", 7, "resp-1"),
+        predict=lambda **kw: calls.predict.append(kw),
+        prerun=lambda *a: types.SimpleNamespace(ok=False, owner_id=None, reason="owner lost access"),
+    )
+    loaded = types.SimpleNamespace(
+        schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode="prompt", approval_rule="pause_and_ask"),
+        version=types.SimpleNamespace(id=9, name="v3"), entity_name="Nightly", prompt="Go", variables=[], trigger="test")
+    monkeypatch.setattr(starter, "_load", lambda *a: loaded)
+
+    starter.run_owner_schedule(34, SCHEDULE_ID, RUN_ID)
+
+    assert calls.conversation == [] and calls.predict == []

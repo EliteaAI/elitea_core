@@ -68,7 +68,7 @@ def decisions(harness, monkeypatch):
 def add_run(harness, schedule_id, status='waiting_for_approval', **columns):
     run_model = sys.modules[f'{PACKAGE}.models.entity_schedule'].EntityScheduleRun
     with harness.session_factory() as session:
-        run = run_model(schedule_id=schedule_id, trigger='cron', status=status, **columns)
+        run = run_model(schedule_id=schedule_id, status=status, **{'trigger': 'cron', **columns})
         session.add(run)
         session.commit()
         return run.id
@@ -289,3 +289,19 @@ def test_the_tail_of_a_run_path_is_the_decision_only_when_it_ends_in_decision(ha
     assert harness.routes._tail(5, 6).endswith('/decision')
     harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/5/runs/6'
     assert not harness.routes._tail(5, 6).endswith('/decision')
+
+
+def test_the_owner_decides_a_parked_test_run_of_the_hidden_draft(harness, decisions):
+    schedule_id = harness.seed(draft=True, enabled=False)
+    run_id = add_run(harness, schedule_id, trigger='test')
+
+    assert decide(harness, schedule_id, run_id) == ({'run_id': run_id, 'status': 'running'}, 200)
+    assert decisions.applied == [(run_id, 'approve')]
+
+
+def test_a_draft_answers_404_for_a_run_that_is_not_a_test_run(harness, decisions):
+    schedule_id = harness.seed(draft=True, enabled=False)
+    run_id = add_run(harness, schedule_id)  # trigger cron
+
+    assert decide(harness, schedule_id, run_id)[1] == 404
+    assert decisions.applied == []

@@ -7,12 +7,16 @@ pipeline, and each test run rewrites it from the form. Every other reader of sch
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, exists, func, select
+from sqlalchemy.exc import IntegrityError
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from ..models.pd.entity_schedule import ScheduleCreate
 
 IDLE_HOURS = 24
 ACTIVE = ('running', 'waiting_for_approval')
+# A draft with runs is never deleted and every click on Test adds a run, so the table would grow without end.
+# The newest runs are the ones Run History shows; an older run is no use to the owner.
+KEEP_TEST_RUNS = 50
 
 
 def find_draft(session, owner_id: int, application_id: int) -> EntitySchedule | None:
@@ -30,12 +34,25 @@ def write_draft(session, owner_id: int, body: ScheduleCreate) -> EntitySchedule:
     """Store the form values in the owner's draft row of this entity, creating the row on the first test run.
 
     The row never gets a stop date, a next run or a risk confirmation: a test run asks as an unconfirmed schedule.
+    Two first test runs at once both find no row; the unique index lets one insert win. The other reuses the winner.
     """
     values = body.model_dump(exclude={'risk_ack', 'enabled'})
     row = find_draft(session, owner_id, body.application_id)
     if row is None:
-        row = EntitySchedule(draft=True, created_by=owner_id)
-        session.add(row)
+        row = _fill(EntitySchedule(draft=True, created_by=owner_id), owner_id, values)
+        try:
+            with session.begin_nested():  # a savepoint: the conflict undoes this insert only
+                session.add(row)
+        except IntegrityError:
+            row = find_draft(session, owner_id, body.application_id)
+            if row is None:
+                raise  # the index fired for another reason than a draft of this owner and entity
+    _fill(row, owner_id, values)
+    session.flush()
+    return row
+
+
+def _fill(row: EntitySchedule, owner_id: int, values: dict) -> EntitySchedule:
     for name, value in values.items():
         setattr(row, name, value)
     row.enabled = False
@@ -44,8 +61,16 @@ def write_draft(session, owner_id: int, body: ScheduleCreate) -> EntitySchedule:
     row.principal = {'kind': 'delegation', 'ref': owner_id}  # a new dict: JSONB is not mutation-tracked
     row.approval_confirmed_by = row.approval_confirmed_at = row.approval_fingerprint = None
     row.updated_at = func.now()  # an edit with equal values would otherwise keep the old idle time
-    session.flush()
     return row
+
+
+def trim_test_runs(session, schedule_id: int) -> int:
+    """Delete the runs of the draft beyond the newest `KEEP_TEST_RUNS`; an active run stays. The number deleted."""
+    old = (select(EntityScheduleRun.id).where(EntityScheduleRun.schedule_id == schedule_id)
+           .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc()).offset(KEEP_TEST_RUNS))
+    result = session.execute(delete(EntityScheduleRun).where(
+        EntityScheduleRun.id.in_(old), EntityScheduleRun.status.not_in(ACTIVE)))
+    return result.rowcount
 
 
 def drop_draft(session, owner_id: int, application_id: int) -> bool:

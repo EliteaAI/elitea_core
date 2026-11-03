@@ -43,7 +43,14 @@ from .schedule_service import (
     refusal,
     update_schedule,
 )
-from .schedule_test_draft import active_run_id, drop_draft, find_draft, sweep_idle_drafts, write_draft
+from .schedule_test_draft import (
+    active_run_id,
+    drop_draft,
+    find_draft,
+    sweep_idle_drafts,
+    trim_test_runs,
+    write_draft,
+)
 from .schedule_timing import ScheduleLimitError
 from .trigger_governance import schedule_governance_notice
 
@@ -93,7 +100,7 @@ class RunsQuery(BaseModel):
 
 
 class ApplicationQuery(BaseModel):
-    """Query of the Cancel of a test run: the agent or pipeline whose draft goes."""
+    """The agent or pipeline whose test draft a Cancel, a test run list or a test run detail is about."""
     application_id: DbId
 
 
@@ -164,11 +171,6 @@ def _run_detail_body(session, project_id: int, schedule, run_id: int):
         "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
         "events": events,
     }, 200
-
-
-class ApplicationQuery(BaseModel):
-    """The agent or pipeline whose draft a test run read is about."""
-    application_id: DbId
 
 
 class DraftRunsQuery(RunsQuery):
@@ -589,14 +591,17 @@ class ScheduleItemHandlers:
             if draft is not None and (active_id := active_run_id(session, draft.id)) is not None:
                 session.commit()
                 return refusal("run_active", "A test run of this schedule is active", 409, active_run_id=active_id)
-            try:   # built before the draft is written, so a failure leaves nothing stored
+            # The draft is written (flushed) first: the request names its id, which a first test run has not got before
+            row = write_draft(session, scope.user_id, body)
+            try:
                 from .mandate_admission import owner_run_request  # pylint: disable=C0415
                 owner_request = owner_run_request(self.module, project_id=project_id, application_id=body.application_id,
-                                                  version_id=body.version_id, schedule_id=draft and draft.id)
-            except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
+                                                  version_id=body.version_id, schedule_id=row.id)
+            except Exception:  # noqa: BLE001 -- the owner can try again; the rollback leaves nothing stored
+                session.rollback()
                 log.exception('Test run of agent or pipeline %s: cannot build the owner run request', body.application_id)
                 return refusal("run_start_failed", "The run could not start", 500)
-            row = write_draft(session, scope.user_id, body)
+            trim_test_runs(session, row.id)
             return _start_run(
                 session, project_id, row.id, row.entity_type, row.application_id, "test", scope.user_id, owner_request)
 
@@ -640,11 +645,13 @@ class ScheduleItemHandlers:
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                row = load_schedule_in_scope(session, schedule_id, scope)
+                row = load_schedule_in_scope(session, schedule_id, scope, include_draft=True)
             except ScheduleError as e:
                 return e.response
             run = session.get(EntityScheduleRun, run_id)
             if run is None or run.schedule_id != schedule_id:
+                return RUN_NOT_FOUND
+            if row.draft and run.trigger != 'test':  # a draft holds test runs only
                 return RUN_NOT_FOUND
             if run.conversation_id is not None:
                 return refusal("run_has_chat", "Decide this run in its chat", 409)
