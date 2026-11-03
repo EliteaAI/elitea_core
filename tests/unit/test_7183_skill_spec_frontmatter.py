@@ -94,7 +94,7 @@ def md(monkeypatch):
     _install_packages(monkeypatch)
     recorder = ImportRecorder()
     for name in ('sqlalchemy', 'sqlalchemy.orm', f'{PKG}.models.skill', f'{PKG}.models.pd.skill',
-                 f'{PKG}.utils.export_import_utils'):
+                 f'{PKG}.utils.export_import_utils', f'{PKG}.utils.skill_files'):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
     skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
     skill_utils._skill_session = recorder.session
@@ -321,6 +321,7 @@ def skill_utils(monkeypatch):
         'tools', 'sqlalchemy', 'sqlalchemy.orm', 'pylon', 'pylon.core', 'pylon.core.tools',
         f'{PKG}.utils.authors', f'{PKG}.utils.utils', f'{PKG}.utils.like_utils',
         f'{PKG}.utils.folder_access', f'{PKG}.utils.skill_run_settings', f'{PKG}.models.skill',
+        f'{PKG}.utils.skill_file_store',
         f'{PKG}.models.all', f'{PKG}.models.enums.all', f'{PKG}.models.enums.events',
         f'{PKG}.models.pd.skill', f'{PKG}.models.pd.skill_version', f'{PKG}.models.pd.skill_run_settings',
     ):
@@ -442,7 +443,7 @@ def publish(monkeypatch, skill_models):
         f'{PKG}.models.pd.collection_base', f'{PKG}.models.pd.skill_publish',
         f'{PKG}.models.pd.skill_version', f'{PKG}.models.skill', f'{PKG}.utils.publish_utils',
         f'{PKG}.utils.constants', f'{PKG}.utils.skill_run_settings', f'{PKG}.utils.utils',
-        f'{PKG}.utils.skill_category_utils', f'{PKG}.utils.skill_utils',
+        f'{PKG}.utils.skill_category_utils', f'{PKG}.utils.skill_utils', f'{PKG}.utils.skill_files',
     ):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
     sys.modules[f'{PKG}.utils.publish_utils'].BaseChecker = object
@@ -470,7 +471,7 @@ class TestPublishingKeepsFrontmatter:
 
     def snapshot(self, publish, monkeypatch):
         source = types.SimpleNamespace(
-            name='v1', instructions='Body', tags=[], run_settings=None,
+            id=70, name='v1', instructions='Body', tags=[], run_settings=None,
             meta={'icon_meta': {'url': 'i'}, 'frontmatter': self.FRONTMATTER},
         )
         use_session(publish, monkeypatch, RecordingSession(
@@ -674,7 +675,7 @@ class TestAgentPublishReusesSkillCopiesOnlyWhenFrontmatterMatches:
         assert len({agent_publish._skill_content_sha('Do it.'), mit, apache}) == 3
 
     def test_publishing_reads_each_skill_frontmatter(self, agent_publish, monkeypatch):
-        skill_version = types.SimpleNamespace(run_settings=None, meta={'frontmatter': {'license': 'MIT'}})
+        skill_version = types.SimpleNamespace(run_settings=None, meta={'frontmatter': {'license': 'MIT'}}, files=[])
         session = types.SimpleNamespace(query=lambda model: FakeQuery([types.SimpleNamespace(skill_version=skill_version)]))
 
         @contextlib.contextmanager
@@ -706,7 +707,7 @@ class TestAgentPublishReusesSkillCopiesOnlyWhenFrontmatterMatches:
                  'frontmatter': {'license': 'MIT'}}
 
         assert agent_publish._resolve_or_fork_skill_twin(2, 1, skill, 3) == (8, 80)
-        assert fingerprinted == [('Do it.', None, {'license': 'MIT'})]
+        assert fingerprinted == [('Do it.', None, {'license': 'MIT'}, None)]
 
 
 

@@ -5,7 +5,9 @@ from typing import List, Optional
 from tools import db_tools, db, config as c
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, String, DateTime, func, ForeignKey, Text, Table, Column, UniqueConstraint, Index, text
+from sqlalchemy import (
+    Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint, func, text,
+)
 from sqlalchemy.ext.mutable import MutableDict
 
 from .enums.all import PublishStatus
@@ -15,6 +17,7 @@ from .mixins import AbstractLikesMixin
 SKILL_TABLE_NAME = 'skills'
 SKILL_VERSION_TABLE_NAME = 'skill_versions'
 ENTITY_SKILL_MAPPING_TABLE_NAME = 'entity_skill_mapping'
+SKILL_VERSION_FILE_TABLE_NAME = 'skill_version_files'
 
 
 SkillVersionTagAssociation = Table(
@@ -123,6 +126,43 @@ class SkillVersion(db_tools.AbstractBaseMixin, db.Base):
         default=PublishStatus.draft.value,
         index=True
     )
+
+    files: Mapped[List['SkillVersionFile']] = relationship(
+        back_populates='version',
+        lazy='select',
+        cascade='all, delete',
+        passive_deletes=True,
+        order_by='SkillVersionFile.path',
+    )
+
+
+class SkillVersionFile(db_tools.AbstractBaseMixin, db.Base):
+    """One bundled file of a skill version: a path under the skill root naming content in object storage by hash."""
+    __tablename__ = SKILL_VERSION_FILE_TABLE_NAME
+    __table_args__ = {'schema': c.POSTGRES_TENANT_SCHEMA}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    skill_version_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.{SKILL_VERSION_TABLE_NAME}.id', ondelete='CASCADE'),
+        index=True,
+    )
+    version: Mapped['SkillVersion'] = relationship(back_populates='files', lazy=True)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_text: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+Index(
+    'uq_skill_version_files_path_ci',
+    SkillVersionFile.skill_version_id,
+    func.lower(SkillVersionFile.path),
+    unique=True,
+)
+
+SKILL_FILE_TABLES = (SkillVersionFile,)
 
 
 class EntitySkillMapping(db_tools.AbstractBaseMixin, db.Base):

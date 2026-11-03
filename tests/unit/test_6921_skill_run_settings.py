@@ -73,6 +73,7 @@ def env(isolated_sys_modules):
     _module(f'{PKG}.models.pd.skill', SkillExportModel=object)
     _module(f'{PKG}.utils.export_import_utils', slugify=lambda value: value)
     _module(f'{PKG}.utils.skill_utils', _skill_session=None, get_skill_details=None, import_skill=None)
+    _module(f'{PKG}.utils.skill_files', list_version_manifest=None)
     sys.modules.setdefault('sqlalchemy.orm', types.ModuleType('sqlalchemy.orm'))
     if not hasattr(sys.modules['sqlalchemy.orm'], 'selectinload'):
         sys.modules['sqlalchemy.orm'].selectinload = lambda *a, **k: None

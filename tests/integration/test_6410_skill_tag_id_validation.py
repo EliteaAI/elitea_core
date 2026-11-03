@@ -166,6 +166,7 @@ def skill_utils_module():
     models_skill = types.ModuleType(f'{PKG_ROOT}.elitea_core.models.skill')
     models_skill.Skill = type('Skill', (), {})
     models_skill.SkillVersion = type('SkillVersion', (), {})
+    models_skill.SkillVersionFile = type('SkillVersionFile', (), {})
     models_skill.EntitySkillMapping = type('EntitySkillMapping', (), {})
     _register(f'{PKG_ROOT}.elitea_core.models.skill', models_skill)
 

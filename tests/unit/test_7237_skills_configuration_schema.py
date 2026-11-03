@@ -9,6 +9,9 @@ SKILL_LIMITS = {
     'max_skills_per_agent': ('skills.max_skills_per_agent', 50, 200),
     'max_invoked_skills_per_turn': ('skills.max_invoked_skills_per_turn', 5, 50),
     'max_instructions_length': ('skills.max_instructions_length', 50000, 200000),
+    'max_package_size_mb': ('skills.max_package_size_mb', 30, 500),
+    'max_file_size_mb': ('skills.max_file_size_mb', 10, 150),
+    'max_package_files': ('skills.max_package_files', 500, 5000),
 }
 
 
@@ -17,7 +20,7 @@ def properties():
     return json.loads((PLUGIN_ROOT / 'admin_schema.json').read_text())['properties']
 
 
-def test_the_skills_section_holds_the_three_limits_and_the_project_skills_switch(properties):
+def test_the_skills_section_holds_the_skill_limits_and_the_project_skills_switch(properties):
     assert [key for key, field in properties.items() if field.get('section') == 'skills'] == [
         *SKILL_LIMITS, 'project_skills_in_chat_available',
     ]

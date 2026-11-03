@@ -31,6 +31,7 @@ def skill_utils(monkeypatch):
         'tools', 'sqlalchemy', 'sqlalchemy.orm', 'pylon', 'pylon.core', 'pylon.core.tools',
         f'{PKG}.utils.authors', f'{PKG}.utils.utils', f'{PKG}.utils.like_utils',
         f'{PKG}.utils.folder_access', f'{PKG}.utils.skill_run_settings', f'{PKG}.models.skill',
+        f'{PKG}.utils.skill_file_store',
         f'{PKG}.models.all', f'{PKG}.models.enums.all', f'{PKG}.models.enums.events',
         f'{PKG}.models.pd.skill', f'{PKG}.models.pd.skill_version', f'{PKG}.models.pd.skill_run_settings',
     ):
