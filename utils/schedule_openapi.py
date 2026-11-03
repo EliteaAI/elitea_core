@@ -397,7 +397,7 @@ OPERATIONS = {
     },
     ("post", "test_run"): {
         "name": "Test a schedule that is not saved",
-        "summary": "Test run of the form before a save",
+        "summary": "Test run of an unsaved form",
         "description": _text(
             "Start a test run of the Save form. The body is the Save body. The values go to the caller's hidden "
             "draft row of this agent or pipeline, and a run with trigger `test` starts on it with the same risk, "
@@ -419,7 +419,7 @@ OPERATIONS = {
     },
     ("delete", "test_run"): {
         "name": "Cancel a test form",
-        "summary": "Remove the hidden draft of a closed test form",
+        "summary": "Drop the hidden test draft",
         "description": _text(
             "Remove the caller's draft row of the agent or pipeline in `application_id`, when the form closes "
             "without Save. A draft that has runs stays. Safe to repeat.",
@@ -430,7 +430,7 @@ OPERATIONS = {
     },
     ("get", "test_run"): {
         "name": "List the test runs of the Save form",
-        "summary": "List the runs of the caller's test draft",
+        "summary": "List the runs of the test draft",
         "description": _text(
             "Answer the test runs of the caller's own draft for `application_id`, newest first, with the total "
             "before paging. The rows have the fields of the runs list. No draft means `total` 0 and no rows.",
@@ -443,7 +443,7 @@ OPERATIONS = {
     },
     ("get", "test_run/<int:run_id>"): {
         "name": "Read one test run of the Save form",
-        "summary": "Read one run of the caller's test draft",
+        "summary": "Read one run of the test draft",
         "description": _text(
             "Answer one run of the caller's own draft for `application_id`, with the body of the run detail of a "
             "saved schedule: status, events, summary, conversation_id, version_label, tokens, cost_usd.",
@@ -453,15 +453,17 @@ OPERATIONS = {
                                          "schema": {"type": "integer"}, "description": "Agent or pipeline id"},
                        {"name": "run_id", "in": "path", "required": True, "schema": {"type": "integer"},
                         "description": "Run id, from the test run answer or the test run list"}],
-        "responses": _responses(200, "The run", None, {400: None, 403: None, 404: "The run is not on the caller's draft"}),
+        "responses": _responses(200, "The run", {"id": 77, "status": "success", "events": [], "summary": "Done", "conversation_id": 410,
+                                    "version_label": "base", "tokens": 1200, "cost_usd": 0.004},
+                              {400: None, 403: None, 404: "The run is not on the caller's draft"}),
     },
     ("get", f"{ITEM}/runs"): {
         "name": "List the runs of a schedule",
         "summary": "List the runs of a schedule",
         "description": _text(
-            "Answer the run records of one schedule, newest first, with the total before paging.",
-            OWNER_OR_ADMIN.format(permission="schedules.details"),
+            "Answer the run records of one schedule, newest first, with the total before paging. "
             "Each row has `version_label`, `duration_ms`, `tokens` and `cost_usd`; they are null when unknown.",
+            OWNER_OR_ADMIN.format(permission="schedules.details"),
             "400 an invalid query option (an unknown `status` or `trigger`, or a `version_id` that is not an id); "
             "403 no permission; 404 not found"),
         "parameters": ITEM_PARAMS + RUNS_QUERY_PARAMS,
@@ -469,7 +471,7 @@ OPERATIONS = {
     },
     ("post", f"{RUN}/decision"): {
         "name": "Decide a waiting run",
-        "summary": "Approve or reject a waiting run that has no chat",
+        "summary": "Decide a waiting run",
         "description": _text(
             "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
             "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",

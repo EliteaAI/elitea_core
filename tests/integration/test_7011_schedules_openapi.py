@@ -39,7 +39,7 @@ BASE = f'{API_ROOT}/schedules/{{mode}}/{{project_id}}'
 ITEM = f'{BASE}/{{schedule_id}}'
 API_MODULES = ('schedules',)
 REAL_MODULES = (
-    'utils/constants.py', 'models/pd/entity_schedule.py', 'models/pd/schedule_run.py',
+    'utils/constants.py', 'utils/error_text.py', 'models/pd/entity_schedule.py', 'models/pd/schedule_run.py',
     'models/pd/schedule_list.py', 'models/pd/generate_schedule_draft.py', 'utils/schedule_item_handlers.py',
     'utils/schedule_settings.py', 'utils/schedule_project_handlers.py', 'utils/schedule_draft_handler.py',
     'utils/schedule_openapi.py',
@@ -53,7 +53,7 @@ LENIENT_MODULES = (
         'exceptions', 'predict_utils', 'schedule_draft_utils', 'service_prompt_utils', 'utils',
         'evaluation_run_utils', 'run_id', 'scheduler_bindings', 'sio_utils', 'prompt_eliminate_utils',
         'admission', 'binding_api', 'governance', 'governance_settings', 'mandate_admission',
-        'worker_capabilities', 'trigger_governance',
+        'worker_capabilities', 'trigger_governance', 'schedule_test_draft',
     )),
 )
 OTHER_TAGS = {
@@ -84,8 +84,15 @@ OPERATIONS = {
     ('get', f'{BASE}/settings'),
     ('put', f'{BASE}/settings'),
     ('post', f'{BASE}/check'),
+    ('post', f'{ITEM}/runs/{{run_id}}/decision'),
+    ('post', f'{BASE}/test_run'),
+    ('delete', f'{BASE}/test_run'),
+    ('get', f'{BASE}/test_run'),
+    ('get', f'{BASE}/test_run/{{run_id}}'),
 }
-NO_JSON_SUCCESS = {('delete', ITEM), ('get', f'{BASE}/export')}  # 204 without a body, a YAML file
+NO_JSON_SUCCESS = {  # 204 without a body, a YAML file
+    ('delete', ITEM), ('delete', f'{BASE}/test_run'), ('get', f'{BASE}/export'),
+}
 
 
 def _with_modes(reverse):
@@ -204,7 +211,7 @@ def _body_schemas(spec):
 def test_r1_1_el7011_every_schedules_operation_has_its_own_path(spec):
     operations = _operations(spec)
     assert set(operations) == OPERATIONS
-    assert len(operations) == 19
+    assert len(operations) == 24
     for (method, path), operation in operations.items():
         path_params = {p['name'] for p in operation['parameters'] if p['in'] == 'path'}
         assert path_params == set(re.findall(r'{(\w+)}', path)), (method, path)
@@ -340,7 +347,7 @@ def test_r1_2_el7011_list_and_runs_publish_query_enums(spec):
     assert listing['enabled']['schema']['type'] == 'boolean'
 
     runs = _query(spec, 'get', f'{ITEM}/runs')
-    assert set(runs) == {'limit', 'offset', 'status'}
+    assert set(runs) == {'limit', 'offset', 'status', 'trigger', 'version_id'}
     assert runs['status']['schema']['enum'] == run_statuses
     assert runs['limit']['schema']['default'] == 20
     assert runs['offset']['schema']['default'] == 0
