@@ -305,3 +305,12 @@ def test_a_draft_answers_404_for_a_run_that_is_not_a_test_run(harness, decisions
 
     assert decide(harness, schedule_id, run_id)[1] == 404
     assert decisions.applied == []
+
+
+def test_an_admin_gets_404_for_a_draft_of_another_user(harness, decisions):
+    harness.request_as(ADMIN_ID, ADMIN)
+    schedule_id = harness.seed(draft=True, enabled=False)  # the draft belongs to the owner
+    run_id = add_run(harness, schedule_id, trigger='test')
+
+    assert decide(harness, schedule_id, run_id)[1] == 404
+    assert decisions.applied == []

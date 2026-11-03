@@ -513,6 +513,8 @@ def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTIC
         if event is None:  # the status moved on after the commit; that writer owns the notice
             continue
         schedule = session.get(EntitySchedule, run.schedule_id)
+        if schedule.draft:  # a Test Run of the hidden draft: no schedule page answers for it, so no notice links to it
+            continue
         # One failed notice must not leave the other runs of a batch without theirs
         try:
             notify_schedule_event(project_id, schedule.created_by, event, schedule, run)

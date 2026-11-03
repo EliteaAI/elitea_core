@@ -17,6 +17,7 @@ COLUMN = "draft"
 INDEX = "uq_entity_schedules_draft_owner_entity"
 LOCK_TIMEOUT = "5s"  # a long lock on the schedule table would stall the boot of every replica
 ATTEMPTS, RETRY_DELAY_S = 3, 5
+BOOT_BUDGET_S = 30  # the boot waits at most this long, however many projects fail
 _MISSING_QUERY = text(
     "SELECT t.table_schema FROM information_schema.tables t WHERE t.table_name = :table "
     "AND t.table_schema ~ '^p_[0-9]+$' AND NOT EXISTS (SELECT 1 FROM information_schema.columns col "
@@ -42,15 +43,21 @@ def _apply_once(pid) -> None:
         session.commit()
 
 
-def apply_draft_column(project_ids, attempts=ATTEMPTS, delay_s=RETRY_DELAY_S, sleep=time.sleep):
+def apply_draft_column(project_ids, attempts=ATTEMPTS, delay_s=RETRY_DELAY_S, sleep=time.sleep,
+                       budget_s=BOOT_BUDGET_S, clock=time.monotonic):
     """(migrated, failed); one transaction per project, each tried up to `attempts` times.
 
+    The loop stops when `budget_s` is spent; the projects left are returned as failed.
     The schema name is built from the integer id only.
     """
+    deadline = clock() + budget_s
     migrated, pending = [], [int(pid) for pid in project_ids]
     for attempt in range(attempts):
         failed = []
         for pid in pending:
+            if clock() >= deadline:
+                failed.append(pid)
+                continue
             try:
                 _apply_once(pid)
                 migrated.append(pid)
@@ -60,6 +67,8 @@ def apply_draft_column(project_ids, attempts=ATTEMPTS, delay_s=RETRY_DELAY_S, sl
         pending = failed
         if not pending:
             break
-        if attempt + 1 < attempts:
+        if attempt + 1 < attempts and clock() + delay_s < deadline:
             sleep(delay_s)
+        elif pending:
+            break
     return migrated, pending

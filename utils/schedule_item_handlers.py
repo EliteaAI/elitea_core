@@ -651,7 +651,8 @@ class ScheduleItemHandlers:
             run = session.get(EntityScheduleRun, run_id)
             if run is None or run.schedule_id != schedule_id:
                 return RUN_NOT_FOUND
-            if row.draft and run.trigger != 'test':  # a draft holds test runs only
+            # a draft holds test runs only and belongs to its creator; an admin gets 404, as for a missing run
+            if row.draft and (run.trigger != 'test' or row.created_by != scope.user_id):
                 return RUN_NOT_FOUND
             if run.conversation_id is not None:
                 return refusal("run_has_chat", "Decide this run in its chat", 409)

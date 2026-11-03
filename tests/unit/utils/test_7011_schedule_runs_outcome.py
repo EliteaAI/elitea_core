@@ -200,6 +200,16 @@ def test_el_7011_r4_3_announce_skips_a_run_whose_status_has_no_notice(runs, sess
     assert (sent.notices, sent.emitted) == ([], [])
 
 
+def test_announce_sends_no_notice_for_a_test_run_of_the_hidden_draft(runs, session, sent):
+    """A draft has no schedule page, so a notice would link to a 404."""
+    schedule = _schedule(runs, session, created_by=12, draft=True)
+    run = _run(runs, session, schedule, status="failed")
+
+    runs._announce(1, session, [run.id])
+
+    assert (sent.notices, sent.emitted) == ([], [])
+
+
 TOOL_ERROR = "GitHub \u00b7 create_pull_request: missing title"
 
 

@@ -1,6 +1,7 @@
 import functools
 import os
 import re
+import time
 
 from collections import OrderedDict
 from json import dumps
@@ -875,8 +876,28 @@ class Module(module.ModuleModel):
             if pending:
                 migrated, failed = apply_draft_column(pending)
                 log.info("schedule draft schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
+                if failed:
+                    log.error("schedule draft schema: projects still without the column, retrying in the "
+                              "background: %s", failed)
+                    self._retry_schedule_draft_column(failed)
         except Exception:  # pylint: disable=W0703
             log.exception("schedule draft schema: auto-migration failed")
+
+    def _retry_schedule_draft_column(self, project_ids):
+        """Try the projects that the boot net could not fix again, every minute, up to ten times."""
+        def _run():
+            from .utils.schedule_draft_schema import apply_draft_column  # pylint: disable=C0415
+            pending = list(project_ids)
+            for _ in range(10):
+                time.sleep(60)
+                _, pending = apply_draft_column(pending, attempts=1)
+                if not pending:
+                    log.info("schedule draft schema: the background retry fixed every project")
+                    return
+            log.error("schedule draft schema: gave up on projects %s; add the column by hand "
+                      "(db_migrations.txt)", pending)
+
+        Thread(target=_run, daemon=True).start()
 
     def _ensure_agent_identity_schema(self):
         """Startup safety net: create the agent identity and mandate tables in any project schema that predates
