@@ -5,13 +5,15 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.enums.all import NotificationEventTypes as Types
 from .sio_utils import SioEvents, get_event_room
 
+DEFAULT_APPROVAL_HOURS = 24
+
 # One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
 # only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
 MESSAGES = {
     Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
     Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
     Types.schedule_approval_needed: 'Schedule "{link}" waits for your approval',
-    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in 24 hours and the run stopped',
+    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in {hours} hours and the run stopped',
     Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
     Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
     Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
@@ -20,6 +22,20 @@ MESSAGES = {
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
 _NAME_BRACKETS = str.maketrans('[]', '［］')
+
+
+def _approval_hours(run) -> int:
+    """The approval window in hours the run was parked with, read from its `paused` events.
+
+    The setting may have changed since; the run keeps the value it was given. A run parked before the value
+    was saved, or whose event was cut from the log, gets the current setting.
+    """
+    for event in reversed(getattr(run, 'events', None) or []):
+        hours = event.get('wait_hours') if isinstance(event, dict) and event.get('kind') == 'paused' else None
+        if isinstance(hours, int) and not isinstance(hours, bool) and hours > 0:
+            return hours
+    from .schedule_runs import approval_wait_hours  # late: the run writers import this module
+    return approval_wait_hours()
 
 
 def _schedule_link(schedule) -> str:
@@ -44,11 +60,14 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         return False
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
+        # Only the expired notice names the window
+        hours = _approval_hours(run) if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
             'message': MESSAGES[event_type].format(
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
+                hours=hours,
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,

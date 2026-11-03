@@ -101,6 +101,9 @@ def notifications(isolated_sys_modules, recorder):
         sys.modules[name] = types.ModuleType(name)
         sys.modules[name].__path__ = []
 
+    runs = types.ModuleType(f'{PKG}.utils.schedule_runs')
+    runs.approval_wait_hours = lambda: 24
+    sys.modules[runs.__name__] = runs
     _load_real('models.enums.all', 'models/enums/all.py')
     _load_real('utils.sio_utils', 'utils/sio_utils.py')
     schedule_models = types.ModuleType(f'{PKG}.models.entity_schedule')
@@ -111,6 +114,31 @@ def notifications(isolated_sys_modules, recorder):
 
 def _send(notifications, event_type, **kwargs):
     return notifications.notify_schedule_event(12, 42, event_type, SCHEDULE, **kwargs)
+
+
+def _parked(*hours):
+    return types.SimpleNamespace(
+        id=5, conversation_id=None, reason=None,
+        events=[{'kind': 'paused', 'wait_hours': value} for value in hours] + [{'kind': 'finished'}])
+
+
+def test_the_expired_notice_names_the_window_the_run_was_parked_with(notifications, recorder):
+    _send(notifications, 'schedule_approval_expired', run=_parked(24, 48))
+
+    assert 'was not approved in 48 hours' in recorder.fired[0][1]['meta']['message']
+
+
+@pytest.mark.parametrize('run', [None, types.SimpleNamespace(id=5, conversation_id=None, reason=None, events=None),
+                                 _parked(0), _parked('x'), _parked(True)])
+def test_the_expired_notice_falls_back_to_the_setting_when_the_run_has_no_window(
+        notifications, recorder, monkeypatch, run):
+    runs = types.ModuleType(f'{PKG}.utils.schedule_runs')
+    runs.approval_wait_hours = lambda: 72
+    monkeypatch.setitem(sys.modules, runs.__name__, runs)
+
+    _send(notifications, 'schedule_approval_expired', run=run)
+
+    assert 'was not approved in 72 hours' in recorder.fired[0][1]['meta']['message']
 
 
 class TestEL7011EventTypes:
@@ -213,7 +241,7 @@ class TestEL7011NoticeLinks:
     @pytest.mark.parametrize('event_type, message', [
         ('schedule_approval_needed', f'Schedule "{SCHEDULE_LINK}" waits for your approval'),
         ('schedule_approval_expired',
-         f'Schedule "{SCHEDULE_LINK}" was not approved in 24 hours and the run stopped'),
+         f'Schedule "{SCHEDULE_LINK}" was not approved in 24 hours and the run stopped'),  # the default window
         ('schedule_run_failed', f'Schedule "{SCHEDULE_LINK}" failed: credential not found'),
         ('schedule_run_succeeded', f'Schedule "{SCHEDULE_LINK}" ran successfully'),
     ])

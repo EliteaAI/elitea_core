@@ -23,6 +23,21 @@ CREDENTIAL_REASONS = {
 }
 
 
+class MissingCredential(str):
+    """The reason text of a missing credential; `credential` is the title of the first one.
+
+    The expansion error names no toolkit; `toolkit` comes from a lookup in the version and may stay None.
+    """
+
+    credential: str | None = None
+    toolkit: str | None = None
+
+
+def credential_wait(reason: str | None) -> bool:
+    """True when the reason is a missing credential, which the owner can fix; a lost token or a broken version is not."""
+    return reason not in (None, NO_TOKEN, VERSION_NOT_EXPANDED)
+
+
 def credential_errors_of(error) -> list[dict]:
     """The credential entries of an expansion ValidationError: type and name only, never the input values."""
     found = []
@@ -86,6 +101,37 @@ def check_owner_rights(project_id: int, owner_id: int, entity_type: str | None =
     return None
 
 
+def credential_toolkit_refs(version) -> list:
+    """The (toolkit name, credential titles) of each toolkit of a loaded version, as plain values.
+
+    The run starter reads the version once; this keeps the toolkit lookup of a missing credential
+    from opening a second database session.
+    """
+    return [(tool.name or tool.type,
+             {str(value.get('elitea_title')) for value in (tool.settings or {}).values() if isinstance(value, dict)})
+            for tool in version.tools]
+
+
+def toolkit_using_credential(toolkits, credential: str) -> str | None:
+    """The name of the first toolkit whose settings reference the credential title; None if unknown.
+
+    The expansion error names only the credential, and the owner needs the toolkit to know what to fix.
+    """
+    return next((name for name, titles in toolkits or [] if credential in titles), None)
+
+
+# Runs whose owner approval already passed the credential check in the request; the restart skips the repeat
+_CHECKED_RUNS: set = set()
+
+
+def mark_credentials_checked(run_id: int) -> None:
+    _CHECKED_RUNS.add(run_id)
+
+
+def forget_credentials_checked(run_id: int) -> None:
+    _CHECKED_RUNS.discard(run_id)
+
+
 def check_owner_credentials(project_id: int, schedule) -> str | None:
     """None when a token resolves for the owner with no socket and the version expands as the owner (R2.1-R2.4)."""
     # Imported here: predict_utils pulls flask and the payload models into every importer
@@ -100,11 +146,21 @@ def check_owner_credentials(project_id: int, schedule) -> str | None:
     expanded = expand_version_for_runtime(project_id, schedule.application_id, schedule.version_id, owner_id)
     if 'error' not in expanded:
         return None
-    reasons = [
-        CREDENTIAL_REASONS[entry['error_type']].format(entry['credential_id'])
-        for entry in expanded.get('credential_errors') or []
-    ]
-    return '; '.join(reasons) or VERSION_NOT_EXPANDED
+    errors = expanded.get('credential_errors') or []
+    reasons = [CREDENTIAL_REASONS[entry['error_type']].format(entry['credential_id']) for entry in errors]
+    if not reasons:
+        return VERSION_NOT_EXPANDED
+    reason = MissingCredential('; '.join(reasons))
+    reason.credential = str(errors[0]['credential_id'])
+    reason.toolkit = toolkit_using_credential(getattr(schedule, 'credential_toolkits', None), reason.credential)
+    return reason
+
+
+def _park(project_id: int, run_id: int, reason: str) -> bool:
+    """Make the run wait for the owner to add the credentials; False when it must fail."""
+    from .schedule_runs import park_for_credentials  # late, as the writers in run_prerun_check
+    return park_for_credentials(project_id, run_id, reason, toolkit=getattr(reason, 'toolkit', None),
+                                credential=getattr(reason, 'credential', None))
 
 
 class PreRunResult(NamedTuple):
@@ -124,16 +180,25 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     from .schedule_runs import disable_schedule, fail_schedule_run
 
     owner_id = schedule.created_by
+    waits_for_owner = False
     try:
         reason = (check_principal(schedule)
                   or check_owner_access(project_id, owner_id)
-                  or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id)
-                  or check_owner_credentials(project_id, schedule))
+                  or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id))
+        # A mark in _CHECKED_RUNS means the owner's approval just ran the credential check
+        if reason is None and run_id not in _CHECKED_RUNS:
+            reason = check_owner_credentials(project_id, schedule)
+            # Only a missing credential can wait for the owner; a lost token or a broken version cannot
+            waits_for_owner = credential_wait(reason)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
         reason = PRERUN_FAILED
+    finally:
+        _CHECKED_RUNS.discard(run_id)  # the mark serves this one start, whatever way the checks end
     if reason is None:
         return PreRunResult(True, owner_id)
+    if waits_for_owner and _park(project_id, run_id, reason):
+        return PreRunResult(False, None, reason)
     fail_schedule_run(project_id, run_id, reason)
     event = Types.schedule_run_failed
     if reason == OWNER_LOST_ACCESS:

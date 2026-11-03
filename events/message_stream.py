@@ -33,7 +33,7 @@ from ..utils.attachments import (
 )
 from ..utils.token_limit_continuation import trim_continuation_overlap
 from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
-from ..utils.schedule_runs import finish_schedule_run, pause_schedule_run, run_failure_reason
+from ..utils.schedule_runs import CHILD_PAUSE_REASON, finish_schedule_run, pause_schedule_run, run_failure_reason
 
 from ..utils.sio_utils import SioEvents
 
@@ -595,14 +595,21 @@ class Event:
 
                 session.add(msg_group)
                 session.commit()
-                # Only a pause that ends the run closes it; a child or MCP-auth pause keeps streaming
-                pause_run_id = None if msg_group.is_streaming else _schedule_run_id(msg_group.conversation)
+                # A pause that ends the run waits for the owner. A child or MCP-auth pause keeps streaming and has
+                # no owner decision to resume it, so a scheduled run ends as failed instead of hanging
+                pause_run_id = _schedule_run_id(msg_group.conversation)
                 if pause_run_id:
                     pause_chat = (msg_group.conversation.id, msg_group.conversation.author_id)
+                child_pause = bool(pause_run_id) and msg_group.is_streaming
                 log.debug(f'chat_message_stream_pause: Set is_streaming={msg_group.is_streaming} for message {message_id}'
                           f'{" (HITL interrupt persisted)" if hitl_interrupt or hitl_interrupts else ""}')
         if pause_run_id:
             try:
-                pause_schedule_run(chat_project_id, pause_run_id, response_metadata, *pause_chat)
+                if child_pause:
+                    chat_id, author_id = pause_chat
+                    finish_schedule_run(chat_project_id, pause_run_id, 'failed', CHILD_PAUSE_REASON, chat_id,
+                                        author_id=author_id)
+                else:
+                    pause_schedule_run(chat_project_id, pause_run_id, response_metadata, *pause_chat)
             except Exception:  # noqa: BLE001 -- the pause stays; the stale sweep closes the run
                 log.exception('chat_message_stream_pause: schedule run %s not closed', pause_run_id)

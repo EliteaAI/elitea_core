@@ -27,7 +27,7 @@ def test_7011_r2_4_save_with_warnings_keeps_enabled_true(harness):
     assert status == 201
     assert body['warnings'] == [WARNING]
     assert harness.row(body['id']).enabled is True
-    assert harness.scans == [(PROJECT_ID, 10, OWNER_ID)]
+    assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'pause_and_ask')]
     updated, status = harness.call('put', {'name': 'Renamed'}, schedule_id=body['id'])
     assert status == 200 and updated['warnings'] == [WARNING]
     assert harness.row(body['id']).enabled is True
