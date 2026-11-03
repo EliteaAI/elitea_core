@@ -720,3 +720,68 @@ def test_the_platform_settings_say_governance_is_enforced_only_while_it_is(ns, m
         answers[governed] = settings.PromptLibAPI(None).get()[0]
     assert "governance_enforced" not in answers[False]
     assert answers[True] == {**answers[False], "governance_enforced": True}
+
+
+# --- a stored selector by title (the index's pgvector as the UI saves it) ------------------------------------------
+
+PGVECTOR = {"elitea_title": "elitea-pgvector", "private": False}
+
+
+def _title_toolkit(env, monkeypatch, ns, answers, tool_id=2, field="pgvector_configuration", value=PGVECTOR):
+    """A second toolkit of version 70 whose ``field`` selects a configuration by title only; ``answers``: what the
+    run's resolver (``configurations_expand``) gives per title (an exception is raised)."""
+    env.add_toolkit(1, 70, tool_id, "jira", {"url": "https://jira.example", field: dict(value)})
+    calls = []
+
+    def expand(project_id, settings, user_id):
+        calls.append((project_id, dict(settings), user_id))
+        answer = answers[settings["elitea_title"]]
+        if isinstance(answer, Exception):
+            raise answer
+        return {**settings, "configuration_type": "pgvector", "connection_string": "{{secret.ref}}", **answer}
+
+    monkeypatch.setattr(ns.governance_readiness, "_expand", expand)
+    return calls
+
+
+def test_a_title_only_index_store_is_resolved_as_the_run_resolves_it_and_is_not_a_credential(ns, env, monkeypatch):
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    cred = credential(env, binding)   # the jira credential by uuid: no reference yet
+    store = str(uuid.uuid4())
+    env.configurations[(1, store)] = {"id": 9, "project_id": 1, "type": "pgvector", "section": "vectorstorage",
+                                      "generation": 1}
+    calls = _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": {"configuration_uuid": store,
+                                                                      "configuration_project_id": 1}})
+    found = items(ns, env)
+    assert [key for key in found if key.startswith(("reference:", "grant:"))] == [
+        f"reference:{cred.uuid}", f"grant:1:{cred.uuid}"]
+    assert found[f"reference:{cred.uuid}"]["state"] == "missing"
+    assert not any(item["state"] == "not_registrable" for item in found.values())
+    assert calls == [(1, {"elitea_title": "elitea-pgvector", "private": False}, MEMBER)]   # one call, as the run asks
+
+
+def test_a_title_that_does_not_resolve_stays_not_registrable(ns, env, monkeypatch):
+    env.add_binding(1, 7, 70, digest=DIGEST)
+    _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": LookupError("not found")})
+    found = items(ns, env)
+    [item] = [item for key, item in found.items() if key.startswith("reference:")]
+    assert (item["state"], item["requestable"]) == ("not_registrable", False)
+
+
+def test_a_title_only_credential_is_treated_like_its_uuid(ns, env, monkeypatch):
+    env.add_binding(1, 7, 70, digest=DIGEST)
+    jira = str(uuid.uuid4())
+    env.configurations[(1, jira)] = {"id": 11, "project_id": 1, "type": "jira", "section": "credentials",
+                                     "generation": 1}
+    _title_toolkit(env, monkeypatch, ns, {"jira-by-title": {"configuration_uuid": jira, "configuration_project_id": 1}},
+                   field="jira_configuration", value={"elitea_title": "jira-by-title", "private": False})
+    found = items(ns, env)
+    assert (found[f"reference:{jira}"]["state"], found[f"reference:{jira}"]["requestable"]) == ("missing", True)
+    assert f"grant:2:{jira}" in found
+
+
+def test_an_unreachable_resolver_makes_readiness_unavailable_never_a_wrong_list(ns, env, monkeypatch):
+    env.add_binding(1, 7, 70, digest=DIGEST)
+    _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": TimeoutError("rpc")})
+    with pytest.raises(ns.governance_readiness.ReadinessUnavailable):
+        items(ns, env)

@@ -17,7 +17,8 @@ recorded, no context, no release. Under off and audit only it is empty and nothi
 person may file now through ``governance_requests`` (in one batch: the binding first, then references, the mandate,
 the grants), given ``governance.request`` and, for a binding, the right to edit the version.
 """
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -28,7 +29,7 @@ from tools import auth, db
 from ..models.agent_identity import LIVE_MANDATE_STATES, AgentIdentityBinding
 from .credential_decision import (
     CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, MANDATE_CONSENT_REQUIRED, MANDATE_DELEGATION_UNSUPPORTED,
-    PROFILE_DEVELOPMENT, CredentialDecisionContext, authorize_credential_use, collect_credential_uses, grant_key,
+    MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, CredentialDecisionContext, authorize_credential_use, collect_credential_uses, grant_key,
     read_configuration_facts, toolkit_secret_fields, user_may_use_credentials, _governed_uses, _read_decision_facts,
 )
 from .definition_digest import DigestError, digest_for_version, toolkit_rows
@@ -119,11 +120,61 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
     return None, "missing"
 
 
+EXPAND_TIMEOUT_S = 5
+
+
+def _expand(project_id, settings, user_id):
+    """The run's own resolver of a configuration selector (``configurations_expand``), its values left as references."""
+    from tools import context  # pylint: disable=C0415
+    return context.rpc_manager.timeout(EXPAND_TIMEOUT_S).configurations_expand(
+        project_id=project_id, settings=settings, user_id=user_id, unsecret=False)
+
+
+def _resolve_titles(candidates, rows, user_id):
+    """A stored selector by title (``{elitea_title, private}``, as the UI saves an index's pgvector) is resolved as the
+    run resolves it, so its section is known: ``(configuration_uuid, configuration_project_id)`` are taken from the
+    answer and the rest of it is dropped. One call per title use, at most ``MAX_GOVERNED_CREDENTIALS_PER_RUN``; a title
+    that resolves to nothing stays a title use (``not_registrable``, as before). Read only."""
+    stored = {str(tool.id): tool.settings for _, tool in rows if isinstance(getattr(tool, "settings", None), dict)}
+    resolved, calls = [], 0
+    for use in candidates:
+        value = (stored.get(use.toolkit_instance_id) or {}).get(use.field)
+        title = (value.get("elitea_title") or value.get("alita_title")) if isinstance(value, dict) else None
+        if use.selector == "title" and isinstance(title, str) and title and calls < MAX_GOVERNED_CREDENTIALS_PER_RUN:
+            calls += 1
+            try:
+                answer = _expand(use.configuration_project_id, {"elitea_title": title,
+                                                                "private": bool(value.get("private"))}, user_id)
+            except (LookupError, ValueError):
+                answer = None
+            except Exception as exc:  # pylint: disable=W0703
+                log.error("governance readiness: a configuration title could not be resolved (%s)", type(exc).__name__)
+                raise ReadinessUnavailable() from None
+            found = _found(answer)
+            if found is not None:
+                use = replace(use, configuration_uuid=found[0], selector="uuid", configuration_project_id=found[1])
+        resolved.append(use)
+    return resolved
+
+
+def _found(answer):
+    if not isinstance(answer, dict):
+        return None
+    project_id = answer.get("configuration_project_id")
+    try:
+        cfg_uuid = str(uuid.UUID(str(answer.get("configuration_uuid"))))
+    except ValueError:
+        return None
+    if not isinstance(project_id, int) or isinstance(project_id, bool):
+        return None
+    return cfg_uuid, project_id
+
+
 def _uses(session, project_id, version_id, user_id, rows):
     """The governed credential uses of the version's stored definition, and the facts of their configurations."""
-    candidates = collect_credential_uses(
+    candidates = _resolve_titles(collect_credential_uses(
         None, project_id, version_id, None, lambda tool_type: toolkit_secret_fields(tool_type, project_id, user_id),
-        rows=rows)
+        rows=rows), rows, user_id)
     configurations = read_configuration_facts(
         (use.configuration_uuid, use.configuration_project_id) for use in candidates)
     return _governed_uses(candidates, configurations), configurations
