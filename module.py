@@ -15,7 +15,10 @@ import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import AdmissionSettings, admit_dispatch, track_context
-from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
+from .utils.binding_api import (
+    PERMISSIONS as BINDING_PERMISSIONS, REQUEST as BINDING_REQUEST, REQUEST_ROLES as BINDING_REQUEST_ROLES,
+    registration as binding_registration,
+)
 from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
@@ -790,6 +793,12 @@ class Module(module.ModuleModel):
             except Exception:  # pylint: disable=W0703
                 log.exception("mandate identity schema: auto-migration failed")
             try:
+                from .utils import token_identity  # pylint: disable=C0415
+                if token_identity.allowed(self):   # (#7337) only where API tokens may act with their owner's consent
+                    token_identity.ensure_table()
+            except Exception:  # pylint: disable=W0703
+                log.exception("token identity schema: the consent table could not be created")
+            try:
                 from .utils.mandate_toolkit_schema import (  # pylint: disable=C0415
                     apply_toolkit_mandates, project_ids_missing_toolkit_mandates,
                 )
@@ -973,10 +982,13 @@ class Module(module.ModuleModel):
                     "default": {"super_admin": False, "admin": False, "viewer": False, "editor": False, "system": False},
                 }
             })
-        # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration only in this slice
-        # (roles in binding_api.RECOMMENDED_ROLES). Registered whatever the governance flag says.
+        # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration, and (#7269) the
+        # project's admins in project mode (roles in binding_api.PROJECT_ROLES). Registered whatever the governance flag
+        # says.
         for permission in BINDING_PERMISSIONS:
             auth.register_permissions(binding_registration(permission))
+        # (#7269) a member files the governed setup of what they work on: project admins and editors
+        auth.register_permissions({"permissions": [BINDING_REQUEST], "recommended_roles": BINDING_REQUEST_ROLES})
 
         # self.init_db()
         # TaskNode

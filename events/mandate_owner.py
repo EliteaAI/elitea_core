@@ -1,5 +1,6 @@
 from pylon.core.tools import web
 
+from ..utils import token_identity
 from ..utils.mandate_owner import on_auth_invalidate
 
 
@@ -9,3 +10,5 @@ class Event:
         """A user was revoked or changed: a governed platform suspends the mandates of an owner who is no longer
         active (#6947). Returns at once when governance is off."""
         on_auth_invalidate(self, payload)
+        # (#7337) a deleted token takes its owner's consent with it; nothing is read without the token source
+        token_identity.on_auth_invalidate(self, payload)

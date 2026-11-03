@@ -41,8 +41,9 @@ STATUS_OF = {TOKEN_SCOPE_PROJECT: 403, TOKEN_SCOPE_OPERATION: 403, DEPENDENCY_UN
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 ADMINISTRATION_MODE = "administration"
 
-# Token management: refused to every API token under the governed profile, whatever the method
-TOKEN_ROUTES = frozenset({"api.v2.auth.token"})
+# Token management: refused to every API token under the governed profile, whatever the method; a token's consent to
+# act with its owner's Microsoft sign-in is its owner's act in their own session (#7337)
+TOKEN_ROUTES = frozenset({"api.v2.auth.token", "api.v2.elitea_core.token_identity"})
 # Routes by Flask endpoint and their operation. A ``(endpoint, path suffix)`` key holds for that action of a route
 # only (a schedule's Run now). Any write not named here is ``build``.
 ROUTE_OPERATIONS = {
@@ -82,6 +83,7 @@ ROUTE_OPERATIONS = {
     "api.v2.elitea_core.agent_identity_action": "admin",
     "api.v2.elitea_core.autonomous_mandates": "admin",
     "api.v2.elitea_core.autonomous_mandate_action": "admin",
+    "api.v2.elitea_core.governance_requests": "admin",   # (#7269) a member's request files governance rows
     "api.v2.elitea_core.admin": "admin",
     "api.v2.elitea_core.admin_published_agents": "admin",
     "api.v2.elitea_core.platform_settings": "admin",

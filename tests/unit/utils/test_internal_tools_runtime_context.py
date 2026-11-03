@@ -128,6 +128,25 @@ class TestSkillRequestWithoutSkillBuilder:
         assert 'Skill Builder tool' not in addon
 
 
+class TestProjectContextAskUserClarification:
+
+    def test_with_ask_user_the_model_is_told_to_use_the_tool(self, internal_tools):
+        addon = internal_tools.get_mcp_entity_link_instructions(['project_context_builder', 'ask_user'])
+        assert 'MUST call the `ask_user` tool' in addon
+        assert 'Do NOT ask for them in a plain-text reply' in addon
+
+    def test_without_ask_user_the_rule_is_absent(self, internal_tools):
+        addon = internal_tools.get_mcp_entity_link_instructions(['project_context_builder'])
+        assert 'ask_user' not in addon
+
+    def test_ask_user_alone_adds_no_builder_addon(self, internal_tools):
+        assert internal_tools.get_mcp_entity_link_instructions(['ask_user']) == ''
+
+    def test_few_shot_block_is_separated_from_the_scope_rule(self, internal_tools):
+        addon = internal_tools.get_mcp_entity_link_instructions(['project_context_builder', 'ask_user'])
+        assert '\n\nOnly use MCP tools' in addon
+
+
 class TestCurrentProjectSuffixes:
 
     def test_skills_and_project_context_follow_the_active_project(self, internal_tools):

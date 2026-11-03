@@ -61,6 +61,7 @@ from .governance import MODE_AUDIT_ONLY, governance_lifecycle_active, is_auditin
 from .governance_settings import Check
 from . import internal_obo
 from .mandate_identity import identity_reader, owner_delegated_allowed, retire_consent
+from . import token_identity
 from .mandate_state import expire_if_due, suspend_owner_mandates
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
 from .trigger_principal import OPERATION_OF
@@ -228,11 +229,22 @@ MESSAGES = {
     "DENIED_MANDATE_CONSENT_REQUIRED": "This scheduled or webhook run acts with the mandate owner's Microsoft sign-in, "
                                        "which needs the owner's consent for this credential: it is missing, was "
                                        "withdrawn, or does not cover the credential as it is now (the owner consents "
-                                       "again under Governance, Mandates); or someone else changed the schedule last "
+                                       "again, signed in, on the schedule in Elitea; operators see it under "
+                                       "Governance, Mandates); or someone else changed the schedule last "
                                        "(the owner must save the schedule). The run was not started.",
     "DENIED_MANDATE_CONSENT_EXPIRED": "Microsoft no longer accepts the mandate owner's consent (it expired or was "
-                                      "revoked at Microsoft). The owner gives it again under Governance, Mandates. "
+                                      "revoked at Microsoft). The owner gives it again on the schedule in Elitea "
+                                      "(operators see it under Governance, Mandates). "
                                       "The run was not started.",
+    # a scoped API token's run acting with its owner's offline consent (#7337)
+    "DENIED_TOKEN_CONSENT_REQUIRED": "This API token's run uses a credential that acts with the token owner's "
+                                     "Microsoft sign-in, which needs the owner's consent for this token naming this "
+                                     "credential: it is missing, was withdrawn, does not cover this credential (as it "
+                                     "is now), or the token was deleted or expired (the owner consents in Settings, "
+                                     "Personal tokens, signed in). The run was not started.",
+    "DENIED_TOKEN_CONSENT_EXPIRED": "Microsoft no longer accepts the token owner's consent (it expired or was revoked "
+                                    "at Microsoft). The owner gives it again in Settings, Personal tokens. The run "
+                                    "was not started.",
     # the run token of the internal Elitea MCP (#7214)
     "INTERNAL_TOKEN_UNAVAILABLE": "The built-in Elitea tools of this agent cannot get the run's own identity right now; "
                                   "the run was not started. Try again later.",
@@ -819,7 +831,7 @@ def _printable(value: str, limit=80) -> str:
 
 def _admit_children(  # pylint: disable=R0913,R0914
     module, request: AdmissionRequest, subject, payload, expires_at, root_id, *, development, shadow, can_use,
-    decisions=(),
+    decisions=(), token_identity=None,
 ) -> list:
     """Step 5c (#7227): the sub-agents the run calls in its own process, each decided on its own. A bound one (one active
     binding that still matches) is a governed child on its own binding and grants, for the same person (never a
@@ -848,7 +860,7 @@ def _admit_children(  # pylint: disable=R0913,R0914
             decisions = _decide_credentials(
                 module, request.model_copy(update={"application_id": application_id, "version_id": version_id}),
                 subject, binding, {"project_id": payload.get("project_id"), "tools": prefetched[key]}, expires_at,
-                shadow=shadow, rows=rows, can_use=can_use)
+                shadow=shadow, rows=rows, can_use=can_use, token_identity=token_identity)
         except AdmissionDenied as denied:
             raise _named_refusal(denied, payload, key, prefetched[key]) from None
         child = ChildAdmission(key, uuid.uuid4(), admitted[parent].context_id if parent else root_id, lineage,
@@ -872,8 +884,9 @@ def _api_token_subject(principal: dict) -> dict:
     """Step 5 of a scoped API token's run (#7336): the platform vouches that the token is its owner's, and the run acts
     for that owner as an interactive run of theirs does: the subject reference is the owner's linked IdP subject
     (``idp:<tid>:<oid>``), which their personal credentials and grants name. An owner with no linked subject cannot be
-    one (``IDENTITY_SUBJECT_UNLINKED``). The kind stays ``api_token``: nothing acts with the owner's sign-in (an
-    Entra-delegated credential is refused at release, ``DENIED_DELEGATION_UNSUPPORTED_CALLER``)."""
+    one (``IDENTITY_SUBJECT_UNLINKED``). The kind stays ``api_token``: nothing acts with the owner's live sign-in (an
+    Entra-delegated credential is refused at release, ``DENIED_DELEGATION_UNSUPPORTED_CALLER``), unless the owner
+    consented for the token and the deployment allows it (#7337, ``token_identity``)."""
     user_id = principal.get("user_id")
     try:
         user = auth.get_user(user_id)
@@ -890,6 +903,20 @@ def _api_token_subject(principal: dict) -> dict:
         "kind": "api_token", "ref": f"idp:{tid}:{oid}", "delegation_ref": None, "tid": tid, "user_id": user_id,
         "evidence": {"type": "asserted_user", "issuer": evidence.get("issuer"), "subject": evidence.get("subject")},
     }
+
+
+def _linked_person(user_id) -> dict:
+    """``{issuer, oid}`` of a scoped token owner's linked IdP subject (#7337), as ``_api_token_subject`` read it."""
+    try:
+        user = auth.get_user(user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the token owner could not be read (%s)", type(exc).__name__)
+        raise _denied("DEPENDENCY_UNAVAILABLE") from None
+    user = user if isinstance(user, dict) else {}
+    if user.get("id") != user_id or not all(isinstance(user.get(key), str) and user.get(key)
+                                            for key in ("idp_issuer", "idp_oid")):
+        raise _denied("IDENTITY_SUBJECT_UNLINKED")
+    return {"issuer": user["idp_issuer"], "oid": user["idp_oid"]}
 
 
 def _subject_of(principal: dict) -> dict:
@@ -911,7 +938,7 @@ def _subject_of(principal: dict) -> dict:
 
 def _decide_credentials(  # pylint: disable=R0913
     module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False, rows=None,
-    can_use=None, mandate_identity=None, mandate_owner_ref=None,
+    can_use=None, mandate_identity=None, mandate_owner_ref=None, token_identity=None,
 ) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
     agent without governed credentials), or ``AdmissionDenied`` for the first refusal. ``shadow``: audit only, the
@@ -925,7 +952,7 @@ def _decide_credentials(  # pylint: disable=R0913
         can_use=can_use or user_may_use_credentials(user_id, request.binding_project_id),
         subject_kind="mandate" if subject["kind"] == "mandate" else "user_delegation", subject_user_id=user_id,
         profile=PROFILE_DEVELOPMENT if binding.id is None else "governed", mandate_identity=mandate_identity,
-        mandate_owner_ref=mandate_owner_ref,
+        mandate_owner_ref=mandate_owner_ref, token_identity=token_identity,
     )
     try:
         inline_fields = lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id)  # noqa: E731
@@ -1377,6 +1404,7 @@ def _admit(  # pylint: disable=R0914
     # 3. who is asking
     principal = _verify_identity(request, settings, evidence)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
+    token_reader = None
     if principal.get("kind") == "api_token":
         # 3a. (#7336) the token's scope: the run's project (and the agent's) among its projects, and the run operation.
         # Every entry point a token reaches starts a run (an agent, a toolkit tool, a schedule's Run now)
@@ -1391,6 +1419,9 @@ def _admit(  # pylint: disable=R0914
         # from here on the run is its owner's interactive run, as a session's is (PLAN §21.1): the steps below that
         # ask for the person read the token's owner. The audit keeps naming the token (``caller``)
         caller = {"kind": "api_token", "ref": _caller_ref(request), "user_id": principal["user_id"]}
+        # (#7337) an Entra-delegated credential acts with the owner's consent kept for this token, where the deployment
+        # allows it (None: nothing is read, the decision is the one before)
+        token_reader = token_identity.identity_reader(module, evidence["token_id"], principal["user_id"])
         request = request.model_copy(update={"caller_type": "user", "caller_id": principal["user_id"],
                                              "caller_reference": None})
     can_use = None
@@ -1474,7 +1505,8 @@ def _admit(  # pylint: disable=R0914
     _want_prefetched_facts(payload)
     try:
         decisions = [] if not decide else _decide_credentials(
-            module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows, can_use=can_use)
+            module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows, can_use=can_use,
+            token_identity=token_reader)
     except AdmissionDenied as denied:
         if not _is_plain_llm_chat(request):
             raise
@@ -1486,7 +1518,13 @@ def _admit(  # pylint: disable=R0914
     children = _admit_children(
         module, request, subject, payload, expires_at, context_id,
         development=binding.id is None and children_of_drafts is not False, shadow=shadow,
-        can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions)
+        can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions,
+        token_identity=token_reader)
+    if token_reader is not None and any(getattr(decision, "auth_mode", None) == DELEGATED_AUTH_MODE for decision in
+                                        [*decisions, *(d for child in children for d in child.decisions)]):
+        # (#7337) the run acts with the owner's consent: its context names the owner's linked subject, which the
+        # release compares with the consent's
+        subject.update(_linked_person(principal["user_id"]))
     if request.trigger_ref:   # an owner's Run now or Test run (#7254): which schedule it ran
         caller["trigger_ref"] = request.trigger_ref
     if shadow:
