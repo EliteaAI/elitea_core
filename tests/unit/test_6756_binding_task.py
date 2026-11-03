@@ -379,13 +379,31 @@ def values_of(ns, param, **more):
     return {**values, **more}
 
 
-def test_the_creator_cannot_approve_their_own_binding(ns, env):
+def test_the_creator_cannot_approve_the_request_they_made(ns, env):
     run(ns, env, f"{ONE};action=create")
-    run(ns, env, f"{ONE};action=submit", actor=APPROVER)
+    run(ns, env, f"{ONE};action=submit")   # the creator's own request
     events = len(env.recorded)
     result = run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)
     assert result["error"].startswith("SELF_APPROVAL")
     assert (binding(env, ns).state, len(env.recorded)) == ("pending_approval", events)
+
+
+def test_a_creator_who_did_not_make_the_current_request_may_approve_it(ns, env):
+    """(#7228) Four eyes on the request: created by 7, the request made by 8 (submitted, or brought up to date in
+    place). In a two-admin project 7 approves it; before, both were refused (the dead end of browser row 2)."""
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit", actor=APPROVER)
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
+
+
+def test_whoever_brought_a_waiting_binding_up_to_date_cannot_approve_it_and_its_creator_may(ns, env):
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST
+    run(ns, env, f"{ONE};action=rebind", actor=9)   # the current request is 9's now
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
 
 
 def test_whoever_submitted_the_binding_cannot_approve_it(ns, env):
@@ -440,13 +458,12 @@ def test_a_rebound_binding_admits_nothing_until_it_is_approved_again(ns, env):
     assert ns.adm.admit_execution(env.module(), env.request(), run_id="run-3").context_ref
 
 
-def test_a_rebound_binding_is_approved_by_neither_the_creator_nor_the_rebinder(ns, env):
+def test_a_rebound_binding_is_not_approved_by_its_rebinder(ns, env):
     activate(ns, env)
     run(ns, env, f"{ONE};action=rebind", actor=9)
-    for actor in (7, 9):
-        assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=actor)["error"].startswith("SELF_APPROVAL")
-    # the first approver (8) may approve the new definition: they did not create or rebind it
-    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    # (#7228) the creator (7) did not make this request: they may approve it, as the first approver (8) may
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
 
 
 def test_a_rebind_is_approved_for_the_new_definition_only(ns, env):

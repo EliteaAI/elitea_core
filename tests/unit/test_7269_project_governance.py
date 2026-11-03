@@ -567,20 +567,26 @@ def test_a_project_without_an_admin_escalates_everything_waiting(ns, env):
 
 
 def test_escalated_true_filters_in_sql_so_the_page_and_its_total_agree(ns, env):
+    """(#7228) a binding escalates when every project admin made its current request (the requester's rule): created
+    by admin_a and brought up to date by admin_b is not escalated, admin_a approves it."""
     first = pending_binding(ns, env, "admin_a")   # admin_b may approve: not escalated
     env.add_version(1, 72, 7, "v3")
     env.digests[72] = DIGEST
     other = str(env.add_binding(1, 7, 72, state="pending_approval", digest=DIGEST))
-    with ns.sa_orm.Session(env.engine(1)) as session:   # created by admin_a, last changed by admin_b: nobody left
+    with ns.sa_orm.Session(env.engine(1)) as session:   # the reviewer's row: made by A, re-requested by B
         row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(other))
         row.created_by, row.state_changed_by = ADMIN_A, ADMIN_B
         session.commit()
     page, _ = hit(ns, env, "agent_identities", "get", actor="platform_admin", mode=ADMINISTRATION,
                   args={"escalated": "true"})
-    assert [row["id"] for row in page["rows"]] == [other] and page["total"] == 1
-    page, _ = hit(ns, env, "agent_identities", "get", actor="admin_a", args={"escalated": "true"})
-    assert [row["id"] for row in page["rows"]] == [other]
-    assert first not in [row["id"] for row in page["rows"]]
+    assert page["rows"] == [] and page["total"] == 0
+    env.membership.roles[1] = {**env.membership.roles[1], ADMIN_B: ["editor"]}   # admin_a is the only admin now
+    page, _ = hit(ns, env, "agent_identities", "get", actor="platform_admin", mode=ADMINISTRATION,
+                  args={"escalated": "true"})
+    assert [row["id"] for row in page["rows"]] == [first] and page["total"] == 1   # admin_a requested it
+    page, _ = hit(ns, env, "agent_identities", "get", actor="admin_a")
+    by_id = {row["id"]: row for row in page["rows"]}
+    assert (by_id[first]["escalated"], by_id[other]["escalated"]) == (True, False)
 
 
 def test_a_mandate_escalates_when_the_admins_are_its_creator_and_its_owner(ns, env):

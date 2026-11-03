@@ -307,7 +307,8 @@ def test_the_statement_repeats_the_rule_so_a_change_between_read_and_write_canno
     state.transition_binding(session, "b1", "pending_approval", "active", **GOOD)
     sql, _ = compiled(session.updates[0])
     where = sql.split(" WHERE ", 1)[1]
-    assert "created_by IS DISTINCT FROM" in where and "state_changed_by IS DISTINCT FROM" in where
+    # (#7228) the operator of the current request: who last moved it, else its creator
+    assert "coalesce(" in where and "state_changed_by" in where and "created_by) IS DISTINCT FROM" in where
 
 
 def test_resuming_is_not_an_approval(state):

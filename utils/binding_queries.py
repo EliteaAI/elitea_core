@@ -11,6 +11,7 @@ from tools import auth, db
 
 from ..models.agent_identity import AgentIdentityBinding as Binding
 from .governance_inbox import escalated, escalated_clause
+from .binding_state import REQUESTER, requester_of
 from .definition_digest import (
     DigestError, digest_for_version, digest_inputs_for_version, digests_for_versions, read_definition,
 )
@@ -103,8 +104,7 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
     statement, application = _select(project_id)
     conditions = []
     if admins is not None and escalated_only:
-        conditions.append(escalated_clause(admins, Binding.state == "pending_approval",
-                                           Binding.created_by, Binding.state_changed_by))
+        conditions.append(escalated_clause(admins, Binding.state == "pending_approval", REQUESTER))
     if state:
         conditions.append(Binding.state == state)
     if identity_mode:
@@ -131,8 +131,8 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
         item["definition_digest_full"] = binding.definition_digest   # (#7228) what an approval of this row approves
         item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
         if admins is not None:
-            item["escalated"] = binding.state == "pending_approval" and escalated(
-                admins, binding.created_by, binding.state_changed_by)
+            item["escalated"] = binding.state == "pending_approval" and escalated(   # (#7228) the requester's rule
+                admins, requester_of(binding.state_changed_by, binding.created_by))
         rows.append(item)
     return {"total": total, "rows": rows}
 

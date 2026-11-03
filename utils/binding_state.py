@@ -44,6 +44,16 @@ def bumps_epoch(expected: str, target: str) -> bool:
     return target in BUMPS_EPOCH or is_rebind(expected, target)
 
 
+def requester_of(state_changed_by, created_by):
+    """(#7228) Who made a waiting binding's current request: the operator who last moved it (submitted it, rebound it,
+    brought it up to date), else its creator. The one person its four-eyes rule excludes."""
+    return state_changed_by if state_changed_by is not None else created_by
+
+
+# the same, as SQL (the approval's guard and the inbox's escalation)
+REQUESTER = func.coalesce(AgentIdentityBinding.state_changed_by, AgentIdentityBinding.created_by)
+
+
 class InvalidTransition(ValueError):
     """The change is refused before touching the row. ``reason_code`` is stable, the message is for logs."""
 
@@ -64,8 +74,8 @@ def transition_binding(  # pylint: disable=R0913
 
     ``current_digest`` is the definition the activation is checked against; for a rebind it is the definition the
     binding is approved for from now on. Approving (``pending_approval`` -> ``active``) is refused for the operator who
-    created the binding or who last changed its state (``SELF_APPROVAL``); resuming a suspended binding is not an
-    approval and has no such rule.
+    made its current request (``requester_of``: who last changed its state, else its creator; ``SELF_APPROVAL``,
+    #7228); resuming a suspended binding is not an approval and has no such rule.
     """
     if (expected, target) not in TRANSITIONS:
         raise InvalidTransition("INVALID_TRANSITION", f"{expected} -> {target} is not a legal binding change")
@@ -87,11 +97,12 @@ def transition_binding(  # pylint: disable=R0913
         if approving:
             if not actor_user_id:
                 raise InvalidTransition("SELF_APPROVAL", "approving needs an identified operator")
-            if actor_user_id in (row.created_by, row.state_changed_by):
+            # (#7228) four eyes on the request being approved: whoever made the current pending request (submitted or
+            # brought it up to date) never approves it; a creator who did not make it may
+            if actor_user_id == requester_of(row.state_changed_by, row.created_by):
                 raise InvalidTransition("SELF_APPROVAL", "another operator must approve this binding")
             # the same rule once more in the statement, so a change between the read and the write cannot slip by
-            guards = [AgentIdentityBinding.created_by.is_distinct_from(actor_user_id),
-                      AgentIdentityBinding.state_changed_by.is_distinct_from(actor_user_id),
+            guards = [REQUESTER.is_distinct_from(actor_user_id),
                       # (#7228, C9-SEC-98) and only the definition read above: a re-digest in place between the read
                       # and this write leaves the row unchanged (CONCURRENT_CHANGE)
                       AgentIdentityBinding.definition_digest == current_digest]
