@@ -26,7 +26,16 @@ from ..utils.skill_files import import_version_files, stage_import_files
 from ..utils.skill_publish_utils import get_default_skill_validation_rules
 
 
+EVERY_PROJECT = 'project_id=all'
+
+
 class RPC:
+    @web.rpc("skills_sweep_skill_files", "sweep_skill_files_on_schedule")
+    def skills_sweep_skill_files(self, **kwargs) -> dict:
+        """Daily schedule: the ``sweep_skill_files`` admin task over every project, never a dry run; a project whose
+        files are being written is reported among the failed ones and swept on the next run."""
+        return self.sweep_skill_files(param=EVERY_PROJECT)
+
     @web.rpc(
         "skills_get_default_publish_validation_rules",
         "skills_get_default_publish_validation_rules",

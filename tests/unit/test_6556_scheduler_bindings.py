@@ -733,6 +733,7 @@ BOOTSTRAPPED_SCHEDULES = [
     "cleanup_stale_chunks",
     "pgvector_engine_reap",
     "eval_run_reap",
+    "skill_files_sweep",
     "pat_expiration_check",
     "pipeline_scheduling",
 ]

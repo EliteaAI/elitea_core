@@ -1,6 +1,7 @@
 """#7185: the skill file admin tasks - ``create_skill_file_tables`` creates the manifest table only where it is
 missing, ``sweep_skill_files`` sweeps the buckets of the projects the parameter names; the startup guard in
-``module.py`` creates the table off-thread in the schemas that lack it."""
+``module.py`` creates the table off-thread in the schemas that lack it; the platform schedule runs the sweep daily over
+every project through ``skills_sweep_skill_files``."""
 import ast
 import importlib.util
 import os
@@ -13,6 +14,11 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from test_6724_chat_templates import PLUGIN_ROOT, _make_migration_stubs  # noqa: E402  pylint: disable=C0413
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from fixtures.identity import fresh_sqlalchemy  # noqa: E402  pylint: disable=C0413
+from fixtures.skill_file_env import PKG, StubEverythingElse  # noqa: E402  pylint: disable=C0413
 
 PROJECTS = [{"id": 1}, {"id": 2}, {"id": 5}]
 TABLES = ('skill_version_files',)
@@ -42,7 +48,7 @@ def task(isolated_sys_modules):
     def sweep(project_id, dry_run=False):
         swept.append((project_id, dry_run))
         if project_id == 5:
-            raise RuntimeError("storage down")
+            raise RuntimeError("skill files of project 5 are being written; run the sweep again")
         return {"project_id": project_id, "deleted": ["a" * 64] if project_id == 2 else [],
                 "kept_undated": 3 if project_id == 1 else 0, "dry_run": dry_run}
 
@@ -174,3 +180,79 @@ def test_the_module_runs_the_startup_guard_when_ready():
     }
 
     assert "_ensure_skill_file_schema" in calls
+
+
+SWEEP_SCHEDULE = 'skill_files_sweep'
+
+
+@pytest.fixture
+def platform_schedules():
+    created = []
+    managed = [{'name': name, 'rpc_func': f'{name}_rpc', 'cron': '* * * * *', 'active': True}
+               for name in ('index_scheduling', 'pipeline_scheduling')]
+    namespace = {
+        "build_scheduler_sync_plan": lambda config: managed,
+        "Empty": type("Empty", (Exception,), {}),
+        "log": types.SimpleNamespace(warning=lambda *args: None, exception=lambda *args: None),
+    }
+    exec(compile(ast.Module(body=[_module_method("_bootstrap_platform_schedules")], type_ignores=[]), "module.py",
+                 "exec"), namespace)
+    plugin = types.SimpleNamespace(
+        descriptor=types.SimpleNamespace(config={}),
+        context=types.SimpleNamespace(rpc_manager=types.SimpleNamespace(timeout=lambda seconds: types.SimpleNamespace(
+            scheduling_create_if_not_exists=created.append))),
+        _apply_scheduler_runtime_config=lambda plan=None: None,
+        _release_managed_schedules=lambda: None,
+    )
+    namespace["_bootstrap_platform_schedules"](plugin)
+    return created
+
+
+def test_the_platform_schedules_include_a_daily_active_sweep(platform_schedules):
+    [sweep] = [payload for payload in platform_schedules if payload['name'] == SWEEP_SCHEDULE]
+
+    assert sweep == {'rpc_func': 'skills_sweep_skill_files', 'rpc_kwargs': {}, 'name': SWEEP_SCHEDULE,
+                     'cron': '0 3 * * *', 'active': True}
+
+
+class StubEveryOtherPackage(StubEverythingElse):
+    def create_module(self, spec):
+        module = super().create_module(spec)
+        module.__path__ = []
+        return module
+
+
+@pytest.fixture
+def sweep_rpc(task, monkeypatch):
+    fresh_sqlalchemy()
+    for name in [name for name in sys.modules if name == 'plugins' or name.startswith(f'{PKG}.')]:
+        monkeypatch.delitem(sys.modules, name)
+    pylon_tools = types.ModuleType('pylon.core.tools')
+    pylon_tools.web = types.SimpleNamespace(rpc=lambda *names: (lambda function: function))
+    pylon_tools.log = types.SimpleNamespace(error=lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, 'pylon.core.tools', pylon_tools)
+    monkeypatch.setitem(sys.modules, 'tools', types.SimpleNamespace(db=None, serialize=None))
+    for name in ('plugins', PKG, f'{PKG}.rpc'):
+        package = types.ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    monkeypatch.setattr(sys, 'meta_path', [*sys.meta_path, StubEveryOtherPackage()])
+    spec = importlib.util.spec_from_file_location(f'{PKG}.rpc.skill', os.path.join(PLUGIN_ROOT, 'rpc', 'skill.py'))
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    plugin = types.SimpleNamespace(sweep_skill_files=lambda **kwargs: task.sweep(kwargs['param']))
+    return lambda: module.RPC.skills_sweep_skill_files(plugin)
+
+
+def test_the_scheduled_sweep_runs_the_admin_sweep_over_every_project_for_real(task, sweep_rpc):
+    result = sweep_rpc()
+
+    assert task.swept == [(1, False), (2, False), (5, False)]
+    assert result["deleted"] == 1 and result["kept_undated"] == 3 and result["dry_run"] is False
+
+
+def test_a_project_the_scheduled_sweep_could_not_claim_is_reported_not_raised(task, sweep_rpc):
+    result = sweep_rpc()
+
+    assert result["failed"] == 1 and result["failed_projects"] == [{"project_id": 5}]

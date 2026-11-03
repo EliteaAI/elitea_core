@@ -1547,6 +1547,13 @@ class Module(module.ModuleModel):
                     'active': True,
                 },
                 {
+                    'rpc_func': 'skills_sweep_skill_files',
+                    'rpc_kwargs': {},
+                    'name': 'skill_files_sweep',
+                    'cron': '0 3 * * *',
+                    'active': True,
+                },
+                {
                     'rpc_func': 'elitea_core_check_pat_expiration',
                     'rpc_kwargs': {},
                     'name': 'pat_expiration_check',
