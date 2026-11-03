@@ -22,6 +22,10 @@ class SkillVersionCreateModel(BaseModel):
     tags: Optional[List[TagBaseModel]] = None
     meta: Optional[dict] = None
     run_settings: Optional[SkillRunSettingsWriteModel] = None
+    files_from_version_id: Optional[int] = Field(
+        None, exclude=True,
+        description="Version of the same skill whose bundled files the new version starts with (Save as version).",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 

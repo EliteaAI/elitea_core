@@ -166,6 +166,7 @@ def skill_utils_module():
     models_skill = types.ModuleType(f'{PKG_ROOT}.elitea_core.models.skill')
     models_skill.Skill = type('Skill', (), {})
     models_skill.SkillVersion = type('SkillVersion', (), {})
+    models_skill.SkillVersionFile = type('SkillVersionFile', (), {})
     models_skill.EntitySkillMapping = type('EntitySkillMapping', (), {})
     _register(f'{PKG_ROOT}.elitea_core.models.skill', models_skill)
 
@@ -213,6 +214,7 @@ def skill_utils_module():
     folder_access.folder_exclusion_clause = lambda *a, **k: None
     _register(f'{PKG_ROOT}.elitea_core.utils.folder_access', folder_access)
 
+    _load_real('utils/skill_frontmatter.py', f'{PKG_ROOT}.elitea_core.utils.skill_frontmatter')
     module = _load_real('utils/skill_utils.py', f'{PKG_ROOT}.elitea_core.utils.skill_utils')
 
     yield module

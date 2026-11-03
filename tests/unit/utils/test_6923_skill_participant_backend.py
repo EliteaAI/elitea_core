@@ -301,11 +301,15 @@ def skill_modules(isolated_sys_modules):
     for name in ('skill_category_utils', 'publish_utils', 'constants', 'skill_run_settings', 'like_utils',
                  'folder_access'):
         _auto_stub(f'{PACKAGE}.utils.{name}')
+    _auto_stub(f'{PACKAGE}.utils.skill_file_store', delete_contents=lambda project_id, hashes: None)
+    _auto_stub(f'{PACKAGE}.utils.skill_files', add_version_files=lambda *a, **k: None,
+               list_version_manifest=lambda session, version_id: [])
     _auto_stub(f'{PACKAGE}.models.skill', Skill=_model('Skill'), SkillVersion=_model('SkillVersion'),
-               EntitySkillMapping=_model('EntitySkillMapping'))
+               EntitySkillMapping=_model('EntitySkillMapping'), SkillVersionFile=_model('SkillVersionFile'))
     for name in ('all', 'pd.collection_base', 'pd.skill_publish', 'pd.skill_run_settings'):
         _auto_stub(f'{PACKAGE}.models.{name}')
 
+    _load('utils/skill_frontmatter.py', f'{PACKAGE}.utils.skill_frontmatter')
     skill_utils = _load('utils/skill_utils.py', f'{PACKAGE}.utils.skill_utils')
     skill_publish_utils = _load('utils/skill_publish_utils.py', f'{PACKAGE}.utils.skill_publish_utils')
     return types.SimpleNamespace(
@@ -423,7 +427,7 @@ class TestSkillDeletedEvent:
             def query(self, model):
                 return types.SimpleNamespace(
                     filter=lambda *a: types.SimpleNamespace(first=lambda: None if model is not skill_modules.skill_utils.Skill else skill,
-                                                            delete=lambda **k: 0),
+                                                            delete=lambda **k: 0, all=lambda: []),
                 )
 
             def delete(self, row):
@@ -445,6 +449,8 @@ class PublicSession:
 
     def query(self, model):
         session = self
+        if isinstance(model, AnyColumn):
+            return types.SimpleNamespace(filter=lambda *a: types.SimpleNamespace(all=lambda: []))
 
         class Query:
             def get(self, row_id):
@@ -478,7 +484,8 @@ class TestSkillUnpublishedEvent:
     def _unpublish(self, skill_modules, remaining, shared_owner_id=CHAT_PROJECT_ID):
         version = FakeVersion(200, status='published')
         version.skill_id = 10
-        skill = types.SimpleNamespace(id=10, shared_owner_id=shared_owner_id, meta={'default_version_id': 200})
+        skill = types.SimpleNamespace(id=10, shared_owner_id=shared_owner_id, meta={'default_version_id': 200},
+                                      versions=[])
         skill_modules.sessions[PUBLIC_PROJECT_ID] = PublicSession(version, skill, remaining)
         skill_modules.skill_publish_utils.delete_public_skill_version(PUBLIC_PROJECT_ID, 200)
         return _skill_events(skill_modules, 'skill_unpublished')

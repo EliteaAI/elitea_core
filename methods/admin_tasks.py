@@ -25,7 +25,10 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
 from tools import db, config as c  # pylint: disable=E0401
 
+from ..models.skill import SKILL_FILE_TABLES
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
+from ..utils.agent_identity_schema import apply_tables, project_ids_missing_tables
+from ..utils.skill_files import sweep_skill_files as sweep_project_skill_files
 from ..utils.toolkit_migration import (
     run_selected_tools_migration,
     migrate_project_pipeline_instructions,
@@ -716,6 +719,74 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         )
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,
                 "dry_run": values["dry_run"]}
+
+    @web.method()
+    def create_skill_file_tables(self, *args, **kwargs):
+        """Admin task: create the skill file manifest table in each project schema (R-2.0.9, #7185).
+
+        Creates ``skill_version_files`` where it is missing. New projects get it from ``create_all`` and a startup
+        guard covers the rest, so this is the operator's way to report (dry run) and re-run. Idempotent.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+        """
+        param = kwargs.get("param", "") or ""
+        values, error = _parse_project_param("create_skill_file_tables", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+            missing = set(project_ids_missing_tables(SKILL_FILE_TABLES))
+        except Exception:  # pylint: disable=W0703
+            log.exception("create_skill_file_tables: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_tables(
+            [pid for pid in project_ids if pid in missing], SKILL_FILE_TABLES, dry_run=values["dry_run"])
+        log.info(
+            "%screate_skill_file_tables: migrated=%s failed=%s",
+            "[DRY RUN] " if values["dry_run"] else "", len(migrated), len(failed),
+        )
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,
+                "dry_run": values["dry_run"]}
+
+    @web.method()
+    def sweep_skill_files(self, *args, **kwargs):
+        """Admin task: delete skill file objects that no manifest row references (R-2.0.9, #7185).
+
+        Lists each project's ``skill-files`` bucket and removes the keys its ``skill_version_files`` rows do not
+        name, keeping objects younger than an hour (an upload whose row is not committed yet). Version and skill
+        deletes already release their own objects; this reclaims what a failed write or a cross-project delete left.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+        """
+        param = kwargs.get("param", "") or ""
+        values, error = _parse_project_param("sweep_skill_files", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"deleted": 0, "error": error}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("sweep_skill_files: failed to list projects")
+            return {"deleted": 0, "error": "failed to list projects"}
+
+        swept, failed = [], []
+        for project_id in project_ids:
+            try:
+                swept.append(sweep_project_skill_files(project_id, dry_run=values["dry_run"]))
+            except Exception:  # pylint: disable=W0703
+                log.exception("sweep_skill_files: failed for project %s", project_id)
+                failed.append({"project_id": project_id})
+        deleted = sum(len(result["deleted"]) for result in swept)
+        kept_undated = sum(result.get("kept_undated", 0) for result in swept)
+        log.info(
+            "%ssweep_skill_files: deleted=%s kept_undated=%s failed=%s",
+            "[DRY RUN] " if values["dry_run"] else "", deleted, kept_undated, len(failed),
+        )
+        return {"deleted": deleted, "kept_undated": kept_undated,
+                "projects": [result for result in swept if result["deleted"] or result.get("kept_undated")],
+                "failed": len(failed), "failed_projects": failed, "dry_run": values["dry_run"]}
 
     @web.method()
     def create_governance_settings_tables(self, *args, **kwargs):

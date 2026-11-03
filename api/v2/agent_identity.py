@@ -1,4 +1,5 @@
-"""One agent identity binding: the operator detail (#7105, C-1009)."""
+"""One agent identity binding: the operator detail (#7105, C-1009); (#7269) also for the project's admins in project
+mode while governance is enforced."""
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
 
@@ -24,14 +25,36 @@ class AdminAPI(api_tools.APIModeHandler):
     )
     @auth.decorators.check_api(api.check_spec(api.VIEW))
     def get(self, project_id: int, binding_id, **kwargs):
-        try:
-            detail = get_detail(project_id, binding_id)
-        except Exception as exc:  # pylint: disable=W0703
-            log.error("agent identity: read failed (%s)", type(exc).__name__)
-            return api.refusal("DEPENDENCY_UNAVAILABLE")
-        return (detail, 200) if detail is not None else api.refusal("NOT_FOUND")
+        return binding_detail(project_id, binding_id)
+
+
+def binding_detail(project_id, binding_id):
+    try:
+        detail = get_detail(project_id, binding_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("agent identity: read failed (%s)", type(exc).__name__)
+        return api.refusal("DEPENDENCY_UNAVAILABLE")
+    return (detail, 200) if detail is not None else api.refusal("NOT_FOUND")
+
+
+class ProjectAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Agent Identity (Project)",
+        description="One binding of the project for its own admins, as the administration detail. Only while governance "
+                    "is enforced.",
+        tags=[api.OPENAPI_TAG],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}},
+            {"name": "binding_id", "in": "path", "required": True, "schema": {"type": "string", "format": "uuid"}},
+        ],
+        responses={"200": {"description": "The binding."}, "404": {"description": "No such binding in this project."}},
+        mcp_tool=False, available_to_users=False,
+    )
+    @auth.decorators.check_api(api.project_check_spec(api.VIEW))
+    def get(self, project_id: int, binding_id, **kwargs):
+        return api.project_gate(self.module) or binding_detail(project_id, binding_id)
 
 
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes(["<int:project_id>/<uuid:binding_id>"])
-    mode_handlers = {c.ADMINISTRATION_MODE: AdminAPI}
+    mode_handlers = {c.ADMINISTRATION_MODE: AdminAPI, c.DEFAULT_MODE: ProjectAPI}

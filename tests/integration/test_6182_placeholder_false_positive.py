@@ -113,7 +113,13 @@ def pu():
         },
         'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': lambda ms: list(ms)},
         'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': noop},
-        'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': noop},
+        'plugins.elitea_core.utils.skill_frontmatter': {'FRONTMATTER_META_KEY': 'frontmatter'},
+        'plugins.elitea_core.utils.skill_files': {'add_version_files': noop, 'list_version_manifest': lambda *a: [],
+                                                    'stage_version_files': noop},
+        'plugins.elitea_core.utils.skill_utils': {
+            'attach_skill_to_public_copy': noop, 'list_version_file_hashes': lambda *a: set(),
+            'release_unreferenced_contents': noop,
+        },
     }
     for modname, attrs in stubs.items():
         sys.modules[modname] = _module(modname, **attrs)
@@ -144,6 +150,7 @@ def spu(pu):
             'PublishAIResult': object, 'VERSION_NAME_PATTERN': version_pattern,
         },
         'plugins.elitea_core.models.pd.skill_publish': {'SkillPublishAIResult': object},
+        'plugins.elitea_core.models.pd.skill': {'SKILL_NAME_RE': types.SimpleNamespace(match=lambda name: True)},
         'plugins.elitea_core.models.pd.skill_version': {'SkillVersionCreateModel': object},
         'plugins.elitea_core.utils.constants': {'DEFAULT_FALLBACK_CATEGORY': 'Other'},
         'plugins.elitea_core.utils.skill_run_settings': {

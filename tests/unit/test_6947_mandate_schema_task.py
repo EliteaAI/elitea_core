@@ -108,6 +108,7 @@ def admin_tasks(isolated_sys_modules):
         module.__path__ = [PLUGIN_ROOT]
         sys.modules.setdefault(package, module)
     fake = types.ModuleType("elitea_core.utils.agent_identity_schema")
+    fake.apply_tables, fake.project_ids_missing_tables = (lambda *a, **kw: ([], [])), (lambda *a, **kw: [])
     fake.missing, fake.applied, fake.failing = [], [], set()
 
     def apply_mandate_tables(project_ids, dry_run=False):

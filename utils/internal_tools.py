@@ -14,6 +14,7 @@ from tools import VaultClient, rpc_tools, this, config as c, auth
 
 from .internal_base_url import internal_base_url
 from .mcp_config import is_mcp_exposure_enabled
+from .platform_buckets import is_platform_managed_bucket
 from .support_utils import get_support_config
 
 
@@ -41,6 +42,7 @@ MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
 MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY = 'skill_builder'
 MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY = 'project_context_builder'
 MCP_PROJECT_ID_MARKER = '{project_id}'
+ASK_USER_INTERNAL_TOOL_KEY = 'ask_user'
 
 MCP_ENDPOINT_CONFIGS = [
     {"suffix": "elitea_core/applications", "name": "Elitea Applications"},
@@ -366,6 +368,11 @@ def get_default_attachment_bucket(project_id: int) -> str:
         vault_client = VaultClient(project_id)
         secrets = vault_client.get_all_secrets()
         bucket = secrets.get('default_attachment_bucket', ATTACHMENT_DEFAULT_BUCKET)
+        if is_platform_managed_bucket(bucket):
+            log.warning(
+                f"default_attachment_bucket '{bucket}' is managed by the platform; using '{ATTACHMENT_DEFAULT_BUCKET}'"
+            )
+            return ATTACHMENT_DEFAULT_BUCKET
         log.debug(f"Using attachment bucket: {bucket}")
         return bucket
     except Exception as e:
@@ -551,6 +558,8 @@ def resolve_user_token_state(user_id: int) -> tuple[str, str | None]:
         return 'MISSING', None
     # list_tokens hides the platform-owned system token, so a real PAT still wins.
     for token in auth.list_tokens(user_id):
+        if token.get('scope_projects') is not None or token.get('scope_operations') is not None:
+            continue   # a scoped API token (#7336) is its holder's, never put in a toolkit's settings
         expires = token.get('expires')
         if not expires or expires > datetime.now():
             return 'VALID', auth.encode_token(token['id'])
@@ -586,7 +595,13 @@ def run_identity_applies(sid=None, mandate=False) -> bool:
         return True
     from ..models.pd.admission import _holder  # pylint: disable=C0415
     try:
-        return getattr(_holder(sid), "type", None) == "user"
+        holder = _holder(sid)
+        kind = getattr(holder, "type", None)
+        if kind == "token":
+            # a scoped API token (#7336) is admitted as its owner's interactive run, which gets the run token: its
+            # owner's personal token is not looked up. An unscoped one keeps the legacy path
+            return auth.token_scope(int(holder.id)) is not None
+        return kind == "user"
     except Exception:  # pylint: disable=W0703
         return False
 
@@ -965,9 +980,21 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
             "Use elitea_core/project_context MCP tools.\n"
             "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
         )
+        if ASK_USER_INTERNAL_TOOL_KEY in enabled_tools:
+            few_shot_blocks.append(
+                "Project Context clarification rule (the `ask_user` tool is available):\n"
+                "- If the user asks to create or update project context but has not given enough information "
+                "(e.g. what the project is about, its architecture, workflows or constraints), you MUST call the "
+                "`ask_user` tool to collect the missing details. Do NOT ask for them in a plain-text reply, and "
+                "do NOT invent placeholder content.\n"
+                "- Ask 1-4 focused questions, each with a short header and 2-4 concrete options; leave "
+                "`allow_other` enabled so the user can type a free-form answer.\n"
+                "- After the user answers, use the elitea_core/project_context MCP tools to create or update "
+                "the project context from those answers."
+            )
     if few_shot_blocks:
         few_shot_joined = "\n\n".join(few_shot_blocks)
-        few_shot_instruction = f"\n\n{few_shot_joined}"
+        few_shot_instruction = f"\n\n{few_shot_joined}\n\n"
     else:
         few_shot_instruction = ""
     return (

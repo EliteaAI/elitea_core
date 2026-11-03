@@ -21,11 +21,21 @@ from ..utils.skill_utils import (
     get_available_skills_for_agent,
     import_skill,
 )
-from ..utils.skill_export_import import ensure_base_version
+from ..utils.skill_export_import import ensure_base_version, unpack_embedded_skill_frontmatter
+from ..utils.skill_files import import_version_files, stage_import_files
 from ..utils.skill_publish_utils import get_default_skill_validation_rules
 
 
+EVERY_PROJECT = 'project_id=all'
+
+
 class RPC:
+    @web.rpc("skills_sweep_skill_files", "sweep_skill_files_on_schedule")
+    def skills_sweep_skill_files(self, **kwargs) -> dict:
+        """Daily schedule: the ``sweep_skill_files`` admin task over every project, never a dry run; a project whose
+        files are being written is reported among the failed ones and swept on the next run."""
+        return self.sweep_skill_files(param=EVERY_PROJECT)
+
     @web.rpc(
         "skills_get_default_publish_validation_rules",
         "skills_get_default_publish_validation_rules",
@@ -51,18 +61,28 @@ class RPC:
         self, model_data: dict, project_id: int, author_id: int, force_new: bool = False,
         instructions_already_saved: bool = False,
     ):
-        # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
-        versions = ensure_base_version(model_data.get('versions') or [])
         try:
-            imported = import_skill(
-                project_id=project_id,
-                name=model_data['name'],
-                description=model_data.get('description') or model_data['name'],
-                versions=versions,
-                author_id=author_id,
-                force_new=force_new,
-                instructions_already_saved=instructions_already_saved,
-            )
+            # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
+            versions = ensure_base_version([
+                unpack_embedded_skill_frontmatter(version or {}) for version in model_data.get('versions') or []
+            ])
+            staged_files = stage_import_files(project_id, versions, model_data.get('owner_id'), author_id)
+            with db.get_session(project_id) as session:
+                imported = import_skill(
+                    project_id=project_id,
+                    name=model_data['name'],
+                    description=model_data.get('description') or model_data['name'],
+                    versions=versions,
+                    author_id=author_id,
+                    force_new=force_new,
+                    instructions_already_saved=instructions_already_saved,
+                    session=session,
+                )
+                if not imported.reused:
+                    import_version_files(
+                        session, project_id, imported.versions, staged_files, model_data.get('owner_id'),
+                    )
+                session.commit()
         except Exception as ex:
             log.error(f"[IMPORT] Failed to import skill '{model_data.get('name')}': {ex}")
             return None, [f"Skill import failed: {ex}"]

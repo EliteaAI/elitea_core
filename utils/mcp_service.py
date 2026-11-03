@@ -11,7 +11,7 @@ from ..models.all import Application, ApplicationVersion
 from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
-from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
+from ..utils.exceptions import AdmissionDenied, InputGuardrailBlockedError, PoolSaturationError
 from .internal_tools import MCP_CURRENT_PROJECT_SUFFIXES, MCP_PROJECT_SCOPED_SUFFIXES
 from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
@@ -127,7 +127,21 @@ class McpApiToolExecutor:
             status_code, body_data = McpApiToolExecutor._execute_wsgi_request(environ)
             log.debug(f"API tool response status: {status_code}")
 
-            return McpApiToolExecutor._parse_response(status_code, body_data)
+            parsed = McpApiToolExecutor._parse_response(status_code, body_data)
+            claims = _run_token_claims()
+            if claims is not None and "result" in parsed and method == "POST":
+                # (#7269) what a governed run created is requested for its user, as theirs, with the run as origin;
+                # the call's own answer stands whatever happens here
+                try:
+                    from .governance_requests import file_for_run  # pylint: disable=C0415
+                    governance = file_for_run(this.module, claims, method, path, path_params.get("project_id"),
+                                              parsed["result"])
+                except Exception as exc:  # pylint: disable=W0703
+                    log.error("MCP: the run's governance request was not filed (%s)", type(exc).__name__)
+                    governance = None
+                if governance is not None:
+                    parsed["governance_requests"] = governance
+            return parsed
 
         except McpProjectScopeError as exc:
             log.warning("Refused out-of-scope API tool call %s: %s", api_tool.get('label'), exc)
@@ -439,6 +453,9 @@ class McpService:
                 result = {"error": f"Version matching failure for {request.params.name}"}
         except _RunTokenRefusal as e:
             result = {"error": str(e)}
+        except AdmissionDenied as e:
+            # a governed agent run refused (an API token out of its scope, an unscoped token, #7336): readable
+            result = {"error": f"{e.reason_code}: {e.message}"}
         except InputGuardrailBlockedError as e:
             result = e.body()
         except PoolSaturationError as e:
@@ -729,8 +746,15 @@ class McpService:
                     application = session_2.query(Application).options(
                         joinedload(Application.versions).joinedload(ApplicationVersion.tags)
                     ).get(app.id)
-
-                    return application.versions[0].id
+                    # (#7341) under enforce by rule: the bound version, else the latest published, else the first;
+                    # under off and audit only the first, as before
+                    from .governance import is_governed  # pylint: disable=C0415
+                    from .mcp_exposed_version import bound_version_ids, exposed_version  # pylint: disable=C0415
+                    governed = is_governed(this.module)
+                    bound = bound_version_ids(session_2, self.session.project_id, [app.id]).get(app.id, set()) \
+                        if governed else set()
+                    version, _rule = exposed_version(list(application.versions), bound, governed)
+                    return version.id if version is not None else None
 
         return None
 

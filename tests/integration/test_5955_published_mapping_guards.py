@@ -363,7 +363,15 @@ def skill_utils_module():
             "skill_version_id": 1,
         },
     )
+    hash_column = type("HashColumn", (), {"in_": lambda self, values: self})()
+    models_skill.SkillVersionFile = type(
+        "SkillVersionFile", (), {"id": 1, "skill_version_id": hash_column, "path": 1, "sha256": hash_column},
+    )
     _register("plugins.elitea_core.models.skill", models_skill)
+
+    skill_file_store = types.ModuleType("plugins.elitea_core.utils.skill_file_store")
+    skill_file_store.delete_contents = lambda project_id, hashes: None
+    _register("plugins.elitea_core.utils.skill_file_store", skill_file_store)
 
     models_all = types.ModuleType("plugins.elitea_core.models.all")
     models_all.Tag = type("Tag", (), {})
@@ -435,6 +443,14 @@ def skill_utils_module():
     _register("plugins.elitea_core.utils.folder_access", folder_access)
 
     _heal_sqlalchemy_stubs()
+
+    frontmatter_spec = importlib.util.spec_from_file_location(
+        "plugins.elitea_core.utils.skill_frontmatter",
+        PLUGIN_ROOT / "utils" / "skill_frontmatter.py",
+    )
+    frontmatter = importlib.util.module_from_spec(frontmatter_spec)
+    sys.modules[frontmatter_spec.name] = frontmatter
+    frontmatter_spec.loader.exec_module(frontmatter)
 
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.skill_utils",

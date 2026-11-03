@@ -68,6 +68,7 @@ def admin_config(skill_utils_module, monkeypatch):  # noqa: F811
 def _version(instructions):
     return types.SimpleNamespace(
         name='base', instructions=instructions, author_id=7, meta=None, run_settings=None, tags=None,
+        files_from_version_id=None,
     )
 
 

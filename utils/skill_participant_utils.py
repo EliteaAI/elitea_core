@@ -239,7 +239,7 @@ def describe_skill_participants(participants: list, chat_project_id: int) -> dic
 
 
 def mention_candidate(target: SkillRunTarget, skill_project_id: int) -> dict:
-    return {
+    candidate = {
         'skill_id': target.skill_id,
         'skill_version_id': target.version_id,
         'skill_project_id': skill_project_id,
@@ -249,6 +249,9 @@ def mention_candidate(target: SkillRunTarget, skill_project_id: int) -> dict:
         'icon_meta': target.icon_meta,
         'instructions': target.instructions,
     }
+    if target.files:
+        candidate['files'] = list(target.files)
+    return candidate
 
 
 def has_skill_mention(user_input) -> bool:

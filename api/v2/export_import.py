@@ -14,6 +14,7 @@ from ...utils.export_import import (
     create_zip_archive
 )
 from ...utils.export_import_utils import slugify, content_disposition_attachment
+from ...utils.skill_files import SkillVersionExportUnavailableError
 from ...utils.folder_access import entities_access_error, APPLICATION_ENTITY_TYPES
 
 
@@ -180,6 +181,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
         except ValidationError as e:
             return e.errors(), 400
+        except SkillVersionExportUnavailableError as exc:
+            return {'error': str(exc)}, exc.http_status
 
         if not result['ok']:
             return {'errors': {'applications': result['msg']}}, 400

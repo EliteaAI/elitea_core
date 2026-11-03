@@ -31,6 +31,7 @@ def skill_utils(monkeypatch):
         'tools', 'sqlalchemy', 'sqlalchemy.orm', 'pylon', 'pylon.core', 'pylon.core.tools',
         f'{PKG}.utils.authors', f'{PKG}.utils.utils', f'{PKG}.utils.like_utils',
         f'{PKG}.utils.folder_access', f'{PKG}.utils.skill_run_settings', f'{PKG}.models.skill',
+        f'{PKG}.utils.skill_file_store',
         f'{PKG}.models.all', f'{PKG}.models.enums.all', f'{PKG}.models.enums.events',
         f'{PKG}.models.pd.skill', f'{PKG}.models.pd.skill_version', f'{PKG}.models.pd.skill_run_settings',
     ):
@@ -39,6 +40,12 @@ def skill_utils(monkeypatch):
         package = types.ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
+    frontmatter_spec = importlib.util.spec_from_file_location(
+        f'{PKG}.utils.skill_frontmatter', PLUGIN_ROOT / 'utils' / 'skill_frontmatter.py',
+    )
+    frontmatter = importlib.util.module_from_spec(frontmatter_spec)
+    monkeypatch.setitem(sys.modules, frontmatter_spec.name, frontmatter)
+    frontmatter_spec.loader.exec_module(frontmatter)
     spec = importlib.util.spec_from_file_location(f'{PKG}.utils.skill_utils', PLUGIN_ROOT / 'utils' / 'skill_utils.py')
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)

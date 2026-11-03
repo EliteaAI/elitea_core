@@ -711,6 +711,54 @@
         "maximum": 200000
       }
     },
+    "max_package_size_mb": {
+      "type": "integer",
+      "title": "Skill Package Max Size (MB)",
+      "description": "Maximum total size of the files bundled with one skill version, in megabytes. Lowering it never changes existing versions; it only blocks adding files past the new limit. Allowed range: 1–500.",
+      "path": "skills.max_package_size_mb",
+      "section": "skills",
+      "default": 30,
+      "minimum": 1,
+      "maximum": 500,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500
+      }
+    },
+    "max_file_size_mb": {
+      "type": "integer",
+      "title": "Skill File Max Size (MB)",
+      "description": "Maximum size of one file bundled with a skill version, in megabytes. Allowed range: 1–150.",
+      "path": "skills.max_file_size_mb",
+      "section": "skills",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 150,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 150
+      }
+    },
+    "max_package_files": {
+      "type": "integer",
+      "title": "Skill Package Max Files",
+      "description": "Maximum number of files bundled with one skill version. Allowed range: 1–5000.",
+      "path": "skills.max_package_files",
+      "section": "skills",
+      "default": 500,
+      "minimum": 1,
+      "maximum": 5000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5000
+      }
+    },
     "project_skills_in_chat_available": {
       "type": "boolean",
       "title": "Allow project skills without chat participation",

@@ -82,6 +82,7 @@ def loaded():
     load_module_with_stubs(PLUGIN_ROOT / "utils" / "governance.py", f"{PKG}.utils.governance")
     base = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_base_url.py", f"{PKG}.utils.internal_base_url")
     base.host_resolves = lambda host: True   # no real DNS in a unit test
+    load_module_with_stubs(PLUGIN_ROOT / "utils" / "platform_buckets.py", f"{PKG}.utils.platform_buckets")
     internal_tools = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_tools.py", f"{PKG}.utils.internal_tools")
     status_api = load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / "internal_mcp_pat_status.py",
                                         f"{PKG}.api.v2.internal_mcp_pat_status")

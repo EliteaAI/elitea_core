@@ -151,6 +151,7 @@ def _install_package():
     for name in ('delete_skill', 'create_skill_version', 'delete_skill_version',
                  'attach_skill_to_agent', 'detach_skill_from_agent'):
         setattr(skill_utils, name, lambda *a, **k: {'id': 1})
+    skill_utils.clean_stored_frontmatter = lambda meta: meta
 
     def _record(name):
         def call(*args, **kwargs):

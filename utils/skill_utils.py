@@ -4,9 +4,10 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import List, Optional, Tuple, Literal
 
-from sqlalchemy import func, or_, asc, desc
+from sqlalchemy import func, or_, asc, desc, text
 from sqlalchemy.orm import selectinload
 
+from pylon.core.tools import log
 from tools import db, auth, serialize, rpc_tools, this, context
 
 from .authors import get_authors_data
@@ -14,7 +15,12 @@ from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from .folder_access import folder_exclusion_clause
 from .skill_run_settings import portable_run_settings
-from ..models.skill import Skill, SkillVersion, EntitySkillMapping
+from .skill_file_store import delete_contents
+from .skill_frontmatter import (
+    FRONTMATTER_META_KEY,
+    extract_non_elitea_frontmatter,
+)
+from ..models.skill import Skill, SkillVersion, EntitySkillMapping, SkillVersionFile
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
 from ..models.enums.events import ApplicationEvents
@@ -36,6 +42,11 @@ from ..models.pd.skill_run_settings import dump_run_settings
 DEFAULT_MAX_SKILLS_PER_AGENT = 50
 DEFAULT_MAX_INVOKED_SKILLS_PER_TURN = 5
 DEFAULT_MAX_INSTRUCTIONS_LENGTH = 50000
+DEFAULT_MAX_PACKAGE_SIZE_MB = 30
+DEFAULT_MAX_FILE_SIZE_MB = 10
+DEFAULT_MAX_PACKAGE_FILES = 500
+SKILL_FILE_WRITE_LOCK = "SELECT pg_advisory_xact_lock_shared(hashtext('skill-files'), :project_id)"
+SKILL_FILE_DELETE_LOCK = "SELECT pg_try_advisory_xact_lock(hashtext('skill-files'), :project_id)"
 
 
 def _skill_limit(key: str, default: int) -> int:
@@ -57,6 +68,21 @@ def get_max_invoked_skills_per_turn() -> int:
 
 def get_max_instructions_length() -> int:
     return _skill_limit('max_instructions_length', DEFAULT_MAX_INSTRUCTIONS_LENGTH)
+
+
+def get_max_package_bytes() -> int:
+    """Admin cap on the bundled files of one skill version, in bytes."""
+    return _skill_limit('max_package_size_mb', DEFAULT_MAX_PACKAGE_SIZE_MB) * 1024 * 1024
+
+
+def get_max_file_bytes() -> int:
+    """Admin cap on one bundled file, in bytes."""
+    return _skill_limit('max_file_size_mb', DEFAULT_MAX_FILE_SIZE_MB) * 1024 * 1024
+
+
+def get_max_package_files() -> int:
+    """Admin cap on the number of bundled files of one skill version."""
+    return _skill_limit('max_package_files', DEFAULT_MAX_PACKAGE_FILES)
 
 
 _SKILL_SORT_WHITELIST = frozenset({'created_at', 'name', 'id'})
@@ -168,10 +194,40 @@ class SkillInstructionsTooLongError(SkillError):
         self.max_allowed = max_allowed
 
 
+class SkillSpecViolationError(SkillError):
+    """Raised when a new or changed value breaks the Agent Skills spec."""
+    http_status = 400
+
+
+def clean_stored_frontmatter(meta: Optional[dict]) -> Optional[dict]:
+    """Validate the frontmatter a version stores and drop the keys ELITEA owns, so export never repeats them."""
+    if not meta or FRONTMATTER_META_KEY not in meta:
+        return meta
+    frontmatter = meta[FRONTMATTER_META_KEY] or {}
+    if not isinstance(frontmatter, dict):
+        raise SkillSpecViolationError(f'"meta.{FRONTMATTER_META_KEY}" must be a mapping')
+    try:
+        passthrough = extract_non_elitea_frontmatter(frontmatter)
+    except ValueError as exc:
+        raise SkillSpecViolationError(str(exc)) from exc
+    return {**meta, FRONTMATTER_META_KEY: passthrough}
+
+
 def validate_instructions_length(instructions: str) -> None:
     max_allowed = get_max_instructions_length()
     if len(instructions) > max_allowed:
         raise SkillInstructionsTooLongError(len(instructions), max_allowed)
+
+
+class SkillFileError(SkillError):
+    """A bundled-file request the version cannot honour; the message names the cause."""
+
+
+class SkillFileNotFoundError(SkillError):
+    http_status = 404
+
+    def __init__(self, version_id: int, path: str):
+        super().__init__(f"File '{path}' not found in skill version {version_id}")
 
 
 class SkillAlreadyAttachedError(SkillError):
@@ -1078,6 +1134,7 @@ def delete_skill(
             raise SkillPublishedError(skill_id)
 
         skill_name = skill.name
+        released_hashes = list_version_file_hashes(s, [version.id for version in skill.versions])
 
         s.query(EntitySkillMapping).filter(
             EntitySkillMapping.skill_id == skill_id
@@ -1085,6 +1142,7 @@ def delete_skill(
 
         s.delete(skill)
 
+    release_unreferenced_contents(project_id, released_hashes)
     context.event_manager.fire_event(
         ApplicationEvents.skill_deleted.value,
         {'id': skill_id, 'name': skill_name, 'project_id': project_id, 'owner_id': project_id}
@@ -1131,6 +1189,16 @@ def create_skill_version(
         # Handle tags
         if version_data.tags:
             _apply_tags_to_version(s, version, version_data.tags)
+
+        if version_data.files_from_version_id is not None:
+            source_version = s.query(SkillVersion.id).filter(
+                SkillVersion.skill_id == skill_id,
+                SkillVersion.id == version_data.files_from_version_id,
+            ).first()
+            if not source_version:
+                raise SkillVersionNotFoundError(skill_id, version_id=version_data.files_from_version_id)
+            hold_skill_file_deletes(s, project_id)
+            copy_version_files(s, source_version.id, version.id)
 
         return serialize(SkillVersionDetailModel.model_validate(version))
 
@@ -1208,9 +1276,12 @@ def delete_skill_version(
         if usage_count > 0:
             raise SkillVersionInUseError(version_id, usage_count)
 
+        released_hashes = list_version_file_hashes(s, [version_id])
         s.delete(version)
         _repoint_default_version(s, skill_id, version_id, remaining_versions)
-        return None
+
+    release_unreferenced_contents(project_id, released_hashes)
+    return None
 
 
 def _repoint_default_version(session, skill_id: int, deleted_version_id: int, remaining_versions):
@@ -1228,6 +1299,73 @@ def _repoint_default_version(session, skill_id: int, deleted_version_id: int, re
         or min(remaining_versions, key=lambda version: version.created_at)
     )
     skill.meta = {**(skill.meta or {}), 'default_version_id': successor.id}
+
+
+def copy_version_files(session, source_version_id: int, target_version_id: int) -> int:
+    """Give the target version the source version's file rows; same project, so the content is shared by hash."""
+    source_files = session.query(SkillVersionFile).filter(
+        SkillVersionFile.skill_version_id == source_version_id,
+    ).all()
+    for source_file in source_files:
+        session.add(SkillVersionFile(
+            skill_version_id=target_version_id,
+            path=source_file.path,
+            size=source_file.size,
+            sha256=source_file.sha256,
+            content_type=source_file.content_type,
+            is_text=source_file.is_text,
+        ))
+    session.flush()
+    return len(source_files)
+
+
+def list_version_file_hashes(session, version_ids) -> set:
+    """The content hashes the given versions' files point at."""
+    if not version_ids:
+        return set()
+    return {
+        sha256 for (sha256,) in session.query(SkillVersionFile.sha256).filter(
+            SkillVersionFile.skill_version_id.in_(list(version_ids)),
+        ).all()
+    }
+
+
+def hold_skill_file_deletes(session, project_id: int) -> None:
+    """Keep the project's skill file deletes off until this transaction ends, so an object it reuses or a row it
+    adds is never deleted from under it."""
+    session.execute(text(SKILL_FILE_WRITE_LOCK), {'project_id': project_id})
+
+
+def claim_skill_file_deletes(session, project_id: int) -> bool:
+    """Whether no transaction is adding skill file rows to the project; if none is, new ones wait until this
+    transaction ends."""
+    return bool(session.execute(text(SKILL_FILE_DELETE_LOCK), {'project_id': project_id}).scalar())
+
+
+def release_unreferenced_contents(project_id: int, hashes) -> list:
+    """Delete from the project's bucket those of ``hashes`` that no committed file row of the project lists,
+    leaving them to the sweep while another transaction is adding file rows."""
+    candidates = set(hashes or ())
+    if not candidates:
+        return []
+    with db.get_session(project_id) as s:
+        if not claim_skill_file_deletes(s, project_id):
+            log.info('skill files: %s object(s) of project %s left to the sweep', len(candidates), project_id)
+            return []
+        referenced = {
+            sha256 for (sha256,) in s.query(SkillVersionFile.sha256).filter(
+                SkillVersionFile.sha256.in_(sorted(candidates)),
+            ).all()
+        }
+        released = sorted(candidates - referenced)
+        if not released:
+            return []
+        try:
+            delete_contents(project_id, released)
+        except Exception:  # pylint: disable=W0703
+            log.exception('skill files: could not release %s object(s) of project %s', len(released), project_id)
+            return []
+    return released
 
 
 def get_skill_version_by_id(
@@ -1754,7 +1892,7 @@ def consume_invoked_skills(
             seen.add(key)
             continue
         seen.add(key)
-        invoked.append({
+        entry = {
             'skill_id': skill.get('skill_id'),
             'skill_version_id': skill.get('skill_version_id'),
             'skill_project_id': skill.get('skill_project_id'),
@@ -1762,7 +1900,10 @@ def consume_invoked_skills(
             'version_name': skill.get('version_name'),
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
-        })
+        }
+        if skill.get('files'):
+            entry['files'] = skill['files']
+        invoked.append(entry)
 
     return cleaned_text, invoked
 
@@ -1855,7 +1996,7 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             continue
         # A flag, not text appended to the description: the SDK shortens long
         # descriptions to fit the registry budget, and the hint must survive that.
-        disclosable.append({
+        entry = {
             'skill_id': s.get('skill_id'),
             'skill_version_id': s.get('skill_version_id'),
             'name': s.get('name'),
@@ -1863,7 +2004,12 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             'instruction_referenced': s.get('skill_id') in referenced_ids,
             'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
-        })
+        }
+        if s.get('skill_project_id') is not None:
+            entry['skill_project_id'] = s['skill_project_id']
+        if s.get('files'):
+            entry['files'] = s['files']
+        disclosable.append(entry)
     return disclosable
 
 
@@ -1945,7 +2091,10 @@ def _update_version_fields(session, version: SkillVersion, update_data: SkillVer
         validate_instructions_length(update_data.instructions)
         version.instructions = update_data.instructions
     if update_data.meta is not None:
-        version.meta = {**(version.meta or {}), **update_data.meta}
+        meta_update = update_data.meta
+        if meta_update.get(FRONTMATTER_META_KEY) != (version.meta or {}).get(FRONTMATTER_META_KEY):
+            meta_update = clean_stored_frontmatter(meta_update)
+        version.meta = {**(version.meta or {}), **meta_update}
     if 'run_settings' in update_data.model_fields_set:
         version.run_settings = dump_run_settings(update_data.run_settings)
 
