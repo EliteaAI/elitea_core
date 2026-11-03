@@ -567,6 +567,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.credential_release = load("utils", "credential_release")
     ns.credential_probe = load("utils", "credential_probe")
     ns.binding_admin = load("utils", "binding_admin")
+    ns.governance_inbox = load("utils", "governance_inbox")   # the project inbox's escalation (#7269)
     ns.binding_queries = load("utils", "binding_queries")
     ns.binding_api = load("utils", "binding_api")
     ns.pd_binding_api = load("models/pd", "binding_api")

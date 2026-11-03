@@ -87,6 +87,14 @@ def _tool_spend_availability():
         return {}
 
 
+def _governance_enforced():
+    from ...utils.governance import is_governed  # pylint: disable=C0415
+    try:
+        return is_governed(this.module)
+    except Exception:  # pylint: disable=W0703
+        return False
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, **kwargs):
@@ -99,7 +107,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # One RPC hop for both: mode and dismissibility live in the same usage config
         budgets_mode, warning_dismissible = _usage_mode_settings()
         #
-        return {
+        settings = {
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
             "mcp_in_menu_enabled": is_mcp_in_menu_enabled(),
             "mcp_category_name": get_mcp_category_name(),
@@ -128,7 +136,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ),
             "tool_spend": _tool_spend_availability(),
             "skill_instructions_max_length": get_max_instructions_length(),
-        }, 200
+        }
+        # (#7269) the project Governance tab shows only while credential governance is enforced; under off and audit
+        # only the answer is as before (no field)
+        if _governance_enforced():
+            settings["governance_enforced"] = True
+        return settings, 200
 
 
 class API(api_tools.APIBase):
