@@ -25,10 +25,12 @@ PROJECT_PARAMS = [
     {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project id"},
 ]
 ITEM_PARAMS = [*PROJECT_PARAMS, {"name": "schedule_id", "in": "path", "required": True,
-                                 "schema": {"type": "integer"}, "description": "Schedule id"}]
+                                 "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1},
+                                 "description": "Schedule id"}]
 RUN = f"{ITEM}/runs/<int:run_id>"
 RUN_PARAMS = [*ITEM_PARAMS, {"name": "run_id", "in": "path", "required": True,
-                             "schema": {"type": "integer"}, "description": "Run id, from the runs list or the run answer"}]
+                             "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1},
+                             "description": "Run id, from the runs list or the run answer"}]
 LIST_QUERY_PARAMS = [
     {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": list(get_args(EntityType))},
      "description": "Only schedules of this entity kind"},
@@ -425,7 +427,7 @@ OPERATIONS = {
             "without Save. A draft that has runs stays. Safe to repeat.",
             "a project member with `schedules.run`", "400 `application_id` missing or not an id; 403 no permission"),
         "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
-                                         "schema": {"type": "integer"}, "description": "Agent or pipeline id"}],
+                                         "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1}, "description": "Agent or pipeline id"}],
         "responses": _responses(204, "The draft is removed, or there was none", None, {400: None, 403: None}),
     },
     ("get", "test_run"): {
@@ -437,7 +439,7 @@ OPERATIONS = {
             "a project member with `schedules.run`; only the caller's own draft is read",
             "400 an invalid query option or a missing `application_id`; 403 no permission"),
         "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
-                                         "schema": {"type": "integer"}, "description": "Agent or pipeline id"},
+                                         "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1}, "description": "Agent or pipeline id"},
                        *RUNS_QUERY_PARAMS],
         "responses": _responses(200, "The test runs", {"total": 0, "rows": []}, {400: None, 403: None}),
     },
@@ -450,8 +452,9 @@ OPERATIONS = {
             "a project member with `schedules.run`; another owner's run and a run of a saved schedule are 404",
             "400 a missing `application_id`; 403 no permission; 404 the run is not on the caller's draft"),
         "parameters": [*PROJECT_PARAMS, {"name": "application_id", "in": "query", "required": True,
-                                         "schema": {"type": "integer"}, "description": "Agent or pipeline id"},
-                       {"name": "run_id", "in": "path", "required": True, "schema": {"type": "integer"},
+                                         "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1}, "description": "Agent or pipeline id"},
+                       {"name": "run_id", "in": "path", "required": True,
+                        "schema": {"type": "integer", "minimum": 1, "maximum": 2**31 - 1},
                         "description": "Run id, from the test run answer or the test run list"}],
         "responses": _responses(200, "The run", {"id": 77, "status": "success", "events": [], "summary": "Done", "conversation_id": 410,
                                     "version_label": "base", "tokens": 1200, "cost_usd": 0.004},

@@ -47,6 +47,8 @@ ROUTES = {
 }
 # The body of `schedule_service.refusal`; the handler tests load this module without the service
 NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
+MAX_ID = 2**31 - 1  # the database integer range, as `DbId`: a larger id in a URL cannot name a row
+ID_OUT_OF_RANGE = {"code": "not_found", "error": "Schedule not found"}, 404
 
 
 def _tail(schedule_id: int | None, run_id: int | None) -> str:
@@ -69,6 +71,8 @@ class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftH
         name = ROUTES.get((method, _tail(schedule_id, run_id)))
         if name is None:
             return NOT_ALLOWED
+        if any(value is not None and value > MAX_ID for value in (schedule_id, run_id)):
+            return ID_OUT_OF_RANGE  # the query would fail in the driver with a 500
         # Keyword arguments: check_api reads project_id from them for the project-scoped permission check
         ids = {key: value for key, value in (("schedule_id", schedule_id), ("run_id", run_id)) if value is not None}
         return getattr(self, name)(project_id=project_id, **ids)
