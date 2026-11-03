@@ -300,6 +300,8 @@ def test_a_sign_in_credential_is_delegated_personal_stores_nothing_and_is_probed
     world.meta["hitl_interrupts"] = [world.interrupt(credential_type="sharepoint")]
     world.meta["hitl_interrupt"] = world.interrupt(credential_type="sharepoint")
     reply = complete(world, credential_type="sharepoint", fields={"site_url": "https://example.sharepoint.com/sites/a"})
+    assert world.created_payload["data"] == {"site_url": "https://example.sharepoint.com/sites/a",
+                                             "auth_mode": "entra_delegated"}   # the type's own marker
     [item] = world.calls[1][3]
     assert (item["ownership_class"], item["auth_mode"]) == ("personal", "entra_delegated")
     assert item["delegation"] == {"oauth_app_id": "platform", "tenant_id": "tenant-1",

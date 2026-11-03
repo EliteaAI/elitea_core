@@ -153,12 +153,14 @@ def _elitea_title(title):
     return f"{base}_{_random.token_hex(3)}"
 
 
-def _create_configuration(project_id, body, actor, shared):
+def _create_configuration(project_id, body, actor, shared, delegated=False):
     from plugins.configurations.exceptions import ConfigurationError  # pylint: disable=C0415,E0401
     from plugins.configurations.utils import create_configuration  # pylint: disable=C0415,E0401
+    data = {name: value.get_secret_value() for name, value in body.fields.items()}
+    if delegated:   # a container of the person's Microsoft sign-in (#6756): the type's own marker, never typed
+        data["auth_mode"] = DELEGATED_AUTH_MODE
     payload = {"elitea_title": _elitea_title(body.title), "label": body.title, "type": body.credential_type,
-               "shared": shared, "project_id": project_id, "author_id": actor,
-               "data": {name: value.get_secret_value() for name, value in body.fields.items()}}
+               "shared": shared, "project_id": project_id, "author_id": actor, "data": data}
     try:
         return create_configuration(payload)
     except ConfigurationError as exc:
@@ -318,7 +320,7 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
     if body.ownership == SHARED and _is_personal_project(project_id, actor):
         raise FormRefused("OWNERSHIP_INVALID")
     delegation = (body.delegation or _default_delegation(actor)) if delegated else None
-    created = _create_configuration(project_id, body, actor, body.ownership == SHARED)
+    created = _create_configuration(project_id, body, actor, body.ownership == SHARED, delegated)
     configuration_id, configuration_uuid = created.get("id"), str(created.get("uuid"))
     try:
         ref_id = _file_reference(project_id, configuration_uuid, actor, body.ownership, delegation)
