@@ -132,6 +132,9 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedule_runs_schedule_started', 'schedule_id', desc('started_at'), desc('id')),
         # Serves the conversation list filtered by schedule
         Index('ix_entity_schedule_runs_conversation', 'conversation_id'),
+        # Serve the conversation list filtered by run status, trigger or version without a schedule
+        Index('ix_entity_schedule_runs_trigger_status', 'trigger', 'status'),
+        Index('ix_entity_schedule_runs_version', 'version_id'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 

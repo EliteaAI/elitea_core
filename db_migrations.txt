@@ -98,6 +98,13 @@ CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_schedule_started
     ON {pid}.entity_schedule_runs (schedule_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_conversation
     ON {pid}.entity_schedule_runs (conversation_id);
+# Serve the conversation list filtered by run status, trigger or version (issue 7338); create_all adds them to new projects only
+CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_trigger_status
+    ON {pid}.entity_schedule_runs (trigger, status);
+CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_version
+    ON {pid}.entity_schedule_runs (version_id);
+# Revert by hand: DROP INDEX IF EXISTS {pid}.ix_entity_schedule_runs_trigger_status;
+# DROP INDEX IF EXISTS {pid}.ix_entity_schedule_runs_version;
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_preferences (
     user_id INTEGER PRIMARY KEY,
