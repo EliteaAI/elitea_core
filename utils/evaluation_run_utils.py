@@ -526,8 +526,10 @@ def mark_run_unstarted(project_id: int, run_id: int, reason: str, session=None):
 def suite_estimate_inputs(project_id: int, suite_id: int, *,
                           application_version_id: Optional[int] = None, session=None) -> dict:
     """What the estimate is computed from: how many cases a run would execute now, and the per-case
-    usage rows of the last finished run of this suite on the same version. ``history_run_id`` is
-    None when there is no such run — only that suite + version counts as history (#6716)."""
+    usage rows of the last finished run of this suite on the same version. A version that has not
+    finished a run yet falls back to the suite's last finished run on any version, so a new version
+    still gets an estimate (#7311); ``history_application_version_id`` says which version it came
+    from. ``history_run_id`` is None only when the suite has never finished a run."""
     from ..models.evaluation import EvalRun, EvalDataset, EvalRunStatus, EvalCaseUsage
 
     with _session(session, project_id) as s:
@@ -540,14 +542,12 @@ def suite_estimate_inputs(project_id: int, suite_id: int, *,
             dataset = s.query(EvalDataset).filter(EvalDataset.id == suite.dataset_id).first()
             cases = len(effective_cases(dataset.cases, excluded_case_ids(s, suite_id))) if dataset else 0
 
-        run = (
+        finished = (
             s.query(EvalRun)
-            .filter(EvalRun.suite_id == suite_id,
-                    EvalRun.application_version_id == version_id,
-                    EvalRun.status == EvalRunStatus.finished)
+            .filter(EvalRun.suite_id == suite_id, EvalRun.status == EvalRunStatus.finished)
             .order_by(EvalRun.finished_at.desc().nullslast(), EvalRun.id.desc())
-            .first()
         )
+        run = finished.filter(EvalRun.application_version_id == version_id).first() or finished.first()
         rows = []
         if run is not None:
             rows = [
@@ -559,6 +559,7 @@ def suite_estimate_inputs(project_id: int, suite_id: int, *,
             'application_version_id': version_id,
             'cases': cases,
             'history_run_id': run.id if run is not None else None,
+            'history_application_version_id': run.application_version_id if run is not None else None,
             'history_finished_at': run.finished_at.isoformat() if run is not None and run.finished_at else None,
             'history_rows': rows,
         }

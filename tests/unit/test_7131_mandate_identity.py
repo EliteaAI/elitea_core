@@ -88,9 +88,17 @@ class Entra:
         return types.SimpleNamespace(status_code=status, content=b"x", json=lambda: body)
 
 
+# auth_oidc's own holder pattern (rpc/obo_custody.py HOLDER): a mandate or a scoped API token (#7337); anything else is
+# refused there, so the fake refuses it too
+HOLDER_PATTERN = __import__("re").compile(
+    r"^(mandate:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|token:[1-9][0-9]{0,9})$")
+REFUSED = {"ok": False, "code": "REQUEST_REFUSED"}
+
+
 class AuthOidc:
-    """auth_oidc's offline RPCs: each checks the signature the real one checks, and the refresh token travels sealed
-    both ways (``bus`` keeps every request and reply as sent, to show no token crosses in plain text)."""
+    """auth_oidc's offline RPCs: each checks the holder pattern and the signature the real one checks, and the refresh
+    token travels sealed both ways (``bus`` keeps every request and reply as sent, to show no token crosses in plain
+    text)."""
 
     def __init__(self, obo):
         self.obo, self.redeemed, self.granted, self.nonces, self.bus = obo, [], [], set(), []
@@ -108,6 +116,8 @@ class AuthOidc:
         self.nonces.add(nonce)
 
     def auth_oidc_obo_offline_assertion(self, tid, oid, holder, source, sealed_refresh_token, iat, nonce, signature):
+        if not HOLDER_PATTERN.match(holder):
+            return dict(REFUSED)
         digest = __import__("hashlib").sha256(sealed_refresh_token.encode()).hexdigest()
         self._check(("v1-offline", tid, oid, holder, source, digest), iat, nonce, signature)
         token = self.obo.open_sealed(self.key, sealed_refresh_token, self.obo.seal_aad("redeem-req", tid, oid, holder, nonce))
@@ -123,6 +133,8 @@ class AuthOidc:
         return answer
 
     def auth_oidc_obo_offline_grant(self, tid, oid, holder, iat, nonce, signature):
+        if not HOLDER_PATTERN.match(holder):
+            return dict(REFUSED)
         self._check(("v1-offline-grant", tid, oid, holder), iat, nonce, signature)
         self.granted.append((tid, oid, holder))
         answer = dict(self.grant_answer)

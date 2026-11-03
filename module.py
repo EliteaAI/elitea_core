@@ -609,6 +609,7 @@ class Module(module.ModuleModel):
         self._ensure_agent_identity_schema()
         self._start_governance()
         self._start_internal_obo()
+        self._start_token_scope()
         self._check_entra_obo()
 
         self.handle_pylon_modules_initialized()
@@ -749,6 +750,18 @@ class Module(module.ModuleModel):
         from .utils import entra_obo  # pylint: disable=C0415
         entra_obo.check_config(self)
 
+    def _start_token_scope(self):
+        """Scoped API tokens (#7336): the auth plugin asks ``token_scope.check`` what an API token may do on each
+        request. Without it (an auth plugin that predates #7336) tokens pass the hook as before; their runs are still
+        held to their scope by admission."""
+        from .utils import token_scope  # pylint: disable=C0415
+        self._token_scope_checker = lambda token_id, request_parts=None: token_scope.check(  # pylint: disable=W0201
+            self, token_id, request_parts)
+        try:
+            auth.register_token_scope_checker(self._token_scope_checker)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("token scope: the checker could not be registered (%s)", type(exc).__name__)
+
     def _start_internal_obo(self):
         """The run token of governed runs (#7214): the auth plugin hands its bearers to ``verify_request``, and the
         binding column it scopes by is added to the project schemas that predate it (off-thread, catalog-guarded).
@@ -786,6 +799,12 @@ class Module(module.ModuleModel):
                              len(migrated), len(failed))
             except Exception:  # pylint: disable=W0703
                 log.exception("mandate identity schema: auto-migration failed")
+            try:
+                from .utils import token_identity  # pylint: disable=C0415
+                if token_identity.allowed(self):   # (#7337) only where API tokens may act with their owner's consent
+                    token_identity.ensure_table()
+            except Exception:  # pylint: disable=W0703
+                log.exception("token identity schema: the consent table could not be created")
             try:
                 from .utils.mandate_toolkit_schema import (  # pylint: disable=C0415
                     apply_toolkit_mandates, project_ids_missing_toolkit_mandates,
@@ -1339,6 +1358,10 @@ class Module(module.ModuleModel):
             auth.unregister_bearer_verifier(TOKEN_PREFIX)
         except Exception as exc:  # pylint: disable=W0703
             log.warning("internal OBO: the run token verifier was not unregistered (%s)", type(exc).__name__)
+        try:
+            auth.unregister_token_scope_checker(getattr(self, "_token_scope_checker", None))
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("token scope: the checker was not unregistered (%s)", type(exc).__name__)
         self.thread._stop()
 
         # MCP SSE deinitialization

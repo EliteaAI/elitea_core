@@ -51,7 +51,7 @@ from tools import auth, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
-from . import entra_obo, mandate_identity
+from . import entra_obo, mandate_identity, token_identity
 from .credential_decision import (
     MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure, subject_grant_holder,
     subject_grant_in_force, subject_grant_key,
@@ -130,6 +130,7 @@ class _Request:  # pylint: disable=R0902,R0903
             "toolkit_instance_id": toolkit_instance_id, "credential_ref": slot["credential_ref"],
             "credential_generation": slot["credential_generation"], "run_id": caller.get("run_id")}
         self.counter_key = None   # the release counter this request raised, until it is released or given back
+        self.audit_extra = {}     # what the release event says besides the scope's event (#7337)
 
     @property
     def ref(self) -> str:
@@ -734,10 +735,11 @@ def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: d
     #   9. the events are committed before the reply leaves; if they cannot be, the sealed bytes are dropped with them
     try:
         with db.get_session(requests[0].project_id) as session:
-            for event, release_id, resource in zip(scope.events, release_ids, kinds):
+            for event, release_id, resource, request in zip(scope.events, release_ids, kinds, requests):
                 stamped = {"environment": module.admission_settings.environment,   # a probe has no admitted context
                            "policy_revision": module.governance_profile.policy_revision}
                 stamped.update({key: item for key, item in event.items() if item is not None})
+                stamped.update(request.audit_extra)   # a token's offline release: the token and its consent (#7337)
                 if resource is not None:   # the kind is in the reason code, the resource is the target
                     stamped["target_ref"] = resource
                 adm._tracing().security_audit_record(session, adm._event(
@@ -771,11 +773,13 @@ def _delegated_at_once(module, requests, values, scope, deadline) -> dict:
     per key). Only the slots the loop would reach are asked: the scan stops at the first slot that fails its store
     checks (missing value, other generation, a stored slot without its fields). The loop still refuses at the first
     failing slot in order, so the answer is the one the sequential loop gave; a refusal does wait for the exchanges
-    already in flight (each bounded by the deadline). A mandate run (#7131: its slots redeem one consent) and a request
-    with one key: ``{}`` (the loop asks every slot itself, as before)."""
+    already in flight (each bounded by the deadline). A mandate run (#7131: its slots redeem one consent), a scoped API
+    token's run acting with its owner's consent (#7337, the same) and a request with one key: ``{}`` (the loop asks every
+    slot itself, as before)."""
     person = scope.person[0] if scope.person else None
-    if isinstance(person, dict) and person.get("kind") == "mandate":
-        return {}
+    if isinstance(person, dict) and (person.get("kind") == "mandate" or (
+            person.get("kind") == "api_token" and token_identity.allowed(module))):
+        return {}   # its slots redeem one consent, one after the other (#7294 M1; a token's, #7337)
     wanted, keys = [], set()
     for index, request in enumerate(requests):
         value = values.get(request.slot["credential_ref"])
@@ -802,6 +806,26 @@ def _delegated_at_once(module, requests, values, scope, deadline) -> dict:
 
     with ThreadPoolExecutor(max_workers=min(DELEGATED_PARALLEL, len(wanted))) as pool:
         return dict(pool.map(ask, wanted))
+
+
+# the codes of an offline redemption, said for a token's consent (#7337): the consent is the token's, not a mandate's
+_TOKEN_CODES = {entra_obo.CONSENT_REQUIRED: entra_obo.TOKEN_CONSENT_REQUIRED,
+                entra_obo.CONSENT_EXPIRED: entra_obo.TOKEN_CONSENT_EXPIRED}
+
+
+def _token_offline(module, request: _Request, scope: _Scope, delegation: dict, deadline) -> tuple:
+    """``acquire_offline`` with the consent the token's owner gave the token (``token_identity``). The release event
+    names the token as its caller and the consent it rests on (``approver_ref``); one Microsoft refused is withdrawn."""
+    subject, _, caller = scope.person
+    person, material = token_identity.release_person(*scope.person, slot=request.slot)
+    try:
+        found = entra_obo.acquire_offline(module, person, delegation, scope.binding_project_id, material, deadline)
+    except entra_obo.DelegationRefused as refused:
+        if refused.code == entra_obo.CONSENT_EXPIRED:
+            token_identity.consent_refused(caller, material)
+        raise entra_obo.DelegationRefused(_TOKEN_CODES.get(refused.code, refused.code), refused.answered) from None
+    request.audit_extra = {"caller_ref": caller.get("ref"), "approver_ref": f"consent:{material.ref}"}
+    return found
 
 
 def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadline=None) -> tuple:
@@ -833,6 +857,9 @@ def _delegated(module, request: _Request, scope: _Scope, delegation: dict, deadl
                 if refused.code == entra_obo.CONSENT_EXPIRED:
                     mandate_identity.consent_refused(scope.binding_project_id, subject, material)
                 raise
+        elif isinstance(subject, dict) and subject.get("kind") == "api_token" and token_identity.allowed(module):
+            # a scoped API token's run acting with its owner's offline consent for this token (#7337)
+            token, expires = _token_offline(module, request, scope, delegation, deadline)
         else:
             person = entra_obo.run_subject(*scope.person)
             token, expires = entra_obo.acquire(module, person, delegation, scope.binding_project_id, deadline)
