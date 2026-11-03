@@ -408,7 +408,9 @@ def _version(version_id, status, day):
 
 @pytest.mark.parametrize("governed, bound, expected", [
     (True, {2}, (2, "bound")), (True, {1, 3}, (3, "bound")), (True, {1}, (1, "bound")),
-    (True, set(), (3, "published")), (False, {2}, (3, "published")), (False, set(), (3, "published")),
+    (True, set(), (3, "published")),
+    # (D-1) off and audit only: the first stored version, exactly as before (no rule, nothing bound read)
+    (False, {2}, (1, "stored")), (False, set(), (1, "stored")),
 ])
 def test_the_exposed_version_rule(ns, governed, bound, expected):
     versions = [_version(1, "draft", 1), _version(2, "draft", 2), _version(3, "published", 3)]
@@ -580,3 +582,141 @@ def test_the_facts_are_asked_with_well_formed_keys_when_there_is_no_binding_or_n
             assert subject
     for asked in env.subject_grant_calls:
         assert all(subject for _credential, subject in asked or ())
+
+
+# --- fix round (review of 2026-11-03) ------------------------------------------------------------------------------
+
+def _set_binding_state(ns, env, binding_id, state):
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.get(ns.models.AgentIdentityBinding, binding_id).state = state
+        session.commit()
+
+
+def test_a_suspended_binding_stays_suspended_whatever_its_definition_and_a_member_cannot_lift_it(ns, env):
+    """(S-1 b) A member's rebind never lifts a suspension: readiness says suspended, not requestable, and a request
+    naming the binding is stale with the row unchanged."""
+    changed = "adv1:" + "9" * 64
+    binding = env.add_binding(1, 7, 70, state="suspended", digest=changed)
+    found = items(ns, env)
+    assert (found["binding"]["state"], found["binding"]["requestable"]) == ("suspended", False)
+    with pytest.raises(ns.governance_requests.RequestRefused) as refused:
+        file(ns, env, keys=["binding"])
+    assert (refused.value.code, refused.value.key) == ("STALE_READINESS", "binding")
+    [row] = bindings(env, ns)
+    assert (row.id, row.state, row.definition_digest) == (binding, "suspended", changed) and env.recorded == []
+
+
+def test_a_binding_suspended_after_readiness_is_not_rebound(ns, env, monkeypatch):
+    binding = env.add_binding(1, 7, 70, digest="adv1:" + "9" * 64)
+    real = ns.governance_requests.readiness
+
+    def then_suspended(*args, **kwargs):
+        found = real(*args, **kwargs)   # "changed": requestable
+        _set_binding_state(ns, env, binding, "suspended")   # an operator suspends it meanwhile
+        return found
+
+    monkeypatch.setattr(ns.governance_requests, "readiness", then_suspended)
+    with pytest.raises(ns.governance_requests.RequestRefused) as refused:
+        file(ns, env, keys=["binding"])
+    assert refused.value.code == "CONCURRENT_CHANGE"
+    [row] = bindings(env, ns)
+    assert row.state == "suspended" and env.recorded == []
+
+
+def test_another_members_live_mandate_on_the_version_is_said_and_not_offered(ns, env, monkeypatch):
+    """(S-3) One live mandate per version: while another member's holds it, nothing is requestable for this schedule,
+    and the item says so without naming the holder."""
+    no_risks(monkeypatch, ns)
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    cred = credential(env, binding, reference=True)
+    mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding,
+                            valid_until=datetime.now(timezone.utc) + timedelta(days=30))
+    schedule_id = schedule(ns, env, owner=OWNER)
+    found = items(ns, env, user=OWNER, kind="schedule", entity=schedule_id)
+    assert (found["mandate"]["state"], found["mandate"]["requestable"], found["mandate"]["ref"]) == (
+        "held_by_another", False, None)
+    assert found[f"grant:1:{cred.uuid}"]["requestable"] is False
+    assert str(MEMBER) not in json.dumps(found["mandate"])
+    assert ns.governance_requests.file_requests(module(ns), 1, "schedule", schedule_id, OWNER) == []
+
+
+def test_the_mandate_exists_refusal_reads_as_such(ns):
+    exc = ns.governance_requests.RequestRefused("MANDATE_EXISTS")
+    body, status = ns.endpoints.governance_requests._refused(exc)  # pylint: disable=W0212
+    assert status == 409 and "Another member's schedule" in body["error"]
+
+
+def test_a_second_submit_of_the_same_batch_files_nothing_more(ns, env, monkeypatch):
+    """(S-7 e) Two submits of one readiness: the second finds the first's rows and is refused, nothing duplicated."""
+    credential(env)
+    real = ns.governance_requests.readiness
+    calls = []
+
+    def first_one_wins(*args, **kwargs):
+        found = real(*args, **kwargs)
+        if not calls:
+            calls.append(1)
+            monkeypatch.setattr(ns.governance_requests, "readiness", real)
+            file(ns, env)   # the other submit, with the same readiness, commits first
+            monkeypatch.setattr(ns.governance_requests, "readiness", first_one_wins)
+        return found
+
+    monkeypatch.setattr(ns.governance_requests, "readiness", first_one_wins)
+    recorded = None
+    with pytest.raises(ns.governance_requests.RequestRefused) as refused:
+        recorded = file(ns, env)
+    assert recorded is None and refused.value.code in ("BINDING_EXISTS", "STALE_READINESS")
+    assert len(bindings(env, ns)) == 1
+    assert [event["reason_code"] for _, event in env.recorded].count("GOVERNANCE_REQUEST_FILED") == 3
+
+
+def test_a_unique_constraint_lost_to_a_concurrent_submit_is_stale_readiness(ns, env, monkeypatch):
+    """(N-3) The race both sides pass the existence check in: the database's unique constraint answers, read as stale
+    (never as an unavailable audit trail)."""
+    from sqlalchemy.exc import IntegrityError  # pylint: disable=C0415
+    credential(env)
+
+    def lost(*args, **kwargs):
+        raise IntegrityError("insert", {}, Exception("unique"))
+
+    monkeypatch.setattr(ns.governance_requests, "create_binding", lost)
+    with pytest.raises(ns.governance_requests.RequestRefused) as refused:
+        file(ns, env)
+    assert refused.value.code == "STALE_READINESS" and bindings(env, ns) == [] and env.recorded == []
+
+
+def test_ids_beyond_the_database_range_are_refused_before_it_is_asked(ns, env):
+    """(N-12)"""
+    payload, status = route(ns, env, "governance_readiness", "get", entity_kind="version", entity_id=2**31)
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST")
+    payload, status = route(ns, env, "governance_requests", "post",
+                            body={"entity_kind": "version", "entity_id": 2**31})
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST")
+    assert env.sessions == []
+
+
+def test_the_platform_settings_say_governance_is_enforced_only_while_it_is(ns, monkeypatch):
+    """(S-4) The project Governance tab shows only under enforce; under off and audit only the platform settings
+    answer exactly as before (no new field)."""
+    for name, attrs in (("mcp_config", ("get_mcp_category_name", "is_mcp_exposure_enabled", "is_mcp_in_menu_enabled")),
+                        ("midturn_injection_utils", ("get_midturn_injection_blocked", "get_midturn_injection_whitelist")),
+                        ("skill_publish_utils", ("get_skill_publish_blocked", "get_skill_publish_whitelist")),
+                        ("skill_utils", ("get_max_instructions_length",))):
+        stub = types.ModuleType(f"{PKG}.utils.{name}")
+        for attr in attrs:
+            setattr(stub, attr, lambda *a, **k: [])
+        monkeypatch.setitem(sys.modules, f"{PKG}.utils.{name}", stub)
+    monkeypatch.setattr(ns.tools, "api_tools", types.SimpleNamespace(
+        APIModeHandler=ns.tools.api_tools.APIModeHandler, APIBase=ns.tools.api_tools.APIBase,
+        with_modes=lambda params: params, endpoint_metrics=lambda func: func), raising=False)
+    monkeypatch.setattr(ns.tools, "rpc_tools", types.SimpleNamespace(), raising=False)
+    settings = load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / "platform_settings.py",
+                                      f"{PKG}.api.v2.platform_settings")
+    monkeypatch.setattr(settings, "_usage_mode_settings", lambda: (None, True))
+    monkeypatch.setattr(settings, "_tool_spend_availability", lambda: {})
+    answers = {}
+    for governed in (False, True):
+        monkeypatch.setattr(settings, "this", types.SimpleNamespace(module=module(ns, governed=governed)))
+        answers[governed] = settings.PromptLibAPI(None).get()[0]
+    assert "governance_enforced" not in answers[False]
+    assert answers[True] == {**answers[False], "governance_enforced": True}

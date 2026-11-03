@@ -29,6 +29,7 @@ STATUS = {
     "UNAUTHENTICATED": 401,
     "FORBIDDEN": 403, "SELF_APPROVAL": 403, "DENIED_BINDING": 403, "DENIED_DELEGATION_UNSUPPORTED_CALLER": 403,
     "GOVERNANCE_NOT_ENFORCED": 409, "PROJECT_GOVERNANCE_OFF": 409, "TOKEN_SCOPE_OPERATION": 403,
+    "RESUME_NEEDS_OPERATOR": 403, "OWNER_NOT_MEMBER": 400,
     "NOT_FOUND": 404, "VERSION_NOT_FOUND": 404,
     "PAYLOAD_TOO_LARGE": 413,
     "INVALID_STATE": 409, "CONCURRENT_CHANGE": 409, "BINDING_EXISTS": 409, "INVALID_TRANSITION": 409,
@@ -47,6 +48,10 @@ MESSAGES = {
                               "changed.",
     "TOKEN_SCOPE_OPERATION": "Project governance needs your own signed-in session or a scoped API token with the admin "
                              "operation.",
+    # (#7269) what someone who is not an admin of the project suspended is resumed by a platform operator only
+    "RESUME_NEEDS_OPERATOR": "It was suspended by someone who is not an admin of this project; a platform operator "
+                             "resumes it. Nothing was changed.",
+    "OWNER_NOT_MEMBER": "The owner must be a member of the project.",
     "NOT_FOUND": "no such record",
     "PAYLOAD_TOO_LARGE": "the request body is too large",
     "DEPENDENCY_UNAVAILABLE": "the request could not be completed; nothing was changed",

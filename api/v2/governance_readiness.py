@@ -49,6 +49,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return refused
         if entity_kind not in readiness.KINDS:
             return api.refusal("INVALID_REQUEST", "entity_kind is one of: version, toolkit, schedule")
+        if not 1 <= entity_id <= readiness.MAX_INT32:
+            return api.refusal("INVALID_REQUEST", "entity_id is out of range")
         if not api.has_permission(VIEW_RIGHT[entity_kind], project_id, PROMPT_LIB_MODE):
             return api.refusal("NOT_FOUND")
         try:

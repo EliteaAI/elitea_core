@@ -139,7 +139,7 @@ def find_binding(project_id, binding_id):
             select(Binding).where(Binding.project_id == project_id, Binding.id == binding_id)).scalar_one_or_none()
         return None if row is None else {
             "id": row.id, "application_id": row.application_id, "version_id": row.version_id,
-            "identity_mode": row.identity_mode, "state": row.state}
+            "identity_mode": row.identity_mode, "state": row.state, "state_changed_by": row.state_changed_by}
 
 
 def get_detail(project_id, binding_id):

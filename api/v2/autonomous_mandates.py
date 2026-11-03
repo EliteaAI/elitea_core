@@ -94,8 +94,8 @@ def list_mandates(module, project_id, project_mode=False):
         return api.refusal("DEPENDENCY_UNAVAILABLE")
 
 
-def create_mandate(module, project_id):
-    """A draft mandate, as the admin task makes it."""
+def create_mandate(module, project_id, project_mode=False):
+    """A draft mandate, as the admin task makes it. (#7269) In project mode its owner is a member of the project."""
     actor = api.current_actor()
     if actor is None:
         return api.refusal("FORBIDDEN")
@@ -104,6 +104,13 @@ def create_mandate(module, project_id):
         return error
     if body.valid_until.tzinfo is None:
         return api.refusal("INVALID_REQUEST", "valid_until needs a time zone offset")
+    if project_mode:
+        from ...utils.governance_inbox import AdminsUnavailable, project_members  # pylint: disable=C0415
+        try:
+            if body.owner_user_id not in project_members(project_id):
+                return api.refusal("OWNER_NOT_MEMBER")
+        except AdminsUnavailable:
+            return api.refusal("DEPENDENCY_UNAVAILABLE")
     covers = f"toolkit_id={body.toolkit_id}" if body.toolkit_id is not None else f"version_id={body.version_id}"
     param = (f"project_id={project_id};action=create;{covers};"
              f"owner_user_id={body.owner_user_id};operations={','.join(body.operations)};"
@@ -143,7 +150,7 @@ class ProjectAPI(api_tools.APIModeHandler):
     )
     @auth.decorators.check_api(api.project_check_spec(api.MANAGE_MANDATES))
     def post(self, project_id: int, **kwargs):
-        return api.project_gate(self.module) or create_mandate(self.module, project_id)
+        return api.project_gate(self.module) or create_mandate(self.module, project_id, project_mode=True)
 
 
 class OwnerAPI(api_tools.APIModeHandler):

@@ -22,8 +22,9 @@ class AdminsUnavailable(Exception):
     """The project's members could not be read: an inbox page is refused rather than marked wrong."""
 
 
-def project_admins(project_id) -> frozenset:
-    """The user ids holding the project's ``admin`` role. ``AdminsUnavailable`` when the membership cannot be read."""
+def project_members(project_id) -> dict:
+    """``{user id: role names}`` of the project, its system user left out. ``AdminsUnavailable`` when the membership
+    cannot be read."""
     from tools import rpc_tools  # pylint: disable=C0415
     try:
         roles = rpc_tools.RpcMixin().rpc.timeout(ROLES_TIMEOUT_S).admin_get_users_roles_in_project(
@@ -31,8 +32,12 @@ def project_admins(project_id) -> frozenset:
     except Exception as exc:  # pylint: disable=W0703
         log.error("governance inbox: the project's members were not read (%s)", type(exc).__name__)
         raise AdminsUnavailable() from None
-    return frozenset(int(user_id) for user_id, names in (roles or {}).items()
-                     if user_id is not None and ADMIN_ROLE in (names or ()))
+    return {int(user_id): tuple(names or ()) for user_id, names in (roles or {}).items() if user_id is not None}
+
+
+def project_admins(project_id) -> frozenset:
+    """The user ids holding the project's ``admin`` role. ``AdminsUnavailable`` when the membership cannot be read."""
+    return frozenset(user_id for user_id, names in project_members(project_id).items() if ADMIN_ROLE in names)
 
 
 def escalated(admins, *excluded) -> bool:

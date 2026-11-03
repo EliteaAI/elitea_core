@@ -5,10 +5,10 @@
 transaction, all or nothing (``utils/governance_requests``). Needs ``governance.request`` in the project; never an
 approval. Answers ``{filed: [{key, kind, id}], items}`` (the readiness after the batch).
 """
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from flask import request
-from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from pylon.core.tools import log
 from tools import api_tools, auth, register_openapi
 
@@ -25,13 +25,15 @@ STATUS = {"STALE_READINESS": 409, "PROJECT_GOVERNANCE_OFF": 409, "VERSION_NOT_FO
 MESSAGES = {
     "STALE_READINESS": "What this needs has changed; read it again. Nothing was requested.",
     "PROJECT_GOVERNANCE_OFF": "Requests apply only while credential governance is enforced; nothing was requested.",
+    "MANDATE_EXISTS": "Another member's schedule already holds the mandate of this agent version; nothing was "
+                      "requested.",
 }
 
 
 class RequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     entity_kind: StrictStr
-    entity_id: StrictInt
+    entity_id: Annotated[StrictInt, Field(ge=1, le=readiness.MAX_INT32)]
     keys: Optional[List[StrictStr]] = None
 
 

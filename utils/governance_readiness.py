@@ -40,6 +40,7 @@ EDIT_PERMISSION = "models.applications.version.update"
 GOVERNED_MODES = ("dedicated_agent", "elitea_native")
 REQUESTED_MODE = "elitea_native"   # what a member's binding request asks for (an operator may rebind it otherwise)
 MAX_ITEMS = 128
+MAX_INT32 = 2**31 - 1   # ids are 32-bit columns: a larger one is refused before the database sees it
 NO_BINDING = "00000000-0000-0000-0000-000000000000"
 NO_SUBJECT = "idp:unlinked:unlinked"   # a person with no linked sign-in: a well-formed subject no grant names
 
@@ -100,7 +101,8 @@ def _permissions(user_id, project_id):
 
 def _binding_of(session, project_id, application_id, version_id, current_digest):
     """The version's binding as admission sees it: ``(row, state)``, ``state`` one of missing, draft, provisioning,
-    pending_approval, active, suspended, changed (in force but approved for another definition)."""
+    pending_approval, active, suspended, changed (active but approved for another definition). A suspended binding stays
+    ``suspended`` whatever its definition: a member's rebind never lifts a suspension (an operator resumes it)."""
     rows = session.execute(
         select(AgentIdentityBinding.id, AgentIdentityBinding.state, AgentIdentityBinding.definition_digest,
                AgentIdentityBinding.created_by, AgentIdentityBinding.state_changed_by)
@@ -112,7 +114,7 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
     for wanted in ("active", "suspended", "pending_approval", "provisioning", "draft"):
         for row in rows:
             if row.state == wanted:
-                changed = wanted in ("active", "suspended") and row.definition_digest != current_digest
+                changed = wanted == "active" and row.definition_digest != current_digest
                 return row, "changed" if changed else wanted
     return None, "missing"
 
@@ -322,8 +324,11 @@ def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: d
         # a schedule runs on its owner's mandate: the version's binding, the mandate, its grants, the owner's consent
         from .mandate_admin import _live_mandate  # pylint: disable=C0415
         mandate = _live_mandate(session, project_id, version_id=row.id)
-        if mandate is not None and mandate.owner_user_id != owner_id:
-            mandate = None   # another person's mandate never lends its authority to this schedule
+        held = mandate is not None and mandate.owner_user_id != owner_id
+        if held:
+            # another person's mandate never lends its authority to this schedule, and while it is live none can be
+            # requested for this version (one live mandate per version): said as such, without naming its owner
+            mandate = None
         owner_ref = _person(owner_id) if owner_id != user_id else subject_ref
         binding, binding_state, uses, configurations = _version_items(
             result, module, session, project_id, row, user_id, subject_ref, permissions,
@@ -331,8 +336,9 @@ def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: d
         title = f"{schedule.name}"
         is_owner = owner_id == user_id
         if mandate is None:
-            result.add("mandate", "mandate", title, "missing",
-                       requestable=is_owner and REQUEST_PERMISSION in permissions and binding_state == "active",
+            may_file = not held and is_owner and REQUEST_PERMISSION in permissions and binding_state == "active"
+            result.add("mandate", "mandate", title, "held_by_another" if held else "missing",
+                       requestable=may_file,
                        version_id=row.id, owner_user_id=owner_id,
                        trigger=schedule.principal.get("trigger") if isinstance(schedule.principal, dict) else None)
             # the mandate's grants, requested with it: one per credential the version uses
@@ -341,7 +347,7 @@ def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: d
                 if use.selector == "uuid" and config.get("section") == CREDENTIAL_SECTION:
                     result.add(f"grant:{use.toolkit_instance_id}:{use.configuration_uuid}", "grant",
                                f"{config.get('title') or 'Credential'} for the schedule", "missing",
-                               requestable=is_owner and REQUEST_PERMISSION in permissions and binding_state == "active",
+                               requestable=may_file,
                                toolkit_id=int(use.toolkit_instance_id) if str(use.toolkit_instance_id).isdecimal()
                                else None, configuration_uuid=use.configuration_uuid,
                                reference_ref=result.plan.get("_refs", {}).get(use.configuration_uuid))

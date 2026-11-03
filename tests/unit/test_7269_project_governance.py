@@ -32,7 +32,8 @@ ADMINISTRATION, DEFAULT = "administration", "default"
 DIGEST = "adv1:" + "1" * 64
 OWNER = mandate_env.OWNER
 ADMIN_A, ADMIN_B, VIEWER, FOREIGN, PLATFORM = 31, 32, 34, 41, 11
-SCOPED_TOKEN, UNSCOPED_TOKEN, OTHER_PROJECT_TOKEN = 901, 902, 903
+SCOPED_TOKEN, UNSCOPED_TOKEN, OTHER_PROJECT_TOKEN, SYSTEM_TOKEN = 901, 902, 903, 904
+SYSTEM = 5   # the project's system user
 VALID_UNTIL = (datetime.now(timezone.utc) + timedelta(days=20)).replace(microsecond=0).isoformat()
 # who calls: (user id, {mode or project id: role}, token id or None)
 ACTORS = {
@@ -45,6 +46,10 @@ ACTORS = {
     "scoped_token": (ADMIN_A, {1: "admin"}, SCOPED_TOKEN),
     "unscoped_token": (ADMIN_A, {1: "admin"}, UNSCOPED_TOKEN),
     "anonymous": (None, {}, None),
+    # (S-7 b) the project's system user: its role recommends nothing here; with the stale template rows a deployment may
+    # still hold (C9-SEC-84 b, "admin"-like permissions) its unscoped token is refused by the gate
+    "system": (SYSTEM, {1: "system"}, None),
+    "system_token_with_stale_rows": (SYSTEM, {1: "admin"}, SYSTEM_TOKEN),
 }
 
 
@@ -276,6 +281,8 @@ MATRIX = [
     ("admin_a", True, True), ("admin_b", True, True), ("scoped_token", True, True),
     ("editor", False, False), ("viewer", False, False), ("foreign", False, False), ("platform_admin", False, False),
     ("unscoped_token", "TOKEN_SCOPE_OPERATION", "TOKEN_SCOPE_OPERATION"), ("anonymous", False, False),
+    ("system", False, False),
+    ("system_token_with_stale_rows", "TOKEN_SCOPE_OPERATION", "TOKEN_SCOPE_OPERATION"),
 ]
 
 
@@ -296,6 +303,110 @@ def test_the_project_mode_authorization_matrix(ns, env, route, actor, may_read, 
         assert (status, payload["code"]) == (403, allowed), (route, actor, payload)
     assert ([(row.id, row.state) for row in bindings(env, ns)], len(env.recorded),
             len(env.query(1, ns.Mandate))) == before
+
+
+def _action_rows(ns, env):
+    """A row in the state each lifecycle action starts from (bindings on their own versions, mandates on 70)."""
+    rows = {}
+    for version_id, state in ((80, "pending_approval"), (81, "active"), (82, "suspended"), (83, "active")):
+        env.add_version(1, version_id, 7, f"v{version_id}")
+        env.digests[version_id] = DIGEST if version_id != 83 else "adv1:" + "2" * 64   # 83: changed since approval
+        rows[version_id] = str(env.add_binding(1, 7, version_id, state=state, digest=DIGEST))
+    with ns.sa_orm.Session(env.engine(1)) as session:   # suspended by admin_a, a project admin
+        row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(rows[82]))
+        row.created_by = row.state_changed_by = ADMIN_A
+        row.approval_ref, row.policy_revision = "CHG-1", "rev-1"   # a resume carries the stored approval
+        session.get(ns.models.AgentIdentityBinding, uuid.UUID(rows[80])).created_by = PLATFORM   # nobody who calls
+        session.commit()
+    binding = env.add_binding(1, 7, 70, state="active", digest=DIGEST)
+    until = datetime.now(timezone.utc) + timedelta(days=20)
+    rows["m_pending"] = str(mandate_env.add_mandate(env, ns, state="pending_approval", binding_ref=binding,
+                                                    created_by=PLATFORM, valid_until=until))
+    return rows
+
+
+ACTION_CALLS = {  # (S-7 a) every project-mode lifecycle action
+    "binding_activate": lambda ns, env, actor, r: act(ns, env, r[80], "activate", "pending_approval", actor=actor,
+                                                      **APPROVAL),
+    "binding_suspend": lambda ns, env, actor, r: act(ns, env, r[81], "suspend", "active", actor=actor),
+    "binding_resume": lambda ns, env, actor, r: act(ns, env, r[82], "resume", "suspended", actor=actor),
+    "binding_rebind": lambda ns, env, actor, r: act(ns, env, r[83], "rebind", "active", actor=actor),
+    "mandate_approve": lambda ns, env, actor, r: mandate_act(ns, env, r["m_pending"], "approve", actor=actor,
+                                                             **APPROVAL),
+    "mandate_reject": lambda ns, env, actor, r: mandate_act(ns, env, r["m_pending"], "reject", actor=actor),
+    "mandate_revoke": lambda ns, env, actor, r: mandate_act(ns, env, r["m_pending"], "revoke", actor=actor),
+}
+
+
+@pytest.mark.parametrize("route", sorted(ACTION_CALLS))
+@pytest.mark.parametrize("actor, refusal", [
+    ("editor", "access_denied"), ("viewer", "access_denied"), ("foreign", "access_denied"),
+    ("platform_admin", "access_denied"), ("anonymous", "access_denied"), ("system", "access_denied"),
+    ("unscoped_token", "TOKEN_SCOPE_OPERATION"), ("system_token_with_stale_rows", "TOKEN_SCOPE_OPERATION"),
+])
+def test_every_lifecycle_action_refuses_who_is_not_an_admin_of_the_project(ns, env, route, actor, refusal):
+    rows = _action_rows(ns, env)
+    before = (sorted((str(row.id), row.state) for row in bindings(env, ns)), len(env.recorded),
+              sorted((str(row.id), row.state) for row in env.query(1, ns.Mandate)))
+    payload, status = ACTION_CALLS[route](ns, env, actor, rows)
+    assert status == 403 and refusal in (payload.get("error"), payload.get("code")), (route, actor, payload)
+    assert (sorted((str(row.id), row.state) for row in bindings(env, ns)), len(env.recorded),
+            sorted((str(row.id), row.state) for row in env.query(1, ns.Mandate))) == before
+
+
+@pytest.mark.parametrize("route", sorted(ACTION_CALLS))
+@pytest.mark.parametrize("actor", ["admin_b", "scoped_token"])
+def test_every_lifecycle_action_is_open_to_the_projects_admins(ns, env, route, actor):
+    rows = _action_rows(ns, env)
+    payload, status = ACTION_CALLS[route](ns, env, actor, rows)
+    assert status == 200, (route, actor, payload)
+
+
+# --- resume of what a platform operator suspended (D-3) ----------------------------------------------------------
+
+def _suspended_by_operator(ns, env):
+    binding_id = str(env.add_binding(1, 7, 70, state="active", digest=DIGEST))
+    payload, status = act(ns, env, binding_id, "suspend", "active", actor="platform_admin", mode=ADMINISTRATION)
+    assert status == 200, payload
+    return binding_id
+
+
+@pytest.mark.parametrize("action, expected", [("resume", "suspended"), ("rebind", "suspended")])
+def test_a_project_admin_cannot_lift_what_a_platform_operator_suspended(ns, env, action, expected):
+    binding_id = _suspended_by_operator(ns, env)
+    events = len(env.recorded)
+    payload, status = act(ns, env, binding_id, action, expected, actor="admin_b")
+    assert (status, payload["code"]) == (403, "RESUME_NEEDS_OPERATOR"), payload
+    assert [row.state for row in bindings(env, ns)] == ["suspended"] and len(env.recorded) == events
+    # administration mode keeps resume
+    payload, status = act(ns, env, binding_id, "resume", "suspended", actor="platform_admin", mode=ADMINISTRATION)
+    assert (status, payload["state"]) == (200, "active")
+
+
+def test_a_project_admin_resumes_what_an_admin_of_the_project_suspended(ns, env):
+    binding_id = str(env.add_binding(1, 7, 70, state="active", digest=DIGEST))
+    assert act(ns, env, binding_id, "suspend", "active", actor="admin_a")[1] == 200
+    payload, status = act(ns, env, binding_id, "resume", "suspended", actor="admin_b")
+    assert (status, payload["state"]) == (200, "active")
+
+
+def test_the_resume_rule_reads_the_membership_and_fails_closed(ns, env):
+    binding_id = _suspended_by_operator(ns, env)
+    env.membership.down = True
+    payload, status = act(ns, env, binding_id, "resume", "suspended", actor="admin_b")
+    assert (status, payload["code"]) == (503, "DEPENDENCY_UNAVAILABLE")
+    assert [row.state for row in bindings(env, ns)] == ["suspended"]
+
+
+# --- a project mandate's owner is a member (N-11) ----------------------------------------------------------------
+
+def test_a_project_mandate_for_an_owner_outside_the_project_is_refused_at_create(ns, env):
+    env.add_binding(1, 7, 70, state="active", digest=DIGEST)
+    body = {"version_id": 70, "owner_user_id": FOREIGN, "operations": ["run:schedule"], "max_runtime_s": 600,
+            "valid_until": VALID_UNTIL}
+    payload, status = hit(ns, env, "autonomous_mandates", "post", actor="admin_a", body=body)
+    assert (status, payload["code"]) == (400, "OWNER_NOT_MEMBER") and env.query(1, ns.Mandate) == []
+    assert create_mandate(ns, env, actor="admin_a")[1] == 200   # the editor, a member
 
 
 def test_a_token_scoped_to_another_project_holds_its_owners_role_and_the_hook_refuses_the_project(ns, env):

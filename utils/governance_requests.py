@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from pylon.core.tools import log
+from sqlalchemy.exc import IntegrityError
 from tools import db, this
 
 from .binding_admin import BindingActionError, _create as create_binding, _transition as change_binding
@@ -83,8 +84,10 @@ def _file_binding(module, session, tracing, project_id, plan, actor):
     if plan["action"] == "create":
         binding_id = create_binding(session, tracing, {**values, "action": "create"}, actor)["binding_ref"]
     action = "rebind" if plan["action"] == "rebind" else "submit"
+    # a member rebinds an active binding only (never a suspended one) and submits a draft only: anything else since
+    # readiness is CONCURRENT_CHANGE, nothing written
     change_binding(module, session, tracing, {**values, "action": action, "binding_id": uuid.UUID(str(binding_id)),
-                                              "expected_state": None}, actor)
+                                              "expected_state": "active" if action == "rebind" else "draft"}, actor)
     return str(binding_id)
 
 
@@ -176,6 +179,9 @@ def file_requests(module, project_id, kind, entity_id, actor, keys=None, run_id=
         except (InvalidTransition, DigestError) as exc:
             raw.rollback()
             raise RequestRefused(exc.reason_code) from None
+        except IntegrityError:   # a concurrent submit of the same batch won: nothing of this one is written
+            raw.rollback()
+            raise RequestRefused("STALE_READINESS") from None
         except Exception as exc:  # pylint: disable=W0703
             raw.rollback()
             log.error("governance requests: the batch failed (%s)", type(exc).__name__)

@@ -16,8 +16,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="MCP Exposed Agent Versions",
         description=("For each agent of the project (at most 200), the version the Elitea MCP server gives external "
-                     "clients and why: bound (the version with an active identity binding, under enforce), published "
-                     "(the latest published one) or stored (the first stored one). {rows: [{application_id, "
+                     "clients and why: under enforce bound (the version with an active identity binding), published "
+                     "(the latest published one) or stored (the first stored one); under off and audit only stored. {rows: [{application_id, "
                      "application_name, version_id, version_name, rule}]}"),
         parameters=[{"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}}],
         mcp_tool=False, available_to_users=False,

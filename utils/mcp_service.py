@@ -746,7 +746,8 @@ class McpService:
                     application = session_2.query(Application).options(
                         joinedload(Application.versions).joinedload(ApplicationVersion.tags)
                     ).get(app.id)
-                    # (#7341) by rule: the bound version under enforce, else the latest published, else the first
+                    # (#7341) under enforce by rule: the bound version, else the latest published, else the first;
+                    # under off and audit only the first, as before
                     from .governance import is_governed  # pylint: disable=C0415
                     from .mcp_exposed_version import bound_version_ids, exposed_version  # pylint: disable=C0415
                     governed = is_governed(this.module)

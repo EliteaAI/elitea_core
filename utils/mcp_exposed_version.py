@@ -1,9 +1,9 @@
 """Which version of an agent the Elitea MCP server exposes to external clients (#7341, C-1009).
 
-By rule, not by the order the database returns the versions in: under enforce the version with an active identity
+Under enforce, by rule, not by the order the database returns the versions in: the version with an active identity
 binding (the latest published one of them when several, else the latest bound one), so an external client reaches what
-its owner had approved; otherwise, and under off and audit only, the latest published version; and with no published
-version the first stored one, as before.
+its owner had approved; otherwise the latest published version; and with no published version the first stored one.
+Under off and audit only it is the first stored one, exactly as before (the platform unchanged).
 """
 from datetime import datetime
 
@@ -24,10 +24,11 @@ def exposed_version(versions, bound_version_ids, governed):
     ``(None, None)``. Pure."""
     if not versions:
         return None, None
-    if governed:
-        bound = [version for version in versions if version.id in bound_version_ids]
-        if bound:
-            return _latest([version for version in bound if version.status == PUBLISHED] or bound), "bound"
+    if not governed:
+        return versions[0], "stored"   # off and audit only: as before
+    bound = [version for version in versions if version.id in bound_version_ids]
+    if bound:
+        return _latest([version for version in bound if version.status == PUBLISHED] or bound), "bound"
     published = [version for version in versions if version.status == PUBLISHED]
     if published:
         return _latest(published), "published"
