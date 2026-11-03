@@ -51,7 +51,8 @@ from .credential_decision import (
     USE_PERMISSION, WHOLE_TARGET,
     CredentialDecisionContext, CredentialDecisionError, _uuid_text, binding_ref, collect_credential_uses, decide_credential_uses,
     CREDENTIAL_SECTION, _int_or_none, _payload_toolkits, configurations_in, read_configuration_facts, recheck_credentials,
-    recheck_development, subject_grant_holder, toolkit_secret_fields, user_may_use_credentials, walk_scope,
+    recheck_development, resolve_title_uses, subject_grant_holder, toolkit_secret_fields, user_may_use_credentials,
+    walk_scope,
     want_configuration_facts,
 )
 from .credential_slots import FREE_FORM_SECRET_MARK, has_free_form_secret, prefetched_tool_lists, seal_payload
@@ -958,11 +959,13 @@ def _decide_credentials(  # pylint: disable=R0913
         inline_fields = lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id)  # noqa: E731
         if rows is None:
             with db.get_session(request.binding_project_id) as session:
-                candidates = collect_credential_uses(
-                    session, request.binding_project_id, request.version_id, payload, inline_fields)
-        else:   # no session is open while the schemas and the facts are read
-            candidates = collect_credential_uses(
-                None, request.binding_project_id, request.version_id, payload, inline_fields, rows=rows)
+                rows = toolkit_rows(session, request.version_id)
+        # no session is open while the schemas, the titles and the facts are read
+        candidates = collect_credential_uses(
+            None, request.binding_project_id, request.version_id, payload, inline_fields, rows=rows)
+        # (#7228) a credential the toolkit selects by title is resolved for the subject as the run resolves it (and as
+        # readiness does), then decided exactly like a selection by uuid
+        candidates = resolve_title_uses(candidates, rows, user_id, request.binding_project_id)
         return decide_credential_uses(context, candidates)
     except CredentialDecisionError as exc:
         error = exc

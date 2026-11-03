@@ -931,6 +931,18 @@ def _title_toolkit(env, monkeypatch, ns, answers, tool_id=2, field="pgvector_con
     return calls
 
 
+def test_a_title_selected_credential_resolved_for_the_user_needs_its_reference_and_grant_like_a_uuid(ns, env,
+                                                                                                     monkeypatch):
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    cred = credential(env, binding, reference=True)
+    _title_toolkit(env, monkeypatch, ns, {"github_access": {"configuration_uuid": cred.uuid,
+                                                            "configuration_project_id": 1}},
+                   tool_id=4, field="github_configuration", value={"elitea_title": "github_access"})
+    env.configurations[(1, cred.uuid)]["section"] = "credentials"
+    found = items(ns, env)
+    assert f"grant:4:{cred.uuid}" in found and "reference:4:github_configuration" not in found
+
+
 def test_a_title_only_index_store_is_resolved_as_the_run_resolves_it_and_is_not_a_credential(ns, env, monkeypatch):
     binding = env.add_binding(1, 7, 70, digest=DIGEST)
     cred = credential(env, binding)   # the jira credential by uuid: no reference yet
@@ -947,12 +959,13 @@ def test_a_title_only_index_store_is_resolved_as_the_run_resolves_it_and_is_not_
     assert calls == [(1, {"elitea_title": "elitea-pgvector", "private": False}, MEMBER)]   # one call, as the run asks
 
 
-def test_a_title_that_does_not_resolve_stays_not_registrable(ns, env, monkeypatch):
+def test_a_title_that_does_not_resolve_is_not_found_never_a_typed_value(ns, env, monkeypatch):
+    """(#7228 round 4) the same resolution admission uses: nothing found for this user reads ``not_found``."""
     env.add_binding(1, 7, 70, digest=DIGEST)
     _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": LookupError("not found")})
     found = items(ns, env)
     [item] = [item for key, item in found.items() if key.startswith("reference:")]
-    assert (item["state"], item["requestable"]) == ("not_registrable", False)
+    assert (item["state"], item["requestable"]) == ("not_found", False)
 
 
 def test_a_title_only_credential_is_treated_like_its_uuid(ns, env, monkeypatch):

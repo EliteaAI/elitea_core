@@ -194,6 +194,13 @@ class Env:  # pylint: disable=R0902,R0904
 
     # --- state ---------------------------------------------------------------------------------
 
+    def _resolve_title(self, project_id, settings, user_id):
+        key = (project_id, settings.get("elitea_title"), bool(settings.get("private")), user_id)
+        self.title_calls.append(key)
+        if key not in self.title_resolutions:
+            raise LookupError("no such configuration")
+        return {**settings, "configuration_type": "jira", **self.title_resolutions[key]}
+
     def reset(self):
         self.runs += 1
         self.dir = self.tmp_path / f"t{self.runs}"
@@ -238,6 +245,12 @@ class Env:  # pylint: disable=R0902,R0904
         self.references = []            # rows as `credential_use_facts` returns them, plus project_id/configuration_id
         self.grants = {}                # (project_id, grant key string) -> {grant_id, state, ...}
         self.revoked_binding_grants = []   # (project_id, binding id, actor, reason) per call (#7228)
+        # (#7228) what the run's resolver (``configurations_expand``) gives a stored title selector:
+        # (project_id, title, private, user_id) -> {configuration_uuid, configuration_project_id}; else LookupError
+        self.title_resolutions = {}
+        self.title_calls = []
+        if getattr(self.ns, "credential_decision", None) is not None:
+            self.ns.credential_decision._expand_selector = self._resolve_title
         self.permissions = {42: {"credentials.use"}, 43: {"credentials.use"}}
         self.permission_calls = []
         self.configuration_calls = []   # (project_id, uuids)

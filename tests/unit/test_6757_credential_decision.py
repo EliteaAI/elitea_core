@@ -786,3 +786,65 @@ def test_the_decision_runs_after_binding_and_subject_and_before_the_context_row(
     assert store.index("session.add(ExecutionSecurityContext(") < store.index("security_audit_record(session")
     # the payload admission reads is the dispatched one (a toolkit run's toolkit as its toolkit list, #7229)
     assert "payload=view_payload" in text[text.index("def admit_dispatch"):text.index("def _parent_entries")]
+
+
+# --- (#7228 round 4) a credential the toolkit selects by title is decided like a uuid selection once resolved -------
+
+USER = 42   # the caller of ``env.request()``: the subject the title is resolved for
+
+
+def test_a_title_selected_credential_resolved_in_this_project_is_decided_like_a_uuid_and_released(ns, env):
+    """What the builder writes (``{"elitea_title": ...}``, no private, no uuid) resolves in the current project for the
+    run's user, as the run resolves it: the reference and the grant decide it, the payload is sealed, the run admitted."""
+    cred = seeded(env, selector="title")
+    env.title_resolutions[(1, TITLE, False, USER)] = {"configuration_uuid": cred.uuid, "configuration_project_id": 1}
+    call = call_kwargs(payload_of(cred))
+    ref = ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
+    assert ref and call["meta"]["context_ref"] == ref
+    [context] = contexts(env, ns)
+    [entry] = context.allowed_bindings
+    assert (entry["credential_ref"], entry["toolkit_instance_id"]) == (cred.ref_id, "1")
+    assert env.title_calls == [(1, TITLE, False, USER)]
+    assert validate(ns, env, ref)   # the recheck reads it by its reference, as for a uuid selection
+
+
+def test_a_private_title_resolves_in_the_subjects_personal_project_and_is_refused_as_another_projects(ns, env):
+    """A private title resolves in the user's personal project, never this one: a governed run of this project's agent
+    is refused it (readiness says ``other_project``), whatever the title is."""
+    cred = seeded(env, selector="title")
+    env.add_toolkit(1, 70, 9, "jira", {"url": "https://jira.example",
+                                       "credentials": {"elitea_title": "mine", "private": True}})
+    personal = str(uuid.uuid4())
+    env.configurations[(77, personal)] = {"id": 4, "project_id": 77, "type": "jira", "section": "credentials",
+                                          "generation": 1}
+    env.title_resolutions[(1, TITLE, False, USER)] = {"configuration_uuid": cred.uuid, "configuration_project_id": 1}
+    env.title_resolutions[(1, "mine", True, USER)] = {"configuration_uuid": personal, "configuration_project_id": 77}
+    payload = payload_of(cred)
+    payload["application"]["version_details"]["tools"].append({"id": 9, "type": "jira", "settings": {
+        "url": "https://jira.example", "credentials": {"elitea_title": "mine", "configuration_uuid": personal,
+                                                       "configuration_project_id": 77, "configuration_type": "jira"}}})
+    assert refusal(env, ns, payload).reason_code == "DENIED_GRANT"
+    assert (1, "mine", True, USER) in env.title_calls
+    assert contexts(env, ns) == []
+
+
+def test_a_title_that_resolves_to_nothing_is_refused_as_needing_a_reference(ns, env):
+    cred = seeded(env, selector="title")   # no resolution: the resolver answers LookupError
+    assert refusal(env, ns, payload_of(cred)).reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+    assert env.title_calls == [(1, TITLE, False, USER)]
+
+
+def test_a_payload_carrying_another_configuration_than_the_title_resolves_to_is_refused(ns, env):
+    cred = seeded(env, selector="title")
+    env.title_resolutions[(1, TITLE, False, USER)] = {"configuration_uuid": str(uuid.uuid4()),
+                                                      "configuration_project_id": 1}
+    assert refusal(env, ns, payload_of(cred)).reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+
+
+def test_an_unreachable_title_resolver_fails_closed(ns, env, monkeypatch):
+    cred = seeded(env, selector="title")
+
+    def down(*_args):
+        raise RuntimeError("rpc timeout")
+    monkeypatch.setattr(ns.credential_decision, "_expand_selector", down)
+    assert refusal(env, ns, payload_of(cred)).reason_code == "DEPENDENCY_UNAVAILABLE"
