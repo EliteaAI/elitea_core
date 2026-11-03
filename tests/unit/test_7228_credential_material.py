@@ -27,7 +27,11 @@ EXPECTED = {   # every MCP-exposed route whose class is not ``none``, by tool na
     "put_artifacts_s3_credentials": "material_out",
     "post_configurations_configurations": "per_request",
     "put_configurations_configuration": "per_request",
-    "post_elitea_core_applications": "per_request",   # its webhook secret
+    "post_elitea_core_applications": "per_request",   # its webhook secret, its first versions
+    "post_elitea_core_tools": "per_request",          # a toolkit's typed secret (review M-1)
+    "put_elitea_core_tool": "per_request",
+    "post_elitea_core_versions": "per_request",       # a pipeline's webhook secret, a toolkit's typed secret
+    "put_elitea_core_version": "per_request",
 }
 
 
@@ -224,3 +228,119 @@ def test_governance_off_stamps_nothing_and_reads_nothing(ns, env):
     before = copy.deepcopy(call)
     assert ns.adm.admit_dispatch(env.module(governed=False), "indexer_agent", call, env.request()) is None
     assert call == before and "credential_form" not in call["kwargs"]["tools"][0]["settings"]
+
+
+# --- fix round: build writes, redacted reads, fail closed, unreviewed names ---------------------------------------
+
+GITHUB_SCHEMA = {"properties": {"base_url": {"type": "string"}, "access_token": {"type": "string", "secret": True},
+                                "github_configuration": {"type": "object", "configuration_types": ["github"]}}}
+MCP_SCHEMA = {"properties": {"url": {"type": "string"}, "headers": {"type": "object"}}}
+TOOL_SCHEMAS = {"github": GITHUB_SCHEMA, "mcp": MCP_SCHEMA}
+
+
+@pytest.fixture
+def schemas(ns, monkeypatch):
+    monkeypatch.setattr(ns.application_tools, "find_toolkit_schema_by_type_everywhere",
+                        lambda tool_type, project_id, user_id, status: (TOOL_SCHEMAS.get(tool_type), False),
+                        raising=False)
+    return TOOL_SCHEMAS
+
+
+TOOLS = "/api/v2/elitea_core/tools/{mode}/{project_id}"
+TOOL = "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}"
+VERSIONS = "/api/v2/elitea_core/versions/{mode}/{project_id}/{application_id}"
+VERSION = "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}"
+AGENTS = "/api/v2/elitea_core/applications/{mode}/{project_id}"
+
+
+@pytest.mark.parametrize("body, expected", [
+    ({"type": "github", "settings": {"base_url": "https://api.github.com", "access_token": "made-up"}}, True),
+    ({"type": "github", "settings": {"access_token": "{{secret.GITHUB}}"}}, False),          # a reference
+    ({"type": "github", "settings": {"github_configuration": {"elitea_title": "gh", "private": False,
+                                                              "configuration_uuid": "u"}}}, False),   # a selector
+    ({"type": "github", "settings": {"base_url": "https://api.github.com"}}, False),
+    ({"type": "mcp", "settings": {"url": "https://x", "headers": {"Authorization": "Bearer made-up"}}}, True),
+    ({"type": "mcp", "settings": {"url": "https://x", "headers": '{"Authorization": "Bearer made-up"}'}}, True),
+    ({"type": "mcp", "settings": {"url": "https://x", "headers": {"Authorization": "{{secret.MCP}}"}}}, False),
+    ({"type": "unheard_of", "settings": {"anything": "made-up"}}, True),                      # no schema
+])
+def test_a_toolkit_write_is_material_only_with_a_typed_secret(ns, schemas, body, expected):
+    assert obo(ns).material_of_call("POST", TOOLS, {"project_id": 1}, body, 42) is expected
+
+
+def test_a_toolkit_update_is_decided_by_its_stored_type(ns, schemas, monkeypatch):
+    monkeypatch.setattr(obo(ns), "_stored_toolkit_type", lambda project_id, tool_id: "github")
+    assert obo(ns).material_of_call("PUT", TOOL, {"project_id": 1, "tool_id": 3},
+                                    {"settings": {"access_token": "made-up"}}, 42) is True
+    assert obo(ns).material_of_call("PUT", TOOL, {"project_id": 1, "tool_id": 3},
+                                    {"settings": {"base_url": "https://x"}}, 42) is False
+
+
+@pytest.mark.parametrize("path, body, expected", [
+    (VERSION, {"pipeline_settings": {"trigger": {"type": "webhook", "webhook_secret": "made-up"}}}, True),
+    (VERSIONS, {"pipeline_settings": {"triggers": [{"webhook_signing_secret": "made-up"}]}}, True),
+    (VERSION, {"pipeline_settings": {"trigger": {"webhook_secret": "{{secret.WEBHOOK}}"}}}, False),
+    (VERSION, {"pipeline_settings": {"trigger": {"type": "schedule", "cron": "0 * * * *"}}}, False),
+    (VERSION, {"tools": [{"type": "github", "settings": {"access_token": "made-up"}}]}, True),
+    (VERSION, {"instructions": "x", "tools": [{"type": "github", "settings": {"base_url": "https://x"}}]}, False),
+    (AGENTS, {"name": "a", "versions": [{"pipeline_settings": {"trigger": {"webhook_secret": "made-up"}}}]}, True),
+    (AGENTS, {"name": "a", "versions": [{"tools": [{"type": "mcp", "settings": {
+        "headers": {"Authorization": "Bearer made-up"}}}]}]}, True),
+    (AGENTS, {"name": "a", "versions": [{"name": "base", "instructions": "x"}]}, False),
+])
+def test_a_version_write_is_material_with_a_webhook_secret_or_a_toolkits_secret(ns, schemas, path, body, expected):
+    method = "PUT" if path == VERSION else "POST"
+    assert obo(ns).material_of_call(method, path, {"project_id": 1}, body, 42) is expected
+
+
+def test_a_run_tokens_read_never_shows_a_stored_toolkit_secret(ns, schemas):
+    answer = {"id": 73, "tools": [
+        {"type": "mcp", "name": "m", "settings": {"url": "https://x", "headers": {"Authorization": "Bearer made-up-26",
+                                                                                   "X-Ref": "{{secret.MCP}}"}}},
+        {"type": "github", "settings": {"base_url": "https://api.github.com", "access_token": "made-up",
+                                        "github_configuration": {"elitea_title": "gh", "private": False}}},
+        {"type": "unheard_of", "settings": {"api_token": "made-up", "url": "https://y"}}]}
+    redacted = obo(ns).redact_for_run(answer, 1, 42)
+    assert "made-up" not in json.dumps(redacted)
+    mcp, github, other = redacted["tools"]
+    assert mcp["settings"] == {"url": "https://x", "headers": {"Authorization": "governed-reference",
+                                                               "X-Ref": "{{secret.MCP}}"}}
+    assert github["settings"]["base_url"] == "https://api.github.com"
+    assert github["settings"]["github_configuration"] == {"elitea_title": "gh", "private": False}
+    assert other["settings"] == {"api_token": "governed-reference", "url": "https://y"}
+    assert answer["tools"][0]["settings"]["headers"]["Authorization"] == "Bearer made-up-26"   # not changed in place
+
+
+def test_an_unreadable_registry_fails_closed(ns, registry):
+    def broken(full=True):
+        raise RuntimeError("registry down")
+
+    registry.get_combined_spec = broken
+    path = "/api/v2/elitea_core/applications/{mode}/{project_id}/{application_id}"
+    assert obo(ns).material_of("GET", path) == "unknown"
+    assert obo(ns).operation_of("GET", path) == "credentials"
+    assert obo(ns).listed_for_run("GET", path) is False
+    assert obo(ns).material_of_call("GET", path, {}, {}) is True
+
+
+def test_a_new_route_with_a_field_named_like_a_secret_is_held_until_someone_classifies_it(ns, registry):
+    registry.spec = copy.deepcopy(registry.spec)
+    registry.spec["paths"]["/api/v2/elitea_core/new_thing/{mode}/{project_id}"] = {
+        "post": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"name": {"type": "string"}, "api_token": {"type": "string"},
+                                             "max_tokens": {"type": "integer"}}}}}}},
+        "put": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"max_tokens": {"type": "integer"}}}}}}}}
+    path = "/api/v2/elitea_core/new_thing/{mode}/{project_id}"
+    assert obo(ns).material_of("POST", path) == "unreviewed"
+    assert obo(ns).material_of("PUT", path) == "none"        # a token budget is reviewed as harmless
+    assert obo(ns).material_of_call("POST", path, {}, {"name": "x"}) is True
+    assert obo(ns).listed_for_run("POST", path) is False
+    assert obo(ns).unclassified_material([{"method": "post", "path": path}, {"method": "put", "path": path}]) == [
+        "POST elitea_core/new_thing/{mode}/{project_id}"]
+
+
+def test_the_live_registry_has_no_unreviewed_secret_name(ns, registry):
+    unreviewed = [name for name, entries in SNAPSHOT["routes"].items()
+                  if obo(ns).material_of(entries[0]["method"], entries[0]["path"]) == "unreviewed"]
+    assert unreviewed == []

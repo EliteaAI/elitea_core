@@ -189,6 +189,22 @@ DECLARED_MATERIAL = {
 # the registry schema says of them (``SecretString`` publishes no secret format)
 PER_REQUEST_FIELDS = {("POST", "elitea_core/applications/{mode}/{project_id}"): ("webhook_secret",)}
 MAX_SCHEMA_WALK = 2000   # nodes of one schema walk; a larger schema counts as material
+MATERIAL_UNREVIEWED = "unreviewed"   # a field named like a secret no one classified: material until a line says
+MATERIAL_UNKNOWN = "unknown"         # the registry could not be read: material (fails closed)
+# The build writes whose body may carry a typed secret (#7228 review M-1): a toolkit's settings, a version's pipeline
+# webhook secret or toolkit settings
+TOOLKIT_WRITES = frozenset({("POST", "elitea_core/tools/{mode}/{project_id}"),
+                            ("PUT", "elitea_core/tool/{mode}/{project_id}/{tool_id}")})
+VERSION_WRITES = frozenset({("POST", "elitea_core/versions/{mode}/{project_id}/{application_id}"),
+                            ("PUT", "elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}")})
+DECLARED_MATERIAL = {**DECLARED_MATERIAL, **{key: MATERIAL_PER_REQUEST for key in TOOLKIT_WRITES | VERSION_WRITES}}
+PIPELINE_SECRET_KEYS = frozenset({"webhook_secret", "webhook_signing_secret"})
+SECRET_REFERENCE = "{{secret."
+# A field named like a secret (``secret``, ``token``, ``password``, an API/private/access key, a credential)
+SECRET_NAME = re.compile(r"(secret|token|passw|api_?key|private_?key|access_?key|credential)", re.IGNORECASE)
+# Names that match ``SECRET_NAME`` and were reviewed as holding no secret (a model's token budget)
+REVIEWED_FIELD_NAMES = frozenset({"max_tokens"})
+MAX_REDACT_NODES = 50_000
 
 # The RBAC half of the scope: an operation is in scope only when the user holds one of these in the agent's project.
 # A coarse pre-filter: the endpoint's own decorator still decides every call. ``read`` needs no extra permission.
@@ -695,7 +711,8 @@ def operation_of(method, path) -> Optional[str]:
     (refused)."""
     verb = str(method or "").upper()
     if verb in READ_METHODS:
-        return "credentials" if material_of(verb, path) == MATERIAL_OUT else "read"
+        return "credentials" if material_of(verb, path) in (MATERIAL_OUT, MATERIAL_UNREVIEWED, MATERIAL_UNKNOWN) \
+            else "read"
     return ENDPOINT_OPERATIONS.get((verb, endpoint_key(path)))
 
 
@@ -728,12 +745,47 @@ def _secret_typed(schema, components=None) -> bool:
     return walk(schema)
 
 
+def _secret_named(schema, components=None) -> list:
+    """The property names of a schema (``$ref`` followed, bounded) that look like a secret (``SECRET_NAME``) and are not
+    reviewed as harmless (``REVIEWED_FIELD_NAMES``): a plain-text secret the schema cannot type."""
+    components, nodes, seen, found = components or {}, [0], set(), set()
+
+    def walk(node):
+        nodes[0] += 1
+        if nodes[0] > MAX_SCHEMA_WALK:
+            found.add("<schema too large>")
+            return
+        if isinstance(node, dict):
+            for name in (node.get("properties") or {}) if isinstance(node.get("properties"), dict) else ():
+                if isinstance(name, str) and SECRET_NAME.search(name) and name not in REVIEWED_FIELD_NAMES:
+                    found.add(name)
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                name = ref.rsplit("/", 1)[1]
+                if name not in seen:
+                    seen.add(name)
+                    walk(components.get(name))
+            for key, value in node.items():
+                if key != "$ref":
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(schema)
+    return sorted(found)
+
+
 def schema_material(request_schema, response_schema, components=None) -> str:
-    """The class a route's own schemas give it: ``material_in`` / ``material_out`` / ``none``."""
+    """The class a route's own schemas give it: ``material_in`` / ``material_out`` (a secret-typed field),
+    ``unreviewed`` (a field named like a secret that no one classified: refused to a run token until a line says what
+    it is), ``none``."""
     if request_schema is not None and _secret_typed(request_schema, components):
         return MATERIAL_IN
     if response_schema is not None and _secret_typed(response_schema, components):
         return MATERIAL_OUT
+    if any(schema is not None and _secret_named(schema, components) for schema in (request_schema, response_schema)):
+        return MATERIAL_UNREVIEWED
     return MATERIAL_NONE
 
 
@@ -766,15 +818,16 @@ def _registry_materials() -> dict:
 
 
 def material_of(method, path) -> str:
-    """The material class of a route: its declared line, else its registry schemas, else ``none``."""
+    """The material class of a route: its declared line, else its registry schemas. A registry that cannot be read is
+    ``unknown`` (fails closed: refused and not listed to a run token)."""
     key = (str(method or "").upper(), endpoint_key(path))
     if key in DECLARED_MATERIAL:
         return DECLARED_MATERIAL[key]
     try:
         return _registry_materials().get(key, MATERIAL_NONE)
     except Exception as exc:  # pylint: disable=W0703
-        log.warning("internal_obo: the registry schemas could not be read (%s)", type(exc).__name__)
-        return MATERIAL_NONE
+        log.warning("internal_obo: the registry schemas could not be read (%s); material assumed", type(exc).__name__)
+        return MATERIAL_UNKNOWN
 
 
 def _configuration_holds_secret(config_type, data) -> bool:
@@ -801,38 +854,162 @@ def _stored_configuration_type(project_id, config_id):
     return (found or {}).get("type")
 
 
-def material_of_call(method, path, path_params, body) -> bool:
-    """Is this call of an MCP API tool credential material? Its route's class; a ``per_request`` route is material when
-    its body carries a value in one of its ``PER_REQUEST_FIELDS`` (an agent's webhook secret), or (Create/Update
-    Configuration) when its ``data`` carries a value at a secret field of the configuration's type (the body's ``type``
-    on create, the stored type on update): a model definition that points at an existing credential is not. Anything
-    that cannot be decided counts as material."""
+def _plain_value(value) -> bool:
+    """A value typed in: a non-empty string that is not a ``{{secret.…}}`` reference (a selector is a dict)."""
+    return isinstance(value, str) and bool(value.strip()) and not value.strip().startswith(SECRET_REFERENCE)
+
+
+def _toolkit_secret_names(tool_type, project_id, user_id):
+    """``(names, known)``: the fields of a toolkit type that hold a secret (``secret: true`` or ``format: password`` in
+    its schema), and whether the type has a schema at all."""
+    from .application_tools import find_toolkit_schema_by_type_everywhere  # pylint: disable=C0415
+    schema, _external = find_toolkit_schema_by_type_everywhere(tool_type, project_id, user_id, {})
+    properties = (schema or {}).get("properties") or {}
+    names = {name for name, spec in properties.items() if isinstance(spec, dict) and (
+        spec.get("secret") is True or spec.get("format") == "password"
+        or any(isinstance(option, dict) and option.get("format") == "password" for option in spec.get("anyOf") or ()))}
+    return names, bool(schema)
+
+
+def toolkit_holds_secret(tool_type, settings, project_id, user_id) -> bool:
+    """Does a toolkit's ``settings`` carry a typed secret: a value at a secret field of its type, or in a header-like
+    map (``DICT_SECRET_FIELDS``)? References (``{{secret.…}}``) and configuration selectors (dicts) are not. A type with
+    no schema counts as carrying one when any setting holds a typed string."""
+    from .credential_slots import DICT_SECRET_FIELDS  # pylint: disable=C0415
+    if not isinstance(settings, dict) or not settings:
+        return False
+    for name in DICT_SECRET_FIELDS:
+        found = settings.get(name)
+        if isinstance(found, str):
+            try:
+                found = json.loads(found) if found.strip() else {}
+            except ValueError:
+                return True
+        if isinstance(found, dict) and any(_plain_value(value) for value in found.values()):
+            return True
+    names, known = _toolkit_secret_names(tool_type, project_id, user_id) if isinstance(tool_type, str) and tool_type \
+        else (set(), False)
+    if not known:
+        return any(_plain_value(value) for value in settings.values())
+    return any(_plain_value(settings.get(name)) for name in names)
+
+
+def _pipeline_holds_secret(pipeline_settings) -> bool:
+    """A version's ``pipeline_settings`` with a typed webhook secret (``PIPELINE_SECRET_KEYS`` at any depth, bounded)."""
+    nodes = [0]
+
+    def walk(node):
+        nodes[0] += 1
+        if nodes[0] > MAX_SCHEMA_WALK:
+            return True
+        if isinstance(node, dict):
+            return any((key in PIPELINE_SECRET_KEYS and _plain_value(value)) or walk(value) for key, value in node.items())
+        if isinstance(node, list):
+            return any(walk(value) for value in node)
+        return False
+
+    return walk(pipeline_settings)
+
+
+def _version_holds_secret(version, project_id, user_id) -> bool:
+    version = version if isinstance(version, dict) else {}
+    if _pipeline_holds_secret(version.get("pipeline_settings")):
+        return True
+    tools = version.get("tools") if isinstance(version.get("tools"), list) else []
+    return any(isinstance(tool, dict) and toolkit_holds_secret(tool.get("type"), tool.get("settings"), project_id, user_id)
+               for tool in tools)
+
+
+def _stored_toolkit_type(project_id, tool_id):
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    with db.get_session(int(project_id)) as session:
+        return session.execute(select(EliteATool.type).where(EliteATool.id == int(tool_id))).scalar_one_or_none()
+
+
+def material_of_call(method, path, path_params, body, user_id=None) -> bool:  # pylint: disable=R0911
+    """Is this call of an MCP API tool credential material? Its route's class; a ``per_request`` route is decided from
+    the call's own body: a configuration's ``data`` with a value at a secret field of its type (the body's ``type`` on
+    create, the stored type on update; a model definition that points at an existing credential is not), a toolkit's
+    ``settings`` with a typed secret (``toolkit_holds_secret``), a version's (or an agent's first versions')
+    ``pipeline_settings`` webhook secret or toolkit settings, an agent's ``webhook_secret``. Anything that cannot be
+    decided counts as material."""
     found = material_of(method, path)
     if found != MATERIAL_PER_REQUEST:
-        return found in (MATERIAL_IN, MATERIAL_OUT)
+        return found in (MATERIAL_IN, MATERIAL_OUT, MATERIAL_UNREVIEWED, MATERIAL_UNKNOWN)
     body = body if isinstance(body, dict) else {}
-    fields = PER_REQUEST_FIELDS.get((str(method or "").upper(), endpoint_key(path)))
-    if fields is not None:
-        return any(body.get(name) not in (None, "", {}) for name in fields)
-    data = body.get("data")
-    if not isinstance(data, dict) or not data:
-        return False
+    key = (str(method or "").upper(), endpoint_key(path))
+    path_params = path_params or {}
+    project_id = path_params.get("project_id")
     try:
-        if str(method or "").upper() == "POST":
+        if key in TOOLKIT_WRITES:
+            tool_type = body.get("type") or (_stored_toolkit_type(project_id, path_params.get("tool_id"))
+                                             if path_params.get("tool_id") is not None else None)
+            return toolkit_holds_secret(tool_type, body.get("settings"), project_id, user_id)
+        if key in VERSION_WRITES:
+            return _version_holds_secret(body, project_id, user_id)
+        fields = PER_REQUEST_FIELDS.get(key)
+        if fields is not None:
+            if any(body.get(name) not in (None, "", {}) for name in fields):
+                return True
+            versions = body.get("versions") if isinstance(body.get("versions"), list) else []
+            return any(_version_holds_secret(version, project_id, user_id) for version in versions)
+        data = body.get("data")
+        if not isinstance(data, dict) or not data:
+            return False
+        if key[0] == "POST":
             config_type = body.get("type")
         else:
-            config_type = _stored_configuration_type((path_params or {}).get("project_id"),
-                                                     (path_params or {}).get("config_id"))
+            config_type = _stored_configuration_type(project_id, path_params.get("config_id"))
         return _configuration_holds_secret(config_type, data)
     except Exception as exc:  # pylint: disable=W0703
-        log.warning("internal_obo: a configuration body could not be classified (%s); refused", type(exc).__name__)
+        log.warning("internal_obo: a request body could not be classified (%s); refused", type(exc).__name__)
         return True
 
 
 def listed_for_run(method, path) -> bool:
-    """Is an MCP API tool listed to a run token? Not when it can only ever be material (#7228): the model is not shown
-    a tool it may never call. ``per_request`` routes stay (a model definition is not material)."""
-    return material_of(method, path) not in (MATERIAL_IN, MATERIAL_OUT)
+    """Is an MCP API tool listed to a run token? Not when it can only ever be material (#7228), or is not reviewed, or
+    the registry cannot be read: the model is not shown a tool it may never call. ``per_request`` routes stay."""
+    return material_of(method, path) not in (MATERIAL_IN, MATERIAL_OUT, MATERIAL_UNREVIEWED, MATERIAL_UNKNOWN)
+
+
+def _redact_settings(settings, tool_type, project_id, user_id) -> dict:
+    from .credential_slots import DICT_SECRET_FIELDS, GOVERNED_VALUE  # pylint: disable=C0415
+    try:
+        names = _toolkit_secret_names(tool_type, project_id, user_id)[0] if isinstance(tool_type, str) else set()
+    except Exception:  # pylint: disable=W0703
+        names = set()
+    cleaned = dict(settings)
+    for name, value in settings.items():
+        if name in DICT_SECRET_FIELDS:
+            if isinstance(value, dict):
+                cleaned[name] = {key: GOVERNED_VALUE if _plain_value(item) else item for key, item in value.items()}
+            elif isinstance(value, str) and value.strip():
+                cleaned[name] = GOVERNED_VALUE
+        elif _plain_value(value) and (name in names or (SECRET_NAME.search(name) and name not in REVIEWED_FIELD_NAMES)):
+            cleaned[name] = GOVERNED_VALUE
+    return cleaned
+
+
+def redact_for_run(answer, project_id, user_id):
+    """(#7228, C9-SEC-94) A read's answer as a run token gets it: every toolkit in it (``{type, settings}``) with the
+    values at its type's secret fields, at fields named like a secret and in every header-like map replaced by the
+    validator marker; references and selectors kept. Bounded walk; the answer is not changed in place."""
+    nodes = [0]
+
+    def walk(node):
+        nodes[0] += 1
+        if nodes[0] > MAX_REDACT_NODES:
+            raise ValueError("answer too large to redact")
+        if isinstance(node, dict):
+            result = {key: walk(value) for key, value in node.items()}
+            if isinstance(node.get("type"), str) and isinstance(node.get("settings"), dict):
+                result["settings"] = _redact_settings(result["settings"], node["type"], project_id, user_id)
+            return result
+        if isinstance(node, list):
+            return [walk(value) for value in node]
+        return node
+
+    return walk(answer)
 
 
 class OperationRefused(Exception):
@@ -966,14 +1143,18 @@ def record_would_deny_material(module, project_id, user_id, target, tool_name) -
 
 
 def unclassified_material(api_tools) -> list:
-    """The MCP-exposed routes (``openapi_registry.get_mcp_api_tools()``) whose registry schema shows a secret-typed
-    field but whose operation is not ``credentials``: a credential route the map files elsewhere. Checked at startup
-    beside ``unmapped_writes`` (the run token refuses them as material either way)."""
+    """The MCP-exposed routes (``openapi_registry.get_mcp_api_tools()``) that need a reviewer: a schema field named like
+    a secret that no line classifies (``unreviewed``; refused to a run token meanwhile), a registry that cannot be read,
+    or a secret-typed field on a route whose operation is not ``credentials``. Checked at startup beside
+    ``unmapped_writes``."""
     found = []
     for tool in api_tools or []:
         method = str(tool.get("method", "")).upper()
-        if method and material_of(method, tool.get("path")) in (MATERIAL_IN, MATERIAL_OUT) \
-                and operation_of(method, tool.get("path")) != "credentials":
+        if not method:
+            continue
+        material = material_of(method, tool.get("path"))
+        if material in (MATERIAL_UNREVIEWED, MATERIAL_UNKNOWN) or (
+                material in (MATERIAL_IN, MATERIAL_OUT) and operation_of(method, tool.get("path")) != "credentials"):
             found.append(f"{method} {endpoint_key(tool.get('path'))}")
     return sorted(set(found))
 

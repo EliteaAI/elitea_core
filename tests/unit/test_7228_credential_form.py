@@ -66,6 +66,9 @@ class World:
         self.requests_answer = [{"key": "binding", "kind": "binding", "id": "b-1"}]
         self.requests_refused = None
         self.run_version = (PROJECT, 70)
+        self.run_user = MEMBER        # the author of the question the paused answer replies to
+        self.claims = None            # run-token claims of the request (a resume from a run)
+        self.purged = []
         self.commits = self.rollbacks = 0
         self.reference = {"state": "validated", "owner": {"id": MEMBER}, "created_by": {"id": MEMBER}}
         self.meta = {"hitl_interrupt": self.interrupt(), "hitl_interrupts": [self.interrupt()]}
@@ -105,6 +108,9 @@ class FakeSession:
 
     def scalar(self):
         return self.world.message.meta
+
+    def first(self):
+        return self.world.message
 
 
 @pytest.fixture
@@ -168,6 +174,7 @@ def world(monkeypatch):
     _module(f"{PKG}.utils.credential_slots", DELEGATED_TYPES=w.delegated_types,
             configuration_secret_fields=lambda types_: {name: sorted(w.secret_names) for name in types_})
     _load(f"{PKG}.utils.parallel_hitl", PLUGIN_ROOT / "utils" / "parallel_hitl.py")
+    _module(f"{PKG}.utils.internal_obo", current_claims=lambda: w.claims)
 
     def create_configuration(payload):
         w.calls.append(("create_configuration", payload["type"], payload["shared"], payload["author_id"],
@@ -201,7 +208,8 @@ def world(monkeypatch):
     _module("plugins.secrets.utils")
     _module("plugins.configurations.exceptions", ConfigurationError=type("ConfigurationError", (Exception,), {}))
     _module("plugins.configurations.utils", create_configuration=create_configuration,
-            delete_configuration=delete_configuration)
+            delete_configuration=delete_configuration,
+            purge_secrets=lambda project_id, references: w.purged.append((project_id, sorted(references))))
     _module("plugins.secrets.utils.credential_material", write_material=write_material)
     _module("plugins.secrets.utils.credential_onboarding", run_reference_action=run_reference_action)
     _module("plugins.secrets.utils.credential_queries", reference_detail=reference_detail)
@@ -209,6 +217,7 @@ def world(monkeypatch):
     monkeypatch.setattr(cf, "_message", lambda session, conversation_uuid, message_id: w.message
                         if (str(conversation_uuid), str(message_id)) == (CONVERSATION, MESSAGE) else None)
     monkeypatch.setattr(cf, "_run_version", lambda session, message: w.run_version)
+    monkeypatch.setattr(cf, "_run_user", lambda session, message: w.run_user if message is not None else None)
     monkeypatch.setattr(cf, "_type_entry", lambda credential_type: _entry(w, credential_type))
     monkeypatch.setattr(cf, "_is_personal_project", lambda project_id, user_id: w.personal_project)
     w.cf = cf
@@ -325,7 +334,13 @@ def test_a_failed_value_write_keeps_nothing(world):
     assert (found.code, found.status) == ("DEPENDENCY_UNAVAILABLE", 503)
     assert ("reference_action", "retire", None, MEMBER) in world.calls
     assert ("delete_configuration", PROJECT, 9) in world.calls
-    assert "credential_form_result" not in json.dumps(world.message.meta) and world.events == []
+    assert world.purged == [(PROJECT, ["{{secret.x}}"])]   # the Vault secret the configuration create stored
+    meta = json.dumps(world.message.meta)
+    assert "credential_form_result" not in meta and "credential_form_in_progress" not in meta   # claim released
+    [event] = world.events
+    assert (event["reason_code"], event["outcome"], event["operation_id"], event["credential_ref"]) == (
+        "CREDENTIAL_FORM_FAILED", "failed", f"credential_form:{INTERRUPT}:value", REF)
+    assert SECRET_MARK not in json.dumps(world.events)
 
 
 def test_a_refused_reference_rolls_its_transaction_back_and_deletes_the_configuration(world):
@@ -377,8 +392,9 @@ def test_the_same_form_sent_twice_creates_nothing_twice(world):
     count = len(world.calls)
     again = complete(world)
     assert len(world.calls) == count and again["reference_id"] == first["reference_id"] and again["requests"] == []
+    world.run_user = OTHER
     found = refused(world, actor=OTHER)   # another member never reads the record
-    assert found.code == "NOT_FOUND"
+    assert found.code == "NOT_RUN_USER"
 
 
 def test_governance_off_reads_nothing(world):
@@ -626,3 +642,99 @@ def test_the_record_must_be_the_callers_own_even_when_the_reference_would_pass(w
     world.reference = {"state": "validated", "owner": {"id": OTHER}, "created_by": {"id": OTHER}}
     with pytest.raises(world.cf.FormRefused):
         resume(world, value={"reference_id": REF}, actor=OTHER)
+
+
+
+# --- fix round: one Create at a time, the run's own user, nothing usable left -----------------------------------
+
+def test_a_second_create_while_one_is_in_progress_is_refused_and_creates_nothing(world, monkeypatch):
+    seen = {}
+    real = world.cf._create_configuration
+
+    def slow(*args, **kwargs):   # the second Create arrives while the first holds its claim
+        seen["second"] = refused(world)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(world.cf, "_create_configuration", slow)
+    first = complete(world)
+    assert (seen["second"].code, seen["second"].status) == ("FORM_IN_PROGRESS", 409)
+    assert [call[0] for call in world.calls].count("create_configuration") == 1
+    assert first["reference_id"] == REF and "credential_form_in_progress" not in json.dumps(world.message.meta)
+
+
+def test_a_stale_claim_of_a_crashed_create_is_taken_over(world):
+    stale = {"by": MEMBER, "at": "2026-11-03T10:00:00+00:00"}
+    world.message.meta = world.cf._remember(world.message.meta, INTERRUPT, stale, world.cf.CLAIM_KEY)  # pylint: disable=W0212
+    assert complete(world)["reference_id"] == REF
+
+
+def test_a_live_claim_refuses_even_the_same_person(world):
+    from datetime import datetime, timezone
+    live = {"by": MEMBER, "at": datetime.now(timezone.utc).isoformat()}
+    world.message.meta = world.cf._remember(world.message.meta, INTERRUPT, live, world.cf.CLAIM_KEY)  # pylint: disable=W0212
+    assert refused(world).code == "FORM_IN_PROGRESS" and world.calls == []
+
+
+def test_a_failed_reference_releases_the_claim_and_purges_the_vault_secret(world):
+    world.reference_fails = "REFERENCE_EXISTS"
+    refused(world)
+    assert world.purged == [(PROJECT, ["{{secret.x}}"])]
+    assert "credential_form_in_progress" not in json.dumps(world.message.meta)
+    assert [event["operation_id"] for event in world.events] == [f"credential_form:{INTERRUPT}:reference"]
+    world.reference_fails = None
+    assert complete(world)["reference_id"] == REF   # the person can try again at once
+
+
+def test_only_the_person_whose_run_paused_may_complete_the_form(world):
+    world.run_user = OTHER   # the question was asked by another member of the project (a project-visible chat)
+    found = refused(world)
+    assert (found.code, found.status) == ("NOT_RUN_USER", 403)
+    assert world.calls == [] and "credential_form_in_progress" not in json.dumps(world.message.meta)
+    world.run_user = None    # an answer that replies to no person's question
+    assert refused(world).code == "NOT_RUN_USER"
+
+
+def test_another_member_cannot_resume_the_form_and_neither_can_a_run(world):
+    complete(world)
+    world.run_user = OTHER
+    with pytest.raises(world.cf.FormRefused):
+        resume(world, value={"reference_id": REF})
+    world.run_user, world.claims = MEMBER, {"uid": MEMBER, "scope": ["run"]}
+    for action, value in (("created", {"reference_id": REF}), ("cancel", None)):
+        with pytest.raises(world.cf.FormRefused) as found:
+            resume(world, action=action, value=value)
+        assert found.value.code == "HITL_VALUE_INVALID"
+
+
+def test_the_body_takes_no_delegation_descriptor(world):
+    from pydantic import ValidationError
+    model = sys.modules[f"{PKG}.models.pd.credential_form"].CredentialFormBody
+    with pytest.raises(ValidationError):
+        model.model_validate({"interrupt_id": INTERRUPT, "message_id": MESSAGE, "credential_type": "sharepoint",
+                              "title": "SP", "fields": {}, "auth_mode": "entra_delegated",
+                              "delegation": {"oauth_app_id": "platform"}})
+
+
+def test_a_failed_check_names_its_code_without_a_value(world):
+    world.probe_answer = {"error": "no", "code": "CHECK_CONNECTION_FAILED", "reason": "DENIED_ASSERTION_SOURCE_UNSUPPORTED"}
+    reply = complete(world)
+    assert (reply["state"], reply["check"]) == ("pending", "DENIED_ASSERTION_SOURCE_UNSUPPORTED")
+
+
+def test_a_type_a_plugin_owns_is_not_created_here(world, monkeypatch):
+    """The real ``_type_entry`` (the fixture replaces it): an owned type is refused before anything is written."""
+    registry = types.ModuleType("plugins.configurations.models.pd.registry")
+    registry.CONFIG_TYPE_REGISTRY = {
+        "s3_api_credentials": types.SimpleNamespace(section="credentials", managed_by="artifacts"),
+        "github": types.SimpleNamespace(section="credentials", managed_by=None)}
+    for name in ("plugins.configurations.models", "plugins.configurations.models.pd"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, registry.__name__, registry)
+    tree = ast.parse((PLUGIN_ROOT / "utils" / "credential_form.py").read_text())
+    namespace = {"FormRefused": world.cf.FormRefused, "CREDENTIAL_SECTION": "credentials"}
+    exec(compile(ast.Module([node for node in tree.body if isinstance(node, ast.FunctionDef)  # pylint: disable=W0122
+                             and node.name == "_type_entry"], []), "credential_form.py", "exec"), namespace)
+    with pytest.raises(world.cf.FormRefused) as found:
+        namespace["_type_entry"]("s3_api_credentials")
+    assert found.value.code == "INVALID_REQUEST"
+    assert namespace["_type_entry"]("github").managed_by is None

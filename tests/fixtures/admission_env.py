@@ -535,6 +535,9 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.application_tools = application_tools
     tools.auth = types.SimpleNamespace()
     tools.this = types.SimpleNamespace()
+    # (#7228) the OpenAPI registry the material classifier reads: an empty one (a test sets its own spec)
+    tools.openapi_registry = types.SimpleNamespace(get_combined_spec=lambda full=True: {"paths": {}},
+                                                   get_mcp_api_tools=lambda *a, **k: [])
     tools.config.ADMINISTRATION_MODE, tools.config.DEFAULT_MODE = "administration", "default"
 
     def load(kind, name):

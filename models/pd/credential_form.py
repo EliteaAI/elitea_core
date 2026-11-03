@@ -1,6 +1,6 @@
 """The body of the chat's credential form (#7228, C-1009): strict, bounded, its values ``SecretStr`` from the moment
 they are parsed (a repr or a validation error never shows them)."""
-from typing import Any, Dict, Literal, Optional
+from typing import Dict, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictStr, field_validator
@@ -20,8 +20,8 @@ class CredentialFormBody(BaseModel):
     title: StrictStr = Field(min_length=1, max_length=64)
     fields: Dict[StrictStr, SecretStr] = Field(default_factory=dict)
     ownership: Literal["personal", "project_shared"] = "personal"
+    # a flag only: the descriptor of a sign-in credential is the server's (the person's own tenant and login)
     auth_mode: Optional[Literal["entra_delegated"]] = None
-    delegation: Optional[Dict[StrictStr, Any]] = None
 
     @field_validator("fields", mode="before")
     @classmethod

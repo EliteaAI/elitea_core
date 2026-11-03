@@ -44,7 +44,8 @@ def mcp_service_module(monkeypatch):
     tools_pkg.db = types.SimpleNamespace(get_session=lambda pid: None)
     tools_pkg.auth = types.SimpleNamespace(current_user=lambda: {"id": 1})
     tools_pkg.this = types.SimpleNamespace()
-    tools_pkg.openapi_registry = types.SimpleNamespace(get_mcp_api_tools=lambda *a, **k: [])
+    tools_pkg.openapi_registry = types.SimpleNamespace(get_mcp_api_tools=lambda *a, **k: [],
+                                                       get_combined_spec=lambda full=True: {"paths": {}})
     tools_pkg.sanitize_property_name = lambda name: name
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
 
@@ -138,12 +139,15 @@ def service(mcp_service_module, monkeypatch):
         isinstance(node, ast.Assign) and any(getattr(t, "id", None) in (
             "ENDPOINT_OPERATIONS", "READ_METHODS", "MAX_BODY_DEPTH", "MAX_BODY_NODES", "MAX_NESTED_JSON_CHARS",
             "MATERIAL_IN", "MATERIAL_OUT", "MATERIAL_NONE", "MATERIAL_PER_REQUEST", "DECLARED_MATERIAL",
-            "MAX_SCHEMA_WALK", "_MATERIALS", "PER_REQUEST_FIELDS")
+            "MAX_SCHEMA_WALK", "_MATERIALS", "PER_REQUEST_FIELDS", "MATERIAL_UNREVIEWED", "MATERIAL_UNKNOWN",
+            "TOOLKIT_WRITES", "VERSION_WRITES", "PIPELINE_SECRET_KEYS", "SECRET_REFERENCE", "SECRET_NAME",
+            "REVIEWED_FIELD_NAMES", "MAX_REDACT_NODES")
             for t in node.targets))
         or (isinstance(node, ast.FunctionDef) and node.name in (
             "endpoint_key", "operation_of", "projects_named_in", "material_of", "material_of_call", "listed_for_run",
-            "_registry_materials", "schema_material", "_secret_typed", "_operation_schemas"))]
-    namespace = {"Optional": __import__("typing").Optional, "json": __import__("json"),
+            "_registry_materials", "schema_material", "_secret_typed", "_operation_schemas", "_secret_named",
+            "_plain_value", "_pipeline_holds_secret", "_version_holds_secret", "redact_for_run"))]
+    namespace = {"Optional": __import__("typing").Optional, "json": __import__("json"), "re": __import__("re"),
                  "log": sys.modules["pylon.core.tools"].log}
     exec(compile(ast.Module(wanted, []), "internal_obo.py", "exec"), namespace)  # pylint: disable=W0122
     # (#7228) a configuration body's secret fields: the configurations plugin's answer, faked per test
@@ -151,9 +155,18 @@ def service(mcp_service_module, monkeypatch):
     namespace["_configuration_holds_secret"] = lambda config_type, data: config_type not in holds or bool(
         set(data) & holds[config_type])
     namespace["_stored_configuration_type"] = lambda project_id, config_id: "github"
+    # a toolkit's typed secret: the real rule is tested on the real package (test_7228_credential_material); here a
+    # token at ``token`` or an Authorization header stands for it
+    namespace["toolkit_holds_secret"] = lambda tool_type, settings, project_id, user_id: bool(
+        isinstance(settings, dict) and (settings.get("token") or (settings.get("headers") or {}).get("Authorization")))
+    namespace["_stored_toolkit_type"] = lambda project_id, tool_id: "github"
+    namespace["_redact_settings"] = lambda settings, tool_type, project_id, user_id: {
+        **settings, **({"headers": {k: "governed-reference" for k in settings["headers"]}} if settings.get("headers")
+                       else {})}
     obo.operation_of = namespace["operation_of"]
     obo.material_of_call = namespace["material_of_call"]
     obo.listed_for_run = namespace["listed_for_run"]
+    obo.redact_for_run = namespace["redact_for_run"]
 
     def check_targets(arguments, target, tool_name):
         if any(p not in flask.g.internal_obo["tgt"] for p in namespace["projects_named_in"](arguments)):
@@ -415,3 +428,47 @@ def test_a_change_a_run_makes_is_filed_for_its_user_and_the_model_reads_what_hap
     assert mcp_service_module._with_governance({"result": [1]}) == [1]   # pylint: disable=W0212
     assert mcp_service_module._with_governance({"result": [1], "governance_requests": summary}) == {   # pylint: disable=W0212
         "result": [1], "governance_requests": summary}
+
+
+# --- fix round (review M-1, M-2) ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method, path, extra, arguments", [
+    ("POST", "/api/v2/elitea_core/tools/{mode}/{project_id}", (),
+     {"type": "github", "name": "gh", "settings": {"token": "made-up-not-a-secret"}}),
+    ("PUT", "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}", ("tool_id",),
+     {"tool_id": "3", "settings": {"headers": {"Authorization": "Bearer made-up"}}}),
+    ("PUT", "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+     ("application_id", "version_id"),
+     {"application_id": "2", "version_id": "2", "pipeline_settings": {"trigger": {"webhook_secret": "made-up"}}}),
+    ("POST", "/api/v2/elitea_core/versions/{mode}/{project_id}/{application_id}", ("application_id",),
+     {"application_id": "2", "pipeline_settings": {"trigger": {"webhook_signing_secret": "made-up"}}}),
+])
+def test_a_build_write_with_a_typed_secret_is_refused_and_nothing_is_written(service, method, path, extra, arguments):
+    service.flask.g.internal_obo = dict(CLAIMS)   # read and build only: the build scope does not help
+    result = service.executor.execute(secret_tool(method, path, *extra), {"project_id": 1, **arguments})
+    assert result["error"].startswith("CREDENTIALS_VIA_FORM") and service.sent == []
+    assert service.checks[0][0] == "build" and service.checks[0][-1] == "material"
+
+
+def test_a_toolkit_selecting_a_stored_credential_is_built_as_before(service):
+    service.flask.g.internal_obo = dict(CLAIMS)
+    result = service.executor.execute(tool("POST", "/api/v2/elitea_core/tools/{mode}/{project_id}"), {
+        "project_id": 1, "type": "github", "name": "gh",
+        "settings": {"github_configuration": {"elitea_title": "gh", "private": False}}})
+    assert result == {"result": {}} and len(service.sent) == 1
+
+
+def test_a_run_tokens_read_of_a_version_is_served_with_its_toolkit_secrets_redacted(service, monkeypatch):
+    stored = {"id": 73, "tools": [{"type": "mcp", "settings": {"url": "https://x",
+                                                               "headers": {"Authorization": "Bearer made-up-26"}}}]}
+    monkeypatch.setattr(service.executor, "_execute_wsgi_request",
+                        staticmethod(lambda environ: (200, __import__("json").dumps(stored))))
+    read = secret_tool("GET", "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+                       "application_id", "version_id")
+    service.flask.g.internal_obo = dict(CLAIMS, scope=["read"])
+    on_token = service.executor.execute(read, {"project_id": 1, "application_id": "58", "version_id": "73"})
+    assert "made-up-26" not in __import__("json").dumps(on_token)
+    assert on_token["result"]["tools"][0]["settings"]["headers"] == {"Authorization": "governed-reference"}
+    del service.flask.g.internal_obo   # the same read in the person's own session: unchanged
+    in_session = service.executor.execute(read, {"project_id": 1, "application_id": "58", "version_id": "73"})
+    assert in_session == {"result": stored}

@@ -26,6 +26,7 @@ the server's own record before anything is dispatched.
 import re
 import secrets as _random
 import uuid
+from datetime import datetime, timezone
 
 from pylon.core.tools import log
 from sqlalchemy.orm.attributes import flag_modified
@@ -39,6 +40,9 @@ GUARDRAIL = "credential_form"
 ACTIONS = ("created", "cancel")
 RESULT_KEY = "credential_form_result"
 REASON = "CREDENTIAL_FORM_COMPLETED"
+FAILED_REASON = "CREDENTIAL_FORM_FAILED"
+CLAIM_KEY = "credential_form_in_progress"
+CLAIM_TTL_S = 300   # a claim older than this (a crashed Create) may be taken over
 PERSONAL, SHARED = "personal", "project_shared"
 DELEGATED_AUTH_MODE = "entra_delegated"
 CREATE_PERMISSION = "configurations.configuration.create"
@@ -47,6 +51,7 @@ NOT_TYPED = frozenset({"refresh_token"})   # a stored sign-in is written by the 
 TITLE_MAX = 64
 
 STATUS = {"PROJECT_GOVERNANCE_OFF": 409, "NOT_FOUND": 404, "INTERRUPT_MISMATCH": 409, "INVALID_REQUEST": 400,
+          "NOT_RUN_USER": 403, "FORM_IN_PROGRESS": 409,
           "OWNERSHIP_INVALID": 400, "FORBIDDEN": 403, "DEPENDENCY_UNAVAILABLE": 503, "HITL_VALUE_INVALID": 400}
 MESSAGES = {
     "PROJECT_GOVERNANCE_OFF": "The credential form applies only while credential governance is enforced; nothing was "
@@ -59,6 +64,8 @@ MESSAGES = {
     "FORBIDDEN": "You may not create credentials in this project; nothing was created.",
     "DEPENDENCY_UNAVAILABLE": "The credential could not be stored right now; nothing was kept. Try again in a moment.",
     "HITL_VALUE_INVALID": "The answer to the credential request is not valid; nothing was resumed.",
+    "NOT_RUN_USER": "Only the person whose run asked for this credential can create it; nothing was created.",
+    "FORM_IN_PROGRESS": "This credential is being created already; nothing more was created.",
 }
 
 
@@ -97,9 +104,10 @@ def _form_interrupt(meta, interrupt_id):
 
 
 def _type_entry(credential_type):
+    """A credential type a person may create here: registered, of the credentials section, not owned by a plugin."""
     from plugins.configurations.models.pd.registry import CONFIG_TYPE_REGISTRY  # pylint: disable=C0415,E0401
     entry = CONFIG_TYPE_REGISTRY.get(credential_type)
-    if entry is None or getattr(entry, "section", None) != CREDENTIAL_SECTION:
+    if entry is None or getattr(entry, "section", None) != CREDENTIAL_SECTION or getattr(entry, "managed_by", None):
         raise FormRefused("INVALID_REQUEST", "credential_type")
     return entry
 
@@ -112,6 +120,7 @@ def _secret_names(credential_type):
         raise FormRefused("DEPENDENCY_UNAVAILABLE") from None
     if not isinstance(paths, (list, tuple)):
         raise FormRefused("INVALID_REQUEST", "credential_type")
+    # top-level fields only: the form shows a type's top-level fields (no credential type has nested secrets today)
     return {path for path in paths if isinstance(path, str) and "." not in path}
 
 
@@ -129,6 +138,18 @@ def _may_create(project_id, user_id):
         return CREATE_PERMISSION in set(auth.get_user_permissions(user_id, mode="default", project_id=project_id))
     except Exception:  # pylint: disable=W0703
         raise FormRefused("DEPENDENCY_UNAVAILABLE") from None
+
+
+def _run_user(session, message):
+    """The user whose run paused on this answer: the author of the question it replies to (None otherwise)."""
+    from ..models.enums.all import ParticipantTypes  # pylint: disable=C0415
+    from ..models.message_group import ConversationMessageGroup  # pylint: disable=C0415
+    question = session.get(ConversationMessageGroup, message.reply_to_id) if message.reply_to_id else None
+    participant = question.author_participant if question is not None else None
+    if participant is None or participant.entity_name != ParticipantTypes.user:
+        return None
+    user_id = (participant.entity_meta or {}).get("id")
+    return user_id if isinstance(user_id, int) and not isinstance(user_id, bool) else None
 
 
 def _run_version(session, message):
@@ -170,10 +191,26 @@ def _create_configuration(project_id, body, actor, shared, delegated=False):
         raise FormRefused("DEPENDENCY_UNAVAILABLE") from None
 
 
-def _delete_configuration(project_id, configuration_id):
+def _stored_references(node, found=None, depth=0):
+    """The ``{{secret.…}}`` references the configuration create stored the typed values under."""
+    found = [] if found is None else found
+    if isinstance(node, str) and node.startswith("{{secret.") and node.endswith("}}"):
+        found.append(node)
+    elif isinstance(node, dict) and depth < 8:
+        for value in node.values():
+            _stored_references(value, found, depth + 1)
+    return found
+
+
+def _delete_configuration(project_id, created):
+    """The configuration and the Vault secrets its create stored (the form refuses typed references, so every
+    reference in it is one of those)."""
     try:
-        from plugins.configurations.utils import delete_configuration  # pylint: disable=C0415,E0401
-        delete_configuration(project_id, configuration_id)
+        from plugins.configurations.utils import delete_configuration, purge_secrets  # pylint: disable=C0415,E0401
+        references = sorted(set(_stored_references(created.get("data"))))
+        if references:
+            purge_secrets(project_id, references)
+        delete_configuration(project_id, created.get("id"))
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential form: a configuration was left after a failure (%s)", type(exc).__name__)
 
@@ -217,10 +254,11 @@ def _store_value(project_id, ref_id, secret_fields, ownership, actor):
 
 
 def _probe(project_id, ref_id, ownership, delegated, actor):
-    """The person's own check of their personal credential (as the card's Check): ``validated`` or ``pending``. A team
-    credential is probed by the admin who approves it."""
+    """The person's own check of their personal credential (as the card's Check): ``(state, code)``, ``validated`` or
+    ``pending`` with the check's code (a sign-in that is not a Microsoft one says so). A team credential is probed by
+    the admin who approves it."""
     if ownership != PERSONAL:
-        return "pending"
+        return "pending", None
     from plugins.secrets.utils.credential_onboarding import run_reference_action  # pylint: disable=C0415,E0401
     values = {"project_id": project_id, "action": "probe", "ref": ref_id, "dry_run": False}
     if not delegated:
@@ -229,8 +267,10 @@ def _probe(project_id, ref_id, ownership, delegated, actor):
         answer = run_reference_action(values, actor, audit_code=True)
     except Exception as exc:  # pylint: disable=W0703
         log.warning("credential form: the check did not run (%s)", type(exc).__name__)
-        return "pending"
-    return answer.get("state") if answer.get("error") is None and answer.get("state") else "pending"
+        return "pending", "CHECK_NOT_RUN"
+    if answer.get("error") is None and answer.get("state"):
+        return answer["state"], None
+    return "pending", answer.get("reason") or answer.get("code")
 
 
 def _file_run_requests(module, project_id, run_version, actor, conversation_uuid):
@@ -245,15 +285,17 @@ def _file_run_requests(module, project_id, run_version, actor, conversation_uuid
         return [], "DEPENDENCY_UNAVAILABLE"
 
 
-def _record(project_id, actor, ref_id, configuration_id, interrupt_id, conversation_uuid):
+def _record(project_id, actor, ref_id, configuration_id, interrupt_id, conversation_uuid, reason=REASON,  # pylint: disable=R0913
+            step=None):
     from .governance_readiness import _person  # pylint: disable=C0415
     try:
         subject = _person(actor)
     except Exception:  # pylint: disable=W0703
         subject = None
-    event = {"event_type": "lifecycle", "reason_code": REASON, "outcome": "success", "project_id": project_id,
-             "caller_ref": f"run:{conversation_uuid}", "user_ref": subject, "credential_ref": ref_id,
-             "target_ref": f"configuration:{configuration_id}", "operation_id": f"credential_form:{interrupt_id}"[:256],
+    event = {"event_type": "lifecycle", "reason_code": reason, "outcome": "success" if reason == REASON else "failed",
+             "project_id": project_id, "caller_ref": f"run:{conversation_uuid}", "user_ref": subject,
+             "credential_ref": ref_id, "target_ref": f"configuration:{configuration_id}" if configuration_id else None,
+             "operation_id": (f"credential_form:{interrupt_id}" + (f":{step}" if step else ""))[:256],
              "run_id": str(conversation_uuid)}
     try:
         this.for_module("tracing").module.security_audit_record_autocommit(
@@ -262,29 +304,35 @@ def _record(project_id, actor, ref_id, configuration_id, interrupt_id, conversat
         log.error("credential form: the completion was not recorded (%s)", type(exc).__name__)
 
 
-def _remember(meta, interrupt_id, result):
-    """The interrupt record of this message, with the server's answer on it (the resume reads it back)."""
+def _remember(meta, interrupt_id, value, field=RESULT_KEY):
+    """The interrupt record of this message with ``field`` set to ``value`` (removed for None): the server's answer
+    (the resume reads it back) or the claim of a Create in progress."""
+    def put(item):
+        found = {key: entry for key, entry in item.items() if key != field}
+        return found if value is None else {**found, field: value}
+
     updated = dict(meta or {})
     for key in ("hitl_interrupt", "hitl_interrupts"):
-        value = updated.get(key)
-        if isinstance(value, dict) and interrupt_identity(value) == interrupt_id:
-            updated[key] = {**value, RESULT_KEY: result}
-        elif isinstance(value, list):
-            updated[key] = [{**item, RESULT_KEY: result} if isinstance(item, dict)
-                            and interrupt_identity(item) == interrupt_id else item for item in value]
+        current = updated.get(key)
+        if isinstance(current, dict) and interrupt_identity(current) == interrupt_id:
+            updated[key] = put(current)
+        elif isinstance(current, list):
+            updated[key] = [put(item) if isinstance(item, dict) and interrupt_identity(item) == interrupt_id else item
+                            for item in current]
     return updated
 
 
 def public_result(result):
-    """What the reply and the model get: ids, titles, type and state (never ``created_by``)."""
-    return {key: result.get(key) for key in ("reference_id", "configuration_uuid", "configuration_title", "title",
-                                             "credential_type", "state")}
+    """What the reply and the model get: ids, titles, type, state and the check's code (never ``created_by``)."""
+    found = {key: result.get(key) for key in ("reference_id", "configuration_uuid", "configuration_title", "title",
+                                              "credential_type", "state")}
+    if result.get("check"):
+        found["check"] = result["check"]
+    return found
 
 
-def complete(module, project_id, conversation_uuid, body, actor):  # pylint: disable=R0914
-    """Create the credential the paused run asked for. Returns the reply; ``FormRefused`` with nothing kept."""
-    if not is_governed(module):
-        raise FormRefused("PROJECT_GOVERNANCE_OFF")
+def _check_body(body):
+    """``(delegated, secret_fields)`` of a body that fits its credential type (read only)."""
     entry = _type_entry(body.credential_type)
     delegated = body.credential_type in _delegated_types()
     if body.auth_mode is not None and not delegated:
@@ -302,51 +350,104 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
         raise FormRefused("INVALID_REQUEST", "fields")   # a sign-in credential holds no typed secret
     if not delegated and not any(value.get_secret_value() for value in secret_fields.values()):
         raise FormRefused("INVALID_REQUEST", "fields")
-    with db.get_session(project_id) as session:   # the interrupt, read and held while it is checked
+    return delegated, secret_fields
+
+
+def _claim_is_live(claim, now) -> bool:
+    try:
+        taken = datetime.fromisoformat(str(claim.get("at")))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return (now - taken).total_seconds() < CLAIM_TTL_S
+
+
+def _claim(project_id, conversation_uuid, body, actor):
+    """Under the interrupt row's lock: the checks of the pause, then a claim (``CLAIM_KEY``) committed before any
+    effect, so a second Create meanwhile is ``FORM_IN_PROGRESS``. Returns ``(record or None, run version)``: the
+    record when this form was completed already (the same answer again, nothing created twice)."""
+    now = datetime.now(timezone.utc)
+    with db.get_session(project_id) as session:
         message = _message(session, conversation_uuid, body.message_id)
         interrupt = _form_interrupt(message.meta if message else None, body.interrupt_id)
         if interrupt is None:
             raise FormRefused("NOT_FOUND")
         if interrupt.get("guardrail_type") != GUARDRAIL or interrupt.get("credential_type") != body.credential_type:
             raise FormRefused("INTERRUPT_MISMATCH")
+        if _run_user(session, message) != actor:   # the person whose run paused, and nobody else
+            raise FormRefused("NOT_RUN_USER")
         done = interrupt.get(RESULT_KEY)
-        if isinstance(done, dict):   # the same form sent again: the record, nothing created twice
+        if isinstance(done, dict):
             if done.get("created_by") != actor:
-                raise FormRefused("NOT_FOUND")
-            return {**public_result(done), "configuration_id": done.get("configuration_id"), "requests": []}
+                raise FormRefused("NOT_RUN_USER")
+            return done, None
+        claim = interrupt.get(CLAIM_KEY)
+        if isinstance(claim, dict) and _claim_is_live(claim, now):
+            raise FormRefused("FORM_IN_PROGRESS")
         run_version = _run_version(session, message)
+        message.meta = _remember(message.meta, body.interrupt_id, {"by": actor, "at": now.isoformat()}, CLAIM_KEY)
+        flag_modified(message, "meta")
+        session.commit()
+    return None, run_version
+
+
+def _settle(project_id, conversation_uuid, body, result):
+    """The claim released; on success the record written in its place (one write)."""
+    with db.get_session(project_id) as session:
+        message = _message(session, conversation_uuid, body.message_id)
+        if message is not None:
+            meta = _remember(message.meta, body.interrupt_id, None, CLAIM_KEY)
+            message.meta = _remember(meta, body.interrupt_id, result) if result is not None else meta
+            flag_modified(message, "meta")
+            session.commit()
+
+
+def complete(module, project_id, conversation_uuid, body, actor):  # pylint: disable=R0914
+    """Create the credential the paused run asked for. Returns the reply; ``FormRefused`` with nothing usable kept."""
+    if not is_governed(module):
+        raise FormRefused("PROJECT_GOVERNANCE_OFF")
+    delegated, secret_fields = _check_body(body)
     if not _may_create(project_id, actor):
         raise FormRefused("FORBIDDEN")
     if body.ownership == SHARED and _is_personal_project(project_id, actor):
         raise FormRefused("OWNERSHIP_INVALID")
-    delegation = (body.delegation or _default_delegation(actor)) if delegated else None
-    created = _create_configuration(project_id, body, actor, body.ownership == SHARED, delegated)
-    configuration_id, configuration_uuid = created.get("id"), str(created.get("uuid"))
+    delegation = _default_delegation(actor) if delegated else None
+    done, run_version = _claim(project_id, conversation_uuid, body, actor)
+    if done is not None:   # the same form sent again: the record, nothing created twice
+        return {**public_result(done), "configuration_id": done.get("configuration_id"), "requests": []}
+    step, created, ref_id = "configuration", None, None
     try:
-        ref_id = _file_reference(project_id, configuration_uuid, actor, body.ownership, delegation)
-    except FormRefused:
-        _delete_configuration(project_id, configuration_id)
-        raise
-    if not delegated:
-        stored = _store_value(project_id, ref_id, secret_fields, body.ownership, actor)
-        if stored.get("error") is not None:
-            log.error("credential form: the value was not stored (%s)", stored.get("code"))
+        created = _create_configuration(project_id, body, actor, body.ownership == SHARED, delegated)
+        step = "reference"
+        ref_id = _file_reference(project_id, str(created.get("uuid")), actor, body.ownership, delegation)
+        if not delegated:
+            step = "value"
+            stored = _store_value(project_id, ref_id, secret_fields, body.ownership, actor)
+            if stored.get("error") is not None:
+                log.error("credential form: the value was not stored (%s)", stored.get("code"))
+                raise FormRefused("DEPENDENCY_UNAVAILABLE")
+    except Exception as exc:   # nothing usable is kept: reference retired, configuration and its Vault secrets gone
+        if ref_id is not None:
             _retire(project_id, ref_id, actor)
-            _delete_configuration(project_id, configuration_id)
-            raise FormRefused("DEPENDENCY_UNAVAILABLE")
-    state = _probe(project_id, ref_id, body.ownership, delegated, actor)
+        if created is not None:
+            _delete_configuration(project_id, created)
+        _settle(project_id, conversation_uuid, body, None)
+        code = exc.code if isinstance(exc, FormRefused) else "DEPENDENCY_UNAVAILABLE"
+        _record(project_id, actor, ref_id, created.get("id") if created else None, body.interrupt_id,
+                conversation_uuid, reason=FAILED_REASON, step=step)
+        if isinstance(exc, FormRefused):
+            raise
+        log.error("credential form: failed at %s (%s)", step, type(exc).__name__)
+        raise FormRefused(code) from None
+    state, check_code = _probe(project_id, ref_id, body.ownership, delegated, actor)
     filed, refused = _file_run_requests(module, project_id, run_version, actor, conversation_uuid)
-    result = {"reference_id": ref_id, "configuration_id": configuration_id, "configuration_uuid": configuration_uuid,
-              "configuration_title": created.get("elitea_title"), "title": body.title,
-              "credential_type": body.credential_type, "state": state, "created_by": actor}
-    with db.get_session(project_id) as session:
-        message = _message(session, conversation_uuid, body.message_id)
-        if message is not None:
-            message.meta = _remember(message.meta, body.interrupt_id, result)
-            flag_modified(message, "meta")
-            session.commit()
-    _record(project_id, actor, ref_id, configuration_id, body.interrupt_id, conversation_uuid)
-    reply = {**public_result(result), "configuration_id": configuration_id, "requests": filed}
+    result = {"reference_id": ref_id, "configuration_id": created.get("id"),
+              "configuration_uuid": str(created.get("uuid")), "configuration_title": created.get("elitea_title"),
+              "title": body.title, "credential_type": body.credential_type, "state": state, "created_by": actor}
+    if check_code:
+        result["check"] = check_code
+    _settle(project_id, conversation_uuid, body, result)
+    _record(project_id, actor, ref_id, created.get("id"), body.interrupt_id, conversation_uuid)
+    reply = {**public_result(result), "configuration_id": created.get("id"), "requests": filed}
     if refused:
         reply["requests_refused"] = refused
     return reply
@@ -418,12 +519,18 @@ def check_resume(module, project_id, message_id, action, value, decisions, actor
         return value, decisions
     from ..models.message_group import ConversationMessageGroup  # pylint: disable=C0415
     with db.get_session(project_id) as session:
-        meta = session.query(ConversationMessageGroup.meta).filter(
-            ConversationMessageGroup.uuid == str(message_id)).scalar()
-    pending = pending_interrupts(meta)
-    forms = {interrupt_identity(item): item for item in pending if item.get("guardrail_type") == GUARDRAIL}
+        message = session.query(ConversationMessageGroup).filter(
+            ConversationMessageGroup.uuid == str(message_id)).first()
+        meta = message.meta if message is not None else None
+        pending = pending_interrupts(meta)
+        forms = {interrupt_identity(item): item for item in pending if item.get("guardrail_type") == GUARDRAIL}
+        run_user = _run_user(session, message) if forms else None
     if not forms:
         return value, decisions
+    from .internal_obo import current_claims  # pylint: disable=C0415
+    if current_claims() is not None or run_user != actor:
+        # only the person answers their credential form: never a run (its token), never another member
+        raise FormRefused("HITL_VALUE_INVALID")
     if decisions:
         answered = []
         for decision in decisions:

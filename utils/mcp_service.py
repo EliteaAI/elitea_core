@@ -79,7 +79,8 @@ def _refused_by_run_token(operation, target, tool_name, arguments=None, material
     from . import internal_obo  # pylint: disable=C0415
     try:
         internal_obo.check_targets(arguments or {}, target, tool_name)
-        internal_obo.check_operation(operation, target, tool_name, material=material)
+        # a body classification may read (a stored type): only for a call its targets allow
+        internal_obo.check_operation(operation, target, tool_name, material=material() if callable(material) else material)
     except internal_obo.OperationRefused as exc:
         return internal_obo.refusal_text(exc)
     return None
@@ -154,7 +155,8 @@ class McpApiToolExecutor:
                 refused = _refused_by_run_token(   # classified by the tool's own path template, not the call's values
                     operation_of(method, path), f"{method} {url_path}", api_tool.get("label", ""),
                     {**query_params, **body_params},
-                    material=material_of_call(method, path, path_params, body_params))
+                    material=lambda: material_of_call(method, path, path_params, body_params,
+                                                      _run_token_claims().get("uid")))
                 if refused:
                     return {"error": refused}
             else:
@@ -169,6 +171,10 @@ class McpApiToolExecutor:
 
             parsed = McpApiToolExecutor._parse_response(status_code, body_data)
             claims = _run_token_claims()
+            if claims is not None and method in ("GET", "HEAD") and "result" in parsed:
+                # (#7228) a stored toolkit secret never reaches a run token's read: redacted, the read itself served
+                from .internal_obo import redact_for_run  # pylint: disable=C0415
+                parsed["result"] = redact_for_run(parsed["result"], path_params.get("project_id"), claims.get("uid"))
             if claims is not None and "result" in parsed and method in ("POST", "PUT", "PATCH"):
                 # (#7269) what a governed run created is requested for its user, as theirs, with the run as origin;
                 # the call's own answer stands whatever happens here
