@@ -565,3 +565,18 @@ def test_nothing_waiting_reads_no_membership(ns, env, monkeypatch):
     credential(env)
     monkeypatch.setattr(ns.governance_inbox, "project_admins", lambda project_id: pytest.fail("read"))
     assert all("escalated" not in item for item in items(ns, env).values())
+
+
+def test_the_facts_are_asked_with_well_formed_keys_when_there_is_no_binding_or_no_sign_in(ns, env):
+    """The secrets facts refuse a malformed binding id or an empty subject (ValueError): readiness never sends one."""
+    credential(env)
+    items(ns, env)
+    env.user_rows[MEMBER] = ns.users[MEMBER] = {"id": MEMBER}
+    items(ns, env)
+    items(ns, env, kind="toolkit", entity=1)
+    for asked in env.grants_for_calls:
+        for binding, _toolkit, _config, _target, subject in asked or ():
+            uuid.UUID(str(binding))
+            assert subject
+    for asked in env.subject_grant_calls:
+        assert all(subject for _credential, subject in asked or ())

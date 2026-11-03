@@ -40,6 +40,8 @@ EDIT_PERMISSION = "models.applications.version.update"
 GOVERNED_MODES = ("dedicated_agent", "elitea_native")
 REQUESTED_MODE = "elitea_native"   # what a member's binding request asks for (an operator may rebind it otherwise)
 MAX_ITEMS = 128
+NO_BINDING = "00000000-0000-0000-0000-000000000000"
+NO_SUBJECT = "idp:unlinked:unlinked"   # a person with no linked sign-in: a well-formed subject no grant names
 
 
 class ReadinessUnavailable(Exception):
@@ -221,7 +223,9 @@ def _version_items(result, module, session, project_id, version, user_id, subjec
                        "missing": "create", "changed": "rebind", "draft": "submit"}.get(state))
     tools = {str(tool.id): tool.name or tool.type for _, tool in rows}
     uses, configurations = _uses(session, project_id, version.id, user_id, rows)
-    label = "" if binding is None else str(binding.id)   # a rebind keeps the row, and its grants
+    # a rebind keeps the row, and its grants; with no binding a well-formed id no grant names (the facts refuse a
+    # malformed one)
+    label = NO_BINDING if binding is None else str(binding.id)
     if mandate is not None:
         ctx = CredentialDecisionContext(
             binding_project_id=project_id, agent_binding_ref=label, subject_ref=f"mandate:{mandate.id}",
@@ -231,7 +235,7 @@ def _version_items(result, module, session, project_id, version, user_id, subjec
         subject_for = "the schedule"
     else:
         ctx = CredentialDecisionContext(
-            binding_project_id=project_id, agent_binding_ref=label, subject_ref=subject_ref or "",
+            binding_project_id=project_id, agent_binding_ref=label, subject_ref=subject_ref or NO_SUBJECT,
             policy_revision="", now=_now(), expires_at=_now(), can_use=user_may_use_credentials(user_id, project_id),
             subject_kind="user_delegation", subject_user_id=user_id)
         subject_for = "you"
@@ -284,7 +288,7 @@ def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: d
             rows = [(None, tool)]
             uses, configurations = _uses(session, project_id, None, user_id, rows)
             ctx = CredentialDecisionContext(
-                binding_project_id=project_id, agent_binding_ref="", subject_ref=subject_ref or "",
+                binding_project_id=project_id, agent_binding_ref=NO_BINDING, subject_ref=subject_ref or NO_SUBJECT,
                 policy_revision="", now=_now(), expires_at=_now(), can_use=user_may_use_credentials(user_id, project_id),
                 subject_kind="user_delegation", subject_user_id=user_id, profile=PROFILE_DEVELOPMENT)
             _credential_items(result, ctx, uses, configurations, {str(tool.id): tool.name or tool.type},
