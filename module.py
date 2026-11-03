@@ -412,6 +412,7 @@ class Module(module.ModuleModel):
             log.exception("Failed to preload UI bundle")
 
     def ready(self):
+        self._ensure_schedule_draft_column()  # before any schedule read or tick; see the method
         self._register_managed_schedules()
         self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
@@ -598,7 +599,6 @@ class Module(module.ModuleModel):
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
         self._ensure_schedule_streak_column()
-        self._ensure_schedule_draft_column()
         self._ensure_agent_identity_schema()
         self._start_governance()
         self._start_internal_obo()
@@ -865,20 +865,18 @@ class Module(module.ModuleModel):
 
     def _ensure_schedule_draft_column(self):
         """Startup safety net: add entity_schedules.draft to the project schemas that predate it. The ORM names the
-        column in every read, so a schema without it must get it at boot. Runs off-thread; no DDL in steady state."""
-        def _run():
-            try:
-                from .utils.schedule_draft_schema import (  # pylint: disable=C0415
-                    apply_draft_column, project_ids_missing_draft_column,
-                )
-                pending = project_ids_missing_draft_column()
-                if pending:
-                    migrated, failed = apply_draft_column(pending)
-                    log.info("schedule draft schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
-            except Exception:  # pylint: disable=W0703
-                log.exception("schedule draft schema: auto-migration failed")
-
-        Thread(target=_run, daemon=True).start()
+        column in every read, the tick included, so this runs on the boot thread: the module serves after it. A
+        failed project is tried again; no DDL in steady state."""
+        try:
+            from .utils.schedule_draft_schema import (  # pylint: disable=C0415
+                apply_draft_column, project_ids_missing_draft_column,
+            )
+            pending = project_ids_missing_draft_column()
+            if pending:
+                migrated, failed = apply_draft_column(pending)
+                log.info("schedule draft schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
+        except Exception:  # pylint: disable=W0703
+            log.exception("schedule draft schema: auto-migration failed")
 
     def _ensure_agent_identity_schema(self):
         """Startup safety net: create the agent identity and mandate tables in any project schema that predates
