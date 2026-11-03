@@ -12,6 +12,12 @@ VIEW = "governance.bindings.view"
 MANAGE = "governance.bindings.manage"
 APPROVE = "governance.bindings.approve"
 PERMISSIONS = (VIEW, MANAGE, APPROVE)
+# (#7269) the mandate permissions the project-mode mandate routes check (administration mode keeps the binding ones)
+MANDATE_VIEW = "governance.mandates.view"
+MANAGE_MANDATES = "governance.mandates.manage"
+APPROVE_MANDATES = "governance.mandates.approve"
+# (#7269) what a project member may do: file the governed setup of what they work on (no approval, no other's rows)
+REQUEST = "governance.request"
 OPENAPI_TAG = "elitea_core/governance"
 MAX_BODY_BYTES = 8 * 1024
 DEFAULT_LIMIT, MAX_LIMIT, MAX_SEARCH = 20, 50, 128
@@ -22,7 +28,7 @@ STATUS = {
     "INVALID_REQUEST": 400, "APPROVAL_REQUIRED": 400, "DIGEST_REQUIRED": 400,
     "UNAUTHENTICATED": 401,
     "FORBIDDEN": 403, "SELF_APPROVAL": 403, "DENIED_BINDING": 403, "DENIED_DELEGATION_UNSUPPORTED_CALLER": 403,
-    "GOVERNANCE_NOT_ENFORCED": 409,
+    "GOVERNANCE_NOT_ENFORCED": 409, "PROJECT_GOVERNANCE_OFF": 409, "TOKEN_SCOPE_OPERATION": 403,
     "NOT_FOUND": 404, "VERSION_NOT_FOUND": 404,
     "PAYLOAD_TOO_LARGE": 413,
     "INVALID_STATE": 409, "CONCURRENT_CHANGE": 409, "BINDING_EXISTS": 409, "INVALID_TRANSITION": 409,
@@ -36,6 +42,11 @@ MESSAGES = {
     # (#7337) an owner's consent actions: their own signed-in session only, and only while governance is enforced
     "DENIED_DELEGATION_UNSUPPORTED_CALLER": "Consent needs your own signed-in session, not an API token.",
     "GOVERNANCE_NOT_ENFORCED": "Consent applies only while credential governance is enforced; nothing was changed.",
+    # (#7269) a project-mode governance route under off or audit only, and an unscoped API token on one
+    "PROJECT_GOVERNANCE_OFF": "Project governance applies only while credential governance is enforced; nothing was "
+                              "changed.",
+    "TOKEN_SCOPE_OPERATION": "Project governance needs your own signed-in session or a scoped API token with the admin "
+                             "operation.",
     "NOT_FOUND": "no such record",
     "PAYLOAD_TOO_LARGE": "the request body is too large",
     "DEPENDENCY_UNAVAILABLE": "the request could not be completed; nothing was changed",
@@ -49,6 +60,17 @@ RECOMMENDED_ROLES = {
     c.ADMINISTRATION_MODE: {"system": False, "super_admin": True, "admin": True, "editor": False, "viewer": False},
     c.DEFAULT_MODE: {"system": False, "super_admin": True, "admin": False, "editor": False, "viewer": False},
 }
+# (#7269) the project operator: platform administration as before, and in a project its admins (never ``system``: the
+# project's system user is no operator)
+PROJECT_ROLES = {
+    c.ADMINISTRATION_MODE: dict(RECOMMENDED_ROLES[c.ADMINISTRATION_MODE]),
+    c.DEFAULT_MODE: {"system": False, "super_admin": True, "admin": True, "editor": False, "viewer": False},
+}
+# (#7269) a member's request: project admins and editors; nobody in administration mode (a platform operator acts there)
+REQUEST_ROLES = {
+    c.ADMINISTRATION_MODE: {"system": False, "super_admin": False, "admin": False, "editor": False, "viewer": False},
+    c.DEFAULT_MODE: {"system": False, "super_admin": False, "admin": True, "editor": True, "viewer": False},
+}
 
 
 def check_spec(*permissions):
@@ -56,9 +78,15 @@ def check_spec(*permissions):
     return {"permissions": list(permissions), "recommended_roles": RECOMMENDED_ROLES}
 
 
+def project_check_spec(*permissions):
+    """The ``check_api`` descriptor of a project-mode governance route (#7269): project admins, any-of."""
+    return {"permissions": list(permissions), "recommended_roles": PROJECT_ROLES}
+
+
 def registration(permission):
-    """What the module registers for one permission: the same roles the endpoints recommend."""
-    return check_spec(permission)
+    """What the module registers for one permission (#7269): platform administration as before, and the project's
+    admins in project mode, as the project-mode routes recommend."""
+    return project_check_spec(permission)
 
 
 def refusal(code, message=None):
@@ -89,8 +117,46 @@ def session_actor():
     return actor
 
 
-def has_permission(permission, project_id):
-    return permission in auth.resolve_permissions(mode=c.ADMINISTRATION_MODE, project_id=project_id)
+def has_permission(permission, project_id, mode=None):
+    """Exactly ``permission`` for the caller in ``mode`` (administration unless given: the project mode of #7269 passes
+    its own)."""
+    return permission in auth.resolve_permissions(mode=mode or c.ADMINISTRATION_MODE, project_id=project_id)
+
+
+def project_gate(module):
+    """None, or the refusal of a project-mode governance call (#7269), before anything governed is read: governance is
+    enforced (else ``PROJECT_GOVERNANCE_OFF``: off and audit only stay the platform as it was), a user is signed in, and
+    an API token is a scoped one (the hook already asked for its ``admin`` operation in the project); an unscoped token,
+    the project's system token among them, is refused (``TOKEN_SCOPE_OPERATION``)."""
+    from .governance import is_governed  # pylint: disable=C0415
+    if not is_governed(module):
+        return refusal("PROJECT_GOVERNANCE_OFF")
+    if current_actor() is None:
+        return refusal("FORBIDDEN")
+    from .credential_probe import _session_holder  # pylint: disable=C0415
+    holder = _session_holder()
+    if getattr(holder, "type", None) == "token":
+        try:
+            scope = auth.token_scope(holder.id)
+        except Exception:  # pylint: disable=W0703
+            return refusal("DEPENDENCY_UNAVAILABLE")
+        if scope is None:
+            return refusal("TOKEN_SCOPE_OPERATION")
+    return None
+
+
+def inbox_args(project_id, args, always=False):
+    """``(admins, escalated_only, None)`` or ``(None, False, response)`` for a list (#7269): the project's admins when the
+    rows are to say whether they are escalated (``always``: a project-mode list) or ``escalated=true`` asks for those
+    rows only; ``(None, False, None)`` otherwise (the list as before, nothing more read)."""
+    only = args.get("escalated") == "true"
+    if not (always or only):
+        return None, False, None
+    from .governance_inbox import AdminsUnavailable, project_admins  # pylint: disable=C0415
+    try:
+        return project_admins(project_id), only, None
+    except AdminsUnavailable:
+        return None, False, refusal("DEPENDENCY_UNAVAILABLE")
 
 
 def parse_body(request, model):

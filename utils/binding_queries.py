@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from tools import auth, db
 
 from ..models.agent_identity import AgentIdentityBinding as Binding
+from .governance_inbox import escalated, escalated_clause
 from .definition_digest import (
     DigestError, digest_for_version, digest_inputs_for_version, digests_for_versions, read_definition,
 )
@@ -91,10 +92,15 @@ def _select(project_id):
 
 
 def list_page(project_id, *, state=None, identity_mode=None, application_id=None, search=None,
-              sort_by="updated_at", sort_order="desc", limit=20, offset=0):
-    """``{total, rows}``: one page of the project's bindings. The digest is recomputed for the page's rows only."""
+              sort_by="updated_at", sort_order="desc", limit=20, offset=0, admins=None, escalated_only=False):
+    """``{total, rows}``: one page of the project's bindings. The digest is recomputed for the page's rows only.
+    ``admins`` (#7269): the project's admins; each row then says whether it is ``escalated`` (``governance_inbox``),
+    and ``escalated_only`` keeps those rows only. Without ``admins`` the rows are as before."""
     statement, application = _select(project_id)
     conditions = []
+    if admins is not None and escalated_only:
+        conditions.append(escalated_clause(admins, Binding.state == "pending_approval",
+                                           Binding.created_by, Binding.state_changed_by))
     if state:
         conditions.append(Binding.state == state)
     if identity_mode:
@@ -119,6 +125,9 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
         item = _row(binding, application_name, version_name, users)
         item["definition_digest"] = digest_prefix(binding.definition_digest)
         item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
+        if admins is not None:
+            item["escalated"] = binding.state == "pending_approval" and escalated(
+                admins, binding.created_by, binding.state_changed_by)
         rows.append(item)
     return {"total": total, "rows": rows}
 
