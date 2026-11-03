@@ -127,7 +127,21 @@ class McpApiToolExecutor:
             status_code, body_data = McpApiToolExecutor._execute_wsgi_request(environ)
             log.debug(f"API tool response status: {status_code}")
 
-            return McpApiToolExecutor._parse_response(status_code, body_data)
+            parsed = McpApiToolExecutor._parse_response(status_code, body_data)
+            claims = _run_token_claims()
+            if claims is not None and "result" in parsed and method == "POST":
+                # (#7269) what a governed run created is requested for its user, as theirs, with the run as origin;
+                # the call's own answer stands whatever happens here
+                try:
+                    from .governance_requests import file_for_run  # pylint: disable=C0415
+                    governance = file_for_run(this.module, claims, method, path, path_params.get("project_id"),
+                                              parsed["result"])
+                except Exception as exc:  # pylint: disable=W0703
+                    log.error("MCP: the run's governance request was not filed (%s)", type(exc).__name__)
+                    governance = None
+                if governance is not None:
+                    parsed["governance_requests"] = governance
+            return parsed
 
         except McpProjectScopeError as exc:
             log.warning("Refused out-of-scope API tool call %s: %s", api_tool.get('label'), exc)
@@ -732,8 +746,14 @@ class McpService:
                     application = session_2.query(Application).options(
                         joinedload(Application.versions).joinedload(ApplicationVersion.tags)
                     ).get(app.id)
-
-                    return application.versions[0].id
+                    # (#7341) by rule: the bound version under enforce, else the latest published, else the first
+                    from .governance import is_governed  # pylint: disable=C0415
+                    from .mcp_exposed_version import bound_version_ids, exposed_version  # pylint: disable=C0415
+                    governed = is_governed(this.module)
+                    bound = bound_version_ids(session_2, self.session.project_id, [app.id]).get(app.id, set()) \
+                        if governed else set()
+                    version, _rule = exposed_version(list(application.versions), bound, governed)
+                    return version.id if version is not None else None
 
         return None
 

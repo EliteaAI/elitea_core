@@ -83,6 +83,7 @@ ROUTE_OPERATIONS = {
     "api.v2.elitea_core.agent_identity_action": "admin",
     "api.v2.elitea_core.autonomous_mandates": "admin",
     "api.v2.elitea_core.autonomous_mandate_action": "admin",
+    "api.v2.elitea_core.governance_requests": "admin",   # (#7269) a member's request files governance rows
     "api.v2.elitea_core.admin": "admin",
     "api.v2.elitea_core.admin_published_agents": "admin",
     "api.v2.elitea_core.platform_settings": "admin",
