@@ -47,6 +47,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return revoke_credential_contexts(session, credential_ref)
 
     @web.method()
+    def governance_project_refusal(self):
+        """ Same process (the project-mode credential routes of ``secrets``, #7269): None, or the ``({error, code},
+        status)`` refusal of a project-mode governance call (``binding_api.project_gate``). """
+        from ..utils.binding_api import project_gate  # pylint: disable=C0415
+        #
+        return project_gate(self)
+
+    @web.method()
+    def governance_project_admins(self, project_id):
+        """ Same process (#7269): the user ids holding the project's admin role, for the project inbox's escalation.
+        Raises when the membership cannot be read. """
+        from ..utils.governance_inbox import project_admins  # pylint: disable=C0415
+        #
+        return project_admins(project_id)
+
+    @web.method()
     def get_provider_api_info(self, user_id, project_id, provider_name):
         """ Method """
         provider = self.lookup_provider(user_id, project_id, provider_name)

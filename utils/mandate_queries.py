@@ -9,6 +9,7 @@ from tools import db
 
 from ..models.agent_identity import MANDATE_STATES, AutonomousMandate as Mandate
 from .binding_queries import users_by_id
+from .governance_inbox import escalated, escalated_clause
 from .mandate_identity import allowed_sources
 
 DEFAULT_LIMIT, MAX_LIMIT = 20, 50
@@ -18,10 +19,13 @@ def _iso(moment):
     return moment.isoformat() if moment else None
 
 
-def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, owner_user_id=None):
+def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, owner_user_id=None, admins=None,
+              escalated_only=False):
     """``{total, rows, identity_sources, token_identity}``: one page of the project's mandates, newest change first,
     which identities the deployment lets a mandate name, and whether it lets scoped API tokens act with their owner's
-    sign-in (#7337). ``owner_user_id``: that owner's only (the owner's own view, #7337)."""
+    sign-in (#7337). ``owner_user_id``: that owner's only (the owner's own view, #7337). ``admins`` (#7269): the
+    project's admins; each row then says whether it is ``escalated`` (``governance_inbox``), and ``escalated_only`` keeps
+    those rows only. Without ``admins`` the page is as before."""
     from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
     sources = allowed_sources(module)
@@ -29,6 +33,9 @@ def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, 
     conditions = [Mandate.project_id == project_id] + ([Mandate.state == state] if state in MANDATE_STATES else [])
     if owner_user_id is not None:
         conditions.append(Mandate.owner_user_id == owner_user_id)
+    if admins is not None and escalated_only:
+        conditions.append(escalated_clause(admins, Mandate.state == "pending_approval", Mandate.created_by,
+                                           Mandate.owner_user_id))
     statement = (
         select(Mandate.id, Mandate.application_id, Mandate.agent_version, Mandate.owner_user_id, Mandate.state,
                Mandate.suspended_reason, Mandate.revision, Mandate.allowed_operations, Mandate.max_runtime_s,
@@ -62,6 +69,9 @@ def list_page(module, project_id, *, state=None, limit=DEFAULT_LIMIT, offset=0, 
             "consented": bool(sources and row.identity_material_ref is not None),
             "consented_at": _iso(row.identity_consented_at) if sources else None,
         })
+        if admins is not None:
+            rows[-1]["escalated"] = row.state == "pending_approval" and escalated(
+                admins, row.created_by, row.owner_user_id)
     # (#7337) whether restricted API tokens may act with their owner's sign-in here: said in the Admin UI, set nowhere
     from .token_identity import allowed as token_identity_allowed  # pylint: disable=C0415
     return {"total": total, "rows": rows, "identity_sources": list(sources),

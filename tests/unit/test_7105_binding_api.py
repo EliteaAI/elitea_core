@@ -591,7 +591,8 @@ def test_the_decorators_ask_for_the_designed_permissions(ns):
     assert e.agent_identity_action.AdminAPI.post.descriptor["permissions"] == [
         "governance.bindings.manage", "governance.bindings.approve"]
     for handler in (e.agent_identities, e.agent_identity, e.agent_identity_action, e.governance_agents):
-        assert list(handler.API.mode_handlers) == ["administration"]   # project (default) mode: 404, fail closed
+        # (#7269) the project's admins in project (default) mode, on the same lifecycle; any other mode: 404
+        assert list(handler.API.mode_handlers) == ["administration", "default"]
         assert handler.API.url_params
 
 
@@ -606,12 +607,21 @@ def test_what_the_module_registers_and_what_each_endpoint_recommends_grant_the_d
         ns.endpoints.agent_identities.AdminAPI.get, ns.endpoints.agent_identities.AdminAPI.post,
         ns.endpoints.agent_identity.AdminAPI.get, ns.endpoints.agent_identity_action.AdminAPI.post,
         ns.endpoints.governance_agents.AdminAPI.get)]
-    descriptors += [ns.binding_api.registration(permission) for permission in ns.binding_api.PERMISSIONS]
-    assert sorted(permission for item in descriptors[-3:] for permission in item["permissions"]) == sorted([
-        "governance.bindings.approve", "governance.bindings.manage", "governance.bindings.view"])
-    for descriptor in descriptors:
+    for descriptor in descriptors:   # the administration routes recommend what they did before #7269
         effective = effective_roles(descriptor)
         assert effective == {"administration": ADMINISTRATION_ROLES, "default": DEFAULT_ROLES}, descriptor["permissions"]
+    # (#7269) the module registers, and the project-mode routes recommend, the project's admins (never system)
+    registered = [ns.binding_api.registration(permission) for permission in ns.binding_api.PERMISSIONS]
+    assert sorted(permission for item in registered for permission in item["permissions"]) == sorted([
+        "governance.bindings.approve", "governance.bindings.manage", "governance.bindings.view"])
+    project = [handler.descriptor for handler in (
+        ns.endpoints.agent_identities.ProjectAPI.get, ns.endpoints.agent_identities.ProjectAPI.post,
+        ns.endpoints.agent_identity.ProjectAPI.get, ns.endpoints.agent_identity_action.ProjectAPI.post,
+        ns.endpoints.governance_agents.ProjectAPI.get)]
+    for descriptor in registered + project:
+        effective = effective_roles(descriptor)
+        assert effective == {"administration": ADMINISTRATION_ROLES, "default": {**DEFAULT_ROLES, "admin": True}}, \
+            descriptor["permissions"]
 
 
 def test_the_module_registers_each_binding_permission_through_that_helper():
