@@ -226,6 +226,10 @@ def create_binding(ns, env, actor="admin_a", mode=DEFAULT):
 
 
 def act(ns, env, binding_id, action, expected, actor="admin_a", mode=DEFAULT, **more):
+    if action == "activate" and "definition_digest" not in more:   # (#7228) the digest the approver reviewed
+        with ns.sa_orm.Session(env.engine(1)) as session:
+            row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(str(binding_id)))
+            more["definition_digest"] = row.definition_digest if row is not None else "adv1:" + "0" * 64
     return hit(ns, env, "agent_identity_action", "post", actor=actor, mode=mode,
                binding_id=uuid.UUID(str(binding_id)), body={"action": action, "expected_state": expected, **more})
 

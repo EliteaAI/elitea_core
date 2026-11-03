@@ -237,6 +237,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.configurations = {}        # (project_id, uuid) -> {id, project_id, type, section, generation}
         self.references = []            # rows as `credential_use_facts` returns them, plus project_id/configuration_id
         self.grants = {}                # (project_id, grant key string) -> {grant_id, state, ...}
+        self.revoked_binding_grants = []   # (project_id, binding id, actor, reason) per call (#7228)
         self.permissions = {42: {"credentials.use"}, 43: {"credentials.use"}}
         self.permission_calls = []
         self.configuration_calls = []   # (project_id, uuids)
@@ -830,10 +831,21 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                 values[item["ref_id"]] = types.SimpleNamespace(fields=fields, generation=item["generation"])
             return {"ok": True, "values": values}
 
+        def revoke_binding_grants(session, project_id, binding_id, actor, reason="BINDING_RETIRED"):
+            # as the secrets plugin (#7228): the binding's live grants revoked in the caller's transaction
+            env.revoked_binding_grants.append((project_id, str(binding_id), actor, reason))
+            revoked = 0
+            for (pid, key), grant in env.grants.items():
+                if pid == project_id and key.split("|")[0] == str(binding_id) and grant.get("state") in (
+                        "pending_approval", "active", "suspended"):
+                    grant["state"], revoked = "revoked", revoked + 1
+            return revoked
+
         def modules():
             secrets = types.SimpleNamespace(credential_use_facts=credential_use_facts,
                                             credential_facts_version=lambda: env.facts_version,
-                                            release_credential_material=release_credential_material)
+                                            release_credential_material=release_credential_material,
+                                            revoke_binding_grants=revoke_binding_grants)
             if env.batch_store:
                 secrets.release_credential_materials = release_credential_materials
             for name, method in env.secrets_extra.items():   # more of the secrets plugin, per test (#7131)

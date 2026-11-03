@@ -128,6 +128,7 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
     for binding, application_name, version_name in page:
         item = _row(binding, application_name, version_name, users)
         item["definition_digest"] = digest_prefix(binding.definition_digest)
+        item["definition_digest_full"] = binding.definition_digest   # (#7228) what an approval of this row approves
         item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
         if admins is not None:
             item["escalated"] = binding.state == "pending_approval" and escalated(

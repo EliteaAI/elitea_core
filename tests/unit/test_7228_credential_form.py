@@ -284,8 +284,16 @@ def test_the_reply_events_meta_and_logs_hold_no_value_and_no_placeholder(world):
     assert world.message.meta["hitl_interrupt"]["credential_form_result"] == stored
 
 
+def test_only_me_marks_the_configuration_as_its_authors_own_and_a_team_one_is_unmarked(world):
+    """(#7228) "Only me (in this project)": the toolkit picker lists the configuration under its author's own; the
+    governed reference, not this label, decides who may use it."""
+    complete(world)
+    assert world.created_payload["meta"] == {"personal_owner_id": MEMBER}
+
+
 def test_a_team_credential_is_a_pending_request_imported_from_its_configuration_and_never_probed_by_the_member(world):
     reply = complete(world, ownership="project_shared")
+    assert "meta" not in world.created_payload               # a team one names no owner
     assert world.calls[0][2] is True                         # the configuration is shared
     assert world.calls[1][3][0]["ownership_class"] == "project_shared"
     assert world.calls[2] == ("reference_action", "import", None, MEMBER)

@@ -174,6 +174,11 @@ def _elitea_title(title):
     return f"{base}_{_random.token_hex(3)}"
 
 
+# (#7228) the configuration meta key naming the member a form-created "Only me" credential belongs to (a label for the
+# toolkit picker; who may use it is decided by its governed reference, never by this)
+PERSONAL_OWNER_META = "personal_owner_id"
+
+
 def _create_configuration(project_id, body, actor, shared, delegated=False):
     from plugins.configurations.exceptions import ConfigurationError  # pylint: disable=C0415,E0401
     from plugins.configurations.utils import create_configuration  # pylint: disable=C0415,E0401
@@ -182,6 +187,8 @@ def _create_configuration(project_id, body, actor, shared, delegated=False):
         data["auth_mode"] = DELEGATED_AUTH_MODE
     payload = {"elitea_title": _elitea_title(body.title), "label": body.title, "type": body.credential_type,
                "shared": shared, "project_id": project_id, "author_id": actor, "data": data}
+    if not shared:   # (#7228) "Only me (in this project)": the toolkit picker lists it as its author's own
+        payload["meta"] = {PERSONAL_OWNER_META: actor}
     try:
         return create_configuration(payload)
     except ConfigurationError as exc:

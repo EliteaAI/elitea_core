@@ -17,8 +17,10 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from tools import db, this
 
-from ..models.agent_identity import IDENTITY_MODES, REFERENCE_PATTERN, AgentIdentityBinding
-from .admission import revoke_binding_contexts, version_application_id
+from ..models.agent_identity import (
+    IDENTITY_MODES, LIVE_MANDATE_STATES, REFERENCE_PATTERN, AgentIdentityBinding, AutonomousMandate,
+)
+from .admission import revoke_binding_contexts, revoke_mandate_contexts, version_application_id
 from .binding_state import InvalidTransition, bumps_epoch, transition_binding
 from .definition_digest import DigestError, digest_for_version
 from .internal_obo import OPERATIONS as PLATFORM_OPERATIONS
@@ -126,11 +128,12 @@ def parse_platform_operations(raw, action):
     return [op for op in PLATFORM_OPERATIONS if op in operations], None
 
 
-def _lifecycle_event(values, binding, target, actor_user_id, epoch):
+def _lifecycle_event(values, binding, target, actor_user_id, epoch, source=None):  # pylint: disable=R0913
     """The ``lifecycle`` audit event of one state change, with only the fields the event schema has today. The rebind
     event therefore does not carry the definition digests (new and previous); a ``definition_digest`` and
     ``previous_digest`` pair is to be added to the tracing event model as a follow-up (#7105)."""
-    reason = ("BINDING_REBIND_PENDING_APPROVAL" if values["action"] == "rebind" else
+    reason = ("BINDING_BROUGHT_UP_TO_DATE" if values["action"] == "rebind" and source == "pending_approval" else
+              "BINDING_REBIND_PENDING_APPROVAL" if values["action"] == "rebind" else
               "BINDING_REVIVED" if values["action"] == "create" and binding.state == "retired" else
               f"BINDING_{target.upper()}")
     event = {
@@ -171,6 +174,52 @@ def _create(session, tracing, values, actor_user_id):
             "definition_digest": digest, "dry_run": False}
 
 
+def _end_dependants(session, tracing, project_id, binding_id, actor_user_id, reason):  # pylint: disable=R0913
+    """(#7228, C9-SEC-96/97) What hangs off a binding's id ends with it, in the caller's transaction: its live mandates
+    are revoked (their runs revoked, audited ``MANDATE_REVOKED_<reason>``) and its live grants revoked by the secrets
+    plugin (audited ``GRANT_REVOKED_<reason>``). ``reason``: ``BINDING_RETIRED`` at retirement, ``BINDING_REVIVED``
+    for what a retirement before this change left. Returns the mandate ids (their owners' consents are withdrawn after
+    the commit). ``BindingActionError`` with the caller to roll back: nothing ends half way."""
+    from .mandate_state import transition_mandate  # pylint: disable=C0415
+    if isinstance(actor_user_id, bool) or not isinstance(actor_user_id, int) or actor_user_id <= 0:
+        raise BindingActionError("ACTOR_REQUIRED", "an identified operator is required")
+    mandates = session.execute(select(AutonomousMandate.id, AutonomousMandate.state).where(
+        AutonomousMandate.project_id == project_id, AutonomousMandate.agent_binding_ref == binding_id,
+        AutonomousMandate.state.in_(LIVE_MANDATE_STATES))).all()
+    for mandate_id, state in mandates:
+        if not transition_mandate(session, mandate_id, state, "revoked", actor=actor_user_id):
+            raise BindingActionError("CONCURRENT_CHANGE", "the binding changed while this ran; read it again and retry")
+        revoke_mandate_contexts(session, mandate_id)
+        row = session.execute(select(AutonomousMandate.application_id, AutonomousMandate.revocation_epoch)
+                              .where(AutonomousMandate.id == mandate_id)).one()
+        tracing.security_audit_record(session, {   # the mandate lifecycle event (``mandate_admin._event``'s fields)
+            "event_type": "lifecycle", "reason_code": f"MANDATE_REVOKED_{reason}", "outcome": "success",
+            "project_id": project_id, "application_id": row.application_id, "agent_binding_ref": str(binding_id),
+            "mandate_ref": str(mandate_id), "caller_ref": f"operator:{actor_user_id}",
+            "revocation_epoch": row.revocation_epoch})
+    revoke = getattr(this.for_module("secrets").module, "revoke_binding_grants", None)
+    if revoke is None:   # a secrets plugin without it cannot end the grants: nothing is changed
+        raise BindingActionError("DEPENDENCY_UNAVAILABLE", "the binding's grants could not be revoked; nothing was "
+                                                           "changed")
+    try:
+        revoke(session, project_id, binding_id, actor_user_id, reason)
+    except Exception as exc:  # pylint: disable=W0703
+        code = getattr(exc, "code", None)
+        if code == "CONCURRENT_CHANGE":
+            raise BindingActionError(code, "the binding changed while this ran; read it again and retry") from None
+        log.error("binding: its grants could not be revoked (%s)", type(exc).__name__)
+        raise BindingActionError("AUDIT_UNAVAILABLE", "failed; nothing was changed (is the audit trail available?)") \
+            from None
+    return [mandate_id for mandate_id, _ in mandates]
+
+
+def _withdraw_consents(project_id, mandate_ids, actor_user_id):
+    """After the commit, as a mandate's own revocation does (#7131): the owner's consent goes with the mandate."""
+    from .mandate_identity import retire_consent  # pylint: disable=C0415
+    for mandate_id in mandate_ids:
+        retire_consent(project_id, mandate_id, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor_user_id}", actor_user_id)
+
+
 def _revive(session, tracing, values, binding, digest, actor_user_id):  # pylint: disable=R0913
     """(#7228) A create of a version whose binding was retired takes the same row back to ``draft`` (one row per
     version and mode, so its audit trail stays one chain): the definition as it is now, no approval, the operations
@@ -185,7 +234,10 @@ def _revive(session, tracing, values, binding, digest, actor_user_id):  # pylint
                     .values(allowed_platform_operations=values.get("platform_operations"))
                     .execution_options(synchronize_session=False))
     tracing.security_audit_record(session, event)
+    # (#7228) a binding retired before its retirement ended these starts clean all the same
+    ended = _end_dependants(session, tracing, values["project_id"], binding_id, actor_user_id, "BINDING_REVIVED")
     session.commit()
+    _withdraw_consents(values["project_id"], ended, actor_user_id)
     return {"action": "create", "binding_ref": str(binding_id), "state": "draft",
             "definition_digest": digest, "dry_run": False}
 
@@ -213,6 +265,10 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
     path = PATHS[action].get(binding.state)
     if path is None:
         raise BindingActionError("INVALID_STATE", f"cannot {action} a binding in state '{binding.state}'")
+    reviewed = values.get("reviewed_digest") if action == "activate" else None
+    if reviewed is not None and reviewed != binding.definition_digest:   # (#7228, C9-SEC-98) brought up to date since
+        raise BindingActionError("BINDING_DIGEST_MISMATCH", "the agent changed since this approval was opened; "
+                                                            "review it again")
     kept = values.get("platform_operations") if action == "activate" else None
     if kept is not None:   # (#7228) an approval keeps part of the proposal, never more (no list proposed: read only)
         proposed = set(binding.allowed_platform_operations or ["read"])
@@ -243,13 +299,17 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
         if bumps_epoch(state, target):
             revoke_binding_contexts(session, binding_id)
         tracing.security_audit_record(
-            session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch))
+            session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch, source=state))
         state = target
     if action in ("rebind", "activate") and values.get("platform_operations") is not None:
         session.execute(update(AgentIdentityBinding).where(AgentIdentityBinding.id == binding_id)
                         .values(allowed_platform_operations=values["platform_operations"])
                         .execution_options(synchronize_session=False))
+    # (#7228, C9-SEC-96/97) a retired binding's grants and mandates end with it, in this transaction
+    ended = _end_dependants(session, tracing, values["project_id"], binding_id, actor_user_id, "BINDING_RETIRED") \
+        if action == "retire" else []
     session.commit()
+    _withdraw_consents(values["project_id"], ended, actor_user_id)
     return {"action": action, "binding_ref": str(binding_id), "state": state, "dry_run": False}
 
 

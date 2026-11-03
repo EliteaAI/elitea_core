@@ -298,15 +298,19 @@ def _changed_id(name, path_params):
     return value if 0 < value <= 2**31 - 1 else None
 
 
-def _toolkit_versions(project_id, tool_id) -> list:
-    """The agent versions a toolkit is linked to (at most ``MAX_TOOLKIT_VERSIONS``)."""
+def _toolkit_versions(project_id, tool_id) -> tuple:
+    """``(ids, more)``: the agent versions a toolkit is linked to (at most ``MAX_TOOLKIT_VERSIONS``, agents only, as the
+    definition digest reads them), and how many more there are beyond the cap (#7228: said, never silently dropped)."""
     from ..models.elitea_tools import EntityToolMapping  # pylint: disable=C0415
-    from sqlalchemy import select  # pylint: disable=C0415
+    from sqlalchemy import func, select  # pylint: disable=C0415
+    linked = select(EntityToolMapping.entity_version_id).where(
+        EntityToolMapping.tool_id == tool_id, EntityToolMapping.entity_type == "agent").distinct()
     with db.get_session(project_id) as session:
-        rows = session.execute(
-            select(EntityToolMapping.entity_version_id).where(EntityToolMapping.tool_id == tool_id)
-            .distinct().order_by(EntityToolMapping.entity_version_id).limit(MAX_TOOLKIT_VERSIONS)).scalars().all()
-    return [int(value) for value in rows if isinstance(value, int)]
+        rows = session.execute(linked.order_by(EntityToolMapping.entity_version_id)
+                               .limit(MAX_TOOLKIT_VERSIONS)).scalars().all()
+        total = len(rows) if len(rows) < MAX_TOOLKIT_VERSIONS else session.execute(
+            select(func.count()).select_from(linked.subquery())).scalar_one()
+    return [int(value) for value in rows if isinstance(value, int)], max(0, total - len(rows))
 
 
 def _file_entity(module, project_id, kind, entity_id, user_id, run_id):
@@ -318,6 +322,10 @@ def _file_entity(module, project_id, kind, entity_id, user_id, run_id):
         return {"entity_kind": kind, "entity_id": entity_id, "filed": filed, "items": items}
     except RequestRefused as exc:
         return {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": exc.code}
+    except Exception as exc:  # pylint: disable=W0703
+        # (#7228) one version whose readiness cannot be read is refused alone, not the toolkit's other versions
+        log.error("governance requests: an entity's request was not filed (%s)", type(exc).__name__)
+        return {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": "DEPENDENCY_UNAVAILABLE"}
 
 
 def file_for_run(module, claims, method, path, project_id, answer, path_params=None):  # pylint: disable=R0913
@@ -346,10 +354,13 @@ def file_for_run(module, claims, method, path, project_id, answer, path_params=N
         else:
             summary = _file_entity(module, project_id, kind, entity_id, user_id, run_id)
             if kind == "toolkit":   # (#7228) every version using the toolkit changed with it: its rebind, its grants
+                linked, more = _toolkit_versions(project_id, entity_id)
                 versions = [_file_entity(module, project_id, "version", version_id, user_id, run_id)
-                            for version_id in _toolkit_versions(project_id, entity_id)]
+                            for version_id in linked]
                 if versions:
                     summary["versions"] = versions
+                if more:   # beyond the cap: said, so the person opens them
+                    summary["versions_more"] = more
     except RequestRefused as exc:
         summary = {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": exc.code}
     except Exception as exc:  # pylint: disable=W0703
@@ -363,4 +374,7 @@ def file_for_run(module, claims, method, path, project_id, answer, path_params=N
                  "items": [item for part in parts for item in part.get("items") or []],
                  "refused": next((part["refused"] for part in parts if part.get("refused")), None)}
     summary["next"] = next_step(whole)
+    if summary.get("versions_more"):
+        summary["next"] += (f" {summary['versions_more']} more agents use this toolkit: open them to request what "
+                            "they need.")
     return summary

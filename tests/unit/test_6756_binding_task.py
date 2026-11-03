@@ -493,7 +493,7 @@ def test_a_waiting_binding_is_brought_up_to_date_in_place_and_then_approved(ns, 
     row = binding(env, ns)
     assert (row.state, row.definition_digest, row.revocation_epoch, row.approval_ref) == (
         "pending_approval", NEW_DIGEST, 0, None)   # nothing raised: it was never in use
-    assert reasons(env)[-1] == "BINDING_REBIND_PENDING_APPROVAL"
+    assert reasons(env)[-1] == "BINDING_BROUGHT_UP_TO_DATE"   # its own code: it was never taken out of use (D2-N2)
     assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
     assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
 

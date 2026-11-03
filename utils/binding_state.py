@@ -91,7 +91,10 @@ def transition_binding(  # pylint: disable=R0913
                 raise InvalidTransition("SELF_APPROVAL", "another operator must approve this binding")
             # the same rule once more in the statement, so a change between the read and the write cannot slip by
             guards = [AgentIdentityBinding.created_by.is_distinct_from(actor_user_id),
-                      AgentIdentityBinding.state_changed_by.is_distinct_from(actor_user_id)]
+                      AgentIdentityBinding.state_changed_by.is_distinct_from(actor_user_id),
+                      # (#7228, C9-SEC-98) and only the definition read above: a re-digest in place between the read
+                      # and this write leaves the row unchanged (CONCURRENT_CHANGE)
+                      AgentIdentityBinding.definition_digest == current_digest]
         if current_digest != row.definition_digest:
             raise InvalidTransition("BINDING_DIGEST_MISMATCH", "the definition changed since the binding was created")
         if row.identity_mode == "runtime_domain_binding" and not allow_runtime_domain_binding:

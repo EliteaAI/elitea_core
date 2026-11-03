@@ -231,7 +231,17 @@ def create(ns, **over):
                                                     "identity_mode": "elitea_native", **over}, **{})
 
 
+def stored_digest(ns, binding_id, project_id=1):
+    """The digest the row holds now, as the approve dialog shows it (``definition_digest_full``, #7228)."""
+    with ns.sa_orm.Session(ns.env.engine(project_id)) as session:
+        row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(str(binding_id)))
+        return None if row is None else row.definition_digest
+
+
 def act(ns, binding_id, action, expected_state, actor="admin", **more):
+    if action == "activate" and "definition_digest" not in more:   # (#7228) the digest the approver reviewed
+        more["definition_digest"] = stored_digest(ns, binding_id) or "adv1:" + "0" * 64
+    more = {key: value for key, value in more.items() if value is not None}
     return hit(ns, "agent_identity_action", "post", actor=actor, binding_id=uuid.UUID(str(binding_id)),
                body={"action": action, "expected_state": expected_state, **more})
 
@@ -318,6 +328,34 @@ def test_create_twice_is_a_conflict(ns, env):
     create(ns)
     payload, status = create(ns)
     assert (status, payload["code"]) == (409, "BINDING_EXISTS") and len(rows(env, ns)) == 1
+
+
+@pytest.mark.parametrize("action, state, digest", [
+    ("activate", "pending_approval", None),          # an approval names what it approves
+    ("submit", "draft", "adv1:" + "1" * 64),         # and only an approval does
+    ("retire", "active", "adv1:" + "1" * 64),
+])
+def test_only_an_activation_carries_the_reviewed_digest_and_it_must(ns, env, action, state, digest):
+    """(#7228, C9-SEC-98)"""
+    binding_id = reach(ns, env, state)
+    more = {"approval_ref": "a", "policy_revision": "r"} if action == "activate" else {}
+    payload, status = hit(ns, "agent_identity_action", "post", actor="admin2", binding_id=uuid.UUID(binding_id),
+                          body={"action": action, "expected_state": state, "definition_digest": digest, **more}
+                          if digest else {"action": action, "expected_state": state, **more})
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST") and binding(env, ns).state == state
+
+
+def test_an_approval_of_a_digest_the_row_no_longer_holds_is_a_conflict_and_changes_nothing(ns, env):
+    binding_id = str(env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64))
+    [row] = hit(ns, "agent_identities", "get")[0]["rows"]
+    shown = row["definition_digest_full"]
+    assert act(ns, binding_id, "rebind", "pending_approval")[1] == 200   # brought up to date meanwhile
+    events = len(env.recorded)
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin2", approval_ref="a",
+                          policy_revision="r", definition_digest=shown)
+    assert (status, payload["code"]) == (409, "BINDING_DIGEST_MISMATCH")
+    assert (binding(env, ns).state, len(env.recorded)) == ("pending_approval", events)
+    assert shown not in json.dumps(payload)
 
 
 def test_a_create_after_retirement_requests_the_same_row_again(ns, env):
@@ -799,6 +837,7 @@ def test_a_row_has_the_designed_fields_and_no_secret(ns, env):
         "created_by": {"id": 11, "email": "admin1@example.com"}, "state_changed_by": None,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
         "platform_operations": None,   # (#7228) what the agent may do on the platform: none proposed = read only
+        "definition_digest_full": row["definition_digest_full"],   # (#7228) what an approval of this row approves
     }
     assert "external_agent_identity_ref" not in row and "owner_user_ref" not in row
 

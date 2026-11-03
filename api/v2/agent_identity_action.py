@@ -48,6 +48,9 @@ def binding_action(module, project_id, binding_id, mode):
         return api.refusal("INVALID_REQUEST", "approval_ref and policy_revision belong to action activate only")
     if body.action != "activate" and body.platform_operations is not None:   # (#7228) a rebind proposes in the app
         return api.refusal("INVALID_REQUEST", "platform_operations belongs to action activate only")
+    if (body.action == "activate") != (body.definition_digest is not None):   # (#7228, C9-SEC-98)
+        return api.refusal("INVALID_REQUEST", "definition_digest (the definition the approver reviewed) is required "
+                                              "for action activate and belongs to it only")
     if not api.has_permission(api.APPROVE if body.action == "activate" else api.MANAGE, project_id, mode):
         return api.refusal("FORBIDDEN")
     try:
@@ -64,7 +67,7 @@ def binding_action(module, project_id, binding_id, mode):
         "project_id": project_id, "application_id": found["application_id"], "version_id": found["version_id"],
         "mode": found["identity_mode"], "binding_id": found["id"], "action": body.action,
         "expected_state": body.expected_state, "approval_ref": body.approval_ref,
-        "policy_revision": body.policy_revision, "dry_run": False,
+        "policy_revision": body.policy_revision, "dry_run": False, "reviewed_digest": body.definition_digest,
     }
     if body.platform_operations is not None:   # (#7228) the same parser as create and the admin task
         operations, error = parse_platform_operations(body.platform_operations, body.action)

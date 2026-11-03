@@ -365,10 +365,10 @@ def test_a_changed_agent_is_rebound_by_its_editor(ns, env):
     assert (row.id, row.state, row.definition_digest, row.approval_ref) == (binding, "pending_approval", DIGEST, None)
 
 
-def approve(ns, binding_id, actor=OTHER):
+def approve(ns, binding_id, actor=OTHER, reviewed=None):
     values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native",
               "binding_id": binding_id, "action": "activate", "approval_ref": "A", "policy_revision": "B",
-              "dry_run": False}
+              "dry_run": False, "reviewed_digest": reviewed}
     return ns.binding_admin.run_binding_action(module(ns), values, actor)
 
 
@@ -416,6 +416,68 @@ def test_a_retired_identity_is_requested_again_on_its_row_and_approved(ns, env):
         approve(ns, binding, actor=MEMBER)
     assert refused.value.code == "SELF_APPROVAL"
     assert approve(ns, binding)["state"] == "active"
+
+
+def retire(ns, binding_id, actor=OTHER):
+    values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native",
+              "binding_id": binding_id, "action": "retire", "dry_run": False}
+    return ns.binding_admin.run_binding_action(module(ns), values, actor)
+
+
+def test_retirement_ends_the_bindings_grants_and_mandates_and_a_revival_starts_clean(ns, env):
+    """(#7228, C9-SEC-96/97, the reviewer's row b) A retired binding's grants and live mandates end with it, in its
+    transaction and audited; requested again and approved, none of them comes back: the member's grant is to be
+    requested again and the schedule's mandate stays revoked."""
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    cred = credential(env, binding, reference=True)
+    key = cred.key(subject(MEMBER))
+    env.grants[(1, key)] = {"grant_id": "g1", "state": "active", "valid_from": None, "valid_until": None,
+                            "revocation_epoch": 0, "operations": ["*"]}
+    mandate = mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding)
+    assert retire(ns, binding)["state"] == "retired"
+    assert env.grants[(1, key)]["state"] == "revoked"
+    assert env.revoked_binding_grants == [(1, str(binding), OTHER, "BINDING_RETIRED")]
+    [row] = env.query(1, ns.Mandate)
+    assert (row.id, row.state) == (mandate, "revoked")
+    reasons = [event["reason_code"] for _, event in env.recorded]
+    assert "MANDATE_REVOKED_BINDING_RETIRED" in reasons and reasons[-1] == "MANDATE_REVOKED_BINDING_RETIRED"
+    # requested again and approved: same row, and nothing that hung off it is back
+    assert "binding" in [item["kind"] for item in file(ns, env, keys=["binding"])]
+    assert env.revoked_binding_grants[-1][3] == "BINDING_REVIVED"   # leftovers of an older retirement end too
+    assert approve(ns, binding)["state"] == "active"
+    found = items(ns, env)
+    assert (found[f"grant:1:{cred.uuid}"]["state"], found[f"grant:1:{cred.uuid}"]["requestable"]) == ("missing", True)
+    assert env.query(1, ns.Mandate)[0].state == "revoked"
+
+
+def test_a_retirement_that_cannot_end_the_grants_changes_nothing(ns, env, monkeypatch):
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("audit down")
+    env.secrets_extra["revoke_binding_grants"] = broken
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        retire(ns, binding)
+    assert refused.value.code == "AUDIT_UNAVAILABLE"
+    [row] = bindings(env, ns)
+    assert row.state == "active" and env.query(1, ns.Mandate)[0].state == "active"
+
+
+def test_a_stale_approval_dialog_cannot_approve_a_definition_brought_up_to_date_since(ns, env):
+    """(#7228, C9-SEC-98, the reviewer's row a) The approver opened the waiting identity; a toolkit change then
+    brought it up to date in place. The approval from the old dialog names the digest it showed: refused, nothing
+    changed, nothing audited; with the digest the row now holds it goes through."""
+    binding = env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64)
+    shown = bindings(env, ns)[0].definition_digest
+    file(ns, env, keys=["binding"])   # brought up to date in place (as a PATCH tool of a run does)
+    events = len(env.recorded)
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        approve(ns, binding, reviewed=shown)
+    assert refused.value.code == "BINDING_DIGEST_MISMATCH"
+    [row] = bindings(env, ns)
+    assert (row.state, row.definition_digest, len(env.recorded)) == ("pending_approval", DIGEST, events)
+    assert approve(ns, binding, reviewed=DIGEST)["state"] == "active"
 
 
 def test_off_refuses_the_batch(ns, env):
@@ -986,6 +1048,46 @@ def test_a_repeated_change_files_nothing_more_and_the_version_only_waits_for_app
     assert second["versions"][0]["filed"] == []                     # nothing filed twice
     assert [item for item in items(ns, env).values() if item["requestable"]] == []   # only approvals left
     assert len(bindings(env, ns)) == 1
+
+
+def link(ns, env, tool_id, version_id, entity_type="agent"):
+    env.add_version(1, version_id, 7, name=f"v{version_id}")
+    env.digests[version_id] = "adv1:" + f"{version_id:064x}"
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.add(ns.EntityToolMapping(tool_id=tool_id, entity_version_id=version_id, entity_type=entity_type,
+                                         selected_tools=["run"]))
+        session.commit()
+
+
+def test_a_toolkit_used_by_more_versions_than_the_cap_says_how_many_it_skipped(ns, env, monkeypatch):
+    """(#7228, D2-S2) The fan-out stops at the cap and says so: ``versions_more`` and the model's sentence."""
+    tool_id = credential(env).tool_id
+    link(ns, env, tool_id, 71)
+    link(ns, env, tool_id, 72)
+    monkeypatch.setattr(ns.governance_requests, "MAX_TOOLKIT_VERSIONS", 2)
+    result = ns.governance_requests.file_for_run(module(ns), {"uid": MEMBER, "run": "run-84"}, "PATCH", TOOL_PATCH, 1,
+                                                 {"ok": True}, {"project_id": "1", "tool_id": str(tool_id)})
+    assert [version["entity_id"] for version in result["versions"]] == [70, 71]
+    assert result["versions_more"] == 1
+    assert result["next"].endswith("1 more agents use this toolkit: open them to request what they need.")
+
+
+def test_a_linked_version_whose_readiness_cannot_be_read_is_refused_alone(ns, env):
+    tool_id = credential(env).tool_id
+    link(ns, env, tool_id, 74)
+    env.digests.pop(74)   # its definition cannot be read
+    result = ns.governance_requests.file_for_run(module(ns), {"uid": MEMBER, "run": "run-85"}, "PATCH", TOOL_PATCH, 1,
+                                                 {"ok": True}, {"project_id": "1", "tool_id": str(tool_id)})
+    by_id = {version["entity_id"]: version for version in result["versions"]}
+    assert by_id[74]["refused"] == "DEPENDENCY_UNAVAILABLE" and "refused" not in by_id[70]
+    assert [item["kind"] for item in by_id[70]["filed"]] == ["binding", "reference", "grant"]
+
+
+def test_the_fan_out_reads_agent_versions_only(ns, env):
+    """(#7228, D2-N1) as the definition digest does: another entity type's id is never taken for an agent version."""
+    tool_id = credential(env).tool_id
+    link(ns, env, tool_id, 73, entity_type="pipeline_node")
+    assert ns.governance_requests._toolkit_versions(1, tool_id) == ([70], 0)
 
 
 def test_a_new_version_a_run_creates_is_requested_like_an_agent(ns, env):
