@@ -2,24 +2,27 @@
 
 Runs the real ``utils/skill_file_store.py``, ``utils/skill_utils.py`` and ``utils/skill_files.py`` over an in-memory
 session per project schema and a fake MinioClient whose objects are keyed by ``(bucket, sha256)``, so writes, reads,
-renames and deletes are checked against what each bucket really holds.
+copies across projects, release after deletes and the sweep are checked against what each bucket really holds.
 """
+import base64
+import datetime
 import hashlib
 import pathlib
 import sys
-from types import SimpleNamespace
+import types
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from fixtures.skill_file_env import (  # noqa: E402  pylint: disable=C0413
-    FakeSkill, FakeSkillVersion, FakeSkillVersionFile, install,
+    FakeEntitySkillMapping, FakeSession, FakeSkill, FakeSkillVersion, FakeSkillVersionFile, install,
 )
 
 PROJECT = 7
 OTHER = 9
 PUBLIC = 1
+ACTOR = 1
 SKILL = 3
 MB = 1024 * 1024
 
@@ -59,6 +62,10 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _row(session, version_id, path):
+    return next(f for f in session.rows[FakeSkillVersionFile] if f.skill_version_id == version_id and f.path == path)
+
+
 class TestStore:
     def test_the_first_write_creates_a_system_bucket_without_expiry_in_the_projects_namespace(self, env):
         env.store.put_content(PROJECT, 'a' * 64, b'x')
@@ -94,7 +101,7 @@ class TestStore:
             heads.append((Bucket, Key))
             return {'ContentLength': len(env.storage.objects[(Bucket, Key)])}
 
-        monkeypatch.setattr(env.store.MinioClient, 's3_client', SimpleNamespace(head_object=head_object), raising=False)
+        monkeypatch.setattr(env.store.MinioClient, 's3_client', types.SimpleNamespace(head_object=head_object), raising=False)
         monkeypatch.setattr(env.store.MinioClient, 'get_file_size', None)
 
         env.store.put_content(PROJECT, _sha(data), data)
@@ -155,7 +162,7 @@ class TestBucket:
 
         monkeypatch.setattr(env.store.MinioClient, 'get_bucket_lifecycle', get_bucket_lifecycle)
         monkeypatch.setattr(env.store.MinioClient, 's3_client',
-                            SimpleNamespace(delete_bucket_lifecycle=lambda Bucket: deleted.append(Bucket)),
+                            types.SimpleNamespace(delete_bucket_lifecycle=lambda Bucket: deleted.append(Bucket)),
                             raising=False)
 
         env.store.ensure_bucket(PROJECT)
@@ -289,13 +296,24 @@ class TestWrite:
 
         assert _paths(session, 10) == ['a.txt', 'b/a.txt'] and env.storage.keys(PROJECT) == [_sha(b'same')]
 
-    def test_replacing_a_path_replaces_its_row(self, env, session):
+    def test_replacing_a_path_releases_the_old_object(self, env, session):
         _version(session)
         _write(env, session, 'forms.md', b'old')
 
         entry = _write(env, session, 'FORMS.md', b'new')
 
         assert entry['sha256'] == _sha(b'new') and _paths(session, 10) == ['FORMS.md']
+        assert env.storage.keys(PROJECT) == [_sha(b'new')]
+
+    def test_an_object_another_version_uses_survives_a_replace(self, env, session):
+        _version(session, id=10)
+        _version(session, id=11, name='v2')
+        _write(env, session, 'forms.md', b'shared', version_id=10)
+        _write(env, session, 'forms.md', b'shared', version_id=11)
+
+        _write(env, session, 'forms.md', b'changed', version_id=10)
+
+        assert env.storage.keys(PROJECT) == sorted([_sha(b'shared'), _sha(b'changed')])
 
     def test_a_binary_file_is_stored_as_binary(self, env, session):
         _version(session)
@@ -474,13 +492,22 @@ class TestRenameAndDelete:
             env.files.rename_version_file(PROJECT, SKILL, 10, 'missing.md', 'other.md', session=session)
         assert info.value.http_status == 404 and _paths(session, 10) == ['forms.md']
 
-    def test_delete_removes_the_row(self, env, session):
+    def test_delete_removes_the_row_and_releases_the_object(self, env, session):
         _version(session)
         _write(env, session, 'forms.md', b'x')
 
         env.files.delete_version_file(PROJECT, SKILL, 10, 'FORMS.md', session=session)
 
-        assert _paths(session, 10) == []
+        assert _paths(session, 10) == [] and env.storage.keys(PROJECT) == []
+
+    def test_delete_keeps_an_object_another_file_uses(self, env, session):
+        _version(session)
+        _write(env, session, 'a.md', b'same')
+        _write(env, session, 'b.md', b'same')
+
+        env.files.delete_version_file(PROJECT, SKILL, 10, 'a.md', session=session)
+
+        assert _paths(session, 10) == ['b.md'] and env.storage.keys(PROJECT) == [_sha(b'same')]
 
     def test_deleting_a_missing_file_is_a_404(self, env, session):
         _version(session)
@@ -499,3 +526,450 @@ class TestRenameAndDelete:
         with pytest.raises(env.utils.SkillVersionNotUpdatableError):
             env.files.delete_version_file(PROJECT, SKILL, 10, 'a.md', session=session)
         assert _paths(session, 10) == ['a.md']
+
+    def test_a_storage_failure_after_the_delete_never_fails_the_delete(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'x')
+        env.storage.broken_deletes = True
+
+        env.files.delete_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+
+        assert _paths(session, 10) == [] and env.storage.keys(PROJECT) == [_sha(b'x')]
+
+
+class TestSameProjectCopies:
+    def _version_data(self, files_from_version_id):
+        return types.SimpleNamespace(
+            name='v2', instructions='Body.', author_id=1, tags=None, meta=None, run_settings=None,
+            files_from_version_id=files_from_version_id,
+        )
+
+    def test_copy_version_files_adds_rows_and_writes_no_object(self, env, session):
+        _version(session, id=10)
+        _version(session, id=11, name='v2')
+        _write(env, session, 'forms.md', b'x')
+        _write(env, session, 'scripts/a.py', b'y')
+        writes_before = dict(env.storage.objects)
+
+        copied = env.utils.copy_version_files(session, 10, 11)
+
+        assert copied == 2 and _paths(session, 11) == ['forms.md', 'scripts/a.py']
+        assert env.storage.objects == writes_before
+        target = _row(session, 11, 'forms.md')
+        assert (target.sha256, target.size, target.content_type, target.is_text) == (_sha(b'x'), 1, 'text/markdown', True)
+
+    def test_save_as_version_starts_with_the_source_versions_files(self, env, session):
+        _version(session, id=10)
+        _write(env, session, 'forms.md', b'x')
+
+        env.utils.create_skill_version(PROJECT, SKILL, self._version_data(10), session=session,
+                                       instructions_already_saved=True)
+
+        new_version = next(v for v in session.rows[FakeSkillVersion] if v.name == 'v2')
+        assert _paths(session, new_version.id) == ['forms.md']
+
+    def test_save_as_version_without_a_source_copies_nothing(self, env, session):
+        _version(session, id=10)
+        _write(env, session, 'forms.md', b'x')
+
+        env.utils.create_skill_version(PROJECT, SKILL, self._version_data(None), session=session,
+                                       instructions_already_saved=True)
+
+        new_version = next(v for v in session.rows[FakeSkillVersion] if v.name == 'v2')
+        assert _paths(session, new_version.id) == []
+
+    def test_a_source_version_of_another_skill_is_refused(self, env, session):
+        _version(session, id=10)
+        _version(session, id=50, skill_id=SKILL + 1)
+
+        with pytest.raises(env.utils.SkillVersionNotFoundError):
+            env.utils.create_skill_version(PROJECT, SKILL, self._version_data(50), session=session,
+                                           instructions_already_saved=True)
+
+    def test_deleting_a_version_releases_only_what_no_other_version_uses(self, env, session):
+        _version(session, id=10)
+        _version(session, id=11, name='v2')
+        _write(env, session, 'shared.md', b'shared', version_id=10)
+        _write(env, session, 'shared.md', b'shared', version_id=11)
+        _write(env, session, 'only.md', b'only', version_id=11)
+
+        env.utils.delete_skill_version(PROJECT, SKILL, 11, session=session)
+
+        assert env.storage.keys(PROJECT) == [_sha(b'shared')] and _paths(session, 11) == []
+
+    def test_deleting_a_skill_releases_its_objects_and_keeps_other_skills(self, env, session):
+        session.add(FakeSkill(id=SKILL + 1))
+        _version(session, id=10)
+        _version(session, id=20, skill_id=SKILL + 1)
+        _write(env, session, 'mine.md', b'mine', version_id=10)
+        _write(env, session, 'shared.md', b'shared', version_id=10)
+        _write(env, session, 'shared.md', b'shared', version_id=20, skill_id=SKILL + 1)
+
+        env.utils.delete_skill(PROJECT, SKILL, session=session)
+
+        assert env.storage.keys(PROJECT) == [_sha(b'shared')]
+
+    def test_a_version_an_agent_uses_keeps_its_files(self, env, session):
+        _version(session, id=10)
+        _version(session, id=11, name='v2')
+        _write(env, session, 'forms.md', b'x', version_id=11)
+        session.add(FakeEntitySkillMapping(11))
+
+        with pytest.raises(env.utils.SkillVersionInUseError):
+            env.utils.delete_skill_version(PROJECT, SKILL, 11, session=session)
+        assert env.storage.keys(PROJECT) == [_sha(b'x')]
+
+
+def _seed_source(env, project_id=PROJECT, version_id=10, files=((b'# Forms', 'forms.md'), (b'\x89PNG\x00', 'a.png'))):
+    """A source version in ``project_id`` holding ``files``; returns its manifest as a payload lists it."""
+    session = env.session_of(project_id)
+    session.add(FakeSkill(owner_id=project_id))
+    _version(session, id=version_id)
+    for data, path in files:
+        _write(env, session, path, data, version_id=version_id, project_id=project_id)
+    return env.files.list_version_manifest(session, version_id)
+
+
+def _copy(env, target, entries, source_project_id=PROJECT, project_id=OTHER, version_id=40):
+    """What every copy does: the objects first, with no transaction open, then the rows."""
+    staged = env.files.stage_version_files(project_id, entries, source_project_id)
+    env.files.add_version_files(target, project_id, version_id, entries, staged, source_project_id)
+    return staged
+
+
+class TestCrossProjectCopies:
+    def test_entries_from_another_project_are_copied_into_the_targets_bucket_then_listed(self, env):
+        manifest = _seed_source(env)
+        target = env.session_of(OTHER)
+        _version(target, id=40)
+
+        _copy(env, target, manifest)
+
+        assert _paths(target, 40) == ['a.png', 'forms.md']
+        assert env.storage.keys(OTHER) == sorted([_sha(b'# Forms'), _sha(b'\x89PNG\x00')])
+        assert _row(target, 40, 'a.png').content_type == 'image/png'
+
+    def test_a_target_that_already_holds_the_hash_whole_gets_rows_only(self, env, monkeypatch):
+        manifest = _seed_source(env)
+        env.store.put_contents(OTHER, {_sha(b'# Forms'): b'# Forms', _sha(b'\x89PNG\x00'): b'\x89PNG\x00'})
+        target = env.session_of(OTHER)
+        uploads, reads = [], []
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda *args: uploads.append(args))
+        monkeypatch.setattr(env.store.MinioClient, 'download_file', lambda *args: reads.append(args))
+
+        _copy(env, target, manifest)
+
+        assert uploads == [] and reads == [] and _paths(target, 40) == ['a.png', 'forms.md']
+
+    def test_an_object_cut_short_in_the_target_is_replaced_from_the_source_while_staging(self, env):
+        manifest = _seed_source(env)
+        env.store.put_contents(OTHER, {_sha(b'# Forms'): b'# Fo'})
+
+        staged = env.files.stage_version_files(OTHER, manifest, PROJECT)
+
+        assert env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] == b'# Forms'
+        assert staged[_sha(b'# Forms')] == b'# Forms'
+
+    def test_an_object_cut_short_between_staging_and_the_rows_is_replaced_from_the_staged_bytes(self, env):
+        manifest = _seed_source(env)
+        target = env.session_of(OTHER)
+        staged = env.files.stage_version_files(OTHER, manifest, PROJECT)
+        env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] = b'# Fo'
+        del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms'))]
+
+        env.files.add_version_files(target, OTHER, 40, manifest, staged, PROJECT)
+
+        assert env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] == b'# Forms'
+
+    def test_entries_with_bytes_are_stored_without_reading_any_source(self, env):
+        target = env.session_of(OTHER)
+        entries = [env.files.build_file_entry('notes.md', b'n')]
+
+        _copy(env, target, entries, source_project_id=None)
+
+        assert env.storage.keys(OTHER) == [_sha(b'n')] and set(env.storage.clients) == {OTHER}
+
+    def test_a_copy_listing_no_files_touches_no_storage(self, env):
+        target = env.session_of(OTHER)
+
+        _copy(env, target, [])
+
+        assert env.storage.clients == [] and _paths(target, 40) == []
+
+    def test_bytes_the_source_holds_under_another_hash_are_refused_naming_the_path(self, env):
+        manifest = _seed_source(env)
+        env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms'))] = b'# Tampered'
+
+        with pytest.raises(env.files.SkillFileSourceUnavailableError, match="'forms.md' could not be copied"):
+            env.files.stage_version_files(OTHER, manifest, PROJECT)
+        assert _sha(b'# Forms') not in env.storage.keys(OTHER)
+
+    def test_a_source_object_deleted_meanwhile_is_refused_naming_the_path(self, env):
+        manifest = _seed_source(env)
+        del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'\x89PNG\x00'))]
+
+        with pytest.raises(env.files.SkillFileSourceUnavailableError, match="'a.png' could not be copied") as info:
+            env.files.stage_version_files(OTHER, manifest, PROJECT)
+        assert isinstance(info.value, env.utils.SkillFileError) and info.value.http_status == 400
+
+    def test_an_object_deleted_between_staging_and_the_rows_is_stored_again_from_the_staged_bytes(self, env):
+        manifest = _seed_source(env)
+        target = env.session_of(OTHER)
+        staged = env.files.stage_version_files(OTHER, manifest, PROJECT)
+        del env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))]
+        del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms'))]
+
+        env.files.add_version_files(target, OTHER, 40, manifest, staged, PROJECT)
+
+        assert env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] == b'# Forms'
+        assert _paths(target, 40) == ['a.png', 'forms.md']
+
+    def test_an_object_the_target_held_at_staging_and_lost_is_read_again_from_the_source(self, env):
+        manifest = _seed_source(env)
+        env.store.put_contents(OTHER, {_sha(b'# Forms'): b'# Forms'})
+        target = env.session_of(OTHER)
+        staged = env.files.stage_version_files(OTHER, manifest, PROJECT)
+        del env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))]
+
+        env.files.add_version_files(target, OTHER, 40, manifest, staged, PROJECT)
+
+        assert _sha(b'# Forms') not in staged
+        assert env.storage.objects[(f'p--{OTHER}.skill-files', _sha(b'# Forms'))] == b'# Forms'
+
+    def test_a_same_project_entry_whose_object_is_gone_is_refused_naming_the_path(self, env):
+        manifest = _seed_source(env)
+        del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms'))]
+
+        with pytest.raises(env.files.SkillFileSourceUnavailableError, match="'forms.md'"):
+            env.files.stage_version_files(PROJECT, manifest, PROJECT)
+
+
+class TestPayloadFiles:
+    def test_carried_base64_content_becomes_entries_with_hashes_computed_here(self, env):
+        payload = [{'path': './notes.md', 'sha256': 'forged', 'size': 1,
+                    'content_base64': base64.b64encode(b'hello').decode()}]
+
+        [entry] = env.files.resolve_payload_files(payload)
+
+        assert (entry['path'], entry['sha256'], entry['size'], entry['data']) == (
+            'notes.md', _sha(b'hello'), 5, b'hello')
+
+    def test_invalid_base64_is_refused_naming_the_path(self, env):
+        with pytest.raises(env.utils.SkillFileError, match="'notes.md' does not carry valid base64"):
+            env.files.resolve_payload_files([{'path': 'notes.md', 'content_base64': '***'}])
+
+    def test_listed_files_resolve_to_the_source_versions_own_rows(self, env):
+        manifest = _seed_source(env)
+        payload = [{'path': entry['path'], 'sha256': entry['sha256'], 'size': 0, 'content_type': 'x'}
+                   for entry in manifest]
+
+        entries = env.files.resolve_payload_files(payload, PROJECT, 10, ACTOR)
+
+        assert entries == manifest
+
+    def test_files_the_source_version_holds_copy_even_after_an_admin_lowers_the_caps(self, env, limits):
+        manifest = _seed_source(env)
+        limits['max_package_files'] = 1
+
+        entries = env.files.resolve_payload_files([dict(entry) for entry in manifest], PROJECT, 10, ACTOR)
+
+        assert [entry['path'] for entry in entries] == ['a.png', 'forms.md']
+
+    def test_carried_content_is_held_to_the_admin_caps(self, env, limits):
+        limits['max_package_files'] = 1
+        payload = [{'path': path, 'content_base64': base64.b64encode(path.encode()).decode()}
+                   for path in ('a.md', 'b.md')]
+
+        with pytest.raises(env.utils.SkillFileError, match='at most 1 files'):
+            env.files.resolve_payload_files(payload)
+
+    def test_a_pair_the_source_version_does_not_hold_is_refused(self, env):
+        _seed_source(env)
+        foreign = _seed_source(env, project_id=OTHER, version_id=60, files=((b'secret', 'secret.md'),))
+
+        with pytest.raises(env.utils.SkillFileError, match="'secret.md' is not a file of skill version 10 in project 7"):
+            env.files.resolve_payload_files([dict(foreign[0])], PROJECT, 10, ACTOR)
+
+    def test_listed_files_without_a_source_are_refused(self, env):
+        with pytest.raises(env.utils.SkillFileError, match='without their content'):
+            env.files.resolve_payload_files([{'path': 'a.md', 'sha256': 'a' * 64}])
+
+    def test_import_gives_each_created_version_its_listed_files(self, env):
+        manifest = _seed_source(env)
+        target = env.session_of(OTHER)
+        versions = [
+            {'name': 'base', 'id': 10, 'files': manifest},
+            {'name': 'v2', 'id': 10},
+            {'name': 'notes', 'files': [{'path': 'n.md', 'content_base64': base64.b64encode(b'n').decode()}]},
+        ]
+
+        staged = env.files.stage_import_files(OTHER, versions, PROJECT, ACTOR)
+        added = env.files.import_version_files(target, OTHER, {'base': 41, 'v2': 42, 'notes': 43}, staged, PROJECT)
+
+        assert added == 3
+        assert (_paths(target, 41), _paths(target, 42), _paths(target, 43)) == (['a.png', 'forms.md'], [], ['n.md'])
+        assert env.storage.keys(OTHER) == sorted([_sha(b'# Forms'), _sha(b'\x89PNG\x00'), _sha(b'n')])
+
+
+class TestSweep:
+    NOW = datetime.datetime(2026, 1, 1, 2, 0, tzinfo=datetime.timezone.utc)
+
+    def _seed(self, env, session):
+        _version(session)
+        _write(env, session, 'kept.md', b'kept')
+        env.store.put_contents(PROJECT, {'old' * 21 + 'o': b'orphan', 'new' * 21 + 'n': b'recent'})
+        env.storage.modified[(f'p--{PROJECT}.skill-files', 'new' * 21 + 'n')] = '2026-01-01T01:30:00+00:00'
+
+    def test_the_sweep_deletes_unreferenced_objects_older_than_an_hour(self, env, session):
+        self._seed(env, session)
+
+        result = env.files.sweep_skill_files(PROJECT, now=self.NOW)
+
+        assert result == {'project_id': PROJECT, 'deleted': ['old' * 21 + 'o'], 'kept_recent': 1, 'kept_undated': 0,
+                          'dry_run': False}
+        assert env.storage.keys(PROJECT) == sorted([_sha(b'kept'), 'new' * 21 + 'n'])
+
+    def test_a_dry_run_deletes_nothing(self, env, session):
+        self._seed(env, session)
+
+        result = env.files.sweep_skill_files(PROJECT, dry_run=True, now=self.NOW)
+
+        assert result['deleted'] == ['old' * 21 + 'o'] and len(env.storage.keys(PROJECT)) == 3
+
+    def test_an_object_storage_gives_no_time_for_is_kept_and_counted(self, env, session):
+        self._seed(env, session)
+        env.storage.modified[(f'p--{PROJECT}.skill-files', 'old' * 21 + 'o')] = None
+
+        result = env.files.sweep_skill_files(PROJECT, now=self.NOW)
+
+        assert (result['deleted'], result['kept_undated'], result['kept_recent']) == ([], 1, 1)
+        assert len(env.storage.keys(PROJECT)) == 3
+
+    def test_a_project_without_a_bucket_sweeps_nothing(self, env):
+        assert env.files.sweep_skill_files(OTHER, now=self.NOW)['deleted'] == []
+
+
+class TestDeletesWaitForOpenWrites:
+    """A transaction that reuses an object or adds rows naming it keeps the project's deletes off until it ends, so
+    neither the sweep nor a release deletes the object between the reuse and the row becoming visible."""
+
+    def _open_transaction(self):
+        """Another session of the project: what it adds stays invisible to ``session_of`` until the test moves it."""
+        other = FakeSession(PROJECT)
+        other.add(FakeSkill())
+        other.add(FakeSkillVersion(id=20))
+        return other
+
+    def test_the_sweep_keeps_an_old_unreferenced_object_an_open_write_reused(self, env, session):
+        env.store.put_content(PROJECT, _sha(b'reused'), b'reused')
+        writer = self._open_transaction()
+        _write(env, writer, 'forms.md', b'reused', version_id=20)
+
+        with pytest.raises(env.utils.SkillFileError, match='being written'):
+            env.files.sweep_skill_files(PROJECT, now=TestSweep.NOW)
+        writer.commit()
+        session.rows[FakeSkillVersionFile].extend(writer.rows[FakeSkillVersionFile])
+
+        assert env.files.sweep_skill_files(PROJECT, now=TestSweep.NOW)['deleted'] == []
+        assert env.storage.keys(PROJECT) == [_sha(b'reused')]
+
+    def test_a_release_leaves_an_object_an_open_import_reuses_to_the_sweep(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'shared')
+        session.commit()
+        importer = self._open_transaction()
+        env.files.add_version_files(importer, PROJECT, 20, [env.files.build_file_entry('forms.md', b'shared')])
+
+        env.files.delete_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+
+        assert _paths(session, 10) == [] and env.storage.keys(PROJECT) == [_sha(b'shared')]
+
+    def test_a_release_leaves_an_object_an_open_save_as_version_copies_to_the_sweep(self, env, session):
+        env.store.put_content(PROJECT, _sha(b'x'), b'x')
+        saver = self._open_transaction()
+        saver.add(FakeSkillVersionFile(20, 'forms.md', 1, _sha(b'x'), 'text/markdown', True))
+        version_data = types.SimpleNamespace(
+            name='v2', instructions='Body.', author_id=1, tags=None, meta=None, run_settings=None,
+            files_from_version_id=20,
+        )
+        env.utils.create_skill_version(PROJECT, SKILL, version_data, session=saver, instructions_already_saved=True)
+
+        assert env.utils.release_unreferenced_contents(PROJECT, {_sha(b'x')}) == []
+        assert env.storage.keys(PROJECT) == [_sha(b'x')]
+
+
+class TestDeletesAreHeldOffAroundTheirCriticalSections:
+    def test_a_write_holds_deletes_off_before_it_looks_for_a_reusable_object(self, env, session, monkeypatch):
+        _version(session)
+        held = []
+        monkeypatch.setattr(env.files, 'put_content',
+                            lambda project_id, sha256, data, client=None: held.append(
+                                session in FakeSession.locks.get(project_id, ())))
+
+        _write(env, session, 'forms.md', b'x')
+
+        assert held == [True]
+
+    def test_an_add_holds_deletes_off_before_it_checks_the_objects_and_adds_the_rows(self, env, session, monkeypatch):
+        _version(session)
+        held = []
+        holds_content = env.files.holds_content
+        add = session.add
+        monkeypatch.setattr(env.files, 'holds_content', lambda project_id, sha256, size, client=None: held.append(
+            ('check', session in FakeSession.locks.get(project_id, ()))) or holds_content(project_id, sha256, size,
+                                                                                         client))
+        monkeypatch.setattr(session, 'add', lambda row: held.append(
+            ('row', session in FakeSession.locks.get(PROJECT, ()))) or add(row))
+        entries = [env.files.build_file_entry('a.md', b'a')]
+        staged = env.files.stage_version_files(PROJECT, entries)
+        held.clear()
+
+        env.files.add_version_files(session, PROJECT, 10, entries, staged)
+
+        assert held == [('check', True), ('row', True)]
+
+    def test_staging_moves_the_bytes_with_no_transaction_and_no_lock(self, env, monkeypatch):
+        manifest = _seed_source(env)
+        env.session_of(PROJECT).commit()
+        uploads = []
+        upload = env.store.MinioClient.upload_file
+        monkeypatch.setattr(env.store.MinioClient, 'upload_file', lambda client, bucket, data, name: uploads.append(
+            any(FakeSession.locks.values())) or upload(client, bucket, data, name))
+
+        env.files.stage_version_files(OTHER, manifest, PROJECT)
+
+        assert uploads == [False, False]
+
+    def test_a_save_as_version_holds_deletes_off_before_it_reads_the_source_rows(self, env, session, monkeypatch):
+        session.add(FakeSkill())
+        _version(session, id=20)
+        held = []
+        monkeypatch.setattr(env.utils, 'copy_version_files',
+                            lambda s, source_id, target_id: held.append(s in FakeSession.locks.get(PROJECT, ())))
+        version_data = types.SimpleNamespace(
+            name='v2', instructions='Body.', author_id=1, tags=None, meta=None, run_settings=None,
+            files_from_version_id=20,
+        )
+
+        env.utils.create_skill_version(PROJECT, SKILL, version_data, session=session, instructions_already_saved=True)
+
+        assert held == [True]
+
+    def test_the_sweep_deletes_only_while_it_holds_writes_off(self, env, monkeypatch):
+        env.store.put_content(PROJECT, _sha(b'old'), b'old')
+        claimed = []
+        monkeypatch.setattr(env.files, 'delete_contents',
+                            lambda project_id, hashes: claimed.append(bool(FakeSession.locks.get(project_id))))
+
+        env.files.sweep_skill_files(PROJECT, now=TestSweep.NOW)
+
+        assert claimed == [True]
+
+    def test_a_release_deletes_only_while_it_holds_writes_off(self, env, monkeypatch):
+        claimed = []
+        monkeypatch.setattr(env.utils, 'delete_contents',
+                            lambda project_id, hashes: claimed.append(bool(FakeSession.locks.get(project_id))))
+
+        env.utils.release_unreferenced_contents(PROJECT, {_sha(b'old')})
+
+        assert claimed == [True]

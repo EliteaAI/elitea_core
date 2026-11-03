@@ -37,6 +37,8 @@ from .publish_utils import (
     verify_validation_token,
 )
 from .constants import DEFAULT_FALLBACK_CATEGORY
+from .skill_files import add_version_files, list_version_manifest, stage_version_files
+from .skill_utils import list_version_file_hashes, release_unreferenced_contents
 from .skill_frontmatter import FRONTMATTER_META_KEY
 from .skill_run_settings import SHARED_MODEL_REQUIRED, unshared_model_issue
 from .utils import get_public_project_id
@@ -82,6 +84,7 @@ def build_skill_validation_input(
             'tags': [t.name for t in (version.tags or [])],
         }
         run_settings = version.run_settings
+        files = list_version_manifest(session, version.id)
 
     skill_data = {
         'skill': skill_info,
@@ -90,6 +93,7 @@ def build_skill_validation_input(
     }
     json_str = json.dumps(skill_data, indent=2)
     skill_data['run_settings'] = run_settings
+    skill_data['files'] = files
     return json_str, skill_data
 
 
@@ -594,18 +598,18 @@ def merge_skill_validation_results(deterministic: dict, ai_result: dict) -> dict
     }
 
 
-def compute_skill_content_hash(instructions: str, name: str = '', description: str = '') -> str:
+def compute_skill_content_hash(instructions: str, name: str = '', description: str = '', files=None) -> str:
     # The validation gate judges name and description too, so the token must pin
     # them — an instructions-only hash lets metadata be swapped between validate
     # and publish. (A skill has no vars/llm/sub-agents to fold in; agents do.)
-    raw = json.dumps(
-        {
-            'instructions': instructions or '',
-            'name': name or '',
-            'description': description or '',
-        },
-        sort_keys=True, separators=(',', ':'),
-    )
+    content = {
+        'instructions': instructions or '',
+        'name': name or '',
+        'description': description or '',
+    }
+    if files:
+        content['files'] = sorted([entry['path'], entry['sha256']] for entry in files)
+    raw = json.dumps(content, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -659,6 +663,7 @@ def validate_skill_for_publish(
             skill_data['skill'].get('instructions'),
             skill_data['skill'].get('name'),
             skill_data['skill'].get('description'),
+            skill_data['files'],
         )
         secret = this.module._publish_validation_secret
         merged['validation_token'] = generate_validation_token(
@@ -743,6 +748,7 @@ def create_skill_publish_snapshot(
                     FRONTMATTER_META_KEY: meta.get(FRONTMATTER_META_KEY),
                 },
                 'run_settings': version.run_settings,
+                'files': list_version_manifest(session, version.id),
             },
             'source': {
                 'project_id': project_id,
@@ -818,6 +824,8 @@ def publish_skill_first_version(
     skill_info = snapshot['skill']
     ver_info = snapshot['version']
     published_meta = _build_published_skill_meta(snapshot, version_name, user_id)
+    files = ver_info.get('files') or []
+    staged_files = stage_version_files(public_project_id, files, source['project_id'])
 
     with db.get_session(public_project_id) as session:
         skill = Skill(
@@ -845,6 +853,7 @@ def publish_skill_first_version(
         session.flush()
 
         _apply_snapshot_tags(session, version, ver_info.get('tags'))
+        add_version_files(session, public_project_id, version.id, files, staged_files, source['project_id'])
 
         skill.meta['default_version_id'] = version.id
         session.commit()
@@ -862,6 +871,8 @@ def publish_skill_additional_version(
 ) -> dict:
     ver_info = snapshot['version']
     published_meta = _build_published_skill_meta(snapshot, version_name, user_id)
+    files = ver_info.get('files') or []
+    staged_files = stage_version_files(public_project_id, files, source['project_id'])
 
     with db.get_session(public_project_id) as session:
         skill = session.query(Skill).get(public_skill_id)
@@ -881,6 +892,7 @@ def publish_skill_additional_version(
         session.flush()
 
         _apply_snapshot_tags(session, version, ver_info.get('tags'))
+        add_version_files(session, public_project_id, version.id, files, staged_files, source['project_id'])
         session.commit()
 
         return {'skill_id': skill.id, 'version_id': version.id}
@@ -935,9 +947,10 @@ def verify_skill_token_for_publish(
         instructions = version.instructions
         skill_name = skill.name if skill else ''
         skill_description = skill.description if skill else ''
+        files = list_version_manifest(session, version.id)
     if instructions is None:
         return False, "Failed to verify skill state."
-    content_hash = compute_skill_content_hash(instructions, skill_name, skill_description)
+    content_hash = compute_skill_content_hash(instructions, skill_name, skill_description, files)
     secret = this.module._publish_validation_secret
     ttl = int(this.descriptor.config.get(
         'publish_validation_token_ttl', DEFAULT_VALIDATION_TOKEN_TTL,
@@ -1014,6 +1027,7 @@ def _clone_source_version_for_publish(
             tags=[TagBaseModel(name=t.name, data=t.data or {}) for t in (src.tags or [])],
             meta=src.meta or {},
             run_settings=src.run_settings,
+            files_from_version_id=src.id,
         )
 
     result = create_skill_version(project_id, skill_id, version_data, instructions_already_saved=True)
@@ -1142,6 +1156,7 @@ def delete_public_skill_version(
         }
         public_skill_id = version.skill_id
         deleted_version_id = version.id
+        released_hashes = list_version_file_hashes(session, [deleted_version_id])
 
         session.delete(version)
         session.flush()
@@ -1162,6 +1177,7 @@ def delete_public_skill_version(
                 # ORM cascade drops skill_versions and any entity_skill_mapping rows in
                 # the public project schema only; consuming-agent mappings live in other
                 # project schemas and are untouched.
+                released_hashes |= list_version_file_hashes(session, [v.id for v in skill.versions])
                 session.delete(skill)
                 shell_deleted = True
             elif skill is not None and (skill.meta or {}).get('default_version_id') == deleted_version_id:
@@ -1188,6 +1204,7 @@ def delete_public_skill_version(
 
         session.commit()
 
+    release_unreferenced_contents(public_project_id, released_hashes)
     rpc_tools.EventManagerMixin().event_manager.fire_event(
         ApplicationEvents.skill_unpublished.value,
         {

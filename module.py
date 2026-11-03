@@ -580,6 +580,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "sweep_skill_files", self.sweep_skill_files,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "manage_autonomous_mandate", self.manage_autonomous_mandate,
                 group="R-2.0.8",
             )
@@ -1463,6 +1467,9 @@ class Module(module.ModuleModel):
                 "create_skill_file_tables", self.create_skill_file_tables
             )
             this.for_module("admin").module.unregister_admin_task(
+                "sweep_skill_files", self.sweep_skill_files
+            )
+            this.for_module("admin").module.unregister_admin_task(
                 "manage_autonomous_mandate", self.manage_autonomous_mandate
             )
             this.for_module("admin").module.unregister_admin_task(
@@ -1537,6 +1544,13 @@ class Module(module.ModuleModel):
                     'rpc_kwargs': {},
                     'name': 'eval_run_reap',
                     'cron': '*/10 * * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': 'skills_sweep_skill_files',
+                    'rpc_kwargs': {},
+                    'name': 'skill_files_sweep',
+                    'cron': '0 3 * * *',
                     'active': True,
                 },
                 {

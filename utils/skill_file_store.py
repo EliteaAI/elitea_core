@@ -113,6 +113,13 @@ def content_exists(project_id: int, sha256: str, client=None) -> bool:
     return _has_object(client, sha256)
 
 
+def holds_content(project_id: int, sha256: str, size: int, client=None) -> bool:
+    """Whether the project's bucket holds ``sha256`` whole, ``size`` bytes long; an object cut short does not count."""
+    client = client or project_client(project_id)
+    _ensure_bucket(client)
+    return _holds_whole_object(client, sha256, size)
+
+
 def delete_contents(project_id: int, hashes) -> None:
     """Remove each of ``hashes`` from the project's bucket."""
     client = MinioClient.from_project_id(project_id)

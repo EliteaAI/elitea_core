@@ -363,7 +363,15 @@ def skill_utils_module():
             "skill_version_id": 1,
         },
     )
+    hash_column = type("HashColumn", (), {"in_": lambda self, values: self})()
+    models_skill.SkillVersionFile = type(
+        "SkillVersionFile", (), {"id": 1, "skill_version_id": hash_column, "path": 1, "sha256": hash_column},
+    )
     _register("plugins.elitea_core.models.skill", models_skill)
+
+    skill_file_store = types.ModuleType("plugins.elitea_core.utils.skill_file_store")
+    skill_file_store.delete_contents = lambda project_id, hashes: None
+    _register("plugins.elitea_core.utils.skill_file_store", skill_file_store)
 
     models_all = types.ModuleType("plugins.elitea_core.models.all")
     models_all.Tag = type("Tag", (), {})

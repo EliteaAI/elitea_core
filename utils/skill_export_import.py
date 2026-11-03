@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from ..models.skill import Skill, SkillVersion
 from ..models.pd.skill import SkillExportModel
 from .export_import_utils import slugify
+from .skill_files import list_version_manifest
 from .skill_frontmatter import (
     FRONTMATTER_META_KEY,
     LEGACY_RUN_SETTINGS_KEY,
@@ -329,6 +330,7 @@ def build_skill_fork_payload(
 
         source_version_id = source_version.id
         source_author_id = source_version.author_id
+        files = list_version_manifest(s, source_version_id)
 
         payload = SkillExportModel.model_validate(skill_dict).model_dump(mode='json')
 
@@ -343,6 +345,8 @@ def build_skill_fork_payload(
     ))
     payload['versions'][0]['id'] = source_version_id
     payload['versions'][0]['author_id'] = source_author_id
+    if files:
+        payload['versions'][0]['files'] = files
 
     return payload
 

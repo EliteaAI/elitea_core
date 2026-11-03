@@ -153,6 +153,10 @@ FakeEntitySkillMapping = _model(
 
 
 class FakeSession:
+    """One project schema's rows; the advisory locks it holds live in ``locks``, shared by every session of a
+    test and dropped when its transaction ends."""
+    locks = {}
+
     def __init__(self, project_id):
         self.project_id = project_id
         self.rows = {FakeSkill: [], FakeSkillVersion: [], FakeSkillVersionFile: [], FakeEntitySkillMapping: []}
@@ -160,6 +164,17 @@ class FakeSession:
         self.commits = 0
         self.locked_rows = []
         self.file_reads = []
+
+    def execute(self, statement, params):
+        holders = self.locks.setdefault(params['project_id'], set())
+        granted = 'pg_try_advisory_xact_lock' not in statement or holders <= {self}
+        if granted:
+            holders.add(self)
+        return types.SimpleNamespace(scalar=lambda: granted)
+
+    def end_transaction(self):
+        for holders in self.locks.values():
+            holders.discard(self)
 
     def query(self, target):
         model = target if isinstance(target, type) else target.owner
@@ -187,12 +202,13 @@ class FakeSession:
 
     def commit(self):
         self.commits += 1
+        self.end_transaction()
 
     def rollback(self):
-        pass
+        self.end_transaction()
 
     def close(self):
-        pass
+        self.end_transaction()
 
 
 def _init_version(self, id=None, skill_id=3, name='base', status='draft', instructions='Body.',
@@ -330,6 +346,26 @@ class FakeMinioClient:
         ]
 
 
+class Access:
+    """Who may read what, as the copy check asks it: by default every user holds the skill read permission in every
+    project and no folder is restricted. ``non_members`` holds ``(user, project)`` pairs without the permission
+    (outsiders, removed members); ``restricted`` holds ``(user, project, skill)`` folder exclusions."""
+    READ = 'models.applications.skills.details'
+
+    def __init__(self):
+        self.public_project_id = 1
+        self.non_members = set()
+        self.restricted = set()
+        self.permission_lookups = []
+
+    def get_user_permissions(self, user_id, mode=None, project_id=None):
+        self.permission_lookups.append((user_id, mode, project_id))
+        return [] if (user_id, project_id) in self.non_members else [self.READ]
+
+    def resolve_entity_access(self, project_id, entity_type, entity_id, user_id=None):
+        return 'no_access' if (user_id, project_id, entity_id) in self.restricted else 'full'
+
+
 class PublishStatus:
     draft = 'draft'
     published = 'published'
@@ -387,7 +423,9 @@ def install(monkeypatch, limits: dict):
     for name in [name for name in sys.modules if name == 'plugins' or name.startswith(f'{PKG}')]:
         monkeypatch.delitem(sys.modules, name)
     storage = Storage()
+    access = Access()
     FakeMinioClient.storage = storage
+    FakeSession.locks = {}
     sessions = {}
 
     def session_of(project_id):
@@ -395,7 +433,11 @@ def install(monkeypatch, limits: dict):
 
     @contextlib.contextmanager
     def get_session(project_id):
-        yield session_of(project_id)
+        session = session_of(project_id)
+        try:
+            yield session
+        finally:
+            session.end_transaction()
 
     for name in (
         'pylon', 'pylon.core', 'pylon.core.tools',
@@ -412,6 +454,7 @@ def install(monkeypatch, limits: dict):
 
     sqlalchemy = types.ModuleType('sqlalchemy')
     sqlalchemy.func = types.SimpleNamespace(lower=Lower)
+    sqlalchemy.text = lambda statement: statement
     for name in ('or_', 'asc', 'desc', 'and_', 'distinct'):
         setattr(sqlalchemy, name, lambda *a, **k: None)
     sqlalchemy_orm = types.ModuleType('sqlalchemy.orm')
@@ -427,7 +470,8 @@ def install(monkeypatch, limits: dict):
     tools = types.ModuleType('tools')
     tools.serialize = lambda model: model.model_dump(mode='json')
     tools.db = types.SimpleNamespace(get_session=get_session, with_project_schema_session=get_session)
-    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': 1})
+    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': 1}, get_user_permissions=access.get_user_permissions)
+    tools.config = types.SimpleNamespace(DEFAULT_MODE='default')
     tools.this = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={'skills': limits}))
     tools.rpc_tools = mock.MagicMock()
     tools.context = mock.MagicMock()
@@ -453,8 +497,10 @@ def install(monkeypatch, limits: dict):
     store = load(monkeypatch, 'utils/skill_file_store.py', f'{PKG}.utils.skill_file_store')
     skill_utils = load(monkeypatch, 'utils/skill_utils.py', f'{PKG}.utils.skill_utils')
     skill_files = load(monkeypatch, 'utils/skill_files.py', f'{PKG}.utils.skill_files')
+    monkeypatch.setattr(skill_files, 'resolve_entity_access', access.resolve_entity_access)
+    monkeypatch.setattr(skill_files, 'get_public_project_id', lambda: access.public_project_id)
     skill_export = load(monkeypatch, 'utils/skill_export_import.py', f'{PKG}.utils.skill_export_import')
     return types.SimpleNamespace(
         store=store, utils=skill_utils, files=skill_files, export=skill_export, tools=tools,
-        storage=storage, session_of=session_of,
+        storage=storage, session_of=session_of, access=access,
     )
