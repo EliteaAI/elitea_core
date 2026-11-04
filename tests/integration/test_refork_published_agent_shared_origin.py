@@ -120,6 +120,7 @@ def fork_model():
     _load('plugins.elitea_core.models.pd.collection_base', 'models/pd/collection_base.py')
     _load('plugins.elitea_core.models.pd.llm', 'models/pd/llm.py')
     _load('plugins.elitea_core.models.pd.tag', 'models/pd/tag.py')
+    _load('plugins.elitea_core.utils.trigger_write_rule', 'utils/trigger_write_rule.py')
     _load('plugins.elitea_core.models.enums.all', 'models/enums/all.py')
     _load('plugins.elitea_core.models.pd.tool', 'models/pd/tool.py')
     _load('plugins.elitea_core.models.pd.version', 'models/pd/version.py')
@@ -229,3 +230,24 @@ def test_a_rejected_insert_is_logged_on_the_server():
     _, _, logged = _import_rejected_insert()
 
     assert len(logged) == 1
+
+
+# #7398 AC8 / #6440: a forked pipeline carries no legacy webhook secret ref into the new version
+def test_fork_of_a_webhook_pipeline_drops_the_secret_refs(fork_model):
+    twin = deepcopy(PUBLIC_TWIN)
+    twin['versions'][0]['pipeline_settings'] = {'trigger': {
+        'type': 'webhook', 'webhook_type': 'custom', 'created_by': 3,
+        'webhook_secret': '{{secret.webhook_secret_v122}}'}}
+    payload = fork_model.model_validate(twin).model_dump(mode='json')
+    rule = sys.modules['plugins.elitea_core.utils.trigger_write_rule']
+    stored = rule.sanitize_trigger_for_write(payload['versions'][0]['pipeline_settings'], None)  # create_version does this
+    assert stored == {'trigger': {'type': 'webhook', 'webhook_type': 'custom', 'created_by': 3}}
+
+
+def test_export_of_a_webhook_pipeline_drops_the_secret_refs(fork_model):
+    export_model = sys.modules['plugins.elitea_core.models.pd.version'].ApplicationExportVersionDetailModel
+    version = {**deepcopy(PUBLIC_TWIN['versions'][0]), 'pipeline_settings': {'nodes': [], 'trigger': {
+        'type': 'webhook', 'webhook_type': 'gitlab', 'webhook_secret': '{{secret.a}}',
+        'webhook_signing_secret': '{{secret.b}}'}}}
+    dumped = export_model.model_validate(version).model_dump(mode='json')
+    assert dumped['pipeline_settings'] == {'nodes': [], 'trigger': {'type': 'webhook', 'webhook_type': 'gitlab'}}

@@ -151,12 +151,12 @@ def test_7011_r3_4_run_mode_check(entity_schedule_models):
     ) in ddl
 
 
-# R3.2: one active run per schedule, partial unique index
+# R3.2: one active run per schedule, partial unique index; webhook runs are exempt (#7398)
 def test_7011_r3_2_active_run_unique_index(entity_schedule_models):
     index = _index(entity_schedule_models.EntityScheduleRun, "uq_entity_schedule_runs_active")
     assert index.unique
     assert [col.name for col in index.columns] == ["schedule_id"]
-    where = "status IN ('running', 'waiting_for_approval')"
+    where = "status IN ('running', 'waiting_for_approval') AND trigger <> 'webhook'"
     assert str(index.dialect_options["postgresql"]["where"]) == where
     assert str(index.dialect_options["sqlite"]["where"]) == where
 

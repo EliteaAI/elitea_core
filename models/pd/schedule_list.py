@@ -27,6 +27,10 @@ class ScheduleListFilters(BaseModel):
     limit: int = Field(default=20, ge=1, le=100, description='Rows per page', examples=[20])
     offset: int = Field(default=0, ge=0, le=2**31 - 1, description='Rows to skip',  # the database integer range
                         examples=[0])
+    trigger_kind: Literal['cron', 'webhook'] = Field(
+        'cron', description='Row kind; the default keeps webhooks out of schedule lists', examples=['webhook'])
+    webhook_type: Literal['github', 'gitlab', 'custom'] | None = Field(
+        None, description='Only webhooks of this sender', examples=['github'])
     sort_by: SortBy = Field('next_run', description='Sort column', examples=['name'])
     sort_order: SortOrder = Field('asc', description='Sort direction', examples=['desc'])
 
@@ -58,8 +62,11 @@ class ScheduleListItem(BaseModel):
     entity_name: str = Field(description='Name of the agent or pipeline')
     version_id: int | None = Field(None, description='Version that runs; null when the version is deleted')  # US-01
     version_name: str | None = Field(None, description='Name of the version that runs')
-    cron: str = Field(description='Cron with 5 parts, read in `timezone`')
-    timezone: str = Field(description='IANA time zone name')
+    cron: str | None = Field(None, description='Cron with 5 parts, read in `timezone`; null on webhooks')
+    timezone: str | None = Field(None, description='IANA time zone name; null on webhooks')
+    trigger_kind: str = Field('cron', description='cron or webhook')
+    webhook_type: str | None = Field(None, description='Webhook sender: github, gitlab or custom')
+    webhook_url: str | None = Field(None, description='Delivery URL of a webhook; never carries the secret')
     enabled: bool = Field(description='True: active, false: paused')
     disabled_reason: str | None = Field(None, description='Why the system paused the schedule')
     next_run: datetime | None = Field(None, description='Time of the next run; null when paused or expired')

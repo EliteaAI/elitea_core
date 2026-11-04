@@ -591,6 +591,36 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def ensure_webhook_trigger_columns(self, *args, **kwargs):
+        """Admin task: add the webhook-trigger columns to entity_schedules (R-2.0.9, #7398). Idempotent.
+
+        Param: "project_id=<all|N>[;dry_run]"; a dry run lists the projects still missing them.
+        """
+        from ..utils.webhook_trigger_schema import (  # pylint: disable=C0415
+            apply_webhook_trigger_columns, project_ids_pending,
+        )
+        task = "ensure_webhook_trigger_columns"
+        values, error = _parse_project_param(task, kwargs.get("param", "") or "", "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            pending = set(project_ids_pending())
+            if values["project_id"] == "all":
+                project_ids = [p["id"] for p in (
+                    self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                )]
+            else:
+                project_ids = [values["project_id"]]
+        except Exception:  # pylint: disable=W0703
+            log.exception("%s: failed to list projects", task)
+            return {"migrated": 0, "error": "failed to list projects"}
+        targets = sorted(pid for pid in project_ids if pid in pending)
+        migrated, failed = apply_webhook_trigger_columns(targets, dry_run=values["dry_run"])
+        log.info("%s%s: migrated=%s failed=%s", "[DRY RUN] " if values["dry_run"] else "", task, migrated, failed)
+        return {"migrated": len(migrated), "projects": migrated, "failed": len(failed),
+                "failed_projects": failed, "dry_run": values["dry_run"]}
+
+    @web.method()
     def create_agent_identity_tables(self, *args, **kwargs):
         """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
 

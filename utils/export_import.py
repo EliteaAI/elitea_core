@@ -24,6 +24,7 @@ from .skill_files import (
     read_version_contents,
 )
 from .toolkit_meta import drop_index_schedules
+from .trigger_write_rule import strip_trigger_secrets
 from .utils import get_public_project_id
 
 from ..models.pd.application import (
@@ -1138,7 +1139,7 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
         # Export pipeline_settings (visual flow graph: node positions, edges, orientation)
         pipeline_settings = version.get('pipeline_settings')
         if pipeline_settings:
-            frontmatter['pipeline_settings'] = pipeline_settings
+            frontmatter['pipeline_settings'] = strip_trigger_secrets(pipeline_settings)
 
         # Pipeline has no body - all config is in frontmatter
         body = ''

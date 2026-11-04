@@ -17,6 +17,7 @@ from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel, validate_m
 from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
+from ...utils.trigger_write_rule import strip_trigger_secrets
 
 # todo: switch to rpc call
 from ...utils.authors import get_authors_data
@@ -353,6 +354,12 @@ class ApplicationExportVersionDetailModel(ApplicationVersionDetailModel, Applica
     def exclude_icon_meta(self):
         if self.meta:
             self.meta['icon_meta'] = {}
+        return self
+
+    @model_validator(mode='after')
+    def exclude_trigger_secrets(self):
+        if self.pipeline_settings:
+            self.pipeline_settings = strip_trigger_secrets(self.pipeline_settings)
         return self
 
     @model_validator(mode='after')

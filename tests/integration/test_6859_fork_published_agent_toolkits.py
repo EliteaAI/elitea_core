@@ -247,6 +247,7 @@ def modules():
     _load('plugins.elitea_core.models.pd.tool', 'models/pd/tool.py')
     _load('plugins.elitea_core.utils.export_import_utils', 'utils/export_import_utils.py')
     _load('plugins.elitea_core.utils.toolkit_meta', 'utils/toolkit_meta.py')
+    _load('plugins.elitea_core.utils.trigger_write_rule', 'utils/trigger_write_rule.py')
     export_import = _load('plugins.elitea_core.utils.export_import', 'utils/export_import.py')
     publish_utils = _load('plugins.elitea_core.utils.publish_utils', 'utils/publish_utils.py')
     export_import.selectinload = lambda *a, **k: _Loader()

@@ -19,7 +19,9 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
     last_reason = (
         select(Run.reason).where(Run.schedule_id == S.id).order_by(Run.started_at.desc(), Run.id.desc()).limit(1)
     ).scalar_subquery()
-    conditions = []
+    conditions = [S.trigger_kind == getattr(filters, "trigger_kind", "cron")]
+    if getattr(filters, "webhook_type", None) is not None:
+        conditions.append(S.webhook_type == filters.webhook_type)
     if not scope.is_admin:
         conditions.append(S.created_by == scope.user_id)
     elif filters.owner_ids:
@@ -45,6 +47,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
             Application.name.label("entity_name"), S.version_id, ApplicationVersion.name.label("version_name"),
             S.cron, S.timezone, S.enabled, S.disabled_reason, S.next_run, S.last_run, S.last_run_status,
             last_reason.label("last_run_reason"), S.last_conversation_id, S.expires_at, S.created_by,
+            S.trigger_kind, S.webhook_type, S.uuid,
         )
         .join(Application, Application.id == S.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == S.version_id)

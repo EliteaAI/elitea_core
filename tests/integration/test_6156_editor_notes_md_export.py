@@ -109,6 +109,10 @@ def export_import():
         'plugins.elitea_core.utils.toolkit_meta',
         'utils/toolkit_meta.py',
     )
+    _load(
+        'plugins.elitea_core.utils.trigger_write_rule',
+        'utils/trigger_write_rule.py',
+    )
     module = _load(
         'plugins.elitea_core.utils.export_import', 'utils/export_import.py',
     )

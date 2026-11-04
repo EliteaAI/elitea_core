@@ -61,6 +61,7 @@ def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedu
         select(EntitySchedule)
         .where(
             EntitySchedule.enabled.is_(True),
+            EntitySchedule.trigger_kind == 'cron',
             EntitySchedule.entity_type.in_(entity_types),
             or_(EntitySchedule.next_run <= func.now(), EntitySchedule.expires_at <= func.now()),
         )

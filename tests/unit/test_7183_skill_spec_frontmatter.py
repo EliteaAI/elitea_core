@@ -574,6 +574,7 @@ def agent_markdown(monkeypatch, md):
         f'{PKG}.utils.toolkit_meta', f'{PKG}.utils.utils',
     ):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    _load(monkeypatch, 'utils/trigger_write_rule.py', f'{PKG}.utils.trigger_write_rule')
     return _load(monkeypatch, 'utils/export_import.py', f'{PKG}.utils.export_import')
 
 

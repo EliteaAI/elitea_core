@@ -26,6 +26,7 @@ from .schedule_access import (
     SCHEDULE_PERMISSIONS,
     ScheduleScope,
     allowed_actions,
+    row_webhook_url,
     schedule_check_spec,
     schedule_scope,
 )
@@ -116,7 +117,7 @@ def _owner_name(owner_id: int) -> str | None:
 
 def _details(row, scope: ScheduleScope) -> dict:
     """Shape a row as the API answers it, with the owner's and the confirmer's name for the edit page (US-32)."""
-    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by"}
+    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by", "webhook_url"}
     confirmer = row.approval_confirmed_by
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
@@ -202,7 +203,8 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
 
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
     from .schedule_settings import is_run_without_asking_allowed
-    return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
+    return {**_details(row, scope), "webhook_url": row_webhook_url(project_id, row),
+            "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
 
 
 def _credential_check(project_id: int, owner) -> str:
@@ -349,6 +351,8 @@ class ScheduleItemHandlers:
         body, error = _parse_body(ScheduleCreate)
         if error:
             return error
+        if body.trigger_kind == 'webhook':  # the secret comes with #7404
+            return refusal(INVALID_INPUT, 'Webhooks cannot be created yet', field='trigger_kind')
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
