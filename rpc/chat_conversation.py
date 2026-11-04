@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
 from ..models.folder import ConversationFolder
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import RUN_FORM, EntitySchedule, EntityScheduleRun
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
@@ -59,8 +59,10 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
         ).model_dump()
         for run_id, conversation_id, schedule_id, name, status, trigger in (
             session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
-                          EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
-            .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+                          func.coalesce(EntitySchedule.name, RUN_FORM['name'].astext),
+                          EntityScheduleRun.status, EntityScheduleRun.trigger)
+            # A Test Run has no schedule row: its name comes from the saved form
+            .outerjoin(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
             .filter(EntityScheduleRun.id.in_(set(run_of.values())),
                     EntityScheduleRun.conversation_id.in_(list(run_of)))
             .all()
@@ -425,6 +427,9 @@ class RPC:
         entity_name: str = None,
         entity_project_id: int = None,
         schedule_id: int | None = None,
+        run_status: str | None = None,
+        run_trigger: str | None = None,
+        run_version_id: int | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -437,6 +442,8 @@ class RPC:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
             schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
+            run_status, run_trigger, run_version_id: Optional run options (`run_trigger` is a stored trigger: cron, manual, test);
+                they combine with `schedule_id` and each other on the same run row
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -513,12 +520,20 @@ class RPC:
             if is_skill_history and sorting_by is Conversation.created_at:
                 sorting_by = skill_run_started_at(session, participant_id, entity_project_id)
 
+            run_conditions = []
             if schedule_id is not None:
-                # The run row owns the link, so the filter uses its indexed column, not user-writable meta
+                run_conditions.append(EntityScheduleRun.schedule_id == schedule_id)
+            if run_status is not None:
+                run_conditions.append(EntityScheduleRun.status == run_status)
+            if run_trigger is not None:
+                run_conditions.append(EntityScheduleRun.trigger == run_trigger)
+            if run_version_id is not None:
+                run_conditions.append(EntityScheduleRun.version_id == run_version_id)
+            if run_conditions:
+                # One semi-join on the run row, which owns the link: the chat id column is indexed, and every
+                # option must hold for the same run. User-writable meta is never read for it.
                 base_query = base_query.filter(
-                    Conversation.id.in_(
-                        select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.schedule_id == schedule_id)
-                    ),
+                    Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions)),
                 )
 
             base_query = base_query.order_by(sorting(sorting_by))

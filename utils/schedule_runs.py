@@ -6,7 +6,7 @@ from pylon.core.tools import log
 from sqlalchemy import and_, case, func, or_, select, update
 from tools import db
 
-from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
@@ -191,6 +191,13 @@ def run_failure_reason(error) -> str:
     return reason
 
 
+def run_owner_id(session, run) -> int | None:
+    """The owner of a run: the caller of a Test Run, else the owner of its schedule; None when the schedule is gone."""
+    if run.schedule_id is None:
+        return run.requested_by
+    return session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
+
+
 def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
     """Conditions that tie a chat hook to its own run: the run is linked to this conversation, or has none yet
     and the chat author owns the schedule. The run id comes from conversation meta, which a client can write.
@@ -202,7 +209,10 @@ def _own_conversation(conversation_id: int | None, author_id: int | None) -> lis
         return []
     unlinked = and_(
         EntityScheduleRun.conversation_id.is_(None),
-        EntityScheduleRun.schedule_id.in_(select(EntitySchedule.id).where(EntitySchedule.created_by == author_id)),
+        or_(
+            EntityScheduleRun.schedule_id.in_(select(EntitySchedule.id).where(EntitySchedule.created_by == author_id)),
+            and_(EntityScheduleRun.schedule_id.is_(None), EntityScheduleRun.requested_by == author_id),
+        ),
     )
     if conversation_id is None:
         return [unlinked]
@@ -279,6 +289,8 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
         return False
     try:
         run = session.get(EntityScheduleRun, run_id)
+        if run.schedule_id is None:  # a Test Run has no schedule page to link a notice to
+            return True
         schedule = session.get(EntitySchedule, run.schedule_id)
         notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
     except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it
@@ -314,8 +326,10 @@ def _is_sign_in(item: dict) -> bool:
 
 def _approval_rule(project_id: int, run_id: int, session=None) -> str | None:
     """The approval rule of the schedule the run belongs to; reads in `session` when the caller has one."""
-    query = (select(EntitySchedule.approval_rule)
-             .join(EntityScheduleRun, EntityScheduleRun.schedule_id == EntitySchedule.id)
+    # A Test Run has no schedule: its rule is the one in the stored form
+    query = (select(func.coalesce(EntitySchedule.approval_rule, RUN_FORM['approval_rule'].astext))
+             .select_from(EntityScheduleRun)
+             .outerjoin(EntitySchedule, EntityScheduleRun.schedule_id == EntitySchedule.id)
              .where(EntityScheduleRun.id == run_id))
     if session is not None:
         return session.scalar(query)
@@ -368,7 +382,7 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         run = session.get(EntityScheduleRun, run_id)
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
-        if session.get(EntitySchedule, run.schedule_id).created_by != caller_id:
+        if run_owner_id(session, run) != caller_id:
             raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
@@ -396,7 +410,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
         )
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
-        owner_id = session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
+        owner_id = run_owner_id(session, run)
         approved = decision == 'approve'
         append_run_events(session, run_id, run_event(
             'decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
@@ -491,7 +505,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
     ).all()
     if ended:
         session.execute(
-            update(EntitySchedule).where(EntitySchedule.id.in_({schedule_id for _, schedule_id in ended}))
+            update(EntitySchedule).where(EntitySchedule.id.in_({schedule_id for _, schedule_id in ended if schedule_id is not None}))
             .values(**schedule_values)
         )
     # lean: one locked read per ended run; a sweep ends at most one batch (EXPIRE_BATCH); batch the read if it grows
@@ -511,6 +525,8 @@ def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTIC
         run = session.get(EntityScheduleRun, run_id)
         event = events.get(run.status)
         if event is None:  # the status moved on after the commit; that writer owns the notice
+            continue
+        if run.schedule_id is None:  # a Test Run: no schedule page answers for it, so no notice links to it
             continue
         schedule = session.get(EntitySchedule, run.schedule_id)
         # One failed notice must not leave the other runs of a batch without theirs
