@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import Column, Integer, Table, create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Session
 from unit._tool_spend_loader import load
 
@@ -207,45 +208,67 @@ def test_el_7011_cr24_refused_run_now_keeps_last_run(claim, session):
     assert session.get(claim.EntitySchedule, row.id).last_run.replace(tzinfo=None) == OLD_LAST_RUN
 
 
-def test_due_query_skips_a_draft_row(claim, session):
-    _schedule(claim, session, draft=True, application_id=1, created_by=2, next_run=SEEN)
-    kept = _schedule(claim, session, next_run=SEEN)
+def _test_run(claim, session, status="running", **values):
+    session.execute(
+        claim.EntityScheduleRun.__table__.insert().values(
+            schedule_id=None, trigger="test", status=status, requested_by=7, **values)
+    )
+    return session.scalar(select(claim.EntityScheduleRun).order_by(claim.EntityScheduleRun.id.desc()))
 
-    assert [row.id for row in claim.select_due_schedules(session, ["pipeline"], 10)] == [kept.id]
+
+def test_fail_run_of_a_test_run_logs_the_event_and_touches_no_schedule(claim, session):
+    saved = _schedule(claim, session, last_run_status="success")
+    run = _test_run(claim, session)
+
+    assert claim.fail_run(session, run.id, "boom") is None
+
+    session.flush()
+    session.expire_all()
+    stored = session.get(claim.EntityScheduleRun, run.id)
+    assert (stored.status, stored.reason, stored.schedule_id) == ("failed", "boom", None)
+    assert [event["kind"] for event in stored.events] == ["finished"]
+    assert session.get(claim.EntitySchedule, saved.id).last_run_status == "success"
 
 
-def test_list_query_counts_and_returns_no_draft_row(claim, session, monkeypatch):
-    from sqlalchemy import String
-    from sqlalchemy.orm import Mapped, mapped_column
+def test_fail_run_of_a_saved_run_copies_the_status_and_logs_the_event(claim, session):
+    row = _schedule(claim, session)
+    run_id = claim.insert_cron_run(session, row.id)
 
-    class Parent(DeclarativeBase):
-        pass
+    assert claim.fail_run(session, run_id, "boom") == row.id
 
-    class Application(Parent):
-        __tablename__ = "applications"
-        id: Mapped[int] = mapped_column(Integer, primary_key=True)
-        name: Mapped[str] = mapped_column(String)
+    session.flush()
+    session.expire_all()
+    assert session.get(claim.EntitySchedule, row.id).last_run_status == "failed"
+    assert [event["kind"] for event in session.get(claim.EntityScheduleRun, run_id).events] == ["finished"]
 
-    class ApplicationVersion(Parent):
-        __tablename__ = "application_versions"
-        id: Mapped[int] = mapped_column(Integer, primary_key=True)
-        name: Mapped[str] = mapped_column(String)
 
-    models_all = types.ModuleType("plugins.elitea_core.models.all")
-    models_all.Application, models_all.ApplicationVersion = Application, ApplicationVersion
-    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.all", models_all)
-    queries = load("utils/schedule_queries.py", fresh=True)
-    statements = []
-    real_execute, real_scalar = session.execute, session.scalar
-    session.execute = lambda statement, *a, **k: (statements.append(statement), types.SimpleNamespace(all=lambda: []))[1]
-    session.scalar = lambda statement, *a, **k: (statements.append(statement), 0)[1]
-    scope = types.SimpleNamespace(is_admin=True, user_id=1)
-    filters = types.SimpleNamespace(
-        owner_ids=None, entity_type=None, status=None, enabled=None, entity_id=None, version_id=None,
-        search=None, sort_by="next_run", sort_order="asc")
+def test_fail_run_of_a_run_that_is_not_running_changes_nothing(claim, session):
+    run = _test_run(claim, session, status="success")
 
-    queries.list_schedules(session, scope, filters, 10, 0)
+    assert claim.fail_run(session, run.id, "boom") is None
+    assert session.get(claim.EntityScheduleRun, run.id).status == "success"
 
-    session.execute, session.scalar = real_execute, real_scalar
-    assert len(statements) == 2
-    assert all("entity_schedules.draft IS false" in str(statement) for statement in statements)
+
+def test_insert_run_accepts_no_schedule_and_updates_no_schedule(claim, session):
+    run_id = claim.insert_run(session, None, "test", requested_by=7)
+
+    assert session.get(claim.EntityScheduleRun, run_id).schedule_id is None
+
+
+def test_test_run_columns_stay_out_of_the_mapper_and_have_core_handles(claim):
+    run = claim.EntityScheduleRun
+    assert "form" not in run.__mapper__.attrs
+    assert "application_id" not in run.__mapper__.attrs
+    models = sys.modules["plugins.elitea_core.models.entity_schedule"]
+    assert models.RUN_FORM.table is run.__table__
+    assert models.RUN_APPLICATION_ID.table is run.__table__
+    assert not hasattr(models, "not_draft")
+    assert "draft" not in claim.EntitySchedule.__table__.c
+
+
+def test_the_active_test_run_index_is_unique_per_owner_and_application(claim, session):
+    insert = claim.EntityScheduleRun.__table__.insert().values(
+        schedule_id=None, trigger="test", status="running", requested_by=7, application_id=1)
+    session.execute(insert)
+    with pytest.raises(IntegrityError):
+        session.execute(insert)

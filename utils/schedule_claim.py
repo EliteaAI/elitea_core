@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun, not_draft
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 
 # Must stay stable across deploys: the legacy step of the tick and the migration (US-24) take the same keys
 LEGACY_LOCK_BASE = 7011 << 32
@@ -61,7 +61,6 @@ def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedu
         select(EntitySchedule)
         .where(
             EntitySchedule.enabled.is_(True),
-            not_draft(),
             EntitySchedule.entity_type.in_(entity_types),
             or_(EntitySchedule.next_run <= func.now(), EntitySchedule.expires_at <= func.now()),
         )
@@ -80,7 +79,7 @@ def claim_schedule(session, schedule_id: int, seen_next_run: datetime, new_next_
     return result.rowcount == 1
 
 
-def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None = None) -> int | None:
+def insert_run(session, schedule_id: int | None, trigger: str, requested_by: int | None = None) -> int | None:
     """Insert a running run and copy `running` to its schedule; None when the active-run unique index already holds one.
 
     The copy is in the same transaction, so the list never shows the previous status for a running run (R1.5).
@@ -93,10 +92,11 @@ def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None
             session.add(run)
     except IntegrityError:
         return None
-    values = {'last_run_status': 'running'}
-    if trigger == 'manual':
-        values['last_run'] = func.now()
-    session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(**values))
+    if schedule_id is not None:
+        values = {'last_run_status': 'running'}
+        if trigger == 'manual':
+            values['last_run'] = func.now()
+        session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(**values))
     return run.id
 
 
@@ -108,17 +108,21 @@ def insert_cron_run(session, schedule_id: int) -> int | None:
 def fail_run(session, run_id: int, reason: str) -> int | None:
     """Close a running run as failed and copy the status to its schedule; the schedule id, None when not running.
 
-    A running run that never ends would make the active-run index block the schedule.
+    A running run that never ends would make the active-run index block the schedule. A Test Run has no schedule:
+    its finished event is still written and no schedule row is touched.
     """
-    schedule_id = session.scalar(
+    closed = session.execute(
         update(EntityScheduleRun)
         .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
         .values(status='failed', reason=reason, finished_at=func.now())
-        .returning(EntityScheduleRun.schedule_id)
-    )
+        .returning(EntityScheduleRun.id, EntityScheduleRun.schedule_id)
+    ).first()
+    if closed is None:
+        return None
+    schedule_id = closed.schedule_id
     if schedule_id is not None:
         session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='failed'))
-        append_run_events(session, run_id, finished_event('failed', reason))
+    append_run_events(session, run_id, finished_event('failed', reason))
     return schedule_id
 
 

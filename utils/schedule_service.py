@@ -9,7 +9,7 @@ from pylon.core.tools import log
 from sqlalchemy import select, update
 
 from ..models.all import Application, ApplicationVersion
-from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule, not_draft
+from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule
 from ..models.enums.all import AgentTypes, NotificationEventTypes
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
 from .folder_access import entity_access_error
@@ -147,8 +147,6 @@ def load_schedule_in_scope(
         ScheduleNotFound: When no row is in the caller's scope; the 404 hides that the row exists.
     """
     query = select(EntitySchedule).where(EntitySchedule.id == schedule_id)
-    if not include_draft:
-        query = query.where(not_draft())
     if not scope.is_admin:
         query = query.where(EntitySchedule.created_by == scope.user_id)
     row = session.scalars(query).one_or_none()

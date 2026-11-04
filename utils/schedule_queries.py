@@ -3,7 +3,6 @@ from sqlalchemy import func, or_, select
 
 from ..models.all import Application, ApplicationVersion
 from ..models.entity_schedule import EntitySchedule as S
-from ..models.entity_schedule import not_draft
 from ..models.entity_schedule import EntityScheduleRun as Run
 
 SORT_COLUMNS = {
@@ -20,7 +19,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
     last_reason = (
         select(Run.reason).where(Run.schedule_id == S.id).order_by(Run.started_at.desc(), Run.id.desc()).limit(1)
     ).scalar_subquery()
-    conditions = [not_draft()]
+    conditions = []
     if not scope.is_admin:
         conditions.append(S.created_by == scope.user_id)
     elif filters.owner_ids:

@@ -191,10 +191,9 @@ def project_loop(migration, monkeypatch):
     """The module with versions from `project_loop.versions` and `migrate_version` recording moves."""
     from sqlalchemy import column, table
 
-    schedules = table("entity_schedules", column("enabled"), column("draft"))
+    schedules = table("entity_schedules", column("enabled"))
     schedules.enabled = schedules.c.enabled
-    _stub(monkeypatch, "plugins.elitea_core.models.entity_schedule", EntitySchedule=schedules,
-          not_draft=lambda: schedules.c.draft.is_(False))
+    _stub(monkeypatch, "plugins.elitea_core.models.entity_schedule", EntitySchedule=schedules)
     migration.versions, migration.moved = [], []
     monkeypatch.setattr(migration, "_legacy_versions", lambda _session: migration.versions)
     monkeypatch.setattr(migration, "migrate_version", lambda _s, version, _row: migration.moved.append(version.id))
@@ -373,16 +372,3 @@ def test_restore_refuses_a_row_moved_before_the_column_existed(restore):
     schedule.version_id, schedule.original_trigger = 21, None
     with pytest.raises(ValueError, match="no original trigger"):
         function(_RestoreSession(schedule, None), 1)
-
-
-def test_the_legacy_migration_counts_no_draft_row_in_the_enabled_total(project_loop):
-    captured = []
-
-    class Session:
-        def scalar(self, statement):
-            captured.append(str(statement.compile(compile_kwargs={"literal_binds": True})))
-            return 0
-
-    project_loop._migrate_versions(Session(), 5, dry_run=False)
-
-    assert "draft IS false" in captured[0]

@@ -552,16 +552,3 @@ def test_7011_r4_1_an_updated_entry_names_the_stored_schedule(env):
     env.import_items(keyed(), schema_version=2)
     report = env.import_items(keyed(name='Renamed in the file'), schema_version=2)
     assert [entry['name'] for entry in report['updated']] == ['Daily digest']
-
-
-def test_import_does_not_match_a_draft_row_by_name(env):
-    with env.session_factory() as session:
-        draft = env.EntitySchedule(
-            entity_type='agent', application_id=1, version_id=None, name='Daily digest', cron='0 9 * * *',
-            timezone='UTC', created_by=ADMIN_ID, enabled=False, draft=True,
-            principal={'kind': 'delegation', 'ref': ADMIN_ID},
-        )
-        session.add(draft)
-        session.commit()
-    report = env.import_items(item())
-    assert report == {'created': [{'name': 'Daily digest', 'schedule_id': 2}], 'updated': [], 'skipped': [], 'failed': []}

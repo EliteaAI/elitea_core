@@ -62,12 +62,6 @@ ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS original_trigger JSO
 # column (DROP COLUMN IF EXISTS original_trigger) and the index (DROP INDEX IF EXISTS ix_entity_schedule_runs_conversation)
 # Governance refusals in a row of a schedule's runs (#7254); the startup safety net adds it too
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS refusal_streak SMALLINT DEFAULT 0;
-# A hidden row that holds the runs of "Test" before a schedule is saved (issue 7338); the startup safety net adds it too
-ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS draft BOOLEAN NOT NULL DEFAULT FALSE;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedules_draft_owner_entity
-    ON {pid}.entity_schedules (created_by, application_id) WHERE draft;
-# Revert by hand: DELETE FROM {pid}.entity_schedules WHERE draft; DROP INDEX IF EXISTS uq_entity_schedules_draft_owner_entity;
-# ALTER TABLE {pid}.entity_schedules DROP COLUMN IF EXISTS draft;
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
     id SERIAL PRIMARY KEY,
@@ -98,13 +92,6 @@ CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_schedule_started
     ON {pid}.entity_schedule_runs (schedule_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_conversation
     ON {pid}.entity_schedule_runs (conversation_id);
-# Serve the conversation list filtered by run status, trigger or version (issue 7338); create_all adds them to new projects only
-CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_trigger_status
-    ON {pid}.entity_schedule_runs (trigger, status);
-CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_version
-    ON {pid}.entity_schedule_runs (version_id);
-# Revert by hand: DROP INDEX IF EXISTS {pid}.ix_entity_schedule_runs_trigger_status;
-# DROP INDEX IF EXISTS {pid}.ix_entity_schedule_runs_version;
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_preferences (
     user_id INTEGER PRIMARY KEY,

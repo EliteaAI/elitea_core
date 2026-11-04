@@ -152,11 +152,3 @@ def test_7011_r1_5_export_keeps_prompt_and_variables_of_a_prompt_pipeline(env):
     item = env.items()[0]
     assert (item['run_mode'], item['prompt'], item['variables']) == (
         'prompt', 'Go {{ x }}', [{'name': 'x', 'value': '1'}])
-
-
-def test_export_leaves_out_draft_rows(env):
-    env.seed(name='Kept')
-    draft_id = env.seed(name='Hidden', created_by=43, draft=True)
-    assert [item['name'] for item in env.items()] == ['Kept']
-    with pytest.raises(env.ScheduleError):
-        env.module.export_schedules_yaml(PROJECT_ID, [draft_id])

@@ -14,7 +14,6 @@ from sqlalchemy import (
     Text,
     Uuid,
     desc,
-    false,
     func,
     text,
     true,
@@ -45,10 +44,6 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedules_created_by', 'created_by'),
         Index('ix_entity_schedules_application_version', 'application_id', 'version_id'),
         Index('uq_entity_schedules_uuid', 'uuid', unique=True),
-        Index(
-            'uq_entity_schedules_draft_owner_entity', 'created_by', 'application_id', unique=True,
-            postgresql_where=text('draft'), sqlite_where=text('draft'),
-        ),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
@@ -84,9 +79,6 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     last_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # A hidden row that only holds the runs of "Test" before a schedule is saved. Every reader that is not the test run
-    # route filters it out with not_draft(); it is never enabled and never gets next_run or last_run
-    draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     # Who confirmed "Run without asking", when, and the fingerprint of the sensitive tools they saw
     approval_confirmed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     approval_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -111,11 +103,6 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
         """The mixin's row dict (and repr) without the unmapped refusal count, which the row does not hold."""
         return super().to_json((*exclude_fields, 'refusal_streak'))
 
-def not_draft():
-    """The one filter of every schedule reader except the test run route: a draft row is not a schedule."""
-    return EntitySchedule.draft.is_(False)
-
-
 # The unmapped refusal count of a schedule (#7254), for Core statements
 REFUSAL_STREAK = EntitySchedule.__table__.c.refusal_streak
 
@@ -132,16 +119,27 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedule_runs_schedule_started', 'schedule_id', desc('started_at'), desc('id')),
         # Serves the conversation list filtered by schedule
         Index('ix_entity_schedule_runs_conversation', 'conversation_id'),
-        # Serve the conversation list filtered by run status, trigger or version without a schedule
-        Index('ix_entity_schedule_runs_trigger_status', 'trigger', 'status'),
+        # Serves the conversation list filtered by version
         Index('ix_entity_schedule_runs_version', 'version_id'),
+        # One active Test Run per owner and agent or pipeline; a Test Run has no schedule
+        Index(
+            'uq_entity_schedule_runs_active_test', 'requested_by', 'application_id', unique=True,
+            postgresql_where=text(f'schedule_id IS NULL AND {ACTIVE_RUN_STATUSES}'),
+            sqlite_where=text(f'schedule_id IS NULL AND {ACTIVE_RUN_STATUSES}'),
+        ),
+        # Serves the Test Run list of one owner: newest first
+        Index(
+            'ix_entity_schedule_runs_test_owner', 'requested_by', 'application_id', desc('started_at'), desc('id'),
+            postgresql_where=text('schedule_id IS NULL'), sqlite_where=text('schedule_id IS NULL'),
+        ),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    schedule_id: Mapped[int] = mapped_column(
+    # NULL for a Test Run, which runs the unsaved form and belongs to no schedule
+    schedule_id: Mapped[int | None] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.{EntitySchedule.__tablename__}.id', ondelete='CASCADE'),
-        nullable=False,
+        nullable=True,
     )
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -160,6 +158,23 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
     version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     principal_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
     risk_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The unsaved schedule form and the agent or pipeline of a Test Run. Table columns only, not mapped
+    # (`exclude_properties`): no ORM INSERT or SELECT names them, so a schema that predates them (the admin task
+    # adds them) still creates and reads saved runs. Core statements use `RUN_FORM` and `RUN_APPLICATION_ID`
+    form = mapped_column(JSONB, nullable=True)
+    application_id = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.applications.id', ondelete='CASCADE'), nullable=True
+    )
+    __mapper_args__ = {'exclude_properties': ['form', 'application_id']}  # noqa: RUF012 -- SQLAlchemy reads it
+
+    def to_json(self, exclude_fields: tuple = ()) -> dict:
+        """The mixin's row dict without the unmapped Test Run columns, which the row does not hold."""
+        return super().to_json((*exclude_fields, 'form', 'application_id'))
+
+
+# The unmapped Test Run columns, for Core statements
+RUN_FORM = EntityScheduleRun.__table__.c.form
+RUN_APPLICATION_ID = EntityScheduleRun.__table__.c.application_id
 
 
 class EntitySchedulePreference(db_tools.AbstractBaseMixin, db.Base):

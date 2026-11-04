@@ -323,10 +323,3 @@ def test_el_7011_r4_3_stop_date_after_next_run_is_accepted(timing, frozen_now):
 
 def test_el_7011_r4_3_no_stop_date_is_accepted(timing):
     assert timing.model.ScheduleTiming(cron=YEARLY, timezone="UTC").expires_at is None
-
-
-def test_enabled_cap_count_leaves_out_draft_rows(timing):
-    session = FakeSession(enabled=3)
-    timing.check_enabled_cap(session)
-    sql = " ".join(str(session.statements[0].compile(dialect=postgresql.dialect())).split())
-    assert "entity_schedules.draft IS false" in sql

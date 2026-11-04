@@ -13,7 +13,7 @@ from tools import db
 from yaml import AliasEvent, YAMLError, parse
 
 from ..models.all import Application, ApplicationVersion
-from ..models.entity_schedule import EntitySchedule, not_draft
+from ..models.entity_schedule import EntitySchedule
 from .pipeline_utils import from_str_to_yaml, validate_yaml_from_str
 from .schedule_service import ScheduleError
 from .schedule_timing import end_of_day
@@ -62,7 +62,6 @@ def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
         select(EntitySchedule, Application.name, ApplicationVersion.name)
         .join(Application, Application.id == EntitySchedule.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == EntitySchedule.version_id)
-        .where(not_draft())
         .order_by(EntitySchedule.id)
     )
     if ids is not None:
@@ -173,8 +172,7 @@ def _schedule_index(session, file) -> tuple[dict, dict]:
             names.add(raw['name'])
     by_key, by_name = {}, {}
     for row in session.scalars(
-            select(EntitySchedule).where(
-                not_draft(), or_(EntitySchedule.uuid.in_(keys), EntitySchedule.name.in_(names)))
+            select(EntitySchedule).where(or_(EntitySchedule.uuid.in_(keys), EntitySchedule.name.in_(names)))
     ):
         by_key[row.uuid] = row
         by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)

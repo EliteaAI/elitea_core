@@ -172,18 +172,18 @@ def restore_project_triggers(project_id: int) -> dict:
     """
     from tools import db
 
-    from ..models.entity_schedule import EntitySchedule, not_draft
+    from ..models.entity_schedule import EntitySchedule
 
     report = {'project_id': project_id, 'restored': [], 'errors': [], 'without_original_trigger': 0}
     with db.get_session(project_id) as session:
         ids = session.scalars(
             select(EntitySchedule.id)
-            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_not(None), not_draft())
+            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_not(None))
             .order_by(EntitySchedule.id)
         ).all()
         report['without_original_trigger'] = session.scalar(
             select(func.count()).select_from(EntitySchedule)
-            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_(None), not_draft())
+            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_(None))
         )
         for schedule_id in ids:
             try:
@@ -204,7 +204,7 @@ def _migrate_versions(session, project_id: int, dry_run: bool, enforce_limits: b
     With `enforce_limits` an enabled row over the project cap or below the minimum interval is not moved:
     its version keeps the legacy trigger and goes under `held`.
     """
-    from ..models.entity_schedule import EntitySchedule, not_draft
+    from ..models.entity_schedule import EntitySchedule
 
     report = {
         'project_id': project_id, 'found': 0, 'migrated_enabled': 0, 'migrated_disabled': [],
@@ -212,7 +212,7 @@ def _migrate_versions(session, project_id: int, dry_run: bool, enforce_limits: b
         'original_triggers': [],
     }
     enabled_before = session.scalar(
-        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True), not_draft())
+        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True))
     )
     now = datetime.now(UTC)
     cap = schedule_limits().max_enabled_per_project

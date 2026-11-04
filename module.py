@@ -1,7 +1,6 @@
 import functools
 import os
 import re
-import time
 
 from collections import OrderedDict
 from json import dumps
@@ -413,7 +412,6 @@ class Module(module.ModuleModel):
             log.exception("Failed to preload UI bundle")
 
     def ready(self):
-        self._ensure_schedule_draft_column()  # before any schedule read or tick; see the method
         self._register_managed_schedules()
         self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
@@ -592,6 +590,10 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "fix_platform_tick_row", self.fix_platform_tick_row,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_schedule_test_runs", self.migrate_schedule_test_runs,
                 group="R-2.0.8",
             )
         except Exception as e:
@@ -861,41 +863,6 @@ class Module(module.ModuleModel):
                     log.info("schedule streak schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
             except Exception:  # pylint: disable=W0703
                 log.exception("schedule streak schema: auto-migration failed")
-
-        Thread(target=_run, daemon=True).start()
-
-    def _ensure_schedule_draft_column(self):
-        """Startup safety net: add entity_schedules.draft to the project schemas that predate it. The ORM names the
-        column in every read, the tick included, so this runs on the boot thread: the module serves after it. A
-        failed project is tried again; no DDL in steady state."""
-        try:
-            from .utils.schedule_draft_schema import (  # pylint: disable=C0415
-                apply_draft_column, project_ids_missing_draft_column,
-            )
-            pending = project_ids_missing_draft_column()
-            if pending:
-                migrated, failed = apply_draft_column(pending)
-                log.info("schedule draft schema: column added (migrated=%s failed=%s)", len(migrated), len(failed))
-                if failed:
-                    log.error("schedule draft schema: projects still without the column, retrying in the "
-                              "background: %s", failed)
-                    self._retry_schedule_draft_column(failed)
-        except Exception:  # pylint: disable=W0703
-            log.exception("schedule draft schema: auto-migration failed")
-
-    def _retry_schedule_draft_column(self, project_ids):
-        """Try the projects that the boot net could not fix again, every minute, up to ten times."""
-        def _run():
-            from .utils.schedule_draft_schema import apply_draft_column  # pylint: disable=C0415
-            pending = list(project_ids)
-            for _ in range(10):
-                time.sleep(60)
-                _, pending = apply_draft_column(pending, attempts=1)
-                if not pending:
-                    log.info("schedule draft schema: the background retry fixed every project")
-                    return
-            log.error("schedule draft schema: gave up on projects %s; add the column by hand "
-                      "(db_migrations.txt)", pending)
 
         Thread(target=_run, daemon=True).start()
 
@@ -1506,6 +1473,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_governance_settings_tables", self.create_governance_settings_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_schedule_test_runs", self.migrate_schedule_test_runs
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

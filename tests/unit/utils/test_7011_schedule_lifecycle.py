@@ -30,7 +30,6 @@ class EntitySchedule(Base):
     created_by: Mapped[int] = mapped_column(Integer)
     version_id: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean)
-    draft: Mapped[bool] = mapped_column(Boolean)
     disabled_reason: Mapped[str | None] = mapped_column(String)
     updated_at: Mapped[str | None] = mapped_column(String)
 
@@ -64,7 +63,6 @@ def lifecycle(isolated_sys_modules):
         sys.modules[name].__path__ = []
     schedule_models = types.ModuleType(f'{PKG}.models.entity_schedule')
     schedule_models.EntitySchedule = EntitySchedule
-    schedule_models.not_draft = lambda: EntitySchedule.draft.is_(False)
     sys.modules[schedule_models.__name__] = schedule_models
     return load_module_with_stubs(
         PLUGIN_ROOT / 'utils/schedule_lifecycle.py', f'{PKG}.utils.schedule_lifecycle'
@@ -109,11 +107,3 @@ def test_7011_r23_disable_without_versions_sends_no_statement(lifecycle, version
 
     assert lifecycle.disable_version_schedules(session, version_ids) == []
     assert session.statements == []
-
-
-def test_version_delete_leaves_draft_rows_alone(lifecycle):
-    session = RecordingSession([])
-
-    lifecycle.disable_version_schedules(session, [8])
-
-    assert 'entity_schedules.draft IS false' in _sql(session.statements[0])
