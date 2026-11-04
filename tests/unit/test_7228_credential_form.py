@@ -55,7 +55,7 @@ class World:
         self.logs, self.events, self.calls = [], [], []
         self.permissions = {MEMBER: {"governance.request", "configurations.configuration.create"},
                             OTHER: {"governance.request", "configurations.configuration.create"}}
-        self.personal_project = False
+        self.personal_project = True   # (round 5) the ownership follows the project: the personal project's is personal
         self.secret_names = {"access_token"}
         self.properties = {"access_token", "base_url", "refresh_token"}
         self.section = "credentials"
@@ -236,7 +236,7 @@ def _entry(w, credential_type):
 
 def body(w, **over):
     values = {"interrupt_id": INTERRUPT, "message_id": MESSAGE, "credential_type": "github", "title": "GitHub",
-              "fields": {"access_token": VALUE, "base_url": "https://api.github.com"}, "ownership": "personal"}
+              "fields": {"access_token": VALUE, "base_url": "https://api.github.com"}}
     values.update(over)
     return sys.modules[f"{PKG}.models.pd.credential_form"].CredentialFormBody.model_validate(values)
 
@@ -284,16 +284,11 @@ def test_the_reply_events_meta_and_logs_hold_no_value_and_no_placeholder(world):
     assert world.message.meta["hitl_interrupt"]["credential_form_result"] == stored
 
 
-def test_only_me_marks_the_configuration_as_its_authors_own_and_a_team_one_is_unmarked(world):
-    """(#7228) "Only me (in this project)": the toolkit picker lists the configuration under its author's own; the
-    governed reference, not this label, decides who may use it."""
-    complete(world)
-    assert world.created_payload["meta"] == {"personal_owner_id": MEMBER}
-
-
-def test_a_team_credential_is_a_pending_request_imported_from_its_configuration_and_never_probed_by_the_member(world):
-    reply = complete(world, ownership="project_shared")
-    assert "meta" not in world.created_payload               # a team one names no owner
+def test_a_team_projects_credential_is_the_projects_pending_request_imported_and_never_probed_by_the_member(world):
+    """(round 5) in a team project the credential is the project's: never chosen, never marked as anyone's."""
+    world.personal_project = False
+    reply = complete(world)
+    assert "meta" not in world.created_payload               # no owner label on any configuration
     assert world.calls[0][2] is True                         # the configuration is shared
     assert world.calls[1][3][0]["ownership_class"] == "project_shared"
     assert world.calls[2] == ("reference_action", "import", None, MEMBER)
@@ -301,19 +296,17 @@ def test_a_team_credential_is_a_pending_request_imported_from_its_configuration_
     assert reply["state"] == "pending"
 
 
-@pytest.mark.parametrize("case", ["personal_project", "delegated"])
-def test_a_team_credential_in_a_personal_project_or_of_a_sign_in_type_is_ownership_invalid(world, case):
-    if case == "personal_project":
-        world.personal_project = True
-        found = refused(world, ownership="project_shared")
-    else:
-        found = refused(world, ownership="project_shared", credential_type="sharepoint",
-                        fields={"site_url": "https://example.sharepoint.com/sites/a"})
-    assert (found.code, found.status) == ("OWNERSHIP_INVALID", 400)
-    assert [call for call in world.calls if call[0] == "create_configuration"] == []
+def test_the_personal_projects_credential_is_personal_and_unmarked(world):
+    complete(world)
+    assert world.calls[0][2] is False and "meta" not in world.created_payload
+    assert world.calls[1][3][0]["ownership_class"] == "personal"
 
 
-def test_a_sign_in_credential_is_delegated_personal_stores_nothing_and_is_probed_by_its_owner(world):
+@pytest.mark.parametrize("personal_project", [True, False])
+def test_a_sign_in_credential_is_delegated_personal_stores_nothing_and_is_probed_by_its_owner(world, personal_project):
+    """In a team project its configuration is the project's container (shared, no secret inside) and the reference is
+    the person's own sign-in for it (#6756 personal references on a project configuration, #7119)."""
+    world.personal_project = personal_project
     world.meta["hitl_interrupts"] = [world.interrupt(credential_type="sharepoint")]
     world.meta["hitl_interrupt"] = world.interrupt(credential_type="sharepoint")
     reply = complete(world, credential_type="sharepoint", fields={"site_url": "https://example.sharepoint.com/sites/a"})
@@ -327,6 +320,7 @@ def test_a_sign_in_credential_is_delegated_personal_stores_nothing_and_is_probed
     assert "write_material" not in [call[0] for call in world.calls]
     assert ("reference_action", "probe", None, MEMBER) in world.calls
     assert reply["credential_type"] == "sharepoint"
+    assert world.calls[0][2] is (not personal_project)
 
 
 def test_a_sign_in_credential_takes_no_typed_secret(world):
@@ -432,7 +426,8 @@ def test_fields_must_be_the_types_own_and_hold_its_secret(world, fields):
     {"fields": {f"f{i}": "x" for i in range(33)}},
     {"fields": {"bad name": "x"}},
     {"fields": {"access_token": "x" * 9000}},
-    {"ownership": "platform"},
+    {"ownership": "personal"},        # (round 5) an old client's ownership choice: the strict body refuses it
+    {"ownership": "project_shared"},
     {"auth_mode": "static"},
     {"message_id": "not-a-uuid"},
     {"title": ""},
@@ -440,7 +435,7 @@ def test_fields_must_be_the_types_own_and_hold_its_secret(world, fields):
 def test_the_body_is_strict_and_its_errors_never_echo_a_value(world, over):
     from pydantic import ValidationError
     values = {"interrupt_id": INTERRUPT, "message_id": MESSAGE, "credential_type": "github", "title": "GitHub",
-              "fields": {"access_token": VALUE}, "ownership": "personal", **over}
+              "fields": {"access_token": VALUE}, **over}
     model = sys.modules[f"{PKG}.models.pd.credential_form"].CredentialFormBody
     with pytest.raises(ValidationError) as error:
         model.model_validate(values)
@@ -605,7 +600,7 @@ def route(world, monkeypatch):
         holder.kind, holder.actor, holder.session = kind, actor, session
         request.json_body = json_body if json_body is not None else {
             "interrupt_id": INTERRUPT, "message_id": MESSAGE, "credential_type": "github", "title": "GitHub",
-            "fields": {"access_token": VALUE}, "ownership": "personal"}
+            "fields": {"access_token": VALUE}}
         handler = endpoint.PromptLibAPI(world.module)
         return handler.post(PROJECT, CONVERSATION)
 

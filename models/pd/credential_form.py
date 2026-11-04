@@ -19,7 +19,6 @@ class CredentialFormBody(BaseModel):
     credential_type: StrictStr = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_]+$")
     title: StrictStr = Field(min_length=1, max_length=64)
     fields: Dict[StrictStr, SecretStr] = Field(default_factory=dict)
-    ownership: Literal["personal", "project_shared"] = "personal"
     # a flag only: the descriptor of a sign-in credential is the server's (the person's own tenant and login)
     auth_mode: Optional[Literal["entra_delegated"]] = None
 

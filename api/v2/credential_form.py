@@ -1,7 +1,7 @@
 """The chat's credential form (#7228, C-1009): the person creates the credential a paused governed run asked for.
 
 ``POST .../credential_form/prompt_lib/<project_id>/<conversation_uuid>`` ``{interrupt_id, message_id, credential_type,
-title, fields, ownership, auth_mode?, delegation?}`` (``utils/credential_form``). The person's own signed-in session
+title, fields, auth_mode?}`` (``utils/credential_form``). The person's own signed-in session
 only (no API token, no run token), ``governance.request`` in the project, governance enforced. Answers
 ``{reference_id, configuration_id, configuration_uuid, configuration_title, title, credential_type, state, requests}``:
 never a value. It does not resume the run.
@@ -46,7 +46,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Create Credential From Chat",
         description=("The person creates the credential a paused governed run asked for (the chat's credential form): "
-                     "the configuration, its governed reference (personal, or a team one to approve), its value and the "
+                     "the configuration, its governed reference (the project's, to approve; personal in the personal project or for a sign-in), its value and the "
                      "requests the run's agent needs. Session only; the value never reaches the model."),
         tags=[api.OPENAPI_TAG],
         parameters=[{"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}},

@@ -6,12 +6,14 @@ the credential type, a title, a purpose). The chat renders the form inline; **Cr
 under the person's own session (``complete``):
 
 1. read only: governance enforced, the interrupt pending on that message with the same credential type, the type a
-   credential type whose fields the body names, the ownership the person may choose;
+   credential type whose fields the body names;
 2. the configuration is created by the configurations create service the REST route uses (author = the person,
-   ``shared`` only for a team credential);
-3. one transaction (``_OneTransaction`` as ``governance_requests``): the governed reference (personal, custodian = the
-   person; a team one ``pending`` and ``created_by`` the person, which a project admin approves like every request;
-   an Entra sign-in type always personal and delegated), filed by secrets' own lifecycle;
+   ``shared`` in a team project: credentials are the project's, the person never chooses);
+3. one transaction (``_OneTransaction`` as ``governance_requests``): the governed reference, filed by secrets' own
+   lifecycle. In a team project the project's one, ``pending`` and ``created_by`` the person, which a project admin
+   approves like every request; in the person's personal project a personal one (custodian = the person). An Entra
+   sign-in type is always personal and delegated: in a team project its configuration is the project's container
+   (no secret inside) and the reference is the person's own sign-in for it, as every member's is (#6756, #7119);
 4. the value through the store's own staged write (personal: the owner's value write; team: the import); a failure
    retires the reference and deletes the configuration, so nothing is kept;
 5. the person's own check of it (best effort: a failed probe leaves it pending, the state says so);
@@ -51,16 +53,13 @@ NOT_TYPED = frozenset({"refresh_token"})   # a stored sign-in is written by the 
 TITLE_MAX = 64
 
 STATUS = {"PROJECT_GOVERNANCE_OFF": 409, "NOT_FOUND": 404, "INTERRUPT_MISMATCH": 409, "INVALID_REQUEST": 400,
-          "NOT_RUN_USER": 403, "FORM_IN_PROGRESS": 409,
-          "OWNERSHIP_INVALID": 400, "FORBIDDEN": 403, "DEPENDENCY_UNAVAILABLE": 503, "HITL_VALUE_INVALID": 400}
+          "NOT_RUN_USER": 403, "FORM_IN_PROGRESS": 409, "FORBIDDEN": 403, "DEPENDENCY_UNAVAILABLE": 503, "HITL_VALUE_INVALID": 400}
 MESSAGES = {
     "PROJECT_GOVERNANCE_OFF": "The credential form applies only while credential governance is enforced; nothing was "
                               "created.",
     "NOT_FOUND": "This credential request is no longer waiting; nothing was created.",
     "INTERRUPT_MISMATCH": "The form does not match what the agent asked for; nothing was created.",
     "INVALID_REQUEST": "The form is not valid for this credential type; nothing was created.",
-    "OWNERSHIP_INVALID": "A sign-in credential, or a credential in a personal project, is always private; nothing was "
-                         "created.",
     "FORBIDDEN": "You may not create credentials in this project; nothing was created.",
     "DEPENDENCY_UNAVAILABLE": "The credential could not be stored right now; nothing was kept. Try again in a moment.",
     "HITL_VALUE_INVALID": "The answer to the credential request is not valid; nothing was resumed.",
@@ -174,11 +173,6 @@ def _elitea_title(title):
     return f"{base}_{_random.token_hex(3)}"
 
 
-# (#7228) the configuration meta key naming the member a form-created "Only me" credential belongs to (a label for the
-# toolkit picker; who may use it is decided by its governed reference, never by this)
-PERSONAL_OWNER_META = "personal_owner_id"
-
-
 def _create_configuration(project_id, body, actor, shared, delegated=False):
     from plugins.configurations.exceptions import ConfigurationError  # pylint: disable=C0415,E0401
     from plugins.configurations.utils import create_configuration  # pylint: disable=C0415,E0401
@@ -187,8 +181,6 @@ def _create_configuration(project_id, body, actor, shared, delegated=False):
         data["auth_mode"] = DELEGATED_AUTH_MODE
     payload = {"elitea_title": _elitea_title(body.title), "label": body.title, "type": body.credential_type,
                "shared": shared, "project_id": project_id, "author_id": actor, "data": data}
-    if not shared:   # (#7228) "Only me (in this project)": the toolkit picker lists it as its author's own
-        payload["meta"] = {PERSONAL_OWNER_META: actor}
     try:
         return create_configuration(payload)
     except ConfigurationError as exc:
@@ -344,8 +336,6 @@ def _check_body(body):
     delegated = body.credential_type in _delegated_types()
     if body.auth_mode is not None and not delegated:
         raise FormRefused("INVALID_REQUEST", "auth_mode")
-    if delegated and body.ownership != PERSONAL:
-        raise FormRefused("OWNERSHIP_INVALID")
     properties = set(((getattr(entry, "config_schema", None) or {}).get("properties") or {}))
     unknown = sorted(name for name in body.fields if name not in properties or name in NOT_TYPED)
     # typed values only: a ``{{secret.…}}`` placeholder would make an existing project secret the person's credential
@@ -444,20 +434,21 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
     delegated, secret_fields = _check_body(body)
     if not _may_create(project_id, actor):
         raise FormRefused("FORBIDDEN")
-    if body.ownership == SHARED and _is_personal_project(project_id, actor):
-        raise FormRefused("OWNERSHIP_INVALID")
+    personal_project = _is_personal_project(project_id, actor)
+    # (#7228 round 5) the ownership follows the project, never the body: a team project's credential is the project's
+    ownership = PERSONAL if personal_project or delegated else SHARED
     delegation = _default_delegation(actor) if delegated else None
     done, run_version, nonce = _claim(project_id, conversation_uuid, body, actor)
     if done is not None:   # the same form sent again: the record, nothing created twice
         return {**public_result(done), "configuration_id": done.get("configuration_id"), "requests": []}
     step, created, ref_id = "configuration", None, None
     try:
-        created = _create_configuration(project_id, body, actor, body.ownership == SHARED, delegated)
+        created = _create_configuration(project_id, body, actor, not personal_project, delegated)
         step = "reference"
-        ref_id = _file_reference(project_id, str(created.get("uuid")), actor, body.ownership, delegation)
+        ref_id = _file_reference(project_id, str(created.get("uuid")), actor, ownership, delegation)
         if not delegated:
             step = "value"
-            stored = _store_value(project_id, ref_id, secret_fields, body.ownership, actor)
+            stored = _store_value(project_id, ref_id, secret_fields, ownership, actor)
             if stored.get("error") is not None:
                 log.error("credential form: the value was not stored (%s)", stored.get("code"))
                 raise FormRefused("DEPENDENCY_UNAVAILABLE")
@@ -468,7 +459,7 @@ def complete(module, project_id, conversation_uuid, body, actor):  # pylint: dis
             raise
         log.error("credential form: failed at %s (%s)", step, type(exc).__name__)
         raise FormRefused(code) from None
-    state, check_code = _probe(project_id, ref_id, body.ownership, delegated, actor)
+    state, check_code = _probe(project_id, ref_id, ownership, delegated, actor)
     filed, refused = _file_run_requests(module, project_id, run_version, actor, conversation_uuid)
     result = {"reference_id": ref_id, "configuration_id": created.get("id"),
               "configuration_uuid": str(created.get("uuid")), "configuration_title": created.get("elitea_title"),
