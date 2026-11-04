@@ -315,13 +315,20 @@ def validate_pipeline_yaml(
 
     # --- V-01: nodes key ---------------------------------------------------
     nodes_raw = data.get("nodes")
-    if not nodes_raw or not isinstance(nodes_raw, list):
+    if nodes_raw is not None and not isinstance(nodes_raw, list):
+        # nodes key is present but is not a list — genuinely malformed
         errors.append(_err(
             "missing_nodes", None, "nodes",
-            "Pipeline must have a top-level 'nodes' key containing a non-empty list. "
-            "Add at least one node."
+            "The 'nodes' key must be a list. Found a non-list value."
         ))
         return PipelineValidationResult(valid=False, errors=errors, warnings=warnings)
+    if not nodes_raw:
+        # nodes key absent or empty list — incomplete/draft pipeline, warn only
+        warnings.append(_warn(
+            "missing_nodes", None, "nodes",
+            "Pipeline has no nodes yet. Add at least one node before running."
+        ))
+        nodes_raw = []
 
     # --- V-02: every node has a non-empty id --------------------------------
     node_ids: list[str] = []
@@ -389,7 +396,7 @@ def validate_pipeline_yaml(
     top_level_entry = data.get("entry_point")
     if isinstance(top_level_entry, str) and top_level_entry.strip():
         entrypoint_id = top_level_entry.strip()
-        if entrypoint_id not in node_id_set:
+        if node_id_set and entrypoint_id not in node_id_set:
             errors.append(_err(
                 "unknown_entrypoint", None, "entry_point",
                 f"entry_point '{entrypoint_id}' does not match any node id. "
@@ -440,13 +447,13 @@ def validate_pipeline_yaml(
     terminal_node_ids = {
         n["id"].strip() for n in valid_nodes if _is_terminal_node(n)
     }
-    if not terminal_node_ids:
+    if valid_nodes and not terminal_node_ids:
         errors.append(_err(
             "no_end_node", None, "nodes",
             "The pipeline has no terminal node. "
             "Set `transition: END` on the last node of each execution path."
         ))
-    elif entrypoint_id is not None:
+    elif valid_nodes and entrypoint_id is not None:
         # BFS from entrypoint through the adjacency graph (END excluded from graph nodes)
         visited: set[str] = set()
         queue: deque[str] = deque([entrypoint_id])

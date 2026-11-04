@@ -96,15 +96,17 @@ entry_point: proc
 # ---------------------------------------------------------------------------
 
 class TestV01MissingNodes:
-    def test_missing_nodes_key(self):
+    def test_missing_nodes_key_is_warning_not_error(self):
         r = validate_pipeline_yaml("entry_point: step1\n")
-        assert r.valid is False
-        assert "missing_nodes" in _error_codes(r)
+        assert r.valid is True
+        assert "missing_nodes" in _warning_codes(r)
+        assert "missing_nodes" not in _error_codes(r)
 
-    def test_empty_nodes_list(self):
+    def test_empty_nodes_list_is_warning_not_error(self):
         r = validate_pipeline_yaml("nodes: []\nentry_point: step1\n")
-        assert r.valid is False
-        assert "missing_nodes" in _error_codes(r)
+        assert r.valid is True
+        assert "missing_nodes" in _warning_codes(r)
+        assert "missing_nodes" not in _error_codes(r)
 
     def test_nodes_is_not_a_list(self):
         r = validate_pipeline_yaml("nodes: scalar\nentry_point: step1\n")
@@ -289,6 +291,11 @@ entry_point: step1
         r = validate_pipeline_yaml(yaml)
         assert r.valid is False
         assert "no_end_node" in _error_codes(r)
+
+    def test_empty_pipeline_does_not_raise_no_end_node(self):
+        r = validate_pipeline_yaml("nodes: []\n")
+        assert "no_end_node" not in _error_codes(r)
+        assert r.valid is True
 
     def test_terminal_unreachable_from_entrypoint(self):
         yaml = """
