@@ -10,6 +10,7 @@ import types
 from unittest import mock
 
 import pytest
+from pydantic import BaseModel
 from fixtures.helpers import load_module_with_stubs
 from sqlalchemy import Boolean, Integer, String, select
 from sqlalchemy.dialects import postgresql
@@ -48,6 +49,13 @@ class EntityScheduleRun(Base):
     trigger: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String)
     version_id: Mapped[int] = mapped_column(Integer)
+    form: Mapped[dict] = mapped_column(JSONB)
+
+
+class EntitySchedule(Base):
+    __tablename__ = 'entity_schedules'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
 
 
 class Participant(Base):
@@ -162,7 +170,8 @@ def rpc_module(isolated_sys_modules):
     sys.modules[f'{PACKAGE}.models.conversation'] = types.SimpleNamespace(Conversation=Conversation)
     sys.modules[f'{PACKAGE}.models.folder'] = types.SimpleNamespace(ConversationFolder=mock.MagicMock())
     sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
-        EntitySchedule=mock.MagicMock(), EntityScheduleRun=EntityScheduleRun)
+        EntitySchedule=EntitySchedule, EntityScheduleRun=EntityScheduleRun,
+        RUN_FORM=EntityScheduleRun.__table__.c.form)
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
@@ -279,7 +288,7 @@ def _run_filter_sql(rpc_module, **kwargs):
 
 
 def test_run_options_share_one_semi_join_on_the_run_row_with_the_schedule(rpc_module):
-    sql = _run_filter_sql(rpc_module, schedule_id=5, run_status='failed', run_trigger_type='scheduled',
+    sql = _run_filter_sql(rpc_module, schedule_id=5, run_status='failed', run_trigger='cron',
                           run_version_id=9)
     assert (
         "chat_conversations.id IN (SELECT entity_schedule_runs.conversation_id FROM entity_schedule_runs "
@@ -289,11 +298,57 @@ def test_run_options_share_one_semi_join_on_the_run_row_with_the_schedule(rpc_mo
     assert sql.count('entity_schedule_runs.conversation_id') == 1
 
 
-@pytest.mark.parametrize(('trigger_type', 'stored'), [('scheduled', 'cron'), ('manual', 'manual'), ('test', 'test')])
-def test_the_trigger_type_filter_reads_the_stored_trigger(rpc_module, trigger_type, stored):
-    sql = _run_filter_sql(rpc_module, run_trigger_type=trigger_type)
-    assert f"entity_schedule_runs.trigger = '{stored}'" in sql
+@pytest.mark.parametrize('trigger', ['cron', 'manual', 'test'])
+def test_the_trigger_filter_compares_the_stored_trigger(rpc_module, trigger):
+    sql = _run_filter_sql(rpc_module, run_trigger=trigger)
+    assert f"entity_schedule_runs.trigger = '{trigger}'" in sql
     assert 'schedule_id' not in sql
+
+
+def test_the_old_trigger_type_names_are_gone(rpc_module, api):
+    assert not hasattr(rpc_module, 'RUN_TRIGGER_OF_TYPE')
+    names = dir(sys.modules[f'{PACKAGE}.models.pd.schedule_list'])
+    assert [n for n in names if n.startswith('RunTrigger')] == ['RunTrigger']
+
+
+class RecordingRunQuery:
+    """Query for the run records: it keeps the columns and the join kind, and returns fixed rows."""
+
+    def __init__(self, rows):
+        self.rows, self.outer = rows, None
+
+    def outerjoin(self, *args):
+        self.outer = True
+        return self
+
+    def join(self, *args):
+        self.outer = False
+        return self
+
+    def filter(self, *args):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class RunRef(BaseModel):
+    id: int
+    schedule_id: int | None
+    schedule_name: str | None
+    status: str
+    trigger: str
+
+
+def test_a_run_without_a_schedule_is_listed_with_the_name_of_its_form(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    query = RecordingRunQuery([(9, 4, None, 'Draft form name', 'success', 'test')])
+    session = types.SimpleNamespace(query=lambda *columns: query)
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert query.outer is True
+    assert runs == {4: {'id': 9, 'schedule_id': None, 'schedule_name': 'Draft form name', 'status': 'success',
+                        'trigger': 'test'}}
 
 
 def test_a_list_without_run_options_adds_no_run_filter(rpc_module):
@@ -301,7 +356,7 @@ def test_a_list_without_run_options_adds_no_run_filter(rpc_module):
 
 
 @pytest.mark.parametrize(('args', 'field'), [
-    ({'status': 'done'}, 'status'), ({'trigger_type': 'cron'}, 'trigger_type'), ({'trigger_type': ''}, 'trigger_type'),
+    ({'status': 'done'}, 'status'), ({'trigger': 'scheduled'}, 'trigger'), ({'trigger': ''}, 'trigger'),
     ({'version_id': 'x'}, 'version_id'), ({'version_id': '0'}, 'version_id'),
 ])
 def test_an_unknown_run_option_is_400_and_the_rpc_is_not_called(api, args, field):
@@ -311,7 +366,12 @@ def test_an_unknown_run_option_is_400_and_the_rpc_is_not_called(api, args, field
 
 
 def test_valid_run_options_reach_the_rpc(api):
-    _, status = _get(api, status='running', trigger_type='test', version_id='12', schedule_id='5')
+    _, status = _get(api, status='running', trigger='test', version_id='12', schedule_id='5')
     assert status == 200
-    assert {k: api.calls[0][k] for k in ('schedule_id', 'run_status', 'run_trigger_type', 'run_version_id')} == {
-        'schedule_id': 5, 'run_status': 'running', 'run_trigger_type': 'test', 'run_version_id': 12}
+    assert {k: api.calls[0][k] for k in ('schedule_id', 'run_status', 'run_trigger', 'run_version_id')} == {
+        'schedule_id': 5, 'run_status': 'running', 'run_trigger': 'test', 'run_version_id': 12}
+
+
+def test_the_trigger_option_does_not_take_the_old_query_name(api):
+    _get(api, trigger_type='test')
+    assert api.calls[0]['run_trigger'] is None

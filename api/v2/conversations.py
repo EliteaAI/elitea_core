@@ -4,21 +4,13 @@ from tools import serialize
 
 from typing import get_args
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
-from ...models.pd.schedule_list import DbId, RunStatus, RunTriggerType
+from ...models.pd.schedule_list import RunFilters, RunStatus, RunTrigger
 from ...utils.conversation_utils import create_conversation, get_conversation_details
 from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.constants import PROMPT_LIB_MODE
-
-
-class RunFilters(BaseModel):
-    """The run options of the list; each one keeps only the chats of a schedule run with that value."""
-
-    status: RunStatus | None = None
-    trigger_type: RunTriggerType | None = None
-    version_id: DbId | None = None
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -64,9 +56,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "status", "in": "query", "required": False,
              "schema": {"type": "string", "enum": list(get_args(RunStatus))},
              "description": "Only conversations of a schedule run with this status. Unknown value: 400."},
-            {"name": "trigger_type", "in": "query", "required": False,
-             "schema": {"type": "string", "enum": list(get_args(RunTriggerType))},
-             "description": "Only conversations of a scheduled, manual or test schedule run. Unknown value: 400."},
+            {"name": "trigger", "in": "query", "required": False,
+             "schema": {"type": "string", "enum": list(get_args(RunTrigger))},
+             "description": "Only conversations of a schedule run with this trigger: cron (scheduled), manual or test. "
+                            "Unknown value: 400."},
             {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1},
              "description": "Only conversations of a schedule run of this version. Not an id: 400."},
         ],
@@ -117,7 +110,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             entity_project_id=request.args.get('entity_meta_project_id', type=int),
             schedule_id=schedule_id,
             run_status=run_filters.status,
-            run_trigger_type=run_filters.trigger_type,
+            run_trigger=run_filters.trigger,
             run_version_id=run_filters.version_id,
         )
 

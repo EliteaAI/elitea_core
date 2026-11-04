@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
 from ..models.folder import ConversationFolder
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import RUN_FORM, EntitySchedule, EntityScheduleRun
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
@@ -36,8 +36,6 @@ from ..utils.model_defaults import creation_llm_settings, chat_request_default
 # and CLI tools may pass larger values, but anything above this is rejected
 # silently rather than fanning into a heavy GROUP BY.
 LIST_CONVERSATIONS_MAX_LIMIT = 100
-# The run history names the stored `cron` trigger "scheduled"
-RUN_TRIGGER_OF_TYPE = {'scheduled': 'cron', 'manual': 'manual', 'test': 'test'}
 
 
 def _schedule_runs(session, conversations) -> dict[int, dict]:
@@ -61,8 +59,10 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
         ).model_dump()
         for run_id, conversation_id, schedule_id, name, status, trigger in (
             session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
-                          EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
-            .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+                          func.coalesce(EntitySchedule.name, RUN_FORM['name'].astext),
+                          EntityScheduleRun.status, EntityScheduleRun.trigger)
+            # A Test Run has no schedule row: its name comes from the saved form
+            .outerjoin(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
             .filter(EntityScheduleRun.id.in_(set(run_of.values())),
                     EntityScheduleRun.conversation_id.in_(list(run_of)))
             .all()
@@ -428,7 +428,7 @@ class RPC:
         entity_project_id: int = None,
         schedule_id: int | None = None,
         run_status: str | None = None,
-        run_trigger_type: str | None = None,
+        run_trigger: str | None = None,
         run_version_id: int | None = None,
     ) -> dict:
         """
@@ -442,7 +442,7 @@ class RPC:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
             schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
-            run_status, run_trigger_type, run_version_id: Optional run options (`scheduled` is the stored `cron`);
+            run_status, run_trigger, run_version_id: Optional run options (`run_trigger` is a stored trigger: cron, manual, test);
                 they combine with `schedule_id` and each other on the same run row
         """
         with db.get_session(project_id) as session:
@@ -525,8 +525,8 @@ class RPC:
                 run_conditions.append(EntityScheduleRun.schedule_id == schedule_id)
             if run_status is not None:
                 run_conditions.append(EntityScheduleRun.status == run_status)
-            if run_trigger_type is not None:
-                run_conditions.append(EntityScheduleRun.trigger == RUN_TRIGGER_OF_TYPE[run_trigger_type])
+            if run_trigger is not None:
+                run_conditions.append(EntityScheduleRun.trigger == run_trigger)
             if run_version_id is not None:
                 run_conditions.append(EntityScheduleRun.version_id == run_version_id)
             if run_conditions:

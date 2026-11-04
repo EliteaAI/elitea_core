@@ -32,8 +32,8 @@ class ConversationList(ConversationBase):
 class ScheduleRunRef(BaseModel):
     """The run record of a run history row: the schedule is read live, the status stays raw (CR-22, US-38 D6)."""
     id: int
-    schedule_id: int
-    schedule_name: str
+    schedule_id: int | None  # null for a Test Run, which has no schedule row
+    schedule_name: str | None
     status: str
     trigger: str
 
@@ -54,13 +54,13 @@ class ConversationListExtended(ConversationList):
         # Late import: that module loads the DB models
         from ...utils.pipeline_execution import TriggerType
         stored = self.meta.get('execution_type')
+        if stored == 'schedule_test':
+            # Old rows exist whose meta still holds the dropped test type; a test run reads schedule_manual now
+            stored = TriggerType.SCHEDULE_MANUAL
         if stored in TriggerType.VALUES:
             self.execution_type = stored
         elif self.meta.get('scheduled_run') is True:
             self.execution_type = 'scheduled'
-        # A chat made before the test type was stored reads schedule_manual; its run row still says test
-        if self.execution_type == TriggerType.SCHEDULE_MANUAL and self.schedule_run and self.schedule_run.trigger == 'test':
-            self.execution_type = TriggerType.SCHEDULE_TEST
         return self
 
     @model_validator(mode='after')
