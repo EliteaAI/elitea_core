@@ -47,7 +47,7 @@ class Recorder:
 def apply(monkeypatch):
     prerun = load(PRERUN, fresh=True)
 
-    def run(recorder):
+    def run(recorder, schedule=None):
         monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_runs", SimpleNamespace(
             fail_schedule_run=recorder.fail_schedule_run, disable_schedule=recorder.disable_schedule,
             park_for_credentials=recorder.park_for_credentials))
@@ -60,7 +60,8 @@ def apply(monkeypatch):
         monkeypatch.setattr(prerun, "check_owner_access", recorder.step("access"))
         monkeypatch.setattr(prerun, "check_owner_rights", recorder.step("rights"))
         monkeypatch.setattr(prerun, "check_owner_credentials", recorder.step("credentials"))
-        schedule = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4)
+        schedule = schedule or SimpleNamespace(
+            id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4)
         return prerun.run_prerun_check(34, schedule, RUN_ID)
     run.prerun = prerun
     return run
@@ -223,3 +224,13 @@ def test_a_mark_is_cleared_when_a_check_raises(apply):
 
     assert result.reason == "the pre-run check failed"
     assert RUN_ID not in apply.prerun._CHECKED_RUNS
+
+
+def test_a_test_run_with_no_schedule_only_fails_its_run_when_the_owner_lost_access(apply):
+    recorder = Recorder(access="owner lost access")
+    form = SimpleNamespace(id=None, created_by=OWNER, entity_type="agent", application_id=3, version_id=4)
+
+    result = apply(recorder, form)
+
+    assert (result.ok, result.reason) == (False, "owner lost access")
+    assert recorder.effects() == ["principal", "access", "fail"]

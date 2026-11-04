@@ -200,6 +200,8 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     if waits_for_owner and _park(project_id, run_id, reason):
         return PreRunResult(False, None, reason)
     fail_schedule_run(project_id, run_id, reason)
+    if schedule.id is None:  # a Test Run has no schedule to disable and no schedule page to link a notice to
+        return PreRunResult(False, None, reason)
     event = Types.schedule_run_failed
     if reason == OWNER_LOST_ACCESS:
         disable_schedule(project_id, schedule.id, DISABLED_OWNER_LOST_ACCESS)

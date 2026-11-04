@@ -621,6 +621,33 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "failed_projects": failed, "dry_run": values["dry_run"]}
 
     @web.method()
+    def migrate_schedule_test_runs(self, *args, **kwargs):
+        """Admin task: add the Test Run columns and indexes to entity_schedule_runs in each project schema (R-2.0.8).
+
+        Adds ``form`` and ``application_id``, lets ``schedule_id`` be NULL, and creates the Test Run indexes. Idempotent;
+        new projects get them from ``create_all``. A project is one transaction.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"              - dry run across all projects (default; changes nothing)
+            "project_id=34;dry_run=false" - migrate project 34
+        """
+        from ..utils.schedule_test_run_schema import (  # pylint: disable=C0415
+            dry_run_flag, run_schedule_test_run_migration,
+        )
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_schedule_test_runs: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        return run_schedule_test_run_migration(project_ids, dry_run_flag(param))
+
+    @web.method()
     def create_agent_identity_tables(self, *args, **kwargs):
         """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
 

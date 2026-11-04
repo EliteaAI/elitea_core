@@ -2,9 +2,12 @@ from flask import request
 from tools import api_tools, auth, db, config as c, MinioClient, rpc_tools, register_openapi
 from tools import serialize
 
+from typing import get_args
+
 from pydantic import ValidationError
 
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
+from ...models.pd.schedule_list import RunFilters, RunStatus, RunTrigger
 from ...utils.conversation_utils import create_conversation, get_conversation_details
 from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.constants import PROMPT_LIB_MODE
@@ -50,6 +53,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Owner project of a 'skill' participant; separates own skills from Catalog skills."},
             {"name": "schedule_id", "in": "query", "required": False, "schema": {"type": "integer"},
              "description": "Only conversations started by this schedule (meta.schedule_id). Not an integer: 400."},
+            {"name": "status", "in": "query", "required": False,
+             "schema": {"type": "string", "enum": list(get_args(RunStatus))},
+             "description": "Only conversations of a schedule run with this status. Unknown value: 400."},
+            {"name": "trigger", "in": "query", "required": False,
+             "schema": {"type": "string", "enum": list(get_args(RunTrigger))},
+             "description": "Only conversations of a schedule run with this trigger: cron (scheduled), manual or test. "
+                            "Unknown value: 400."},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1},
+             "description": "Only conversations of a schedule run of this version. Not an id: 400."},
         ],
         available_to_users=True,
     )
@@ -75,6 +87,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {'error': 'schedule_id must be an integer', 'field': 'schedule_id'}, 400
             schedule_id = int(schedule_id)
 
+        try:  # an unknown value is a 400, never ignored: an ignored filter would show every run as the match
+            run_filters = RunFilters.model_validate({
+                name: request.args[name] for name in RunFilters.model_fields if name in request.args})
+        except ValidationError as e:
+            first = e.errors()[0]
+            return {'code': 'invalid_input', 'error': f"{first['loc'][0]} is not a valid value", 'field': first['loc'][0]}, 400
+
         result = rpc.timeout(10).chat_list_conversations_rpc(
             project_id=project_id,
             user_id=user_id,
@@ -90,6 +109,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             entity_name=request.args.get('entity_name'),
             entity_project_id=request.args.get('entity_meta_project_id', type=int),
             schedule_id=schedule_id,
+            run_status=run_filters.status,
+            run_trigger=run_filters.trigger,
+            run_version_id=run_filters.version_id,
         )
 
         return result, 200
