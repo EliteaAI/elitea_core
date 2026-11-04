@@ -1,8 +1,8 @@
 """Loader for ``sio/all.py`` with the chat surface (redis, ORM, SDK utils) stubbed out.
 
 Only the dependency-free modules the handlers need (``utils/sio_utils.py``,
-``utils/toolkit_test_rooms.py``, ``models/pd/sio.py``) are loaded for real. Add a new stub or a
-new real module here and every sio test picks it up.
+``utils/toolkit_test_rooms.py``, ``models/pd/sio.py``, ``sio/mcp.py`` and the MCP server storage) are
+loaded for real. Add a new stub or a new real module here and every sio test picks it up.
 """
 import importlib.abc
 import importlib.util
@@ -21,7 +21,8 @@ _STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{SIO_PKG}.models.conversa
             f'{SIO_PKG}.models.message_items', f'{SIO_PKG}.models.pd.participant',
             f'{SIO_PKG}.models.pd.predict', f'{SIO_PKG}.utils.continue_message',
             f'{SIO_PKG}.utils.participant_utils', f'{SIO_PKG}.utils.canvas_utils',
-            f'{SIO_PKG}.utils.chat_constants', f'{SIO_PKG}.utils.conversation_access')
+            f'{SIO_PKG}.utils.chat_constants', f'{SIO_PKG}.utils.conversation_access',
+            f'{SIO_PKG}.utils.mcp_client')
 
 # Loaded for real, in dependency order.
 _REAL = (
@@ -31,6 +32,10 @@ _REAL = (
     (f'{SIO_PKG}.utils.toolkit_test_rooms', 'utils/toolkit_test_rooms.py'),
     (f'{SIO_PKG}.models.pd.sio', 'models/pd/sio.py'),
     (f'{SIO_PKG}.sio.all', 'sio/all.py'),
+    (f'{SIO_PKG}.models.mcp', 'models/mcp.py'),
+    (f'{SIO_PKG}.utils.schema_registry_version', 'utils/schema_registry_version.py'),
+    (f'{SIO_PKG}.utils.mcp_servers_storage', 'utils/mcp_servers_storage.py'),
+    (f'{SIO_PKG}.sio.mcp', 'sio/mcp.py'),
 )
 
 

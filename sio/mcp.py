@@ -19,6 +19,7 @@
 
 import re
 
+from pydantic import ValidationError
 from pylon.core.tools import log, web  # pylint: disable=E0611,E0401,W0611
 from tools import auth
 
@@ -30,21 +31,47 @@ from ..utils.sio_utils import SioEvents, get_event_room
 class SIO:  # pylint: disable=E1101,R0903
     @web.sio(SioEvents.mcp_connect)
     def mcp_connect(self, sid: str, data: dict):
-        payload = McpConnectSioPayload.model_validate(data)
+        try:
+            payload = McpConnectSioPayload.model_validate(data)
+        except ValidationError as error:
+            log.warning("Sid %s sent an invalid mcp_connect payload: %s", sid, error)
+            return {
+                "ok": False,
+                "error": "validation_error",
+                "message": "The mcp_connect payload is invalid.",
+                "details": error.errors(include_url=False, include_context=False, include_input=False),
+            }
         #
         if not auth.is_sio_user_in_project(sid, payload.project_id):
             log.warning("Sid %s is not in project %s", sid, payload.project_id)
-            return  # FIXME: need some proper error?
+            return {
+                "ok": False,
+                "error": "not_in_project",
+                "message": f"User has no access to project {payload.project_id} or the project does not exist.",
+                "project_id": payload.project_id,
+            }
         #
+        registered = []
+        declined = []
         for toolkit_config in payload.toolkit_configs:
+            requested_name = toolkit_config.name
             toolkit_config.project_id = payload.project_id
             toolkit_config.sio_sid = sid
             toolkit_config.timeout_tools_list = payload.timeout_tools_list
             toolkit_config.timeout_tools_call = payload.timeout_tools_call
-            toolkit_config.name = _sanitize_name(toolkit_config.name)
+            toolkit_config.name = _sanitize_name(requested_name)
             #
-            is_registered = self.servers_storage.add_server(payload.project_id, toolkit_config)
-            status = "registered" if is_registered else "declined"
+            if not toolkit_config.name:
+                declined.append({"name": requested_name, "reason": "invalid_name"})
+                mcp_notification_to_sid(sid, f"{requested_name} - declined (invalid name).")
+                continue
+            #
+            if self.servers_storage.add_server(payload.project_id, toolkit_config):
+                status = "registered"
+                registered.append(toolkit_config.name)
+            else:
+                status = "declined"
+                declined.append({"name": toolkit_config.name, "reason": "name_already_registered"})
             #
             mcp_notification_to_sid(sid, f"{toolkit_config.name} - {status}.")
             log.debug(f"[MCP_CLIENT] Mcp Server {toolkit_config.name} has been {status} for project {payload.project_id}")
@@ -55,6 +82,7 @@ class SIO:  # pylint: disable=E1101,R0903
 
         room = get_event_room(SioEvents.mcp_connect, str(payload.project_id))
         self.context.sio.enter_room(sid, room)
+        return {"ok": True, "registered": registered, "declined": declined}
 
 
 def _sanitize_name(name: str) -> str:
