@@ -57,11 +57,11 @@ def pd_module():
     # 2. generate_application_draft — relative-imports .predict_llm
     _load("models/pd/generate_application_draft.py", f"{_MODELS_PD}.generate_application_draft")
 
-    # 3. pipeline_validator — stdlib/pydantic only, load directly then expose as stub
+    # 3. pipeline_validator — load the real module so that any other test suite that later
+    # loads pipeline_utils under plugins.elitea_core can resolve the relative import
+    # `from .pipeline_validator import validate_pipeline_yaml` without hitting a thin stub.
+    _load("utils/pipeline_validator.py", f"{_ROOT}.utils.pipeline_validator")
     from utils.pipeline_validator import PipelineValidationResult  # noqa: PLC0415
-    validator_stub = types.ModuleType(f"{_ROOT}.utils.pipeline_validator")
-    validator_stub.PipelineValidationResult = PipelineValidationResult
-    sys.modules[f"{_ROOT}.utils.pipeline_validator"] = validator_stub
 
     # 4. generate_pipeline_draft — imports .predict_llm, .generate_application_draft, ...utils.pipeline_validator
     _load("models/pd/generate_pipeline_draft.py", f"{_MODELS_PD}.generate_pipeline_draft")
