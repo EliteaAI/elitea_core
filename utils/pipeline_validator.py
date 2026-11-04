@@ -476,7 +476,8 @@ def validate_pipeline_yaml(
 
     # --- V-07: LLM nodes have llm_settings.model_name ----------------------
     for node in valid_nodes:
-        if node.get("type", "").lower() != "llm":
+        ntype = node.get("type")
+        if not isinstance(ntype, str) or ntype.lower() != "llm":
             continue
         nid = node["id"].strip()
         llm_settings = node.get("llm_settings") or {}
@@ -489,8 +490,10 @@ def validate_pipeline_yaml(
 
     # --- V-08: agent/toolkit/mcp nodes have a non-empty 'name' -------------
     for node in valid_nodes:
-        ntype = node.get("type", "").lower()
-        if ntype not in _NAME_REQUIRED_TYPES:
+        ntype = node.get("type")
+        if not isinstance(ntype, str):
+            continue
+        if ntype.lower() not in _NAME_REQUIRED_TYPES:
             continue
         nid = node["id"].strip()
         name = node.get("name") or node.get("tool_name")
@@ -503,7 +506,8 @@ def validate_pipeline_yaml(
 
     # --- V-09: code nodes have a non-empty 'code' field --------------------
     for node in valid_nodes:
-        if node.get("type", "").lower() != "code":
+        ntype = node.get("type")
+        if not isinstance(ntype, str) or ntype.lower() != "code":
             continue
         nid = node["id"].strip()
         code_field = node.get("code")
@@ -527,7 +531,8 @@ def validate_pipeline_yaml(
 
     # --- V-10: router nodes have at least one condition --------------------
     for node in valid_nodes:
-        if node.get("type", "").lower() != "router":
+        ntype = node.get("type")
+        if not isinstance(ntype, str) or ntype.lower() != "router":
             continue
         nid = node["id"].strip()
         conditions = node.get("conditions") or node.get("routes") or []

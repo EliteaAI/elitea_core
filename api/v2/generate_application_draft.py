@@ -213,27 +213,36 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         # Inject project_id into suggested agents/pipelines/skills so catalog items
         # carry the public project ID and the frontend can link them correctly.
-        _app_project_id = {
-            a["application_id"]: a.get("project_id")
+        # Keyed by (catalog_project_id, application_id) to avoid collision: a user's
+        # own agent and a catalog agent can share the same numeric application_id across
+        # different project schemas.  Only catalog items have project_id set.
+        _catalog_app_project_id: dict[tuple, int] = {
+            (a["project_id"], a["application_id"]): a["project_id"]
             for a in (agents + pipelines)
             if a.get("project_id") is not None
         }
-        _skill_project_id = {
-            s["id"]: s.get("project_id")
+        _app_to_catalog_project: dict[int, int] = {
+            app_id: cat_pid
+            for (cat_pid, app_id), cat_pid in _catalog_app_project_id.items()
+        }
+        _skill_to_catalog_project: dict[int, int] = {
+            s["id"]: s["project_id"]
             for s in skills
             if s.get("project_id") is not None
         }
         for key in ("suggested_agents", "suggested_pipelines"):
             for item in parsed.get(key) or []:
-                if isinstance(item, dict):
-                    pid = _app_project_id.get(item.get("application_id"))
-                    if pid is not None:
-                        item["project_id"] = pid
-        for item in parsed.get("suggested_skills") or []:
-            if isinstance(item, dict):
-                pid = _skill_project_id.get(item.get("id"))
+                if not isinstance(item, dict):
+                    continue
+                pid = _app_to_catalog_project.get(item.get("application_id"))
                 if pid is not None:
                     item["project_id"] = pid
+        for item in parsed.get("suggested_skills") or []:
+            if not isinstance(item, dict):
+                continue
+            pid = _skill_to_catalog_project.get(item.get("id"))
+            if pid is not None:
+                item["project_id"] = pid
 
         try:
             draft = GenerateApplicationDraftResponse.model_validate(parsed)

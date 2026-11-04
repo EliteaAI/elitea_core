@@ -62,12 +62,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Each error/warning has: code, node_id, field, message, severity.
 
         Common fixes:
-        - missing_nodes: add a top-level 'nodes' list
+        - missing_nodes: add a top-level 'nodes' list with at least one node
         - missing_node_id: add unique 'id' to each node
-        - unknown_node_type: set 'type' to a valid type (llm, code, agent, toolkit, mcp,
-          router, decision, state_modifier, printer, hitl, custom, end)
-        - no_end_node: add a node with type: end
-        - end_node_unreachable: add a transition from some node to the end node
+        - unknown_node_type: set 'type' to one of: llm, code, agent, toolkit, mcp,
+          router, decision, state_modifier, printer, hitl, custom
+        - no_end_node: set `transition: END` on the last node of each execution path
+          (do NOT add a separate node with type: end — that is deprecated)
+        - end_node_unreachable: wire the graph so all paths reach a node with `transition: END`
         - unknown_transition_target: fix the target node id spelling
         - missing_tool_name: add 'name' to agent/toolkit/mcp nodes
         - missing_code_field: add a 'code' field to code nodes

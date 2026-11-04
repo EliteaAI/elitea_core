@@ -50,22 +50,34 @@ def _fetch_catalog_agents(
     ``forked_ids`` is a set of (shared_owner_id, shared_id) tuples representing
     catalog items already forked into the current project — those are excluded
     to avoid duplicate suggestions.
+
+    Uses a subquery to select one representative published version per application
+    to avoid returning duplicate rows when an application has multiple published versions.
     """
     try:
+        from sqlalchemy import func  # noqa: PLC0415
         with db.with_project_schema_session(public_project_id) as session:
+            # One row per application: take the max published version id as a stable representative.
+            latest_published = (
+                session.query(
+                    ApplicationVersion.application_id,
+                    func.max(ApplicationVersion.id).label("version_id"),
+                    ApplicationVersion.agent_type,
+                )
+                .filter(ApplicationVersion.status == PublishStatus.published)
+                .group_by(ApplicationVersion.application_id, ApplicationVersion.agent_type)
+                .subquery()
+            )
             rows = (
                 session.query(
                     Application.id,
                     Application.name,
                     Application.description,
-                    ApplicationVersion.agent_type,
-                    ApplicationVersion.id.label("version_id"),
+                    latest_published.c.agent_type,
+                    latest_published.c.version_id,
                 )
-                .join(
-                    ApplicationVersion,
-                    (ApplicationVersion.application_id == Application.id)
-                    & (ApplicationVersion.status == PublishStatus.published),
-                )
+                .join(latest_published, latest_published.c.application_id == Application.id)
+                .limit(50)
                 .all()
             )
             return [
@@ -100,6 +112,7 @@ def _fetch_catalog_skills(
             rows = (
                 session.query(Skill.id, Skill.name, Skill.description)
                 .filter(Skill.versions.any(SkillVersion.status == PublishStatus.published))
+                .limit(50)
                 .all()
             )
             return [
@@ -156,6 +169,7 @@ def fetch_project_resources(
                 (ApplicationVersion.application_id == Application.id)
                 & (ApplicationVersion.name == "base"),
             )
+            .limit(200)
             .all()
         )
         # Track which catalog items are already forked into this project (to deduplicate later)
@@ -211,19 +225,23 @@ def fetch_project_resources(
         def _strip_internal(item: dict) -> dict:
             return {k: v for k, v in item.items() if not k.startswith("_")}
 
+        # Cap candidates before calling _fits_nesting to bound N+1 DB calls:
+        # at most _MAX_AGENTS*2 candidates are checked before returning _MAX_AGENTS results.
+        _agent_candidates = [item for _, item in agents_scored if item["type"] == "agent"]
+        _pipeline_candidates = [item for _, item in agents_scored if item["type"] == "pipeline"]
         agents = [
             _strip_internal(item)
-            for _, item in agents_scored
-            if item["type"] == "agent" and _fits_nesting(item)
+            for item in _agent_candidates[:_MAX_AGENTS * 2]
+            if _fits_nesting(item)
         ][:_MAX_AGENTS]
         pipelines = [
             _strip_internal(item)
-            for _, item in agents_scored
-            if item["type"] == "pipeline" and _fits_nesting(item)
+            for item in _pipeline_candidates[:_MAX_PIPELINES * 2]
+            if _fits_nesting(item)
         ][:_MAX_PIPELINES]
 
         skill_rows = session.query(Skill.id, Skill.name, Skill.description,
-                                   Skill.shared_owner_id, Skill.shared_id).all()
+                                   Skill.shared_owner_id, Skill.shared_id).limit(100).all()
         forked_skill_ids = {
             (r.shared_owner_id, r.shared_id)
             for r in skill_rows

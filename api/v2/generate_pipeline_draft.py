@@ -79,7 +79,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         available_to_users=False,
     )
     @auth.decorators.check_api({
-        "permissions": ["models.applications.applications.create"],
+        "permissions": ["models.applications.applications.details"],
         "recommended_roles": {
             c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -91,6 +91,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
             req = GeneratePipelineDraftRequest.model_validate(request.json)
         except ValidationError as e:
             return e.errors(), 400
+
+        # Create mode requires create permission; edit mode requires update permission.
+        caller_permissions = auth.resolve_permissions(
+            project_id=project_id,
+            permissions=["models.applications.applications.create", "models.applications.applications.update"],
+        )
+        if req.is_edit_mode:
+            if "models.applications.applications.update" not in caller_permissions:
+                return {"error": "Permission denied."}, 403
+        else:
+            if "models.applications.applications.create" not in caller_permissions:
+                return {"error": "Permission denied."}, 403
 
         user_id = auth.current_user().get("id")
 
@@ -294,27 +306,38 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         # Inject project_id into suggested agents/pipelines/skills so catalog items
         # carry the public project ID and the frontend can link them correctly.
-        _app_project_id = {
-            a["application_id"]: a.get("project_id")
+        # Keyed by (catalog_project_id, application_id) to avoid collision: a user's
+        # own agent and a catalog agent can share the same numeric application_id across
+        # different project schemas.  Only catalog items have project_id set.
+        _catalog_app_project_id: dict[tuple, int] = {
+            (a["project_id"], a["application_id"]): a["project_id"]
             for a in (agents + pipelines)
             if a.get("project_id") is not None
         }
-        _skill_project_id = {
-            s["id"]: s.get("project_id")
+        # Reverse map: application_id → catalog project_id (catalog items are unique within their
+        # own project, and catalog project_id is always != current project_id by construction).
+        _app_to_catalog_project: dict[int, int] = {
+            app_id: cat_pid
+            for (cat_pid, app_id), cat_pid in _catalog_app_project_id.items()
+        }
+        _skill_to_catalog_project: dict[int, int] = {
+            s["id"]: s["project_id"]
             for s in skills
             if s.get("project_id") is not None
         }
         for key in ("suggested_agents", "suggested_pipelines"):
             for item in parsed.get(key) or []:
-                if isinstance(item, dict):
-                    pid = _app_project_id.get(item.get("application_id"))
-                    if pid is not None:
-                        item["project_id"] = pid
-        for item in parsed.get("suggested_skills") or []:
-            if isinstance(item, dict):
-                pid = _skill_project_id.get(item.get("id"))
+                if not isinstance(item, dict):
+                    continue
+                pid = _app_to_catalog_project.get(item.get("application_id"))
                 if pid is not None:
                     item["project_id"] = pid
+        for item in parsed.get("suggested_skills") or []:
+            if not isinstance(item, dict):
+                continue
+            pid = _skill_to_catalog_project.get(item.get("id"))
+            if pid is not None:
+                item["project_id"] = pid
 
         try:
             draft = GeneratePipelineDraftResponse.model_validate(parsed)

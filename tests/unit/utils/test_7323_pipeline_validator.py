@@ -605,3 +605,36 @@ entry_point: a
         result = fix_deprecated_end_node(yaml_str)
         import yaml
         assert yaml.safe_load(result) == yaml.safe_load(yaml_str)
+
+
+# ---------------------------------------------------------------------------
+# V-07/V-08/V-09/V-10: null/non-string type guard
+# ---------------------------------------------------------------------------
+
+class TestNullTypeGuard:
+    """Nodes with null or non-string type values must not crash V-07 through V-10."""
+
+    def test_null_type_does_not_crash_v07_to_v10(self):
+        yaml_str = """
+nodes:
+  - id: broken
+    type: null
+    transition: END
+entry_point: broken
+"""
+        result = validate_pipeline_yaml(yaml_str)
+        codes = [e.code for e in result.errors]
+        # missing_node_type is the expected error; the loop guards prevent AttributeError
+        assert "missing_node_type" in codes
+
+    def test_integer_type_does_not_crash_v07_to_v10(self):
+        yaml_str = """
+nodes:
+  - id: broken
+    type: 42
+    transition: END
+entry_point: broken
+"""
+        result = validate_pipeline_yaml(yaml_str)
+        codes = [e.code for e in result.errors]
+        assert "missing_node_type" in codes
