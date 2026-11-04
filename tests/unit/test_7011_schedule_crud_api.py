@@ -214,13 +214,17 @@ def harness(isolated_sys_modules, monkeypatch):
     sys.modules[governance.__name__] = governance
     mandates = types.ModuleType(f'{PACKAGE}.utils.mandate_admission')
 
-    def owner_run_request(module, **kwargs):
+    # The real signature, so a keyword the real function does not take fails here as it does in production
+    def owner_run_request(module, *, project_id, application_id, version_id, trigger_ref):
+        kwargs = dict(project_id=project_id, application_id=application_id, version_id=version_id,
+                      trigger_ref=trigger_ref)
         harness.owner_requests.append((harness.user_id, kwargs))
         if harness.owner_request_error:
             raise harness.owner_request_error
         return harness.owner_request
 
     mandates.owner_run_request = owner_run_request
+    mandates.schedule_trigger_ref = lambda schedule_id: f'schedule:entity:{schedule_id}'
     mandates.test_run_trigger_ref = lambda run_id: f'schedule:test:{run_id}'
     sys.modules[mandates.__name__] = mandates
     sys.modules[notifications.__name__] = notifications

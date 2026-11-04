@@ -623,9 +623,10 @@ class ScheduleItemHandlers:
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
             entity_type = row.entity_type
             try:   # the owner's own run (#7254), from this signed-in request; None when off. Built before the run row
-                from .mandate_admission import owner_run_request  # pylint: disable=C0415
+                from .mandate_admission import owner_run_request, schedule_trigger_ref  # pylint: disable=C0415
                 owner_request = owner_run_request(self.module, project_id=project_id, application_id=row.application_id,
-                                                  version_id=row.version_id, schedule_id=schedule_id)
+                                                  version_id=row.version_id,
+                                                  trigger_ref=schedule_trigger_ref(schedule_id))
             except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
                 log.exception('Schedule %s: cannot build the owner run request', schedule_id)
                 return refusal("run_start_failed", "The run could not start", 500)
