@@ -221,6 +221,25 @@ def test_7404_admin_pause_with_a_null_field_is_not_an_edit(api):
     assert status == 200
 
 
+# Review fix: a 503 must mean "nothing changed": the working secret still works and no new one is lost
+def test_7404_failed_regenerate_commit_keeps_the_working_secret(api, monkeypatch):
+    schedule_id, old = seed_hook(api)
+    session_class = type(api.session_factory())
+    real_commit, calls = session_class.commit, []
+
+    def fail_first(self):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('db down')
+        return real_commit(self)
+
+    monkeypatch.setattr(session_class, 'commit', fail_first)
+    body, status = api.call('_secret', {'mode': 'regenerate'}, schedule_id, suffix='/secret')
+    assert (status, body['code']) == (503, 'secret_store_unavailable')
+    assert FakeVault.store[secret_key(api, schedule_id)] == old
+    assert audit_names(api) == []
+
+
 def test_7404_regenerate_replaces_at_once(api):
     schedule_id, _ = seed_hook(api)
     api.call('_secret', {'mode': 'rotate'}, schedule_id, suffix='/secret')

@@ -2,7 +2,8 @@
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, text
+from pylon.core.tools import log
+from sqlalchemy import func, select, text
 from tools import VaultClient
 
 ROTATION_OVERLAP = timedelta(hours=24)
@@ -78,13 +79,16 @@ class RotationInProgress(Exception):
     """A previous secret still works; a second rotate would end its 24 h early."""
 
 
-def rotate_row_secret(session, project_id: int, row, now: datetime, value: str | None = None) -> str:
-    """Write a new secret and keep the current one valid for 24 h as the previous secret."""
-    if row.previous_secret_until is not None and _aware(row.previous_secret_until) > now:
-        raise RotationInProgress()
+def rotate_row_secret(session, project_id: int, row, now: datetime, value: str | None = None,
+                      updated_by: int | None = None) -> str:
+    """Write a new secret and keep the current one valid for 24 h; commits, or restores the store on failure."""
     value = value or new_secret()
     key = _current_key(row)
     client, stored = _locked_store(session, project_id)
+    session.refresh(row)  # under the lock: a rotation that committed meanwhile is seen
+    row.updated_by = updated_by if updated_by is not None else row.updated_by
+    if row.previous_secret_until is not None and _aware(row.previous_secret_until) > now:
+        raise RotationInProgress()
     changes = {key: value}
     if key in stored:
         changes[prev_key(row.uuid)] = stored[key]
@@ -92,19 +96,46 @@ def rotate_row_secret(session, project_id: int, row, now: datetime, value: str |
     else:  # no current value to keep: nothing overlaps
         changes[prev_key(row.uuid)] = None
         row.previous_secret_ref = row.previous_secret_until = None
-    _write_hidden(session, project_id, changes, client, stored)
+    _commit_or_restore(session, project_id, client, stored, changes)
     return value
+
+
+def _commit_or_restore(session, project_id: int, client, stored: dict, changes: dict) -> None:
+    """Write the store, then commit the row; a failed commit puts the old values back under the lock."""
+    _write_hidden(session, project_id, changes, client, stored)
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        _restore(session, project_id, stored, changes)
+        raise
+
+
+def _restore(session, project_id: int, stored: dict, changes: dict) -> None:
+    """Put back the keys that still hold what this call wrote; a key another writer changed since is left alone."""
+    try:
+        client, current = _locked_store(session, project_id)
+        back = {key: stored.get(key) for key, value in changes.items() if current.get(key) == value}
+        _write_hidden(session, project_id, back, client, current)
+        session.commit()
+    except Exception as e:  # noqa: BLE001 -- the caller re-raises the commit error
+        session.rollback()
+        log.error('Webhook secret: the store could not be restored after a failed commit: %s', type(e).__name__)
 
 
 def _aware(moment: datetime) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)  # SQLite drops the zone
 
 
-def regenerate_row_secret(session, project_id: int, row, value: str | None = None) -> str:
-    """Replace the secret at once and drop any previous one."""
+def regenerate_row_secret(session, project_id: int, row, value: str | None = None,
+                          updated_by: int | None = None) -> str:
+    """Replace the secret at once and drop any previous one; commits, or restores the store on failure."""
     value = value or new_secret()
-    _write_hidden(session, project_id, {_current_key(row): value, prev_key(row.uuid): None})
+    client, stored = _locked_store(session, project_id)
+    session.refresh(row)
+    row.updated_by = updated_by if updated_by is not None else row.updated_by
     row.previous_secret_ref = row.previous_secret_until = None
+    _commit_or_restore(session, project_id, client, stored, {_current_key(row): value, prev_key(row.uuid): None})
     return value
 
 
@@ -129,12 +160,15 @@ def drop_secrets_of(session, project_id: int, uuids) -> None:
 def sweep_expired_previous(session, project_id: int, now: datetime) -> int:
     """Drop the previous secrets whose overlap ended; return how many rows were cleared."""
     from ..models.entity_schedule import EntitySchedule  # late: the tick loads without the model graph
-    rows = session.scalars(select(EntitySchedule).where(
-        EntitySchedule.previous_secret_until.is_not(None), EntitySchedule.previous_secret_until < now,
-    )).all()
+    expired = select(EntitySchedule).where(
+        EntitySchedule.previous_secret_until.is_not(None), EntitySchedule.previous_secret_until < now)
+    if session.scalar(select(func.count()).select_from(expired.subquery())) == 0:
+        return 0  # the common case: no lock, no store read
+    client, stored = _locked_store(session, project_id)
+    rows = session.scalars(expired.execution_options(populate_existing=True)).all()  # re-read under the lock
     if not rows:
         return 0
-    _write_hidden(session, project_id, {prev_key(row.uuid): None for row in rows})
+    _write_hidden(session, project_id, {prev_key(row.uuid): None for row in rows}, client, stored)
     for row in rows:
         row.previous_secret_ref = row.previous_secret_until = None
     session.commit()

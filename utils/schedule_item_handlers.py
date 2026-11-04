@@ -680,14 +680,15 @@ class ScheduleItemHandlers:
                 return refusal(INVALID_INPUT, reason, field="signing_secret_value")
             try:
                 if body.mode == "rotate":
-                    value = rotate_row_secret(session, project_id, row, datetime.now(UTC), body.signing_secret_value)
+                    value = rotate_row_secret(session, project_id, row, datetime.now(UTC), body.signing_secret_value,
+                                              updated_by=scope.user_id)
                 else:
-                    value = regenerate_row_secret(session, project_id, row, body.signing_secret_value)
-                row.updated_by = scope.user_id
-                session.commit()
+                    value = regenerate_row_secret(session, project_id, row, body.signing_secret_value,
+                                                  updated_by=scope.user_id)
             except RotationInProgress:
-                return refusal("rotation_in_progress", ROTATION_IN_PROGRESS, 409,
-                               previous_secret_until=_iso(row.previous_secret_until))
+                until = row.previous_secret_until
+                session.rollback()
+                return refusal("rotation_in_progress", ROTATION_IN_PROGRESS, 409, previous_secret_until=_iso(until))
             except Exception as e:  # noqa: BLE001 -- the vault answer must not leak; the old secret stays
                 session.rollback()
                 log.error("Schedule %s: cannot %s the webhook secret: %s", schedule_id, body.mode, type(e).__name__)

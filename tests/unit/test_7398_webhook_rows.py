@@ -78,8 +78,9 @@ def test_7398_webhook_needs_type_and_no_cron(model):
 
 
 def test_7398_gitlab_method_only_and_always_for_gitlab(model):
-    assert model.ScheduleCreate(**_body(trigger_kind="webhook", webhook_type="gitlab",
-                                        gitlab_auth_method="signing_token")).gitlab_auth_method == "signing_token"
+    # #7404: a signing-token row also carries the token GitLab issued
+    assert model.ScheduleCreate(**_body(trigger_kind="webhook", webhook_type="gitlab", gitlab_auth_method="signing_token",
+                                        signing_secret_value="whsec_x")).gitlab_auth_method == "signing_token"
     with pytest.raises(ValidationError, match="gitlab_auth_method"):
         model.ScheduleCreate(**_body(trigger_kind="webhook", webhook_type="gitlab"))
     with pytest.raises(ValidationError, match="gitlab_auth_method"):

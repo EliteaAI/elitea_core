@@ -55,6 +55,17 @@ def _session(env):
     return env.session_factory()
 
 
+def _rotatable(env, session, **fields):
+    """A stored webhook row loaded in `session`: rotate and regenerate re-read and commit a real row."""
+    schedule_id = env.seed(trigger_kind='webhook', webhook_type='github', cron=None, timezone=None, next_run=None,
+                           **fields)
+    return session.get(env.EntitySchedule, schedule_id)
+
+
+def _utc(moment):
+    return moment.replace(tzinfo=UTC) if moment and moment.tzinfo is None else moment  # SQLite drops the zone
+
+
 def test_7404_store_writes_a_generated_secret_under_the_row_uuid(env, secrets_mod):
     row = _hook()
     with _session(env) as session:
@@ -75,20 +86,20 @@ def test_7404_store_of_a_gitlab_signing_row_keeps_the_pasted_token(env, secrets_
 
 
 def test_7404_rotate_keeps_the_old_secret_for_24_hours(env, secrets_mod):
-    row = _hook()
     with _session(env) as session:
+        row = _rotatable(env, session)
         old = secrets_mod.store_row_secret(session, PROJECT_ID, row)
         new = secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW)
     assert new != old
     assert FakeVault.store[f'webhook_secret_{row.uuid}'] == new
     assert FakeVault.store[f'webhook_secret_{row.uuid}_prev'] == old
     assert row.previous_secret_ref == '{{secret.webhook_secret_%s_prev}}' % row.uuid
-    assert row.previous_secret_until == NOW + timedelta(hours=24)
+    assert _utc(row.previous_secret_until) == NOW + timedelta(hours=24)
 
 
 def test_7404_regenerate_replaces_at_once_and_drops_the_previous(env, secrets_mod):
-    row = _hook()
     with _session(env) as session:
+        row = _rotatable(env, session)
         secrets_mod.store_row_secret(session, PROJECT_ID, row)
         secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW)
         new = secrets_mod.regenerate_row_secret(session, PROJECT_ID, row)
@@ -97,8 +108,9 @@ def test_7404_regenerate_replaces_at_once_and_drops_the_previous(env, secrets_mo
 
 
 def test_7404_delete_removes_every_key_of_the_row_only(env, secrets_mod):
-    row, other = _hook(), _hook()
+    other = _hook()
     with _session(env) as session:
+        row = _rotatable(env, session)
         secrets_mod.store_row_secret(session, PROJECT_ID, row)
         secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW)
         secrets_mod.store_row_secret(session, PROJECT_ID, other)
@@ -214,31 +226,79 @@ def test_7404_engines_with_a_locked_merge_get_only_the_changed_keys(env, secrets
 
 # Review fix: a second rotate inside the window would cut the oldest secret's promised 24 h short
 def test_7404_second_rotate_inside_the_window_is_refused_and_keeps_the_previous(env, secrets_mod):
-    row = _hook()
     with _session(env) as session:
+        row = _rotatable(env, session)
         first = secrets_mod.store_row_secret(session, PROJECT_ID, row)
         secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW)
         with pytest.raises(secrets_mod.RotationInProgress):
             secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW + timedelta(hours=1))
     assert FakeVault.store[f'webhook_secret_{row.uuid}_prev'] == first
-    assert row.previous_secret_until == NOW + timedelta(hours=24)
+    assert _utc(row.previous_secret_until) == NOW + timedelta(hours=24)
 
 
 def test_7404_rotate_after_the_window_is_allowed(env, secrets_mod):
-    row = _hook()
     with _session(env) as session:
+        row = _rotatable(env, session)
         secrets_mod.store_row_secret(session, PROJECT_ID, row)
         middle = secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW)
         later = NOW + timedelta(hours=25)
         secrets_mod.rotate_row_secret(session, PROJECT_ID, row, later)
     assert FakeVault.store[f'webhook_secret_{row.uuid}_prev'] == middle
-    assert row.previous_secret_until == later + timedelta(hours=24)
+    assert _utc(row.previous_secret_until) == later + timedelta(hours=24)
 
 
 def test_7404_rotate_without_a_current_value_leaves_no_stale_previous(env, secrets_mod):
-    row = _hook(previous_secret_ref='{{secret.stale}}', previous_secret_until=NOW - timedelta(hours=1))
-    FakeVault.store[f'webhook_secret_{row.uuid}_prev'] = 'stale'
     with _session(env) as session:
+        row = _rotatable(env, session, previous_secret_ref='{{secret.stale}}',
+                         previous_secret_until=NOW - timedelta(hours=1))
+        FakeVault.store[f'webhook_secret_{row.uuid}_prev'] = 'stale'
         value = secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW)
     assert FakeVault.store == {'unrelated': 'keep', f'webhook_secret_{row.uuid}': value}
     assert (row.previous_secret_ref, row.previous_secret_until) == (None, None)
+
+
+# Review fix: the 24 h check runs on the row as stored once the lock is held, not as the caller loaded it
+def test_7404_rotate_rechecks_the_window_after_the_lock(env, secrets_mod):
+    with _session(env) as session:
+        row = _rotatable(env, session)
+        secrets_mod.store_row_secret(session, PROJECT_ID, row)
+        session.commit()
+        with _session(env) as other:  # a parallel rotate commits while this caller still holds the old row
+            secrets_mod.rotate_row_secret(other, PROJECT_ID, other.get(env.EntitySchedule, row.id), NOW)
+        assert row.previous_secret_until is None  # the stale in-memory copy would pass a pre-lock check
+        with pytest.raises(secrets_mod.RotationInProgress):
+            secrets_mod.rotate_row_secret(session, PROJECT_ID, row, NOW + timedelta(minutes=1))
+
+
+# Review fix: the store commits on its own; a failed row commit must put the store back
+@pytest.mark.parametrize('mode', ['rotate', 'regenerate'])
+def test_7404_failed_commit_restores_the_store(env, secrets_mod, monkeypatch, mode):
+    with _session(env) as session:
+        row = _rotatable(env, session)
+        first = secrets_mod.store_row_secret(session, PROJECT_ID, row)
+        session.commit()
+        schedule_id, key = row.id, f'webhook_secret_{row.uuid}'
+        before = dict(FakeVault.store)
+        commits = []
+        real = type(session).commit
+
+        def fail_once(self):
+            commits.append(1)
+            if len(commits) == 1:
+                raise RuntimeError('db down')
+            return real(self)
+
+        monkeypatch.setattr(type(session), 'commit', fail_once)
+        call = secrets_mod.rotate_row_secret if mode == 'rotate' else secrets_mod.regenerate_row_secret
+        with pytest.raises(RuntimeError):
+            call(session, PROJECT_ID, row, NOW) if mode == 'rotate' else call(session, PROJECT_ID, row)
+    assert FakeVault.store == before and FakeVault.store[key] == first
+    assert env.row(schedule_id).previous_secret_until is None
+
+
+def test_7404_restore_leaves_a_key_another_writer_changed(env, secrets_mod):
+    stored = {'k': 'old'}
+    FakeVault.store = {'k': 'someone else'}
+    with _session(env) as session:
+        secrets_mod._restore(session, PROJECT_ID, stored, {'k': 'mine'})
+    assert FakeVault.store == {'k': 'someone else'}
