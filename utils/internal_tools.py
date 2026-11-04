@@ -685,6 +685,44 @@ def dedupe_internal_mcp_tools(tools: list[dict]) -> None:
     ]
 
 
+def _make_no_token_tool(user_id: int) -> dict:
+    """Return a synthetic no-op tool that informs the model (and thus the user)
+    that a personal access token is required to use the Agent & Pipeline Builder.
+
+    The model can call this tool when the user tries to use Builder capabilities
+    and no PAT is configured.  The tool always returns the explanation as its
+    result so the model surfaces it to the user.
+    """
+    return {
+        'type': 'mcp',
+        'name': 'builder_unavailable',
+        'toolkit_name': 'builder_unavailable',
+        'description': (
+            "The Agent & Pipeline Builder is unavailable because your account does not have a "
+            "personal access token (PAT) configured. "
+            "To enable the Builder: go to Settings → Integrations → Personal Access Token and "
+            "create a token, then return here. "
+            "Call this tool to inform the user of this requirement."
+        ),
+        'settings': {
+            'url': None,
+            'headers': {},
+            'timeout': 10,
+            'cache_ttl': 0,
+        },
+        'id': None,
+        'agent_type': None,
+        'variables': [],
+        'meta': {
+            'mcp': True,
+            'support_auto': True,
+            'categories': ['other'],
+            'extra_categories': ['builder', 'system'],
+            'no_token': True,
+        },
+    }
+
+
 def inject_mcp_toolkits(
     user_id: int,
     current_project_id: int | None = None,
@@ -749,7 +787,7 @@ def inject_mcp_toolkits(
     system_token = None if governed else _get_user_token(user_id)
     if not governed and not system_token:
         log.debug(f"[MCP Injection] No valid token for user {user_id} — skipping MCP injection")
-        return []
+        return [_make_no_token_tool(user_id)]
 
     base_url = _get_internal_base_url()
     covered_suffixes = _collect_covered_internal_mcp_suffixes(existing_tools)

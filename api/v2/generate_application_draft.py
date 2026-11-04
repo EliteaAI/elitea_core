@@ -211,6 +211,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 422
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
+        # Inject project_id into suggested agents/pipelines/skills so catalog items
+        # carry the public project ID and the frontend can link them correctly.
+        _app_project_id = {
+            a["application_id"]: a.get("project_id")
+            for a in (agents + pipelines)
+            if a.get("project_id") is not None
+        }
+        _skill_project_id = {
+            s["id"]: s.get("project_id")
+            for s in skills
+            if s.get("project_id") is not None
+        }
+        for key in ("suggested_agents", "suggested_pipelines"):
+            for item in parsed.get(key) or []:
+                if isinstance(item, dict):
+                    pid = _app_project_id.get(item.get("application_id"))
+                    if pid is not None:
+                        item["project_id"] = pid
+        for item in parsed.get("suggested_skills") or []:
+            if isinstance(item, dict):
+                pid = _skill_project_id.get(item.get("id"))
+                if pid is not None:
+                    item["project_id"] = pid
+
         try:
             draft = GenerateApplicationDraftResponse.model_validate(parsed)
         except ValidationError as e:
