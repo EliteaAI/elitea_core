@@ -238,11 +238,22 @@ def test_the_usage_of_a_page_of_runs_is_read_in_one_call_and_matches_the_single_
 
     monkeypatch.setattr(sys.modules["tools"].db, "engine", Counting())
 
-    found = detail.module.usage_summaries(detail.session, PROJECT_ID, [first, no_chat, no_usage])
+    uuids = detail.module.conversation_uuids(detail.session, [first.conversation_id, None, no_usage.conversation_id])
+    pages = [types.SimpleNamespace(**vars(run), conversation_uuid=uuids.get(run.conversation_id))
+             for run in (first, no_chat, no_usage)]
+    detail.session.close()
+
+    found = detail.module.usage_summaries(PROJECT_ID, pages)
 
     assert found == {77: (2000, 0.025), 78: (None, None), 79: (None, None)}
     assert found[77] == detail.module.usage_summary(detail.session, PROJECT_ID, first)
     assert len(calls) == 2  # one for the page, one for the single read above
+
+
+def test_the_chat_uuids_of_a_page_come_from_one_query(detail):
+    assert detail.module.conversation_uuids(detail.session, [CONVERSATION_ID, None, 555]) == {
+        CONVERSATION_ID: CONVERSATION_UUID}
+    assert detail.module.conversation_uuids(detail.session, [None]) == {}
 
 
 def test_the_version_labels_of_a_page_come_from_one_query(detail):

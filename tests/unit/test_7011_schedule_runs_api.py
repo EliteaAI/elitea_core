@@ -39,10 +39,11 @@ def reads(monkeypatch):
     state = types.SimpleNamespace(usage={}, labels={10: 'v3', 11: 'v4'}, calls=[])
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
 
-    def usage_summaries(session, project_id, runs):
+    def usage_summaries(project_id, runs):
         state.calls.append(len(runs))
         return {run.id: state.usage.get(run.id, (None, None)) for run in runs}
 
+    module.conversation_uuids = lambda session, ids: {i: f'uuid-{i}' for i in ids if i is not None}
     module.version_labels = lambda session, version_ids: {i: state.labels[i] for i in version_ids if i in state.labels}
     module.usage_summaries = usage_summaries
     monkeypatch.setitem(sys.modules, module.__name__, module)

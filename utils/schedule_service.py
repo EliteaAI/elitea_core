@@ -125,7 +125,7 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
 
 
 def check_schedule_body(session, project_id: int, body: ScheduleCreate) -> None:
-    """The required-field rules of a Save and of a draft test run, in one place.
+    """The required-field rules of a Save and of a Test Run, in one place.
 
     The body model already needs name, entity, version, cron and time zone. This adds what a model cannot
     state: the entity and version exist and fit, and the starting input (prompt, run mode, variables) fits
@@ -138,9 +138,7 @@ def check_schedule_body(session, project_id: int, body: ScheduleCreate) -> None:
     check_run_input(body.entity_type, body.run_mode, body.prompt, [v.model_dump() for v in body.variables])
 
 
-def load_schedule_in_scope(
-    session, schedule_id: int, scope: ScheduleScope, include_draft: bool = False
-) -> EntitySchedule:
+def load_schedule_in_scope(session, schedule_id: int, scope: ScheduleScope) -> EntitySchedule:
     """Return the schedule when the caller owns it or holds `schedules.admin`.
 
     Raises:

@@ -10,6 +10,7 @@ from typing import ClassVar
 from flask import request
 from tools import api_tools
 
+from ...models.pd.schedule_list import MAX_DB_ID
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.schedule_draft_handler import ScheduleDraftHandler
 from ...utils.schedule_item_handlers import ScheduleItemHandlers
@@ -17,7 +18,7 @@ from ...utils.schedule_project_handlers import ScheduleProjectHandlers
 
 ITEM = "<int:schedule_id>"
 RUN = f"{ITEM}/runs/<int:run_id>"
-TEST_RUN = "test_run/<int:run_id>"  # a run of the caller's draft: no schedule id in the URL
+TEST_RUN = "test_run/<int:run_id>"  # a Test Run of the caller: no schedule id in the URL
 # (HTTP method, URL tail after the project id): handler method. The Swagger table has the same keys.
 ROUTES = {
     ("get", ""): "_list",
@@ -43,18 +44,17 @@ ROUTES = {
     ("post", "test_run"): "_test_run",
     ("get", "test_run"): "_test_runs",
     ("get", TEST_RUN): "_test_run_detail",
-    ("delete", "test_run"): "_cancel_test_run",
+    ("post", f"{TEST_RUN}/decision"): "_decide_test_run",
 }
 # The body of `schedule_service.refusal`; the handler tests load this module without the service
 NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
-MAX_ID = 2**31 - 1  # the database integer range, as `DbId`: a larger id in a URL cannot name a row
 ID_OUT_OF_RANGE = {"code": "not_found", "error": "Schedule not found"}, 404
 
 
 def _tail(schedule_id: int | None, run_id: int | None) -> str:
     """The URL tail after the project id, in the form of the `ROUTES` keys."""
     if run_id is not None and schedule_id is None:
-        return TEST_RUN
+        return f"{TEST_RUN}/decision" if request.path.rstrip("/").endswith("/decision") else TEST_RUN
     if run_id is not None:
         return f"{RUN}/decision" if request.path.rstrip("/").endswith("/decision") else RUN
     last = request.path.rstrip("/").rsplit("/", 1)[-1]
@@ -71,7 +71,8 @@ class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftH
         name = ROUTES.get((method, _tail(schedule_id, run_id)))
         if name is None:
             return NOT_ALLOWED
-        if any(value is not None and value > MAX_ID for value in (schedule_id, run_id)):
+        # a larger id in a URL cannot name a row
+        if any(value is not None and value > MAX_DB_ID for value in (schedule_id, run_id)):
             return ID_OUT_OF_RANGE  # the query would fail in the driver with a 500
         # Keyword arguments: check_api reads project_id from them for the project-scoped permission check
         ids = {key: value for key, value in (("schedule_id", schedule_id), ("run_id", run_id)) if value is not None}
@@ -84,7 +85,7 @@ class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftH
 
     @api_tools.endpoint_metrics
     def post(self, project_id: int, schedule_id: int | None = None, run_id: int | None = None, **kwargs):
-        """Create, check risks, pause, resume, run, change owner, import and draft."""
+        """Create, check risks, pause, resume, run, decide a run, change owner, import, draft and test run."""
         return self._dispatch("post", project_id, schedule_id, run_id)
 
     @api_tools.endpoint_metrics

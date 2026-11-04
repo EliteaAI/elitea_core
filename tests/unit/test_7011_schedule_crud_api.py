@@ -221,6 +221,7 @@ def harness(isolated_sys_modules, monkeypatch):
         return harness.owner_request
 
     mandates.owner_run_request = owner_run_request
+    mandates.test_run_trigger_ref = lambda run_id: f'schedule:test:{run_id}'
     sys.modules[mandates.__name__] = mandates
     sys.modules[notifications.__name__] = notifications
 
@@ -235,7 +236,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/schedule_claim.py', 'utils.schedule_claim')
     load('utils/schedule_dispatch.py', 'utils.schedule_dispatch')
     load('utils/schedule_service.py', 'utils.schedule_service')
-    load('utils/schedule_test_draft.py', 'utils.schedule_test_draft')
+    load('utils/schedule_test_runs.py', 'utils.schedule_test_runs')
     harness.config = tools.this.module.descriptor.config
     harness.module = load('utils/schedule_item_handlers.py', 'utils.schedule_item_handlers')
     sys.modules.update(sqlite_db.handler_stubs(PACKAGE, real='schedule_item_handlers'))
@@ -702,36 +703,3 @@ def test_schedule_body_without_a_required_field_is_400_on_that_field(harness, fi
     body = agent_body()
     del body[field]
     assert_400_names(harness.call('post', body), field)
-
-
-def _draft(harness, **fields):
-    return harness.seed(draft=True, enabled=False, **fields)
-
-
-def test_a_draft_row_is_not_found_by_read_edit_delete_pause_resume_and_run(harness):
-    draft_id = _draft(harness)
-
-    for verb, suffix in (
-        ('get', ''), ('put', ''), ('delete', ''), ('post', '/pause'), ('post', '/resume'), ('post', '/run'),
-    ):
-        body, status = harness.call(verb, {'trigger': 'manual'} if suffix == '/run' else {'name': 'x'}, draft_id, suffix=suffix)
-        assert (body, status) == (NOT_FOUND, 404), (verb, suffix)
-
-
-def test_an_admin_cannot_read_a_draft_row_either(harness):
-    draft_id = _draft(harness, created_by=OTHER_ID)
-    harness.user_id, harness.permissions = ADMIN_ID, set(ADMIN)
-
-    assert harness.call('get', schedule_id=draft_id) == (NOT_FOUND, 404)
-
-
-
-def test_the_owner_change_loads_its_schedule_with_the_draft_filter(harness):
-    draft_id = _draft(harness)
-    service = sys.modules[f'{PACKAGE}.utils.schedule_service']
-    scope = sys.modules[f'{PACKAGE}.utils.schedule_access'].ScheduleScope(ADMIN_ID, True, frozenset())
-
-    with harness.session_factory() as session, pytest.raises(service.ScheduleNotFound):
-        service.load_schedule_in_scope(session, draft_id, scope)
-    with harness.session_factory() as session:
-        assert service.load_schedule_in_scope(session, draft_id, scope, include_draft=True).draft is True

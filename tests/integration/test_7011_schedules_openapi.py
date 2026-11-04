@@ -9,6 +9,7 @@ Run via:
     python tests/run_tests.py -m integration -v integration/test_7011_schedules_openapi.py
 """
 import importlib.util
+import json
 import pathlib
 import re
 import sys
@@ -53,7 +54,7 @@ LENIENT_MODULES = (
         'exceptions', 'predict_utils', 'schedule_draft_utils', 'service_prompt_utils', 'utils',
         'evaluation_run_utils', 'run_id', 'scheduler_bindings', 'sio_utils', 'prompt_eliminate_utils',
         'admission', 'binding_api', 'governance', 'governance_settings', 'mandate_admission',
-        'worker_capabilities', 'trigger_governance', 'schedule_test_draft',
+        'worker_capabilities', 'trigger_governance', 'schedule_test_runs',
     )),
 )
 OTHER_TAGS = {
@@ -86,12 +87,12 @@ OPERATIONS = {
     ('post', f'{BASE}/check'),
     ('post', f'{ITEM}/runs/{{run_id}}/decision'),
     ('post', f'{BASE}/test_run'),
-    ('delete', f'{BASE}/test_run'),
     ('get', f'{BASE}/test_run'),
     ('get', f'{BASE}/test_run/{{run_id}}'),
+    ('post', f'{BASE}/test_run/{{run_id}}/decision'),
 }
 NO_JSON_SUCCESS = {  # 204 without a body, a YAML file
-    ('delete', ITEM), ('delete', f'{BASE}/test_run'), ('get', f'{BASE}/export'),
+    ('delete', ITEM), ('get', f'{BASE}/export'),
 }
 
 
@@ -487,3 +488,24 @@ def test_bug_48_el7011_every_4xx_of_the_save_operations_points_to_the_refusal_sc
 def test_bug_48_el7011_the_4xx_examples_stay(spec):
     resume = _operations(spec)[('post', f'{ITEM}/resume')]['responses']['400']
     assert resume['content']['application/json']['example']['field'] == 'version_id'
+
+
+def test_the_test_run_routes_share_one_application_query_and_have_no_delete(spec):
+    paths = spec['paths']
+    test_run = paths[f'{BASE}/test_run']
+    assert 'delete' not in test_run
+    shared = {json.dumps(param, sort_keys=True) for path in (test_run, paths[f'{BASE}/test_run/{{run_id}}'])
+              for param in path['get']['parameters'] if param['name'] == 'application_id'}
+    assert len(shared) == 1
+    (param,) = (json.loads(item) for item in shared)
+    assert param['required'] is True and param['schema']['maximum'] == 2**31 - 1
+
+
+def test_the_test_run_decision_is_documented_with_its_errors(spec):
+    operation = spec['paths'][f'{BASE}/test_run/{{run_id}}/decision']['post']
+    assert {'200', '400', '403', '404', '409', '500', '503'} <= set(operation['responses'])
+
+
+@pytest.mark.parametrize('method, tail', [('post', 'test_run'), ('get', 'test_run'), ('get', 'test_run/{run_id}')])
+def test_the_test_run_operations_document_503(spec, method, tail):
+    assert '503' in spec['paths'][f'{BASE}/{tail}'][method]['responses']
