@@ -21,7 +21,7 @@ ROW_KEYS = {
     "id", "name", "description", "entity_type", "run_mode", "application_id", "entity_name",
     "version_id", "version_name", "cron", "timezone", "enabled", "disabled_reason", "next_run",
     "last_run", "last_run_status", "last_run_reason", "last_conversation_id", "expires_at",
-    "owner", "allowed_actions",
+    "owner", "allowed_actions", "trigger_kind", "webhook_type", "webhook_url",
 }
 
 

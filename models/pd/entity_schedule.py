@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from ...utils.schedule_timing import compute_next_run, end_of_day, schedule_limits
 from .index import _cron_gaps, _validate_cron_expression
@@ -44,7 +44,7 @@ class ScheduleTiming(BaseModel):
     @classmethod
     def validate_expires_at(cls, v: date | None, info: ValidationInfo) -> date | None:
         # A bad cron or time zone already failed its own field; nothing to compare against
-        if v is None or 'cron' not in info.data or 'timezone' not in info.data:
+        if v is None or info.data.get('cron') is None or info.data.get('timezone') is None:
             return v
         cron, zone = info.data['cron'], info.data['timezone']
         now = datetime.now(UTC)
@@ -59,6 +59,11 @@ NAME_MAX = 256
 DESCRIPTION_MAX = 2304  # the entity_schedules.description column width
 RunMode = Literal['entry_point', 'prompt']
 ApprovalRule = Literal['pause_and_ask', 'run_without_asking']
+TriggerKind = Literal['cron', 'webhook']
+WebhookType = Literal['github', 'gitlab', 'custom']
+GitlabAuthMethod = Literal['secret_token', 'signing_token']
+WEBHOOK_FIELDS = ('webhook_type', 'gitlab_auth_method')
+CRON_FIELDS = ('cron', 'timezone', 'expires_at')
 NAME_TEXT = 'Schedule name'
 DESCRIPTION_TEXT = 'Free text about the schedule'
 VERSION_TEXT = 'Id of the entity version that runs'
@@ -135,6 +140,39 @@ class ScheduleCreate(ScheduleTiming):
     approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
     risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
                                      examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
+    trigger_kind: TriggerKind = Field('cron', description='`cron` runs on a schedule, `webhook` on an HTTP delivery',
+                                      examples=['cron'])
+    cron: str | None = Field(None, description=CRON_TEXT + '; cron rows only', examples=['0 9 * * 1-5'])
+    timezone: str | None = Field(None, description=TIMEZONE_TEXT + '; cron rows only', examples=['Europe/Warsaw'])
+    webhook_type: WebhookType | None = Field(None, description='Webhook rows: the sender', examples=['github'])
+    gitlab_auth_method: GitlabAuthMethod | None = Field(
+        None, description='GitLab webhook rows: how GitLab proves the request', examples=['secret_token'])
+
+    @field_validator('cron')
+    @classmethod
+    def validate_cron(cls, v: str | None) -> str | None:
+        return v if v is None else ScheduleTiming.validate_cron(v)
+
+    @field_validator('timezone')
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        return v if v is None else ScheduleTiming.validate_timezone(v)
+
+    @model_validator(mode='after')
+    def check_trigger_fields(self):
+        if self.trigger_kind == 'cron':
+            if self.cron is None or self.timezone is None:
+                raise ValueError('A schedule needs cron and timezone')
+            if any(getattr(self, f) is not None for f in WEBHOOK_FIELDS):
+                raise ValueError('Webhook fields are only allowed on webhooks')
+            return self
+        if any(getattr(self, f) is not None for f in CRON_FIELDS):
+            raise ValueError('A webhook has no cron, timezone or stop date')
+        if self.webhook_type is None:
+            raise ValueError('A webhook needs webhook_type')
+        if (self.webhook_type == 'gitlab') != (self.gitlab_auth_method is not None):
+            raise ValueError('gitlab_auth_method is required for GitLab webhooks and only for them')
+        return self
 
 
 class ScheduleEdit(BaseModel):
@@ -191,8 +229,8 @@ class ScheduleDetails(BaseModel):
     run_mode: str | None
     prompt: str | None
     variables: list[ScheduleVariable]
-    cron: str
-    timezone: str
+    cron: str | None
+    timezone: str | None
     expires_at: datetime | None
     enabled: bool
     created_by: int
@@ -206,3 +244,8 @@ class ScheduleDetails(BaseModel):
     approval_confirmed_by: str | None = None  # the name of who confirmed "Run without asking"
     approval_confirmed_at: datetime | None = None
     allowed_actions: list[str]
+    trigger_kind: str = 'cron'
+    webhook_type: str | None = None
+    gitlab_auth_method: str | None = None
+    webhook_url: str | None = None
+    previous_secret_until: datetime | None = None

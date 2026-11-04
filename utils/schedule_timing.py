@@ -65,7 +65,7 @@ def end_of_day(day: date, timezone_name: str) -> datetime:
 
 
 def check_enabled_cap(session, adding: int = 1) -> None:
-    """Raise when `adding` more enabled schedules would pass the project cap.
+    """Raise when `adding` more enabled cron schedules would pass the project cap; webhooks do not count.
 
     Callers pass adding=0 for a row that is already enabled.
     """
@@ -75,7 +75,8 @@ def check_enabled_cap(session, adding: int = 1) -> None:
     cap = schedule_limits().max_enabled_per_project
     # lean: soft cap, no lock (US-07 checks and writes in one transaction); lock when parallel enables pass it
     enabled = session.execute(
-        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True))
+        select(func.count()).select_from(EntitySchedule).where(
+            EntitySchedule.enabled.is_(True), EntitySchedule.trigger_kind == 'cron')
     ).scalar()
     if enabled + adding > cap:
         raise ScheduleLimitError(cap)

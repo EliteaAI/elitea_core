@@ -28,6 +28,7 @@ TOO_MANY = f'The schedule file has more than {MAX_ITEMS} schedules'
 SAVE_FAILED = 'The schedule could not be saved'
 REPEATED_KEY = 'The key is used by an earlier schedule of this file'
 OTHER_ENTITY = 'The key belongs to a schedule of another agent or pipeline'
+WEBHOOK_KEY = 'The key belongs to a webhook; webhooks are not imported'
 UNCONFIRMED_NOTE = ('Sensitive tools need a confirmation in the schedule form, or some tools could not be '
                     'checked; saved as Pause and ask me')
 UPDATE_FIELDS = (
@@ -62,6 +63,7 @@ def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
         select(EntitySchedule, Application.name, ApplicationVersion.name)
         .join(Application, Application.id == EntitySchedule.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == EntitySchedule.version_id)
+        .where(EntitySchedule.trigger_kind == 'cron')
         .order_by(EntitySchedule.id)
     )
     if ids is not None:
@@ -175,6 +177,8 @@ def _schedule_index(session, file) -> tuple[dict, dict]:
             select(EntitySchedule).where(or_(EntitySchedule.uuid.in_(keys), EntitySchedule.name.in_(names)))
     ):
         by_key[row.uuid] = row
+        if row.trigger_kind != 'cron':
+            continue
         by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)
     return by_key, by_name
 
@@ -186,6 +190,8 @@ def _match(by_key: dict, by_name: dict, seen_keys: set, item, application_id: in
             raise ScheduleError('repeated_key', REPEATED_KEY)
         seen_keys.add(item.key)
         row = by_key.get(item.key)
+        if row is not None and row.trigger_kind != 'cron':
+            raise ScheduleError('webhook_key', WEBHOOK_KEY)
         if row is not None and (row.application_id, row.entity_type) != (application_id, item.entity_type):
             raise ScheduleError('other_entity', OTHER_ENTITY)
         return row

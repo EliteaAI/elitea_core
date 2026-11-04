@@ -63,6 +63,7 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
                 approval_confirmed_by=schedule.approval_confirmed_by,
+                trigger_kind=schedule.trigger_kind, webhook_type=schedule.webhook_type,
                 credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),

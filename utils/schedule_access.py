@@ -61,3 +61,10 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
     if scope.is_admin:
         actions.append("change_owner")
     return actions
+
+
+def row_webhook_url(project_id: int, row) -> str | None:
+    """The delivery path of a webhook row, keyed by its unchanging uuid; None for cron rows."""
+    if getattr(row, "trigger_kind", "cron") != "webhook":
+        return None
+    return f"/api/v2/elitea_core/hooks/prompt_lib/{int(project_id)}/{row.uuid}"

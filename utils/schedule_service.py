@@ -24,6 +24,7 @@ TEMPLATE_MARK = re.compile(r'{{|}}|{%|%}|{#|#}')
 # Update fields where null clears the value; null elsewhere means "not sent"
 CLEARABLE = {'description', 'run_mode', 'prompt', 'expires_at'}
 NEXT_RUN_FIELDS = {'cron', 'timezone', 'enabled'}
+CRON_ONLY_FIELDS = {'cron', 'timezone', 'expires_at'}
 CONFIRMED_EVENT = 'schedule_run_without_asking_confirmed'
 INVALID_INPUT = 'invalid_input'
 
@@ -194,7 +195,8 @@ def create_schedule(
     check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
     values = body.model_dump(exclude={'risk_ack'})
     check_run_input(body.entity_type, body.run_mode, body.prompt, values['variables'])
-    if body.enabled:
+    cron_row = body.trigger_kind == 'cron'
+    if cron_row and body.enabled:
         check_enabled_cap(session)
     values['expires_at'] = body.expires_at and end_of_day(body.expires_at, body.timezone)
     row = EntitySchedule(
@@ -202,7 +204,7 @@ def create_schedule(
         created_by=scope.user_id,
         updated_by=scope.user_id,
         principal={'kind': 'delegation', 'ref': scope.user_id},
-        next_run=compute_next_run(body.cron, body.timezone, datetime.now(UTC)),
+        next_run=compute_next_run(body.cron, body.timezone, datetime.now(UTC)) if cron_row else None,
     )
     if key is not None:
         row.uuid = key
@@ -232,6 +234,10 @@ def update_schedule(
         key: value for key, value in body.model_dump(exclude_unset=True, exclude={'risk_ack'}).items()
         if value is not None or key in CLEARABLE
     }
+    cron_row = row.trigger_kind == 'cron'
+    set_cron_fields = sorted(k for k in CRON_ONLY_FIELDS & changes.keys() if changes[k] is not None)
+    if not cron_row and set_cron_fields:
+        raise _field_error(set_cron_fields[0], 'A webhook has no cron, time zone or stop date')
     resuming = changes.get('enabled') is True and not row.enabled
     if resuming and changes.get('version_id', row.version_id) is None:
         raise _field_error('version_id', 'Choose a version before you resume this schedule')
@@ -249,7 +255,8 @@ def update_schedule(
         ScheduleTiming(cron=cron, timezone=timezone, expires_at=changes['expires_at'])
         changes['expires_at'] = end_of_day(changes['expires_at'], timezone)
     if resuming:
-        check_enabled_cap(session)
+        if cron_row:
+            check_enabled_cap(session)
         row.disabled_reason = None
         # a resume starts the governance refusal count again (#7254); the column is not mapped
         session.execute(update(EntitySchedule).where(EntitySchedule.id == row.id).values({REFUSAL_STREAK: 0}))
@@ -257,7 +264,7 @@ def update_schedule(
         setattr(row, key, value)
     row.updated_by = scope.user_id
     _apply_confirmation(row, confirmed, scope.user_id)
-    if NEXT_RUN_FIELDS & changes.keys():
+    if cron_row and NEXT_RUN_FIELDS & changes.keys():
         row.next_run = compute_next_run(cron, timezone, datetime.now(UTC))
     admin_change = _is_admin_change(row, scope)
     if admin_change:
