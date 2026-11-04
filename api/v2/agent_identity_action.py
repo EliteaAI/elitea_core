@@ -63,7 +63,10 @@ def binding_action(module, project_id, binding_id, mode):
     refused = _foreign_suspension(project_id, found, body.action, mode)
     if refused:
         return refused
+    # (#7228, C9-SEC-100) a move into approval makes its mover the request's actor only when they may approve
+    takes = body.action not in ("submit", "rebind") or api.has_permission(api.APPROVE, project_id, mode)
     values = {
+        "takes_request": takes, "mover_kind": "deliberate" if takes else "not_approver",
         "project_id": project_id, "application_id": found["application_id"], "version_id": found["version_id"],
         "mode": found["identity_mode"], "binding_id": found["id"], "action": body.action,
         "expected_state": body.expected_state, "approval_ref": body.approval_ref,
@@ -78,7 +81,10 @@ def binding_action(module, project_id, binding_id, mode):
         result = run_binding_action(module, values, actor)
     except BindingActionError as exc:
         return api.action_refusal(exc)
-    return {"ok": True, "id": result["binding_ref"], "state": result["state"]}, 200
+    answer = {"ok": True, "id": result["binding_ref"], "state": result["state"]}
+    if result.get("consents_to_withdraw"):   # (#7228, D3-S4) retired; an owner's consent is still to be withdrawn
+        answer["consents_to_withdraw"] = result["consents_to_withdraw"]
+    return answer, 200
 
 
 def _foreign_suspension(project_id, found, action, mode):

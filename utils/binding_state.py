@@ -46,7 +46,8 @@ def bumps_epoch(expected: str, target: str) -> bool:
 
 def requester_of(state_changed_by, created_by):
     """(#7228) Who made a waiting binding's current request: the operator who last moved it (submitted it, rebound it,
-    brought it up to date), else its creator. The one person its four-eyes rule excludes."""
+    brought it up to date), else its creator. The one person its four-eyes rule excludes. A move that does not take the
+    request (``transition_binding(takes_request=False)``) clears ``state_changed_by``, so the creator stays it."""
     return state_changed_by if state_changed_by is not None else created_by
 
 
@@ -65,6 +66,7 @@ class InvalidTransition(ValueError):
 def transition_binding(  # pylint: disable=R0913
     session, binding_id, expected: str, target: str, *, actor_user_id: int,
     approval_ref=None, policy_revision=None, current_digest=None, allow_runtime_domain_binding=False,
+    takes_request=True,
 ) -> bool:
     """Move a binding from ``expected`` to ``target``. True when this call made the change.
 
@@ -75,7 +77,8 @@ def transition_binding(  # pylint: disable=R0913
     ``current_digest`` is the definition the activation is checked against; for a rebind it is the definition the
     binding is approved for from now on. Approving (``pending_approval`` -> ``active``) is refused for the operator who
     made its current request (``requester_of``: who last changed its state, else its creator; ``SELF_APPROVAL``,
-    #7228); resuming a suspended binding is not an approval and has no such rule.
+    #7228); resuming a suspended binding is not an approval and has no such rule. ``takes_request``: False for a move
+    into approval that does not make its mover that operator (automatic, or by a non-approver; #7228 C9-SEC-100).
     """
     if (expected, target) not in TRANSITIONS:
         raise InvalidTransition("INVALID_TRANSITION", f"{expected} -> {target} is not a legal binding change")
@@ -112,6 +115,10 @@ def transition_binding(  # pylint: disable=R0913
             raise InvalidTransition("DENIED_BINDING", "runtime domain bindings cannot be activated here")
 
     values = {"state": target, "state_changed_by": actor_user_id, "updated_at": func.now()}
+    if target == "pending_approval" and not takes_request:
+        # (#7228, C9-SEC-100) an automatic move into approval (a request the platform filed, a run's change) or one by
+        # someone who may not approve does not make its mover the request's actor: the creator stays excluded
+        values["state_changed_by"] = None
     if approving:   # only an approval writes the two columns; a resume keeps the stored ones
         values["approval_ref"] = approval_ref
         values["policy_revision"] = policy_revision

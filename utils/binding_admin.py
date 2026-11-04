@@ -128,6 +128,10 @@ def parse_platform_operations(raw, action):
     return [op for op in PLATFORM_OPERATIONS if op in operations], None
 
 
+# (#7228, C9-SEC-100) a move into approval whose mover is not the request's actor, by its kind
+MOVER_SUFFIX = {"automatic": "_AUTOMATIC", "not_approver": "_BY_NON_APPROVER"}
+
+
 def _lifecycle_event(values, binding, target, actor_user_id, epoch, source=None):  # pylint: disable=R0913
     """The ``lifecycle`` audit event of one state change, with only the fields the event schema has today. The rebind
     event therefore does not carry the definition digests (new and previous); a ``definition_digest`` and
@@ -147,6 +151,13 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch, source=None)
         event["policy_revision"] = binding.policy_revision
     if values.get("platform_operations") is not None and target in ("draft", "pending_approval", "active"):
         event["operation_id"] = "platform_operations:" + (",".join(values["platform_operations"]) or "none")
+    if target == "pending_approval":   # (#7228) who the request's actor is now, and how its mover moved it
+        takes = values.get("takes_request", True)
+        actor = actor_user_id if takes else binding.created_by
+        if actor:
+            event["user_ref"] = f"user:{actor}"
+        if not takes:   # the mover (``caller_ref``) did not become its actor: said in the code
+            event["reason_code"] += MOVER_SUFFIX.get(values.get("mover_kind"), "_AUTOMATIC")
     return {key: value for key, value in event.items() if value is not None}
 
 
@@ -207,17 +218,28 @@ def _end_dependants(session, tracing, project_id, binding_id, actor_user_id, rea
         code = getattr(exc, "code", None)
         if code == "CONCURRENT_CHANGE":
             raise BindingActionError(code, "the binding changed while this ran; read it again and retry") from None
+        if code == "TOO_MANY_GRANTS":   # (#7228, D3-S3) readable, never "is the audit trail available?"
+            raise BindingActionError(code, "the binding has more credential grants than one retirement revokes; "
+                                           "nothing was changed") from None
         log.error("binding: its grants could not be revoked (%s)", type(exc).__name__)
         raise BindingActionError("AUDIT_UNAVAILABLE", "failed; nothing was changed (is the audit trail available?)") \
             from None
     return [mandate_id for mandate_id, _ in mandates]
 
 
-def _withdraw_consents(project_id, mandate_ids, actor_user_id):
-    """After the commit, as a mandate's own revocation does (#7131): the owner's consent goes with the mandate."""
+def _withdraw_consents(project_id, mandate_ids, actor_user_id) -> list:
+    """After the commit, as a mandate's own revocation does (#7131): the owner's consent goes with the mandate. The
+    ids whose consent could not be withdrawn (#7228, D3-S4): the retirement stands, the reply says so, never a 500."""
     from .mandate_identity import retire_consent  # pylint: disable=C0415
+    left = []
     for mandate_id in mandate_ids:
-        retire_consent(project_id, mandate_id, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor_user_id}", actor_user_id)
+        try:
+            retire_consent(project_id, mandate_id, "MANDATE_IDENTITY_WITHDRAWN", f"operator:{actor_user_id}",
+                           actor_user_id)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("binding: a revoked mandate's consent is still to be withdrawn (%s)", type(exc).__name__)
+            left.append(str(mandate_id))
+    return left
 
 
 def _revive(session, tracing, values, binding, digest, actor_user_id):  # pylint: disable=R0913
@@ -237,9 +259,9 @@ def _revive(session, tracing, values, binding, digest, actor_user_id):  # pylint
     # (#7228) a binding retired before its retirement ended these starts clean all the same
     ended = _end_dependants(session, tracing, values["project_id"], binding_id, actor_user_id, "BINDING_REVIVED")
     session.commit()
-    _withdraw_consents(values["project_id"], ended, actor_user_id)
+    left = _withdraw_consents(values["project_id"], ended, actor_user_id)
     return {"action": "create", "binding_ref": str(binding_id), "state": "draft",
-            "definition_digest": digest, "dry_run": False}
+            "definition_digest": digest, "dry_run": False, **({"consents_to_withdraw": left} if left else {})}
 
 
 def _find(values):
@@ -292,6 +314,7 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
             approval_ref=approval_ref, policy_revision=policy_revision,
             current_digest=current_digest,
             allow_runtime_domain_binding=bool(settings and settings.allow_runtime_domain_binding),
+            takes_request=values.get("takes_request", True),
         ):
             session.rollback()
             raise BindingActionError("CONCURRENT_CHANGE", "the binding changed while this ran; read it again and retry")
@@ -309,8 +332,9 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
     ended = _end_dependants(session, tracing, values["project_id"], binding_id, actor_user_id, "BINDING_RETIRED") \
         if action == "retire" else []
     session.commit()
-    _withdraw_consents(values["project_id"], ended, actor_user_id)
-    return {"action": action, "binding_ref": str(binding_id), "state": state, "dry_run": False}
+    left = _withdraw_consents(values["project_id"], ended, actor_user_id)
+    return {"action": action, "binding_ref": str(binding_id), "state": state, "dry_run": False,
+            **({"consents_to_withdraw": left} if left else {})}
 
 
 def run_binding_action(module, values, actor_user_id=0):

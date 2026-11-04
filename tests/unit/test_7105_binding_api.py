@@ -518,6 +518,18 @@ def test_the_requester_cannot_approve_and_another_admin_can(ns, env):
     assert (status, payload["state"]) == (200, "active")
 
 
+def test_a_move_by_someone_who_may_not_approve_keeps_the_creator_as_the_requests_actor(ns, env):
+    """(#7228, C9-SEC-100) a manage-only caller submits: they do not become the request's actor (the creator stays
+    excluded); the event says the mover was not an approver."""
+    binding_id = create(ns)[0]["id"]
+    assert act(ns, binding_id, "submit", "draft", actor="token_manage")[1] == 200
+    assert binding(env, ns).state_changed_by is None
+    assert env.recorded[-1][1]["reason_code"] == "BINDING_PENDING_APPROVAL_BY_NON_APPROVER"
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin",
+                          approval_ref="CHG-12", policy_revision="rev-1")
+    assert (status, payload["code"]) == (403, "SELF_APPROVAL")
+
+
 def test_a_creator_who_did_not_make_the_current_request_may_approve_it_over_rest(ns, env):
     """(#7228) created by one admin, the request made by the other: the creator approves (no two-admin dead end)."""
     binding_id = create(ns)[0]["id"]

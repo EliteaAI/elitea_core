@@ -835,10 +835,21 @@ def test_a_title_that_resolves_to_nothing_is_refused_as_needing_a_reference(ns, 
 
 
 def test_a_payload_carrying_another_configuration_than_the_title_resolves_to_is_refused(ns, env):
+    """(D3-S2) Only the mismatch can refuse here: the configuration the title resolves to has its facts, an active
+    reference and this subject's grant, so without the guard the run would be admitted on it."""
     cred = seeded(env, selector="title")
-    env.title_resolutions[(1, TITLE, False, USER)] = {"configuration_uuid": str(uuid.uuid4()),
-                                                      "configuration_project_id": 1}
-    assert refusal(env, ns, payload_of(cred)).reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+    resolved, ref_id = str(uuid.uuid4()), str(uuid.uuid4())
+    env.configurations[(1, resolved)] = {"id": 6, "project_id": 1, "type": "jira", "section": "credentials",
+                                         "generation": 3}
+    env.references.append({"project_id": 1, "configuration_id": 6, "ref_id": ref_id, "state": "active", "generation": 1,
+                           "configuration_generation": 3, "store_kind": "database", "ownership_class": "project_shared",
+                           "revocation_epoch": 2})
+    env.grants[(1, "|".join((str(cred.binding), str(cred.tool_id), ref_id, "*", SUBJECT)))] = {
+        "grant_id": str(uuid.uuid4()), "state": "active", "revocation_epoch": 4, "valid_from": None,
+        "valid_until": None, "operations": ["*"]}
+    env.title_resolutions[(1, TITLE, False, USER)] = {"configuration_uuid": resolved, "configuration_project_id": 1}
+    assert refusal(env, ns, payload_of(cred)).reason_code == "CREDENTIAL_REFERENCE_REQUIRED"   # payload names cred.uuid
+    assert contexts(env, ns) == []
 
 
 def test_an_unreachable_title_resolver_fails_closed(ns, env, monkeypatch):

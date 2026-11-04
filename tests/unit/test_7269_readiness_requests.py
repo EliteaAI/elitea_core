@@ -303,8 +303,9 @@ def test_one_batch_files_the_binding_the_reference_and_the_grant_as_the_members_
     filed = file(ns, env)
     assert [item["kind"] for item in filed] == ["binding", "reference", "grant"]
     [row] = bindings(env, ns)
+    # (#7228, C9-SEC-100) the platform's own filing is automatic: the request's actor is its creator, the member
     assert (row.state, row.created_by, row.state_changed_by, row.identity_mode) == (
-        "pending_approval", MEMBER, MEMBER, "elitea_native")
+        "pending_approval", MEMBER, None, "elitea_native")
     # the secrets plugin got the batch's own session (whose commit is a flush), the reference first, then the grant
     assert [(session, items[0]["kind"]) for session, _, items, _ in env.secrets.calls] == [
         ("_OneTransaction", "reference"), ("_OneTransaction", "grant")]
@@ -314,7 +315,7 @@ def test_one_batch_files_the_binding_the_reference_and_the_grant_as_the_members_
     assert grant["ref"] == filed[1]["id"] and env.secrets.calls[0][2][0]["configuration_uuid"] == cred.uuid
     events = [(event["reason_code"], event.get("caller_ref")) for _, event in env.recorded]
     assert events.count(("GOVERNANCE_REQUEST_FILED", f"user:{MEMBER}")) == 3
-    assert ("BINDING_PENDING_APPROVAL", f"operator:{MEMBER}") in events
+    assert ("BINDING_PENDING_APPROVAL_AUTOMATIC", f"operator:{MEMBER}") in events   # (#7228) the platform filed it
     # every event in the one transaction: the batch's session, or the lifecycle's view of it
     assert len({id(getattr(session, "_session", session)) for session, _ in env.recorded}) == 1
     batch = getattr(env.recorded[0][0], "_session", env.recorded[0][0])
@@ -462,6 +463,36 @@ def test_a_retirement_that_cannot_end_the_grants_changes_nothing(ns, env, monkey
     assert refused.value.code == "AUDIT_UNAVAILABLE"
     [row] = bindings(env, ns)
     assert row.state == "active" and env.query(1, ns.Mandate)[0].state == "active"
+
+
+def test_a_binding_with_more_grants_than_a_retirement_revokes_is_refused_readably(ns, env):
+    """(#7228, D3-S3) the secrets plugin's ceiling reads as such, never as an audit outage; nothing is retired."""
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+
+    class TooMany(Exception):
+        code = "TOO_MANY_GRANTS"
+
+    def too_many(*_args, **_kwargs):
+        raise TooMany()
+    env.secrets_extra["revoke_binding_grants"] = too_many
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        retire(ns, binding)
+    assert refused.value.code == "TOO_MANY_GRANTS" and "audit" not in refused.value.message
+    assert bindings(env, ns)[0].state == "active"
+
+
+def test_a_consent_that_cannot_be_withdrawn_after_the_retirement_is_said_not_raised(ns, env, monkeypatch):
+    """(#7228, D3-S4) the retirement and the mandates' revocation are committed; the owner's consent that could not be
+    withdrawn afterwards is named in the reply, no error."""
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    mandate = mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("secrets down")
+    monkeypatch.setattr(ns.mandate_identity, "retire_consent", broken)
+    result = retire(ns, binding)
+    assert (result["state"], result["consents_to_withdraw"]) == ("retired", [str(mandate)])
+    assert env.query(1, ns.Mandate)[0].state == "revoked"
 
 
 def test_a_stale_approval_dialog_cannot_approve_a_definition_brought_up_to_date_since(ns, env):

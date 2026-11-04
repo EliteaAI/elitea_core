@@ -92,8 +92,10 @@ def _file_binding(module, session, tracing, project_id, plan, actor):
     expected = "draft"
     if action == "rebind":
         expected = plan.get("binding_state") if plan.get("binding_state") in ("active", "pending_approval") else "active"
+    # (#7228, C9-SEC-100) a request the platform files is automatic: it never makes the member the request's actor
     change_binding(module, session, tracing, {**values, "action": action, "binding_id": uuid.UUID(str(binding_id)),
-                                              "expected_state": expected}, actor)
+                                              "expected_state": expected, "takes_request": False,
+                                              "mover_kind": "automatic"}, actor)
     return str(binding_id)
 
 

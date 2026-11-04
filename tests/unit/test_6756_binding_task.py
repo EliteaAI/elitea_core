@@ -815,3 +815,55 @@ def test_the_task_is_documented_for_operators():
     section = doc[doc.index("def manage_agent_identity_binding"):doc.index("def migrate_eval_dataset_columns")]
     for word in ("project_id=N", "application_id=A", "version_id=V", "mode=", "action=", "approval_ref", "policy_revision", "dry_run"):
         assert word in section
+
+
+# --- (#7228 round 5) what the review's mutations showed unpinned, and the requester's kind ---------------------------
+
+def test_a_re_digest_between_the_approvals_read_and_its_write_leaves_the_row_unchanged(ns, env):
+    """(D3-S1) The approving UPDATE repeats the digest it read: a re-digest in place committed between the read and the
+    write makes the write miss (CONCURRENT_CHANGE), nothing is approved."""
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    engine, fired = env.engine(1), []
+
+    def redigest_first(conn, cursor, statement, parameters, context, executemany):  # pylint: disable=R0913
+        if not fired and statement.lstrip().upper().startswith("UPDATE") and "agent_identity_binding" in statement:
+            fired.append(True)
+            cursor.execute("UPDATE agent_identity_binding SET definition_digest = ?", (NEW_DIGEST,))
+    ns.sa.event.listen(engine, "before_cursor_execute", redigest_first)
+    try:
+        result = run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)
+    finally:
+        ns.sa.event.remove(engine, "before_cursor_execute", redigest_first)
+    assert fired and result["error"] == "the binding changed while this ran; read it again and retry"
+    assert binding(env, ns).state == "pending_approval"
+
+
+def test_an_authors_own_edit_requested_by_a_member_is_never_approved_by_the_author(ns, env):
+    """(D3-D1, C9-SEC-100) 7 authors and submits; 7 then edits the agent and a member's Request (the platform's own
+    filing, automatic) brings the waiting binding up to date: the request stays 7's, so 7 is refused and another
+    operator approves. The audit names the request's actor and the mover's kind."""
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST
+    values, _ = ns.binding_admin.parse_binding_param(f"{ONE};action=rebind")
+    values.update(takes_request=False, mover_kind="automatic")
+    assert ns.binding_admin.run_binding_action(env.module(governed=False), values, 9)["state"] == "pending_approval"
+    assert binding(env, ns).state_changed_by is None   # the member did not become the request's actor
+    event = [event for _, event in env.recorded if event["event_type"] == "lifecycle"][-1]
+    assert (event["caller_ref"], event["user_ref"], event["reason_code"]) == (
+        "operator:9", "user:7", "BINDING_BROUGHT_UP_TO_DATE_AUTOMATIC")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_deliberate_re_request_by_another_approver_lets_the_creator_approve(ns, env):
+    """(D3-D1) the two-admin case stays open: another approver moving it deliberately is the request's actor."""
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST
+    run(ns, env, f"{ONE};action=rebind", actor=9)   # the admin task: a deliberate move
+    event = [event for _, event in env.recorded if event["event_type"] == "lifecycle"][-1]
+    assert (event["user_ref"], event["reason_code"]) == ("user:9", "BINDING_BROUGHT_UP_TO_DATE")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
