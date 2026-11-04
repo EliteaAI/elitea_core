@@ -1175,6 +1175,41 @@ def application_toolkit_change_relation(
                     )
                 else:
                     # Different version - update the existing toolkit's version
+                    parent_mapping = session.query(EntityToolMapping).where(
+                        EntityToolMapping.tool_id == existing_relation.id,
+                        EntityToolMapping.entity_id == parent_application_version.application_id,
+                        EntityToolMapping.entity_version_id == parent_application_version.id,
+                        EntityToolMapping.entity_type == ToolEntityTypes.agent,
+                    ).first()
+                    is_shared = session.query(EntityToolMapping).where(
+                        EntityToolMapping.tool_id == existing_relation.id,
+                        EntityToolMapping.id != parent_mapping.id,
+                    ).first() is not None
+                    if is_shared:
+                        # The toolkit is linked to other parent versions too (e.g. copied by
+                        # Save As Version): repoint only this parent's mapping (issue #7396)
+                        target_toolkit = session.query(EliteATool).where(
+                            EliteATool.type == 'application',
+                            EliteATool.settings['application_id'].astext.cast(Integer) == application_id,
+                            EliteATool.settings['application_version_id'].astext.cast(Integer) == version_id
+                        ).first()
+                        if not target_toolkit:
+                            target_toolkit = EliteATool(
+                                name=child_application_version.name,
+                                type='application',
+                                author_id=user_id,
+                                settings={
+                                    'application_id': application_id,
+                                    'application_version_id': version_id
+                                },
+                            )
+                            session.add(target_toolkit)
+                            session.flush()
+                        log.info(f"Repointing relation of version {parent_application_version.id} "
+                                 f"from toolkit {existing_relation.id} to {target_toolkit.id}")
+                        parent_mapping.tool_id = target_toolkit.id
+                        session.flush()
+                        return {'has_relation': True, 'tool_id': target_toolkit.id, 'updated_version': True}
                     log.info(f"Updating existing relation toolkit {existing_relation.id} "
                              f"from version {existing_version_id} to {version_id}")
                     new_settings = dict(existing_relation.settings)
