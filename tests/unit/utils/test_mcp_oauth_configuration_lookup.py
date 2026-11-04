@@ -38,6 +38,7 @@ def mcp_oauth():
     'openapi_configuration',
     'teams_configuration',
     'outlook_configuration',
+    'ms_graph_configuration',
 ])
 def test_every_delegated_oauth_configuration_supplies_the_secret(mcp_oauth, key):
     settings = {key: {'client_id': 'cid', 'client_secret': 'real-secret', 'scopes': ['User.Read']}}
