@@ -222,3 +222,40 @@ def test_cr_el7011_postgres_numeric_sums_become_json_numbers(detail, monkeypatch
     assert (tokens, cost) == (1119, 0.001582)
     assert type(tokens) is int and type(cost) is float
     json.dumps({"tokens": tokens, "cost_usd": cost})
+
+
+def test_the_usage_of_a_page_of_runs_is_read_in_one_call_and_matches_the_single_run_read(detail, monkeypatch):
+    detail.usage(input_tokens=1500, output_tokens=500, cost_nano_usd=25_000_000)
+    detail.usage(conversation=str(uuid.uuid4()), input_tokens=7000)  # a chat of no run on the page
+    first, no_chat, no_usage = detail.run(), detail.run(id=78, conversation_id=None), detail.run(id=79, conversation_id=555)
+    calls = []
+    real = sys.modules["tools"].db.engine
+
+    class Counting:
+        def connect(self):
+            calls.append(1)
+            return real.connect()
+
+    monkeypatch.setattr(sys.modules["tools"].db, "engine", Counting())
+
+    uuids = detail.module.conversation_uuids(detail.session, [first.conversation_id, None, no_usage.conversation_id])
+    pages = [types.SimpleNamespace(**vars(run), conversation_uuid=uuids.get(run.conversation_id))
+             for run in (first, no_chat, no_usage)]
+    detail.session.close()
+
+    found = detail.module.usage_summaries(PROJECT_ID, pages)
+
+    assert found == {77: (2000, 0.025), 78: (None, None), 79: (None, None)}
+    assert found[77] == detail.module.usage_summary(detail.session, PROJECT_ID, first)
+    assert len(calls) == 2  # one for the page, one for the single read above
+
+
+def test_the_chat_uuids_of_a_page_come_from_one_query(detail):
+    assert detail.module.conversation_uuids(detail.session, [CONVERSATION_ID, None, 555]) == {
+        CONVERSATION_ID: CONVERSATION_UUID}
+    assert detail.module.conversation_uuids(detail.session, [None]) == {}
+
+
+def test_the_version_labels_of_a_page_come_from_one_query(detail):
+    assert detail.module.version_labels(detail.session, [10, 99, None, 10]) == {10: "v3"}
+    assert detail.module.version_labels(detail.session, [None]) == {}

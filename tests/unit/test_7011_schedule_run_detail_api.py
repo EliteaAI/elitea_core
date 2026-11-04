@@ -37,7 +37,7 @@ FINISHED = {'at': '2026-10-01T00:00:38+00:00', 'kind': 'finished', 'text': 'Run 
             'level': 'success', 'status': 'success'}
 TOOL = {'at': '2026-10-01T00:00:10+00:00', 'kind': 'tool_call', 'text': 'Tool call: github · list_issues',
         'level': 'info', 'toolkit': 'github', 'tool': 'list_issues', 'duration_ms': 1200}
-DETAIL_FIELDS = FIELDS | {
+DETAIL_FIELDS = (FIELDS - {'tokens', 'cost_usd'}) | {  # the detail has the figures in `summary`
     'version_label', 'principal_label', 'risk_outcome', 'approval_rule', 'approval_expires_at', 'summary', 'events',
 }
 

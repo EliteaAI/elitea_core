@@ -592,6 +592,10 @@ class Module(module.ModuleModel):
                 "fix_platform_tick_row", self.fix_platform_tick_row,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_schedule_test_runs", self.migrate_schedule_test_runs,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -1469,6 +1473,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_governance_settings_tables", self.create_governance_settings_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_schedule_test_runs", self.migrate_schedule_test_runs
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

@@ -64,6 +64,37 @@ def test_el_7011_bug12_r1_1_shared_trigger_value_is_returned(model, stored):
     assert _row(model, {"execution_type": stored}).execution_type == stored
 
 
+def _run_ref(trigger, schedule_id=3, schedule_name="Nightly"):
+    return {"id": 9, "schedule_id": schedule_id, "schedule_name": schedule_name, "status": "success",
+            "trigger": trigger}
+
+
+def _row_with_run(model, meta, run):
+    return model.ConversationListExtended(
+        id=1, name="run", is_private=True, author_id=1, created_at=datetime(2026, 1, 1),
+        meta=meta, participants_count=1, message_groups_count=1, users_count=1, schedule_run=run)
+
+
+def test_an_old_row_with_the_dropped_test_type_reads_as_manual(model):
+    assert _row(model, {"execution_type": "schedule_test"}).execution_type == "schedule_manual"
+
+
+@pytest.mark.parametrize("trigger", ["test", "manual", "cron"])
+def test_a_stored_manual_row_keeps_its_type_whatever_the_run_trigger(model, trigger):
+    row = _row_with_run(model, {"execution_type": "schedule_manual"}, _run_ref(trigger))
+    assert row.execution_type == "schedule_manual"
+
+
+def test_a_test_run_ref_has_no_schedule(model):
+    row = _row_with_run(model, {"execution_type": "schedule_manual"}, _run_ref("test", None, "Draft"))
+    assert (row.schedule_run.schedule_id, row.schedule_run.trigger) == (None, "test")
+    assert model.ScheduleRunRef(id=1, schedule_id=None, schedule_name=None, status="success", trigger="test")
+
+
+def test_a_row_without_a_run_record_keeps_the_stored_execution_type(model):
+    assert _row(model, {"execution_type": "schedule_manual"}).execution_type == "schedule_manual"
+
+
 # TC-US16-03, TC-US16-04: R1.2 - legacy flag
 def test_el_7011_r1_2_scheduled_run_flag_gives_scheduled(model):
     """TC-US16-03: no execution_type and scheduled_run true gives scheduled."""

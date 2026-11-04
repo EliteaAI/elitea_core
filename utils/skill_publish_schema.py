@@ -27,7 +27,7 @@ _RUN_SETTINGS_STATEMENTS = (
 )
 
 
-def _apply_statements(project_ids, statements):
+def apply_project_statements(project_ids, statements):
     migrated, failed = [], []
     for pid in project_ids:
         try:
@@ -43,15 +43,15 @@ def _apply_statements(project_ids, statements):
 
 
 def apply_skill_publish_columns(project_ids):
-    return _apply_statements(project_ids, _MIGRATION_STATEMENTS)
+    return apply_project_statements(project_ids, _MIGRATION_STATEMENTS)
 
 
 def apply_skill_run_settings_column(project_ids):
-    return _apply_statements(project_ids, _RUN_SETTINGS_STATEMENTS)
+    return apply_project_statements(project_ids, _RUN_SETTINGS_STATEMENTS)
 
 
 def apply_skill_columns(project_ids):
-    return _apply_statements(project_ids, _MIGRATION_STATEMENTS + _RUN_SETTINGS_STATEMENTS)
+    return apply_project_statements(project_ids, _MIGRATION_STATEMENTS + _RUN_SETTINGS_STATEMENTS)
 
 
 def project_ids_missing_skill_columns():

@@ -4,12 +4,22 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]  # the database integer range
+MAX_DB_ID = 2**31 - 1  # the database integer range
+DbId = Annotated[int, Field(ge=1, le=MAX_DB_ID)]
 # The values the list and runs options accept; Swagger reads them with typing.get_args (US-55 D3)
 EntityType = Literal['agent', 'pipeline']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
+RunTrigger = Literal['cron', 'manual', 'test']
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled']
 SortOrder = Literal['asc', 'desc']
+
+
+class RunFilters(BaseModel):
+    """The filters of the run lists: the saved runs of a schedule and the Test Runs of an agent or pipeline."""
+
+    status: RunStatus | None = None
+    trigger: RunTrigger | None = None
+    version_id: DbId | None = None
 
 
 class ScheduleListFilters(BaseModel):
@@ -25,8 +35,7 @@ class ScheduleListFilters(BaseModel):
     version_id: DbId | None = Field(None, description='Only schedules that run this version', examples=[31])
     search: str | None = Field(None, description='Match on schedule or entity name', examples=['daily report'])
     limit: int = Field(default=20, ge=1, le=100, description='Rows per page', examples=[20])
-    offset: int = Field(default=0, ge=0, le=2**31 - 1, description='Rows to skip',  # the database integer range
-                        examples=[0])
+    offset: int = Field(default=0, ge=0, le=MAX_DB_ID, description='Rows to skip', examples=[0])
     sort_by: SortBy = Field('next_run', description='Sort column', examples=['name'])
     sort_order: SortOrder = Field('asc', description='Sort direction', examples=['desc'])
 
