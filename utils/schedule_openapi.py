@@ -8,7 +8,7 @@ from typing import get_args
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
-from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
+from ..models.pd.schedule_list import MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
@@ -25,10 +25,12 @@ PROJECT_PARAMS = [
     {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project id"},
 ]
 ITEM_PARAMS = [*PROJECT_PARAMS, {"name": "schedule_id", "in": "path", "required": True,
-                                 "schema": {"type": "integer"}, "description": "Schedule id"}]
+                                 "schema": {"type": "integer", "minimum": 1, "maximum": MAX_DB_ID},
+                                 "description": "Schedule id"}]
 RUN = f"{ITEM}/runs/<int:run_id>"
 RUN_PARAMS = [*ITEM_PARAMS, {"name": "run_id", "in": "path", "required": True,
-                             "schema": {"type": "integer"}, "description": "Run id, from the runs list or the run answer"}]
+                             "schema": {"type": "integer", "minimum": 1, "maximum": MAX_DB_ID},
+                             "description": "Run id, from the runs list or the run answer"}]
 LIST_QUERY_PARAMS = [
     {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": list(get_args(EntityType))},
      "description": "Only schedules of this entity kind"},
@@ -55,6 +57,9 @@ LIST_QUERY_PARAMS = [
     {"name": "sort_order", "in": "query",
      "schema": {"type": "string", "enum": list(get_args(SortOrder)), "default": "asc"}, "description": "Sort direction"},
 ]
+APPLICATION_QUERY = {"name": "application_id", "in": "query", "required": True,
+                     "schema": {"type": "integer", "minimum": 1, "maximum": MAX_DB_ID},
+                     "description": "Agent or pipeline id"}
 RUNS_QUERY_PARAMS = [
     {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20, "minimum": 1},
      "description": f"Rows per page; a value above {MAX_RUNS_LIMIT} is lowered to {MAX_RUNS_LIMIT}"},
@@ -62,6 +67,10 @@ RUNS_QUERY_PARAMS = [
      "description": "Rows to skip"},
     {"name": "status", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunStatus))},
      "description": "Only runs with this status"},
+    {"name": "trigger", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunTrigger))},
+     "description": "Only runs with this stored trigger; `cron` is a scheduled run"},
+    {"name": "version_id", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": MAX_DB_ID},
+     "description": "Only runs of this version"},
 ]
 EXPORT_QUERY_PARAMS = [
     {"name": "ids", "in": "query", "schema": {"type": "string"},
@@ -100,7 +109,7 @@ LIST_EXAMPLE = {"total": 1, "run_without_asking_allowed": False, "rows": [{
 RUNS_EXAMPLE = {"total": 1, "rows": [{
     "id": 77, "trigger": "cron", "status": "success", "reason": None, "conversation_id": 901, "requested_by": 20,
     "started_at": "2026-10-21T07:00:00+00:00", "finished_at": "2026-10-21T07:01:10+00:00",
-    "version_id": 420, "duration_ms": 70000,
+    "version_id": 420, "duration_ms": 70000, "version_label": "v3", "tokens": 2140, "cost_usd": 0.03,
 }]}
 RUN_DETAIL_EXAMPLE = {
     "id": 78, "trigger": "test", "status": "success", "reason": None, "conversation_id": 902, "requested_by": 20,
@@ -256,6 +265,8 @@ def _text(what: str, who: str, errors: str) -> str:
     return f"{what}\n\nWho may call: {who}.\n\nErrors: {errors}."
 
 
+TEST_RUN_UNAVAILABLE_TEXT = "Test runs are not available: the admin task `migrate_schedule_test_runs` did not run"
+
 OPERATIONS = {
     ("get", ""): {
         "name": "List schedules",
@@ -389,25 +400,102 @@ OPERATIONS = {
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,
-        "responses": _responses(202, "The run started", {"run_id": 77}, {
+        "responses": _responses(202, "The run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: "No permission, or not the owner", 404: None,
             409: ("The version is deleted, or a run is active", {
                 "error": "A run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start"}),
     },
+    ("post", "test_run"): {
+        "name": "Test a schedule that is not saved",
+        "summary": "Test run of an unsaved form",
+        "description": _text(
+            "Start a Test Run of the Save form. The body is the Save body. The values are stored on one run row of "
+            "trigger `test` that has no schedule, and the run starts with the same risk, sign-in and credential "
+            "checks as a saved run. No schedule row is written, so the schedule list, Last Run, Next Run, the "
+            "export, the project cap and the tick never see a Test Run. Only one Test Run is active per agent or "
+            "pipeline and caller. The caller keeps the newest 50 Test Runs of an agent or pipeline; an older "
+            "run and its chat are deleted.",
+            "a project member with `schedules.run`",
+            "400 an invalid field (the Save rules) or `approval_rule_not_allowed`; 403 no permission; "
+            "404 the agent or pipeline is not visible; 409 `run_active` (`active_run_id`); "
+            "500 `run_start_failed`; 503 `test_run_unavailable` (the admin task `migrate_schedule_test_runs` "
+            "did not run)"),
+        "parameters": PROJECT_PARAMS,
+        "request_body": ScheduleCreate,
+        "responses": _responses(202, "The test run started", {"run_id": 77, "application_id": 12}, {
+            400: None, 403: None, 404: None,
+            409: ("A test run of this agent or pipeline is active", {
+                "error": "A test run of this schedule is active", "active_run_id": 76}),
+            500: "The run could not start", 503: TEST_RUN_UNAVAILABLE_TEXT}),
+    },
+    ("get", "test_run"): {
+        "name": "List the test runs of the Save form",
+        "summary": "List the Test Runs of an agent",
+        "description": _text(
+            "Answer the caller's own Test Runs for `application_id`, newest first, with the total before paging. "
+            "The rows have the fields of the runs list.",
+            "a project member with `schedules.run`; only the caller's own runs are read",
+            "400 an invalid query option or a missing `application_id`; 403 no permission; "
+            "503 `test_run_unavailable`"),
+        "parameters": [*PROJECT_PARAMS, APPLICATION_QUERY, *RUNS_QUERY_PARAMS],
+        "responses": _responses(200, "The test runs", {"total": 0, "rows": []}, {
+            400: None, 403: None, 503: TEST_RUN_UNAVAILABLE_TEXT}),
+    },
+    ("get", "test_run/<int:run_id>"): {
+        "name": "Read one test run of the Save form",
+        "summary": "Read one Test Run",
+        "description": _text(
+            "Answer one of the caller's own Test Runs for `application_id`, with the body of the run detail of a "
+            "saved schedule: status, events, summary, conversation_id, version_label, tokens, cost_usd. "
+            "`approval_rule` is the one of the stored form.",
+            "a project member with `schedules.run`; another owner's run, a run of a saved schedule and a run of "
+            "another agent or pipeline are 404",
+            "400 a missing `application_id`; 403 no permission; 404 `run_not_found`; "
+            "503 `test_run_unavailable`"),
+        "parameters": [*PROJECT_PARAMS, APPLICATION_QUERY,
+                       {"name": "run_id", "in": "path", "required": True,
+                        "schema": {"type": "integer", "minimum": 1, "maximum": MAX_DB_ID},
+                        "description": "Run id, from the test run answer or the test run list"}],
+        "responses": _responses(200, "The run", {"id": 77, "status": "success", "events": [], "summary": "Done", "conversation_id": 410,
+                                    "version_label": "base", "tokens": 1200, "cost_usd": 0.004},
+                              {400: None, 403: None, 404: "The run is not a Test Run of the caller",
+                               503: TEST_RUN_UNAVAILABLE_TEXT}),
+    },
+    ("post", "test_run/<int:run_id>/decision"): {
+        "name": "Decide a waiting test run",
+        "summary": "Decide a waiting Test Run",
+        "description": _text(
+            "Answer a Test Run that waits for the caller to add credentials. `approve` checks the credentials once "
+            "more and starts the run again; `reject` ends it as failed. A run with a chat is decided in that chat.",
+            "the caller who started the Test Run, with `schedules.run`",
+            "400 an invalid action; 403 no permission; 404 the run is not a Test Run of the caller; "
+            "409 `run_not_waiting`, `run_has_chat` or `credential_missing`; 500 `run_start_failed`; "
+            "503 `test_run_unavailable`"),
+        "parameters": [*PROJECT_PARAMS, {"name": "run_id", "in": "path", "required": True,
+                                         "schema": {"type": "integer", "minimum": 1, "maximum": MAX_DB_ID},
+                                         "description": "Id of the Test Run"}],
+        "request_body": ScheduleRunDecision,
+        "responses": _responses(200, "The decision was written", {"run_id": 77, "status": "running"}, {
+            400: None, 403: None, 404: "The run is not a Test Run of the caller",
+            409: "The run is not waiting, has a chat, or a credential is still missing",
+            500: "The run could not start", 503: TEST_RUN_UNAVAILABLE_TEXT}),
+    },
     ("get", f"{ITEM}/runs"): {
         "name": "List the runs of a schedule",
         "summary": "List the runs of a schedule",
         "description": _text(
-            "Answer the run records of one schedule, newest first, with the total before paging.",
+            "Answer the run records of one schedule, newest first, with the total before paging. "
+            "Each row has `version_label`, `duration_ms`, `tokens` and `cost_usd`; they are null when unknown.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
-            "400 an invalid query option; 403 no permission; 404 not found"),
+            "400 an invalid query option (an unknown `status` or `trigger`, or a `version_id` that is not an id); "
+            "403 no permission; 404 not found"),
         "parameters": ITEM_PARAMS + RUNS_QUERY_PARAMS,
         "responses": _responses(200, "`total` and one page of `rows`", RUNS_EXAMPLE, {400: None, 403: None, 404: None}),
     },
     ("post", f"{RUN}/decision"): {
         "name": "Decide a waiting run",
-        "summary": "Approve or reject a waiting run that has no chat",
+        "summary": "Decide a waiting run",
         "description": _text(
             "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
             "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",

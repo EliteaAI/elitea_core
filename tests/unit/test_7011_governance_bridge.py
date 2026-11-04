@@ -30,7 +30,8 @@ def starter(ns):
     writes = types.SimpleNamespace(calls=[], streak=[])
     stubs = {
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
-                                   "EntityScheduleRun": type("EntityScheduleRun", (), {})},
+                                   "EntityScheduleRun": type("EntityScheduleRun", (), {}),
+                                   "RUN_FORM": object, "RUN_APPLICATION_ID": object},
         "utils.budget_door": {"closed_budget_scope": lambda *args: None},
         "utils.schedule_prerun": {"credential_toolkit_refs": lambda version: [], "run_prerun_check": lambda project_id, schedule, run_id: types.SimpleNamespace(
             ok=True, owner_id=schedule.created_by)},

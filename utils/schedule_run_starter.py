@@ -6,11 +6,12 @@ import time
 from types import SimpleNamespace
 
 from pylon.core.tools import log
+from sqlalchemy import select
 from tools import db
 
 from ..models.all import Application, ApplicationVersion
 from ..models.conversation import Conversation
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import RUN_APPLICATION_ID, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .budget_door import closed_budget_scope
 from .exceptions import BudgetDoorClosedError
 from .pipeline_execution import (
@@ -48,9 +49,15 @@ def fill_placeholders(text: str, variables: list[dict]) -> str:
     return PLACEHOLDER.sub(lambda match: values.get(match.group(1), match.group(0)), text)
 
 
-def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | None:
-    """Plain values of the schedule, its version, its agent or pipeline and the run trigger, read in one session."""
+def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamespace | None:
+    """Plain values of the schedule, its version, its agent or pipeline and the run trigger, read in one session.
+
+    A run with no schedule (a Test Run) takes the same values from the form stored on the run.
+    """
     with db.get_session(project_id) as session:
+        run_row = session.get(EntityScheduleRun, run_id)
+        if run_row is not None and run_row.schedule_id is None:
+            return _load_test_run(session, run_row)
         schedule = session.get(EntitySchedule, schedule_id)
         version = schedule and schedule.version_id and session.get(ApplicationVersion, schedule.version_id)
         agent = version and session.get(Application, version.application_id)
@@ -67,8 +74,34 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
-            trigger=getattr(run_row := session.get(EntityScheduleRun, run_id), 'trigger', 'cron'),
+            trigger=getattr(run_row, 'trigger', 'cron'),
             resumed=getattr(run_row, 'resumed_at', None) is not None)
+
+
+def _load_test_run(session, run_row) -> SimpleNamespace | None:
+    """The values of a Test Run, built from its stored form; None when the version or the agent is gone.
+
+    The form never holds a fingerprint or a confirmation, so a Test Run never runs without asking.
+    """
+    form, application_id = session.execute(
+        select(RUN_FORM, RUN_APPLICATION_ID).where(EntityScheduleRun.id == run_row.id)).one()
+    form = form or {}
+    version_id = form.get('version_id')
+    version = version_id and session.get(ApplicationVersion, version_id)
+    agent = version and session.get(Application, version.application_id)
+    if not agent or version.application_id != application_id:
+        return None
+    owner_id = run_row.requested_by
+    return SimpleNamespace(
+        schedule=SimpleNamespace(
+            id=None, name=form.get('name'), principal={'kind': 'delegation', 'ref': owner_id}, created_by=owner_id,
+            entity_type=form.get('entity_type'), run_mode=form.get('run_mode'),
+            application_id=application_id, version_id=version.id,
+            approval_rule=form.get('approval_rule') or 'pause_and_ask', approval_fingerprint=None,
+            approval_confirmed_by=None, credential_toolkits=credential_toolkit_refs(version)),
+        version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
+        entity_name=agent.name, prompt=form.get('prompt') or '', variables=list(form.get('variables') or []),
+        trigger=run_row.trigger, resumed=run_row.resumed_at is not None)
 
 
 def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
@@ -241,7 +274,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    manual = trigger in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
+    manual = trigger in ('manual', 'test')  # Run now and Test run are the owner's own runs
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
@@ -249,7 +282,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             trigger_type=trigger_type, trigger_message=message,
             conversation_name=f"{'Manual' if manual else 'Scheduled'} run: {loaded.entity_name}",
-            extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': trigger_type},
+            extra_meta={'schedule_id': loaded.schedule.id, 'schedule_run_id': run_id, 'execution_type': trigger_type},
             source=source,
         )
         linked = _link_conversation(project_id, run_id, conversation_uuid)

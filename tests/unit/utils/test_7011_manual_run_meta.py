@@ -37,14 +37,13 @@ def world(monkeypatch):
     return run
 
 
-# TC-US15-06 / R1.3
-@pytest.mark.parametrize("trigger", ["manual", "test"])
-def test_7011_r1_3_manual_run_conversation_has_execution_type_manual(world, trigger):
+@pytest.mark.parametrize(("trigger", "stored"), [("manual", "schedule_manual"), ("test", "schedule_manual")])
+def test_manual_and_test_run_conversations_store_the_manual_execution_type(world, trigger, stored):
     calls = world(trigger)
 
-    assert calls.conversation[0]["trigger_type"] == "schedule_manual"
+    assert calls.conversation[0]["trigger_type"] == stored
     assert calls.conversation[0]["extra_meta"] == {
-        "schedule_id": SCHEDULE_ID, "schedule_run_id": RUN_ID, "execution_type": "schedule_manual"}
+        "schedule_id": SCHEDULE_ID, "schedule_run_id": RUN_ID, "execution_type": stored}
 
 
 # TC-US15-01 / R1.2
@@ -63,3 +62,21 @@ def test_7011_r1_3_cron_run_keeps_the_scheduled_values(world):
     assert calls.conversation[0]["trigger_type"] == "scheduled"
     assert calls.conversation[0]["extra_meta"]["execution_type"] == "scheduled"
     assert calls.predict[0]["trigger_source"] == "scheduled"
+
+
+def test_a_test_run_stops_before_any_chat_when_the_pre_run_check_fails(monkeypatch):
+    calls = types.SimpleNamespace(conversation=[], predict=[])
+    starter = load_starter(
+        monkeypatch,
+        create=lambda **kw: calls.conversation.append(kw) or ("uuid-1", 7, "resp-1"),
+        predict=lambda **kw: calls.predict.append(kw),
+        prerun=lambda *a: types.SimpleNamespace(ok=False, owner_id=None, reason="owner lost access"),
+    )
+    loaded = types.SimpleNamespace(
+        schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode="prompt", approval_rule="pause_and_ask"),
+        version=types.SimpleNamespace(id=9, name="v3"), entity_name="Nightly", prompt="Go", variables=[], trigger="test")
+    monkeypatch.setattr(starter, "_load", lambda *a: loaded)
+
+    starter.run_owner_schedule(34, SCHEDULE_ID, RUN_ID)
+
+    assert calls.conversation == [] and calls.predict == []

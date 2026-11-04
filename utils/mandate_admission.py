@@ -147,6 +147,11 @@ def schedule_trigger_ref(schedule_id) -> str:
     return f"schedule:entity:{schedule_id}"
 
 
+def test_run_trigger_ref(run_id) -> str:
+    """The trigger of one Test Run, as the audit trail names it; a Test Run has no schedule."""
+    return f"schedule:test:{run_id}"
+
+
 def owner_mandate(session, project_id, version_id, owner_id):
     """The latest mandate row of the version when it was made for the schedule's own owner, else ``None``. A schedule
     is its owner's, so another person's mandate never lends its authority to it. One indexed read, the one the legacy
@@ -157,19 +162,19 @@ def owner_mandate(session, project_id, version_id, owner_id):
     return mandate
 
 
-def owner_run_request(module, *, project_id, application_id, version_id, schedule_id) -> Optional[AdmissionRequest]:
+def owner_run_request(module, *, project_id, application_id, version_id, trigger_ref) -> Optional[AdmissionRequest]:
     """The admission request of the owner's Run now or Test run of a schedule (#7254), or ``None`` when governance is
     off (nothing is built or read). Built by the run endpoint, which holds the signed-in owner: the owner's interactive
     run (entry point ``schedule_test``) from that request's holder. It stays in this process: the starter mints its
     single-use ticket right before the run is sent (``mint_owner_run_ticket``), as a cron firing's. No mandate is
-    read."""
+    read. The ``trigger_ref`` only feeds the audit: interactive admission never reads it."""
     from types import SimpleNamespace  # pylint: disable=C0415
     from ..models.pd.admission import ENTRY_SCHEDULE_TEST, admission_request_from  # pylint: disable=C0415
     request = admission_request_from(
         module, sid=None, project_id=project_id, binding_project_id=project_id,
         version_row=SimpleNamespace(id=version_id, application_id=application_id), run_kind="interactive",
         entry_point=ENTRY_SCHEDULE_TEST)
-    return None if request is None else request.model_copy(update={"trigger_ref": schedule_trigger_ref(schedule_id)})
+    return None if request is None else request.model_copy(update={"trigger_ref": trigger_ref})
 
 
 def mint_owner_run_ticket(request: AdmissionRequest) -> str:
