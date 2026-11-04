@@ -73,3 +73,22 @@ def test_request_accepts_prompts_and_variables_at_the_limit(models):
     request = models.GenerateScheduleDraftRequest(
         prompt='x' * 4000, current={'prompt': 'y' * 4000, 'variables': [{'name': 'v', 'value': 'a'}] * 50})
     assert len(request.current.variables) == 50
+
+
+# EL-7313: an untouched new-schedule form sends its unset entity and version as '' (the form's own empty value);
+# the draft request reads them as absent instead of refusing with "Input should be a valid integer"
+@pytest.mark.parametrize('current', [
+    {'application_id': '', 'version_id': ''},
+    {'application_id': None, 'version_id': ''},
+], ids=['both-empty', 'one-empty'])
+def test_el_7313_empty_entity_and_version_read_as_unset(models, current):
+    request = models.GenerateScheduleDraftRequest(prompt='x', current=current)
+    assert request.current.application_id is None
+    assert request.current.version_id is None
+
+
+@pytest.mark.parametrize('current', [{'application_id': '12'}, {'version_id': 'abc'}, {'application_id': 1.5}],
+                         ids=['numeric-string', 'text', 'float'])
+def test_el_7313_a_wrong_typed_entity_or_version_still_fails(models, current):
+    with pytest.raises(ValidationError):
+        models.GenerateScheduleDraftRequest(prompt='x', current=current)

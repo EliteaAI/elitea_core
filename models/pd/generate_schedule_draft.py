@@ -34,6 +34,12 @@ class CurrentForm(BaseModel):
     expires_at: str | None = Field(None, description='Last day of the schedule, as a date', examples=['2026-12-31'])
     approval_rule: str | None = Field(None, description='Approval rule for risky steps', examples=['ask'])
 
+    @field_validator('application_id', 'version_id', mode='before')
+    @classmethod
+    def empty_entity_is_unset(cls, value):
+        # EL-7313: the form's empty value for an unchosen entity or version is '', not null
+        return None if value == '' else value
+
     @field_validator('variables')
     @classmethod
     def limit_variables(cls, value):
