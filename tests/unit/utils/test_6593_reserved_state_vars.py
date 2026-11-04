@@ -34,14 +34,8 @@ _utils_mod = _load("utils/pipeline_utils.py", f"{_PKG}.pipeline_utils")
 validate_yaml_from_str = _utils_mod.validate_yaml_from_str
 
 
-_MINIMAL_NODE = [{'id': 'step1', 'type': 'llm', 'transition': 'END'}]
-
-
 def _make_yaml(state: dict) -> str:
-    return yaml.safe_dump(
-        {'entry_point': 'step1', 'nodes': _MINIMAL_NODE, 'state': state},
-        sort_keys=False,
-    )
+    return yaml.safe_dump({'nodes': [], 'state': state}, sort_keys=False)
 
 
 def test_tool_outcomes_is_allowed():
@@ -65,9 +59,7 @@ def test_non_default_name_passes():
 
 
 def test_no_state_key_passes():
-    result = validate_yaml_from_str(
-        yaml.safe_dump({'entry_point': 'step1', 'nodes': _MINIMAL_NODE}, sort_keys=False)
-    )
+    result = validate_yaml_from_str(yaml.safe_dump({'nodes': []}, sort_keys=False))
     assert isinstance(result, dict)
 
 
