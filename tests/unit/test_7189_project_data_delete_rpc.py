@@ -199,6 +199,8 @@ def harness():
             application_deleted='application_deleted', toolkit_deleted='toolkit_deleted',
         ),
         'detach_skills_for_entity_versions': lambda session, ids: None,
+        'application_webhook_uuids': lambda session, application_id: [],  # #7404, own tests
+        'drop_secrets_of': lambda session, project_id, uuids: None,
         'toolkit_kind': _toolkit_kind(),
         'delete_toolkit': lambda session, project_id, tool_id: {'id': tool_id},
         'time': SimpleNamespace(monotonic=lambda: state.clock[0]),

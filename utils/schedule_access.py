@@ -51,11 +51,32 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
     if not (is_owner or scope.is_admin):
         return []
     granted = {verb for verb in _VERBS if SCHEDULE_PERMISSIONS[verb] in scope.permissions}
+    if getattr(row, "trigger_kind", "cron") == "webhook":
+        return _webhook_actions(row, scope, is_owner, granted)
     actions = []
     if is_owner and "run" in granted and row.version_id is not None:
         actions.append("run")
     if "update" in granted:
         actions += ["edit", "pause" if row.enabled else "resume"]
+    if "delete" in granted:
+        actions.append("delete")
+    if scope.is_admin:
+        actions.append("change_owner")
+    return actions
+
+
+def _webhook_actions(row, scope: ScheduleScope, is_owner: bool, granted: set[str]) -> list[str]:
+    """Plan-b §4.2: only the owner edits; an admin pauses, deletes, rotates and changes the owner, all audited."""
+    actions = []
+    if "update" in granted:
+        if is_owner:
+            actions.append("edit")
+        # after an owner change only the new owner switches it on again
+        if row.enabled:
+            actions.append("pause")
+        elif is_owner or row.disabled_reason != "owner_changed":
+            actions.append("resume")
+        actions.append("rotate_secret")
     if "delete" in granted:
         actions.append("delete")
     if scope.is_admin:

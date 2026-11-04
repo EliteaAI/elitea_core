@@ -31,6 +31,7 @@ ROUTES = {
     ("get", RUN): "_run_detail",
     ("post", f"{RUN}/decision"): "_decide_run",
     ("post", f"{ITEM}/owner"): "_change_owner",
+    ("post", f"{ITEM}/secret"): "_secret",
     ("get", "export"): "_export",
     ("post", "import"): "_import",
     ("post", "draft"): "_draft",

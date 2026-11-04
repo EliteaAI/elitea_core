@@ -17,7 +17,7 @@ MESSAGES = {
     Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
     Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
     Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
-    Types.schedule_owner_changed: 'The owner of schedule "{link}" changed',
+    Types.schedule_owner_changed: 'The owner of schedule "{link}" changed{reason}',
 }
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name

@@ -26,6 +26,7 @@ CLEARABLE = {'description', 'run_mode', 'prompt', 'expires_at'}
 NEXT_RUN_FIELDS = {'cron', 'timezone', 'enabled'}
 CRON_ONLY_FIELDS = {'cron', 'timezone', 'expires_at'}
 CONFIRMED_EVENT = 'schedule_run_without_asking_confirmed'
+OWNER_CHANGED = 'owner_changed'
 INVALID_INPUT = 'invalid_input'
 
 
@@ -152,7 +153,7 @@ def _is_admin_change(row: EntitySchedule, scope: ScheduleScope) -> bool:
     return scope.is_admin and row.created_by != scope.user_id
 
 
-def _notify_owner(project_id: int, owner_id: int, schedule, action: str = 'edited') -> None:
+def notify_owner(project_id: int, owner_id: int, schedule, action: str = 'edited') -> None:
     """Send the admin-change notice; a failure is logged and the committed change stays."""
     try:
         notify_schedule_event(
@@ -171,13 +172,31 @@ def _apply_confirmation(row: EntitySchedule, confirmed: dict | None, user_id: in
         row.approval_confirmed_by = row.approval_confirmed_at = row.approval_fingerprint = None
 
 
-def _audit_confirmation(project_id: int, row: EntitySchedule, user_id: int, confirmed: dict) -> None:
-    """One audit trail event: the tracing plugin writes a row for this span, with the tools in its action."""
-    tools = ', '.join(sorted(f"{item['toolkit']}.{item['tool'] or '*'}" for item in confirmed['sensitive']))
-    otel_trace.get_tracer(__name__).start_span(f'{CONFIRMED_EVENT}: {tools}', attributes={
+def audit_schedule_event(project_id: int, row, user_id: int, event: str, detail: str = '') -> None:
+    """One audit trail event: the tracing plugin writes a row for this span; never pass a secret in `detail`."""
+    otel_trace.get_tracer(__name__).start_span(f'{event}: {detail}' if detail else event, attributes={
         'telemetry.data_type': 'schedule_execution', 'user.id': user_id, 'project.id': project_id,
         'entity.type': 'schedule', 'entity.id': str(row.id), 'entity.name': row.name,
     }).end()
+
+
+def _audit_confirmation(project_id: int, row: EntitySchedule, user_id: int, confirmed: dict) -> None:
+    tools = ', '.join(sorted(f"{item['toolkit']}.{item['tool'] or '*'}" for item in confirmed['sensitive']))
+    audit_schedule_event(project_id, row, user_id, CONFIRMED_EVENT, tools)
+
+
+def _is_webhook(row) -> bool:
+    return row.trigger_kind == 'webhook'
+
+
+def check_webhook_owner_edit(row: EntitySchedule, scope: ScheduleScope, changes) -> None:
+    """Raise 403 unless the owner edits a webhook; an admin may only pause, or resume when no owner change paused it."""
+    if not _is_webhook(row) or row.created_by == scope.user_id:
+        return
+    if set(changes) - {'enabled'}:
+        raise ScheduleError('not_owner', 'Only the owner can edit this webhook', 403)
+    if changes.get('enabled') is True and row.disabled_reason == OWNER_CHANGED:
+        raise ScheduleError('not_owner', 'Only the new owner can switch this webhook on again', 403)
 
 
 def create_schedule(
@@ -187,13 +206,14 @@ def create_schedule(
     """Store a new schedule owned by the caller and running as the caller; `key` sets the uuid (import only).
 
     `confirmed` is the risk review the caller confirmed for "Run without asking"; it is recorded and audited.
+    A webhook row gets its secret in the same transaction; a generated one is set on `row.new_secret` once.
 
     Raises:
         ScheduleError: When an entity or run input rule fails.
         ScheduleLimitError: When an enabled schedule passes the project cap.
     """
     check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
-    values = body.model_dump(exclude={'risk_ack'})
+    values = body.model_dump(exclude={'risk_ack', 'signing_secret_value'})
     check_run_input(body.entity_type, body.run_mode, body.prompt, values['variables'])
     cron_row = body.trigger_kind == 'cron'
     if cron_row and body.enabled:
@@ -210,10 +230,46 @@ def create_schedule(
         row.uuid = key
     _apply_confirmation(row, confirmed, scope.user_id)
     session.add(row)
-    session.commit()
+    if not cron_row:
+        _store_first_secret(session, project_id, row, body.signing_secret_value)
+    try:
+        session.commit()
+    except Exception:
+        if not cron_row:  # the row is gone: its secret must not stay behind
+            session.rollback()
+            _drop_row_secrets(session, project_id, None, row.uuid)
+        raise
     if confirmed is not None:
         _audit_confirmation(project_id, row, scope.user_id, confirmed)
+    if not cron_row:
+        audit_schedule_event(project_id, row, scope.user_id, 'webhook_created', row.webhook_type)
     return row
+
+
+def _store_first_secret(session, project_id: int, row: EntitySchedule, signing_value: str | None) -> None:
+    """Write the secret under the row uuid before the commit; a vault failure rolls the row back."""
+    from .webhook_secrets import signing_value_error, store_row_secret  # late: cron-only loaders skip vault
+    if signing_value is not None:
+        error = signing_value_error(signing_value)
+        if error:
+            raise _field_error('signing_secret_value', error)
+    if row.uuid is None:
+        session.flush()  # the uuid default is applied on insert
+    try:
+        value = store_row_secret(session, project_id, row, signing_value)
+    except Exception as e:  # noqa: BLE001 -- no row may stay without its secret
+        session.rollback()
+        log.error('Webhook create: cannot store the secret: %s', type(e).__name__)
+        raise ScheduleError('secret_store_unavailable', 'The webhook secret could not be stored; try again', 503)
+    row.new_secret = None if signing_value else value  # shown once, never stored on the row
+
+
+def update_changes(body: ScheduleUpdate) -> dict:
+    """The fields an update sets; null means "not sent" except on the clearable fields."""
+    return {
+        key: value for key, value in body.model_dump(exclude_unset=True, exclude={'risk_ack'}).items()
+        if value is not None or key in CLEARABLE
+    }
 
 
 def update_schedule(
@@ -230,10 +286,8 @@ def update_schedule(
         ScheduleLimitError: When a resume passes the project cap.
         pydantic.ValidationError: When the stop date does not fit the resulting cron and time zone.
     """
-    changes = {
-        key: value for key, value in body.model_dump(exclude_unset=True, exclude={'risk_ack'}).items()
-        if value is not None or key in CLEARABLE
-    }
+    changes = update_changes(body)
+    check_webhook_owner_edit(row, scope, changes)
     cron_row = row.trigger_kind == 'cron'
     set_cron_fields = sorted(k for k in CRON_ONLY_FIELDS & changes.keys() if changes[k] is not None)
     if not cron_row and set_cron_fields:
@@ -272,8 +326,10 @@ def update_schedule(
     session.commit()
     if confirmed is not None:
         _audit_confirmation(project_id, row, scope.user_id, confirmed)
+    if not cron_row and 'approval_rule' in changes:
+        audit_schedule_event(project_id, row, scope.user_id, 'webhook_approval_rule_changed', row.approval_rule)
     if admin_change:
-        _notify_owner(project_id, row.created_by, row)
+        notify_owner(project_id, row.created_by, row)
     return row
 
 
@@ -283,7 +339,21 @@ def delete_schedule(session, project_id: int, row: EntitySchedule, scope: Schedu
     if admin_change:
         mark_audit_span(row)
     owner_id, deleted = row.created_by, SimpleNamespace(id=row.id, name=row.name)  # read before the row is gone
+    webhook, uuid = _is_webhook(row), row.uuid
     session.delete(row)
     session.commit()
+    if webhook:  # after the commit: a failed delete must keep the row's secret
+        _drop_row_secrets(session, project_id, deleted.id, uuid)
+        audit_schedule_event(project_id, deleted, scope.user_id, 'webhook_deleted')
     if admin_change:
-        _notify_owner(project_id, owner_id, deleted, action='deleted')
+        notify_owner(project_id, owner_id, deleted, action='deleted')
+
+
+def _drop_row_secrets(session, project_id: int, schedule_id: int, uuid) -> None:
+    """Remove a deleted row's vault keys; a failure leaves an orphan key that no row points to."""
+    from .webhook_secrets import drop_secrets_of  # late: cron-only loaders skip vault
+    try:
+        drop_secrets_of(session, project_id, [uuid])
+    except Exception as e:  # noqa: BLE001 -- the row is already deleted
+        session.rollback()
+        log.error('Schedule %s: cannot remove the webhook secrets: %s', schedule_id, type(e).__name__)
