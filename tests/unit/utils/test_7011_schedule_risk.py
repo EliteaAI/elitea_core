@@ -105,6 +105,7 @@ def scan(isolated_sys_modules):
     app_tools.ConfigurationExpandError = ConfigurationExpandError
     app_tools.expand_toolkit_settings = expand_toolkit_settings
     sys.modules[app_tools.__name__] = app_tools
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_validator.py', f'{PKG}.utils.pipeline_validator')
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_utils.py', f'{PKG}.utils.pipeline_utils')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_risk.py', f'{PKG}.utils.schedule_risk')
     state.review = lambda version_id=VERSION_ID: module.scan_schedule(12, version_id, 42)

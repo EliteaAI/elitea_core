@@ -63,6 +63,19 @@ def register_masking_module(plugin_root: pathlib.Path):
     return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_masking.py', name)
 
 
+def register_pipeline_validator_module(plugin_root: pathlib.Path):
+    """Make ``utils/pipeline_validator.py`` importable as the real module.
+
+    ``utils/pipeline_utils.py`` relative-imports ``validate_pipeline_yaml`` from it
+    (EL-7323).  Any test that loads ``pipeline_utils`` via ``load_module_with_stubs``
+    must call this first so that the relative import resolves correctly.  Idempotent.
+    """
+    name = 'plugins.elitea_core.utils.pipeline_validator'
+    if name in sys.modules:
+        return sys.modules[name]
+    return load_module_with_stubs(plugin_root / 'utils' / 'pipeline_validator.py', name)
+
+
 def load_module_with_stubs(
     module_path: pathlib.Path,
     module_name: str,

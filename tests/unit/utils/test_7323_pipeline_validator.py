@@ -170,7 +170,7 @@ entry_point: step1
 # ---------------------------------------------------------------------------
 
 class TestV03NodeTypes:
-    def test_unknown_node_type(self):
+    def test_unknown_node_type_is_warning_not_error(self):
         yaml = """
 nodes:
   - id: step1
@@ -179,8 +179,9 @@ nodes:
 entry_point: step1
 """
         r = validate_pipeline_yaml(yaml)
-        assert r.valid is False
-        assert "unknown_node_type" in _error_codes(r)
+        assert r.valid is True
+        assert "unknown_node_type" in _warning_codes(r)
+        assert "unknown_node_type" not in _error_codes(r)
 
     def test_known_types_all_pass(self):
         known = ["llm", "code", "agent", "toolkit", "mcp", "router", "decision",
@@ -277,7 +278,7 @@ nodes:
 # ---------------------------------------------------------------------------
 
 class TestV05EndReachability:
-    def test_no_terminal_node(self):
+    def test_no_terminal_node_is_warning_not_error(self):
         yaml = """
 nodes:
   - id: step1
@@ -289,8 +290,9 @@ nodes:
 entry_point: step1
 """
         r = validate_pipeline_yaml(yaml)
-        assert r.valid is False
-        assert "no_end_node" in _error_codes(r)
+        assert r.valid is True
+        assert "no_end_node" in _warning_codes(r)
+        assert "no_end_node" not in _error_codes(r)
 
     def test_empty_pipeline_does_not_raise_no_end_node(self):
         r = validate_pipeline_yaml("nodes: []\n")

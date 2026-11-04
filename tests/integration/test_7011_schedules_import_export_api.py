@@ -14,7 +14,9 @@ import types
 import pytest
 import yaml
 from fixtures import schedule_sqlite as sqlite_db
+from fixtures.helpers import register_pipeline_validator_module
 from unit.test_7011_schedule_yaml_import import (
+    PLUGIN_ROOT,
     file_text,
     install_service_stubs,
     install_tools,
@@ -130,6 +132,7 @@ def _install(env, Base, engine):
 
     load = load_plugin_module
     env.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
+    register_pipeline_validator_module(PLUGIN_ROOT)
     for path, name in (
         ('models/pd/schedule_list.py', 'models.pd.schedule_list'), ('utils/constants.py', 'utils.constants'), ('utils/schedule_timing.py', 'utils.schedule_timing'),
         ('utils/schedule_access.py', 'utils.schedule_access'), ('utils/pipeline_utils.py', 'utils.pipeline_utils'),

@@ -383,7 +383,7 @@ def validate_pipeline_yaml(
                 f"Remove this node and set `transition: END` on the node that transitions to it."
             ))
         elif ntype.lower() not in KNOWN_NODE_TYPES:
-            errors.append(_err(
+            warnings.append(_warn(
                 "unknown_node_type", nid, "type",
                 f"Node '{nid}' has unknown type '{ntype}'. "
                 f"Valid types: {', '.join(sorted(KNOWN_NODE_TYPES))}."
@@ -448,10 +448,10 @@ def validate_pipeline_yaml(
         n["id"].strip() for n in valid_nodes if _is_terminal_node(n)
     }
     if valid_nodes and not terminal_node_ids:
-        errors.append(_err(
+        warnings.append(_warn(
             "no_end_node", None, "nodes",
-            "The pipeline has no terminal node. "
-            "Set `transition: END` on the last node of each execution path."
+            "The pipeline has no terminal node yet. "
+            "Set `transition: END` on the last node of each execution path before running."
         ))
     elif valid_nodes and entrypoint_id is not None:
         # BFS from entrypoint through the adjacency graph (END excluded from graph nodes)

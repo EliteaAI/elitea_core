@@ -16,7 +16,7 @@ import uuid
 import pytest
 import yaml
 from fixtures import schedule_sqlite as sqlite_db
-from fixtures.helpers import load_module_with_stubs
+from fixtures.helpers import load_module_with_stubs, register_pipeline_validator_module
 from sqlalchemy.exc import OperationalError
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -159,6 +159,7 @@ def env(monkeypatch):
         load('utils/constants.py', 'utils.constants')
         load('utils/schedule_timing.py', 'utils.schedule_timing')
         load('utils/schedule_access.py', 'utils.schedule_access')
+        register_pipeline_validator_module(PLUGIN_ROOT)
         load('utils/pipeline_utils.py', 'utils.pipeline_utils')
         load('models/pd/index.py', 'models.pd.index')
         load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')

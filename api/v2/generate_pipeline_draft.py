@@ -271,10 +271,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parsed["pipeline_yaml"] = pipeline_yaml
 
         validation_result = validate_pipeline_yaml(pipeline_yaml, project_id=project_id)
-        # An AI-generated pipeline must have nodes — treat missing_nodes as a hard
-        # failure here even though the validator itself only warns (to allow draft saves).
+        # An AI-generated pipeline must have nodes and a terminal path — treat
+        # missing_nodes and no_end_node as hard failures here even though the
+        # validator only warns (to allow draft saves).
+        _draft_warning_codes = {"missing_nodes", "no_end_node"}
         structural_failures = validation_result.errors + [
-            w for w in validation_result.warnings if w.code == "missing_nodes"
+            w for w in validation_result.warnings if w.code in _draft_warning_codes
         ]
         if not validation_result.valid or structural_failures:
             log.warning(

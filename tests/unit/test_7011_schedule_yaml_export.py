@@ -13,7 +13,8 @@ from datetime import UTC, datetime
 import pytest
 import yaml
 from fixtures import schedule_sqlite as sqlite_db
-from unit.test_7011_schedule_yaml_import import load_plugin_module, sandbox
+from fixtures.helpers import register_pipeline_validator_module
+from unit.test_7011_schedule_yaml_import import load_plugin_module, sandbox, PLUGIN_ROOT
 
 PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
@@ -52,6 +53,7 @@ def env(monkeypatch):
         sys.modules[service.__name__] = service
         env.ScheduleError = ScheduleError
         env.EntitySchedule = sqlite_db.create_schedule_table(load_plugin_module, Base, engine)
+        register_pipeline_validator_module(PLUGIN_ROOT)
         load_plugin_module('utils/pipeline_utils.py', 'utils.pipeline_utils')
         env.module = load_plugin_module('utils/schedule_yaml.py', 'utils.schedule_yaml')
         sqlite_db.add_agent_and_pipeline(env.session_factory, env.Application, env.ApplicationVersion)
