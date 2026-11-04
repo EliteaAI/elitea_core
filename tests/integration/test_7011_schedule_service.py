@@ -103,6 +103,11 @@ def env(monkeypatch):
     load('models/pd/index.py', 'models.pd.index')
     env.pd = load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
     env.service = load('utils/schedule_service.py', 'utils.schedule_service')
+    # #7404: webhook creates store their secret; an in-memory hidden store stands in for the vault
+    env.vault = {}
+    tools.VaultClient = lambda project_id: types.SimpleNamespace(
+        get_hidden_secrets=lambda: dict(env.vault), set_hidden_secrets=lambda secrets: env.vault.update(secrets))
+    load('utils/webhook_secrets.py', 'utils.webhook_secrets')
 
     sqlite_db.add_agent_and_pipeline(env.session_factory, Application, ApplicationVersion)
     yield env

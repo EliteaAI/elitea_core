@@ -147,6 +147,9 @@ class ScheduleCreate(ScheduleTiming):
     webhook_type: WebhookType | None = Field(None, description='Webhook rows: the sender', examples=['github'])
     gitlab_auth_method: GitlabAuthMethod | None = Field(
         None, description='GitLab webhook rows: how GitLab proves the request', examples=['secret_token'])
+    signing_secret_value: str | None = Field(
+        None, description='GitLab signing-token rows: the `whsec_` token GitLab issued; stored, never returned',
+        examples=['whsec_...'])
 
     @field_validator('cron')
     @classmethod
@@ -163,7 +166,7 @@ class ScheduleCreate(ScheduleTiming):
         if self.trigger_kind == 'cron':
             if self.cron is None or self.timezone is None:
                 raise ValueError('A schedule needs cron and timezone')
-            if any(getattr(self, f) is not None for f in WEBHOOK_FIELDS):
+            if any(getattr(self, f) is not None for f in (*WEBHOOK_FIELDS, 'signing_secret_value')):
                 raise ValueError('Webhook fields are only allowed on webhooks')
             return self
         if any(getattr(self, f) is not None for f in CRON_FIELDS):
@@ -172,6 +175,8 @@ class ScheduleCreate(ScheduleTiming):
             raise ValueError('A webhook needs webhook_type')
         if (self.webhook_type == 'gitlab') != (self.gitlab_auth_method is not None):
             raise ValueError('gitlab_auth_method is required for GitLab webhooks and only for them')
+        if (self.gitlab_auth_method == 'signing_token') != bool(self.signing_secret_value):
+            raise ValueError('signing_secret_value is required for GitLab signing tokens and only for them')
         return self
 
 
@@ -209,6 +214,15 @@ class ScheduleUpdate(ScheduleEdit):
     model_config = ConfigDict(json_schema_extra={'examples': [{'enabled': False}, {'cron': '30 8 * * *'}]})
 
     enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
+
+
+class WebhookSecretAction(BaseModel):
+    """`rotate` keeps the old secret valid for 24 h; `regenerate` replaces it at once."""
+    model_config = ConfigDict(extra='forbid', json_schema_extra={'examples': [{'mode': 'rotate'}]})
+
+    mode: Literal['rotate', 'regenerate'] = Field(description='How the new secret replaces the current one')
+    signing_secret_value: str | None = Field(
+        None, description='GitLab signing-token rows only: the new `whsec_` token GitLab issued')
 
 
 class ScheduleOwner(BaseModel):

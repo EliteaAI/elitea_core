@@ -519,3 +519,33 @@ def test_a_schedule_or_run_id_above_the_database_range_is_404(harness):
     harness.body, harness.query = None, {'application_id': 1}
     harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/{huge}'
     assert harness.routes.PromptLibAPI().get(project_id=PROJECT_ID, run_id=huge)[1] == 404
+
+
+# #7404: a webhook form is not a Test Run (a webhook is tried with a sample delivery, #7399)
+def test_7404_a_webhook_form_is_refused_and_stores_no_run(harness, started):
+    body = agent_body(trigger_kind='webhook', webhook_type='gitlab', gitlab_auth_method='signing_token',
+                      signing_secret_value='whsec_x', cron=None, timezone=None)
+    answer, status = post_test_run(harness, body)
+    assert (status, answer['field']) == (400, 'trigger_kind')
+    assert runs(harness) == [] and started == []
+
+
+def test_7404_the_stored_form_never_keeps_a_signing_token(harness):
+    module = runs_module()
+    form = _create_model(agent_body(trigger_kind='webhook', webhook_type='gitlab', gitlab_auth_method='signing_token',
+                                    signing_secret_value='whsec_x', cron=None, timezone=None))
+    statement = {}
+    real_insert = module.EntityScheduleRun.__table__.insert
+
+    class Insert:
+        def values(self, **values):
+            statement.update(values)
+            raise RuntimeError('stop before the database')
+
+    module.EntityScheduleRun.__table__.insert = lambda: Insert()
+    try:
+        with pytest.raises(RuntimeError):
+            module.insert_test_run(types.SimpleNamespace(), OWNER_ID, form)
+    finally:
+        module.EntityScheduleRun.__table__.insert = real_insert
+    assert 'signing_secret_value' not in statement[models().RUN_FORM.key]

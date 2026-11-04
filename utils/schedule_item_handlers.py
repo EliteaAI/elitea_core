@@ -2,6 +2,7 @@
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from flask import request
@@ -19,6 +20,7 @@ from ..models.pd.entity_schedule import (
     ScheduleEdit,
     ScheduleRiskCheck,
     ScheduleUpdate,
+    WebhookSecretAction,
 )
 from ..models.pd.schedule_list import MAX_DB_ID, DbId, RunFilters
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
@@ -37,12 +39,16 @@ from .schedule_notifications import notify_schedule_event
 from .schedule_service import (
     INVALID_INPUT,
     ScheduleError,
+    audit_schedule_event,
     check_entity,
     check_schedule_body,
+    check_webhook_owner_edit,
     create_schedule,
     delete_schedule,
     load_schedule_in_scope,
+    notify_owner,
     refusal,
+    update_changes,
     update_schedule,
 )
 from .schedule_test_runs import (
@@ -83,6 +89,8 @@ BLOCKED = "You can't save this schedule: a scheduled run cannot do what the bloc
 SCAN_INCOMPLETE = 'Some tools could not be checked, so "Run without asking" is not allowed; use "Pause and ask me"'
 CONFIRM = "Review the sensitive tools, then save again with `risk_ack` and this fingerprint"
 CHANGED = "The sensitive tools changed since you reviewed them; review them again and confirm"
+ROTATION_IN_PROGRESS = "The previous secret still works until the time shown; use regenerate to replace it now"
+OWNER_CHANGED_PAUSED = "it is paused until the new owner checks its connections and switches it on"
 NAME_MISMATCH = 'Type the schedule name exactly to confirm "Run without asking"'
 
 
@@ -374,6 +382,8 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
     with db.get_session(project_id) as session:
         try:
             row = load_schedule_in_scope(session, schedule_id, scope)
+            # Before the risk scan: an admin edit of a webhook is refused without scanning
+            check_webhook_owner_edit(row, scope, update_changes(body))
             review = confirmed = None
             if reviewed:
                 if body.version_id is not None:  # no scan of a version the caller may not use
@@ -397,9 +407,10 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
 
 def _notify_owner_change(project_id: int, row, change: dict) -> None:
     """Tell the old and the new owner, both ids in the meta (R3.2); a failure is logged, the change stays."""
+    extra = {**change, "reason": OWNER_CHANGED_PAUSED} if row.trigger_kind == "webhook" else change
     for user_id in change.values():
         try:
-            notify_schedule_event(project_id, user_id, NotificationEventTypes.schedule_owner_changed, row, extra=change)
+            notify_schedule_event(project_id, user_id, NotificationEventTypes.schedule_owner_changed, row, extra=extra)
         except Exception as e:  # noqa: BLE001 -- the change is committed; a lost notice must not fail it
             log.error("Schedule %s: cannot send the owner change notice: %s", row.id, e)
 
@@ -510,8 +521,6 @@ class ScheduleItemHandlers:
         body, error = _parse_body(ScheduleCreate)
         if error:
             return error
-        if body.trigger_kind == 'webhook':  # the secret comes with #7404
-            return refusal(INVALID_INPUT, 'Webhooks cannot be created yet', field='trigger_kind')
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
@@ -530,7 +539,10 @@ class ScheduleItemHandlers:
                 return refusal(LIMIT_REACHED, str(e), 409)
             notice = schedule_governance_notice(
                 self.module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id)
-            return _saved(row, scope, project_id, review, notice), 201
+            answer = _saved(row, scope, project_id, review, notice)
+            if getattr(row, "new_secret", None):  # shown once: no read answers it again
+                answer["secret"] = row.new_secret
+            return answer, 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _read(self, project_id: int, schedule_id: int):
@@ -650,6 +662,9 @@ class ScheduleItemHandlers:
         body, error = _parse_body(ScheduleCreate)
         if error:
             return error
+        if body.trigger_kind == "webhook":  # a webhook is tried with a sample body (#7399), not with a Test Run
+            return refusal(INVALID_INPUT, "A Test Run is for schedules; a webhook is tried with a sample delivery",
+                           field="trigger_kind")
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
@@ -860,5 +875,58 @@ class ScheduleItemHandlers:
             change = change_schedule_owner(session, row, owner_id, scope.user_id)
             if change:
                 mark_owner_change_span(row)
+                if row.trigger_kind == "webhook":
+                    audit_schedule_event(project_id, row, scope.user_id, "webhook_owner_changed",
+                                         f"{change['old_owner_id']} -> {owner_id}")
                 _notify_owner_change(project_id, row, change)
             return _read_answer(row, scope, project_id), 200
+
+    @auth.decorators.check_api(schedule_check_spec("update"))
+    def _secret(self, project_id: int, schedule_id: int):
+        """Rotate (old secret valid 24 h more) or regenerate (at once) a webhook secret; answers it once."""
+        body, error = _parse_body(WebhookSecretAction)
+        if error:
+            return error
+        from .webhook_secrets import (  # pylint: disable=C0415 -- late: only this route writes secrets
+            RotationInProgress,
+            is_signing_row,
+            regenerate_row_secret,
+            rotate_row_secret,
+            signing_value_error,
+        )
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                row = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            if row.trigger_kind != "webhook":
+                return refusal("not_a_webhook", "Only a webhook has a secret", 400)
+            signing = is_signing_row(row)
+            if signing != (body.signing_secret_value is not None):
+                return refusal(INVALID_INPUT, "Send signing_secret_value for GitLab signing tokens, and only then",
+                               field="signing_secret_value")
+            if signing and (reason := signing_value_error(body.signing_secret_value)):
+                return refusal(INVALID_INPUT, reason, field="signing_secret_value")
+            try:
+                if body.mode == "rotate":
+                    value = rotate_row_secret(session, project_id, row, datetime.now(UTC), body.signing_secret_value,
+                                              updated_by=scope.user_id)
+                else:
+                    value = regenerate_row_secret(session, project_id, row, body.signing_secret_value,
+                                                  updated_by=scope.user_id)
+            except RotationInProgress:
+                until = row.previous_secret_until
+                session.rollback()
+                return refusal("rotation_in_progress", ROTATION_IN_PROGRESS, 409, previous_secret_until=_iso(until))
+            except Exception as e:  # noqa: BLE001 -- the vault answer must not leak; the old secret stays
+                session.rollback()
+                log.error("Schedule %s: cannot %s the webhook secret: %s", schedule_id, body.mode, type(e).__name__)
+                return refusal("secret_store_unavailable", "The webhook secret could not be changed; try again", 503)
+            audit_schedule_event(project_id, row, scope.user_id, f"webhook_secret_{body.mode}d")
+            if row.created_by != scope.user_id:
+                notify_owner(project_id, row.created_by, row, action=f"{body.mode}d the secret of")
+            answer = _read_answer(row, scope, project_id)
+            if not signing:
+                answer["secret"] = value
+            return answer, 200

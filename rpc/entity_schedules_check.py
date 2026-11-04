@@ -146,6 +146,17 @@ def _sweep_stale_runs(project_ids: list[int], stale_minutes: int, yield_to_hub) 
             fail_stale_runs(project_id, now, stale_minutes)
         except Exception as exc:  # noqa: BLE001 -- one bad project must not stop the sweep
             log.exception("entity_schedules_check: stale sweep failed: project_id=%s exc=%r", project_id, exc)
+        try:
+            _sweep_previous_secrets(project_id, now)
+        except Exception as exc:  # noqa: BLE001 -- an expired previous secret is cleared on a later tick
+            log.exception("entity_schedules_check: secret sweep failed: project_id=%s exc=%r", project_id, exc)
+
+
+def _sweep_previous_secrets(project_id: int, now: datetime) -> None:
+    """Remove the previous webhook secrets whose 24 h overlap ended."""
+    from ..utils.webhook_secrets import sweep_expired_previous  # late, as the other sweeps
+    with db.get_session(project_id) as session:
+        sweep_expired_previous(session, project_id, now)
 
 
 def _stale_minutes(settings: dict) -> int:

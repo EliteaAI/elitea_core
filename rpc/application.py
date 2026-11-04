@@ -54,6 +54,7 @@ from ..utils.exceptions import (
 )
 from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
+from ..utils.webhook_secrets import application_webhook_uuids, drop_secrets_of
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
 from ..utils.skill_utils import (
@@ -263,8 +264,16 @@ def _delete_application(module, session, project_id: int, application: Applicati
     if application_data.get('version_details') is None and agent_type:
         application_data['version_details'] = {'agent_type': agent_type}
 
+    webhook_uuids = application_webhook_uuids(session, application.id)  # the cascade removes the rows
+
     session.delete(application)
     session.commit()
+
+    try:
+        drop_secrets_of(session, project_id, webhook_uuids)
+    except Exception as e:  # pylint: disable=W0703 -- the application is deleted; an orphan key is only logged
+        session.rollback()
+        log.error("Application %s: cannot remove its webhook secrets: %s", application_data['id'], type(e).__name__)
 
     try:
         module.context.event_manager.fire_event(

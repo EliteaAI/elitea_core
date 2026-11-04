@@ -6,7 +6,7 @@ checks that both tables match. `Module._register_openapi` registers every entry 
 """
 from typing import get_args
 
-from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
+from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck, WebhookSecretAction
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
@@ -539,6 +539,25 @@ OPERATIONS = {
         "responses": _responses(200, "The schedule details with the new owner", {
             **DETAILS_EXAMPLE, "created_by": 21, "owner": {"id": 21, "name": "Bob Lee"}}, {
             400: None, 403: None, 404: None, 503: "The access check is unavailable"}),
+    },
+    ("post", f"{ITEM}/secret"): {
+        "name": "Rotate or regenerate a webhook secret",
+        "summary": "Rotate or regenerate the secret of a webhook",
+        "description": _text(
+            "`rotate` writes a new secret and keeps the old one valid for 24 hours; `regenerate` replaces it at "
+            "once, for a leak. The new secret is in `secret` of this answer only; no read returns it. A GitLab "
+            "signing-token webhook takes the new token GitLab issued in `signing_secret_value` and answers no "
+            "`secret`. A change by an admin is audited and the owner gets a notice.",
+            OWNER_OR_ADMIN.format(permission="schedules.update"),
+            "400 not a webhook or an invalid signing token; 403 no permission; 404 not found; "
+            "409 `rotation_in_progress`: a rotate while the previous secret still works; "
+            "503 the secret store is unavailable"),
+        "parameters": ITEM_PARAMS,
+        "request_body": WebhookSecretAction,
+        "responses": _responses(200, "The webhook details with the new `secret`", {
+            **DETAILS_EXAMPLE, "trigger_kind": "webhook", "secret": "<shown once>"}, {
+            400: None, 403: None, 404: None, 409: "A previous secret still works; use regenerate",
+            503: "The secret store is unavailable"}),
     },
     ("get", "export"): {
         "name": "Export schedules",

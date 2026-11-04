@@ -26,7 +26,7 @@ def validate_new_owner(project_id: int, owner_id: int, entity_type: str | None =
 
 
 def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | None:
-    """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); enabled stays (R1.4).
+    """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); a cron row stays enabled (R1.4).
 
     The approval rule goes back to "Pause and ask me" and the confirmation is cleared.
 
@@ -44,6 +44,9 @@ def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | 
     # The consent belongs to the old owner: the new owner confirms again before a run approves by itself
     row.approval_rule = 'pause_and_ask'
     row.approval_fingerprint = row.approval_confirmed_by = row.approval_confirmed_at = None
+    if row.trigger_kind == 'webhook':
+        # The new owner checks the connections with their own credentials, then switches it on again
+        row.enabled, row.disabled_reason, row.credential_refs = False, 'owner_changed', None
     session.commit()
     return {'old_owner_id': old_owner_id, 'new_owner_id': owner_id}
 

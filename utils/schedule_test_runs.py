@@ -68,7 +68,7 @@ def insert_test_run(session, user_id: int, body: ScheduleCreate) -> int | None:
     Raises:
         TestRunUnavailable: The schema has not got the Test Run columns yet.
     """
-    form = body.model_dump(mode='json', exclude={'risk_ack', 'enabled'})
+    form = body.model_dump(mode='json', exclude={'risk_ack', 'enabled', 'signing_secret_value'})  # no secret in a run row
     statement = EntityScheduleRun.__table__.insert().values(
         schedule_id=None, trigger='test', status='running', requested_by=user_id,
         **{RUN_FORM.key: form, RUN_APPLICATION_ID.key: body.application_id},
