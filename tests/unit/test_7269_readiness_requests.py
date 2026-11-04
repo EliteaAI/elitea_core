@@ -359,6 +359,24 @@ def test_a_request_never_approves_and_the_requester_cannot_approve_it(ns, env):
     assert refused.value.code == "SELF_APPROVAL"
 
 
+def test_an_approver_who_files_through_the_platform_is_the_requester_and_cannot_approve_it(ns, env):
+    """(#7228, C9-SEC-101) the platform's filing is the member's own request when they may approve: an admin who
+    edits an agent and requests from the card never approves that edit; another approver may."""
+    credential(env)
+    env.permissions[MEMBER] = set(MEMBER_RIGHTS) | {"governance.bindings.approve"}
+    file(ns, env, keys=["binding"])
+    [row] = bindings(env, ns)
+    assert (row.state, row.created_by, row.state_changed_by) == ("pending_approval", MEMBER, MEMBER)
+    events = [event["reason_code"] for _, event in env.recorded]
+    assert "BINDING_PENDING_APPROVAL" in events and "BINDING_PENDING_APPROVAL_AUTOMATIC" not in events
+    values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native", "binding_id": row.id,
+              "action": "activate", "approval_ref": "A", "policy_revision": "B", "dry_run": False,
+              "reviewed_digest": row.definition_digest}
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        ns.binding_admin.run_binding_action(module(ns), values, MEMBER)
+    assert refused.value.code == "SELF_APPROVAL"
+
+
 def test_a_changed_agent_is_rebound_by_its_editor(ns, env):
     binding = env.add_binding(1, 7, 70, digest="adv1:" + "9" * 64)
     file(ns, env, keys=["binding"])

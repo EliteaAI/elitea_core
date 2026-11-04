@@ -92,11 +92,21 @@ def _file_binding(module, session, tracing, project_id, plan, actor):
     expected = "draft"
     if action == "rebind":
         expected = plan.get("binding_state") if plan.get("binding_state") in ("active", "pending_approval") else "active"
-    # (#7228, C9-SEC-100) a request the platform files is automatic: it never makes the member the request's actor
+    # (#7228, C9-SEC-100/101) a request the platform files makes the member its actor only when they may approve it:
+    # an approver who edits and files never approves their own edit; a member who may not approve never displaces
+    # the creator as the one excluded
+    takes = _may_approve(project_id, actor)
     change_binding(module, session, tracing, {**values, "action": action, "binding_id": uuid.UUID(str(binding_id)),
-                                              "expected_state": expected, "takes_request": False,
-                                              "mover_kind": "automatic"}, actor)
+                                              "expected_state": expected, "takes_request": takes,
+                                              "mover_kind": "deliberate" if takes else "automatic"}, actor)
     return str(binding_id)
+
+
+def _may_approve(project_id, user_id):
+    """Whether ``user_id`` may approve bindings in the project (the project mode's permission, as the inbox checks)."""
+    from .binding_api import APPROVE  # pylint: disable=C0415
+    from .governance_readiness import _permissions  # pylint: disable=C0415
+    return APPROVE in _permissions(user_id, project_id)
 
 
 def _file_mandate(module, session, tracing, project_id, plan, actor, delegated):
