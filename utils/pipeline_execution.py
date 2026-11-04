@@ -35,9 +35,8 @@ class TriggerType:
     WEBHOOK = "webhook"
     SCHEDULED = "scheduled"
     SCHEDULE_MANUAL = "schedule_manual"
-    SCHEDULE_TEST = "schedule_test"  # a test run of a schedule; only chat meta holds it (the usage plugin knows no such source)
     MANUAL = "manual"  # legacy: stored by Run now and Test run before BUG-12, still listed
-    VALUES = (CHAT, API, MCP, WEBHOOK, SCHEDULED, SCHEDULE_MANUAL, SCHEDULE_TEST, MANUAL)
+    VALUES = (CHAT, API, MCP, WEBHOOK, SCHEDULED, SCHEDULE_MANUAL, MANUAL)
 
 
 def with_execution_type(meta: dict | None, trigger_source: str) -> dict:

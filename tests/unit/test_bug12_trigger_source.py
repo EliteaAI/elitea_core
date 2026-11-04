@@ -44,10 +44,9 @@ def test_el_7011_bug12_r1_1_trigger_type_holds_the_shared_enum(world):  # noqa: 
     trigger_type = world.execution.TriggerType
 
     assert (trigger_type.CHAT, trigger_type.API, trigger_type.MCP, trigger_type.WEBHOOK,
-            trigger_type.SCHEDULED, trigger_type.SCHEDULE_MANUAL, trigger_type.SCHEDULE_TEST) == (
-        "chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "schedule_test")
-    assert set(trigger_type.VALUES) == {
-        "chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "schedule_test", "manual"}
+            trigger_type.SCHEDULED, trigger_type.SCHEDULE_MANUAL) == (
+        "chat", "api", "mcp", "webhook", "scheduled", "schedule_manual")
+    assert set(trigger_type.VALUES) == {"chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "manual"}
 
 
 def test_run_now_is_stored_as_schedule_manual(run):
@@ -58,11 +57,11 @@ def test_run_now_is_stored_as_schedule_manual(run):
     assert calls.predict[0]["trigger_source"] == "schedule_manual"
 
 
-def test_test_run_is_stored_as_schedule_test_but_its_calls_keep_the_manual_usage_source(run):
+def test_test_run_is_stored_and_sent_as_schedule_manual(run):
     calls = run("test")
 
-    assert calls.conversation[0]["trigger_type"] == "schedule_test"
-    assert calls.conversation[0]["extra_meta"]["execution_type"] == "schedule_test"
+    assert calls.conversation[0]["trigger_type"] == "schedule_manual"
+    assert calls.conversation[0]["extra_meta"]["execution_type"] == "schedule_manual"
     assert calls.predict[0]["trigger_source"] == "schedule_manual"
 
 

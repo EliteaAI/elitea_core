@@ -62,7 +62,7 @@ class World:
             _world=self, id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
             created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None, approval_rule="pause_and_ask",
             approval_fingerprint=None, approval_confirmed_by=None)
-        self.run = SimpleNamespace(id=RUN_ID, conversation_id=None)
+        self.run = SimpleNamespace(id=RUN_ID, conversation_id=None, schedule_id=SCHEDULE_ID)
         self.rows = {
             ("EntitySchedule", SCHEDULE_ID): self.schedule,
             ("ApplicationVersion", VERSION_ID): Row(_world=self, id=VERSION_ID, application_id=AGENT_ID, name="v3"),
@@ -101,7 +101,8 @@ def world(monkeypatch):
         "models.all": {"Application": type("Application", (), {}), "ApplicationVersion": type("ApplicationVersion", (), {})},
         "models.conversation": {"Conversation": type("Conversation", (), {})},
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
-                                   "EntityScheduleRun": type("EntityScheduleRun", (), {})},
+                                   "EntityScheduleRun": type("EntityScheduleRun", (), {}),
+                                   "RUN_FORM": object, "RUN_APPLICATION_ID": object},
         "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),

@@ -200,10 +200,11 @@ def test_el_7011_r4_3_announce_skips_a_run_whose_status_has_no_notice(runs, sess
     assert (sent.notices, sent.emitted) == ([], [])
 
 
-def test_announce_sends_no_notice_for_a_test_run_of_the_hidden_draft(runs, session, sent):
-    """A draft has no schedule page, so a notice would link to a 404."""
-    schedule = _schedule(runs, session, created_by=12, draft=True)
-    run = _run(runs, session, schedule, status="failed")
+def test_announce_sends_no_notice_for_a_test_run_with_no_schedule(runs, session, sent):
+    """A test run has no schedule page, so a notice would link to a 404."""
+    run = runs.EntityScheduleRun(schedule_id=None, trigger="test", status="failed", requested_by=12)
+    session.add(run)
+    session.flush()
 
     runs._announce(1, session, [run.id])
 

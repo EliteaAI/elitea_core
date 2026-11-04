@@ -226,11 +226,11 @@ def test_a_mark_is_cleared_when_a_check_raises(apply):
     assert RUN_ID not in apply.prerun._CHECKED_RUNS
 
 
-def test_a_test_run_of_a_draft_row_loses_its_run_when_the_owner_lost_access(apply):
+def test_a_test_run_with_no_schedule_only_fails_its_run_when_the_owner_lost_access(apply):
     recorder = Recorder(access="owner lost access")
-    draft = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4, draft=True)
+    form = SimpleNamespace(id=None, created_by=OWNER, entity_type="agent", application_id=3, version_id=4)
 
-    result = apply(recorder, draft)
+    result = apply(recorder, form)
 
     assert (result.ok, result.reason) == (False, "owner lost access")
-    assert recorder.effects() == ["principal", "access", "fail", "disable", "notify"]
+    assert recorder.effects() == ["principal", "access", "fail"]
