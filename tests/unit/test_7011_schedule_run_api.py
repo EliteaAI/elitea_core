@@ -136,7 +136,7 @@ def test_7254_an_editor_owner_starts_their_own_run_with_their_admission_request(
     body, status = run(harness, schedule_id, trigger)
     assert status == 202
     assert harness.owner_requests == [(OWNER_ID, {'project_id': PROJECT_ID, 'application_id': 1, 'version_id': 10,
-                                                  'schedule_id': schedule_id})]
+                                                  'trigger_ref': f'schedule:entity:{schedule_id}'})]
     assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'], owner_request)]
 
 
