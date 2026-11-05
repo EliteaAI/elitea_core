@@ -29,14 +29,18 @@ from ....configurations.utils import expand_configuration
 
 
 def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str):
-    """Client ID, secret, token endpoint and scopes of an admin-managed app.
+    """Client ID, secret, token endpoint and sign-in scope of an admin-managed app.
 
     Both ids come from the browser: the app must serve this credential type in this project. The
     secret only ever goes to the app's own token endpoint, so the caller's endpoint is ignored.
     """
     from ....configurations.oauth_apps import resolve_app_client  # pylint: disable=C0415
     app = resolve_app_client(oauth_app_id, project_id, credential_type)
-    return app['client_id'], app['client_secret'], app['token_endpoint'], app.get('scopes') or []
+    scopes = [s for s in app.get('scopes') or [] if s != 'offline_access']
+    # offline_access (a refresh token) only while the app's Auto refresh token is on (#7415)
+    if app.get('auto_refresh_token', True):
+        scopes = ['offline_access', *scopes]
+    return app['client_id'], app['client_secret'], app['token_endpoint'], ' '.join(scopes)
 
 
 def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list) -> bool:
@@ -105,11 +109,10 @@ class ProjectAPI(api_tools.APIModeHandler):
         # Default app mode: the browser knows only the app reference, never its secret
         if data.oauth_app_id and not data.used_dcr:
             try:
-                client_id, client_secret, app_token_endpoint, app_scopes = _resolve_oauth_app_client(
+                # The platform's client is used only for the admin's scopes, never the caller's
+                client_id, client_secret, app_token_endpoint, scope = _resolve_oauth_app_client(
                     data.oauth_app_id, project_id, data.credential_type)
                 data.token_endpoint = app_token_endpoint
-                # The platform's client is used only for the admin's scopes, never the caller's
-                scope = ' '.join(['offline_access', *[s for s in app_scopes if s != 'offline_access']])
             except LookupError as e:  # OAuthAppUnavailable
                 return {"error": "app_unavailable", "error_description": str(e)}, 400
 
