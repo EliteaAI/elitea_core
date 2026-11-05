@@ -4,12 +4,13 @@ import flask
 from flask import Response
 from pylon.core.tools import web, log
 
-from tools import context, auth, this, openapi_registry
+from tools import auth, this, openapi_registry
 
 from ..models.enums.mappings import ENTITY_TYPE_MAP
 from ..utils.mcp_handler import CommunicationsHandler
 from ..utils.mcp_protocol import validate_session_id, handle_post_request, get_request_method
 from ..utils.mcp_config import is_mcp_exposure_enabled
+from ..utils.project_access import get_accessible_project
 from ..utils.internal_tools import MCP_SCOPE_PROJECT_QUERY_ARG
 
 handler = CommunicationsHandler()
@@ -25,10 +26,7 @@ def _check_mcp_enabled() -> tuple[dict, int] | None:
 def _check_project_access(project_id: int) -> tuple[dict, int] | None:
     """Check if user has access to project. Returns error response or None."""
     user_id = auth.current_user()["id"]
-    user_project_ids = [
-        project["id"] for project in context.rpc_manager.call.list_user_projects(user_id)
-    ]
-    if project_id not in user_project_ids:
+    if get_accessible_project(project_id, user_id) is None:
         return {"error": "No project access"}, 403
     return None
 
@@ -137,14 +135,9 @@ class Route:
         if mcp_error:
             return mcp_error
 
-        # Simple auth first - check project_id is in user projects
-        user_id = auth.current_user()["id"]
-        user_project_ids = [
-            project["id"] for project in context.rpc_manager.call.list_user_projects(user_id)
-        ]
-        #
-        if project_id not in user_project_ids:
-            return {"error": "No project access"}, 403
+        access_error = _check_project_access(project_id)
+        if access_error:
+            return access_error
         #
         stream, error_response = handler.create_session_and_stream(project_id)
         #
