@@ -9,6 +9,8 @@ import types
 import pytest
 from unit._tool_spend_loader import load
 
+provider_error_answer = load("utils/error_text.py").provider_error_answer
+
 PROJECT_ID, RUN_ID, CONVERSATION_ID, AUTHOR_ID = 5, 9, 42, 17
 CHILD_PAUSE_REASON = "a step inside a parallel branch needs an answer"
 SCHEDULE_META = {"schedule_id": 3, "schedule_run_id": RUN_ID, "execution_type": "scheduled"}
@@ -115,6 +117,7 @@ def make_world(monkeypatch):
                 "process_multimodal_content": none, "update_attachment_thumbnails": none},
             "utils.token_limit_continuation": {"trim_continuation_overlap": same},
             "utils.pipeline_hitl_history": {"persist_pipeline_hitl_prompt": none},
+            "utils.error_text": {"provider_error_answer": provider_error_answer},
             "utils.schedule_runs": {
                 "finish_schedule_run": world.finish, "pause_schedule_run": world.pause,
                 "CHILD_PAUSE_REASON": CHILD_PAUSE_REASON,
@@ -140,8 +143,8 @@ def make_world(monkeypatch):
         sio = types.SimpleNamespace(emit=lambda **kw: world.events.append(("emit", kw["event"])))
         handler = types.SimpleNamespace(
             context=types.SimpleNamespace(sio=sio), is_chat_run_stopped=lambda _id: False)
-        world.end = lambda metadata: events.Event.chat_message_stream_end(handler, None, "end", {
-            "message_id": "m-1", "content": "the answer",
+        world.end = lambda metadata, content="the answer": events.Event.chat_message_stream_end(handler, None, "end", {
+            "message_id": "m-1", "content": content,
             "response_metadata": {"chat_project_id": PROJECT_ID, "project_id": PROJECT_ID, **metadata}})
         world.pause_event = lambda metadata: events.Event.chat_message_stream_pause(handler, None, "pause", {
             "message_id": "m-1", "response_metadata": {"chat_project_id": PROJECT_ID, **metadata}})
@@ -180,6 +183,44 @@ def test_stream_end_ignores_error_text_without_the_error_flag(make_world):
     world.end({"error": WORKER_ERROR})
     finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)
     assert finish in world.events
+
+
+PROVIDER_400 = "Error: Error code: 400 - {'error': {'message': 'The prompt is too long', 'type': 'invalid_request_error'}}"
+PROVIDER_400_REASON = "The model provider rejected the request (HTTP 400)."
+
+
+def test_stream_end_with_a_provider_400_answer_and_no_flag_finishes_the_run_as_failed(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({}, content=PROVIDER_400)
+    finish = ("finish", PROJECT_ID, RUN_ID, "failed", f"short({PROVIDER_400_REASON})", CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events, world.events
+
+
+def test_stream_end_keeps_the_worker_error_over_the_answer_text(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({"is_error": True, "error": "the model failed"}, content=PROVIDER_400)
+    finish = ("finish", PROJECT_ID, RUN_ID, "failed", "short(the model failed)", CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events, world.events
+
+
+@pytest.mark.parametrize("content", [
+    "The check found Error: Error code: 400 in the log",
+    "Error: the file is missing",
+    "Error code: 400 was returned by the API, here is how to fix it",
+    [{"type": "text", "text": PROVIDER_400}],
+    "",
+], ids=["inside-text", "other-error-prefix", "no-answer-prefix", "chunk-list", "empty"])
+def test_stream_end_with_a_normal_answer_finishes_the_run_as_success(make_world, content):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({}, content=content)
+    finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events, world.events
+
+
+def test_stream_end_of_a_chat_without_a_schedule_run_ignores_a_provider_400_answer(make_world):
+    world = make_world({})
+    world.end({}, content=PROVIDER_400)
+    assert world.events == ["commit", ("emit", "sync")]
 
 
 # BUG-37 (US-13 R1.3, R6.1): the stored reason is the short one, never the raw traceback
