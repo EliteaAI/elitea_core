@@ -5,6 +5,7 @@ from pylon.core.tools import log
 
 from ...utils.skill_export_import import (
     import_skill_md,
+    read_skill_zip,
     validate_skill_import_filename,
 )
 from ...utils.skill_utils import SkillError
@@ -13,12 +14,13 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Import a skill from a standalone Markdown file",
+        name="Import a skill from a Markdown file or a skill ZIP",
         description=(
-            "Creates a new skill from an uploaded Markdown (.md) file. The file is "
+            "Creates a new skill from an uploaded Markdown (.md) file or a skill ZIP. The file is "
             "sent as multipart/form-data under the 'file' field (a raw Markdown "
-            "string in the JSON body's 'content' field is also accepted). Only .md "
-            "files are accepted (400 otherwise). The frontmatter must contain at "
+            "string in the JSON body's 'content' field is also accepted). A ZIP holds SKILL.md at its root "
+            "or inside one top-level folder, and every other member becomes a file of the skill version. "
+            "Other extensions are refused (400). The frontmatter must contain at "
             "least name and description; the body becomes the skill instructions. "
             "Re-importing a name that already exists creates a new, independent "
             "skill (skill names are not unique)."
@@ -42,6 +44,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         content = None
         filename = None
+        package_files = ()
 
         files = getattr(request, 'files', None)
         if files and 'file' in files:
@@ -53,11 +56,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
             except ValueError as e:
                 return {"error": str(e)}, 400
 
-            try:
-                raw = uploaded.read()
-                content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
-            except (UnicodeDecodeError, ValueError) as e:
-                return {"error": f"Could not read file as UTF-8 text: {e}"}, 400
+            raw = uploaded.read()
+            if (filename or '').lower().endswith('.zip'):
+                try:
+                    content, package_files = read_skill_zip(raw)
+                except SkillError as exc:
+                    return {"error": str(exc)}, exc.http_status
+            else:
+                try:
+                    content = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+                except (UnicodeDecodeError, ValueError) as e:
+                    return {"error": f"Could not read file as UTF-8 text: {e}"}, 400
         else:
             payload = request.json if request.is_json else None
             if isinstance(payload, dict):
@@ -77,6 +86,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 project_id=project_id,
                 content=content,
                 author_id=author_id,
+                files=package_files,
             )
         except SkillError as exc:
             return {"error": str(exc)}, exc.http_status

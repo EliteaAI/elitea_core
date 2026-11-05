@@ -1,5 +1,9 @@
 import json
 import uuid
+import zipfile
+import zlib
+from io import BytesIO
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -8,7 +12,15 @@ from sqlalchemy.orm import selectinload
 from ..models.skill import Skill, SkillVersion
 from ..models.pd.skill import SkillExportModel
 from .export_import_utils import slugify
-from .skill_files import list_version_manifest
+from .skill_files import (
+    add_version_files,
+    build_file_entry,
+    describe_size,
+    list_version_manifest,
+    read_version_contents,
+    stage_version_files,
+    validate_package,
+)
 from .skill_frontmatter import (
     FRONTMATTER_META_KEY,
     LEGACY_RUN_SETTINGS_KEY,
@@ -17,14 +29,24 @@ from .skill_frontmatter import (
     list_unused_frontmatter_keys,
 )
 from .skill_utils import (
+    SkillFileError,
     _skill_session,
+    get_max_file_bytes,
     get_skill_details,
     import_skill,
+    validate_instructions_length,
 )
+from .zip_safety import is_compression_bomb, is_encrypted_zip_member, is_unsafe_zip_member
 
 
 DEFAULT_VERSION_NAME = 'base'
-ALLOWED_SKILL_EXTENSIONS = {'.md'}
+ALLOWED_SKILL_EXTENSIONS = {'.md', '.zip'}
+SKILL_MD_NAME = 'SKILL.md'
+MD_MIMETYPE = 'text/markdown; charset=utf-8'
+ZIP_MIMETYPE = 'application/zip'
+ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+ZIP_LITTER_PREFIXES = ('__MACOSX/',)
+ZIP_LITTER_NAMES = ('.DS_Store',)
 
 REQUIRED_FRONTMATTER_FIELDS = ('name', 'description')
 
@@ -250,50 +272,73 @@ def export_skill_md(
     version_id: Optional[int] = None,
     session=None,
 ) -> dict:
-    """Export a skill as Markdown."""
-    result = get_skill_details(
-        project_id=project_id,
-        skill_id=skill_id,
-        version_name=version_name,
-        version_id=version_id,
-        session=session,
-    )
-    skill_data = result.get('data')
-    if not skill_data:
-        return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
-
-    if version_id is not None:
-        version = next(
-            (v for v in (skill_data.get('versions') or []) if v.get('id') == version_id),
-            None,
+    """Export a skill version as Markdown, or as a ZIP of ``<name>/SKILL.md`` and its files when it has files."""
+    with _skill_session(session, project_id) as s:
+        result = get_skill_details(
+            project_id=project_id,
+            skill_id=skill_id,
+            version_name=version_name,
+            version_id=version_id,
+            session=s,
         )
-        if not version:
-            return {
-                'ok': False,
-                'msg': f"Version '{version_id}' not found for skill {skill_id}",
-            }
-        # Render/name the export by the resolved version name (already validated).
-        version_name = version.get('name')
-    elif version_name:
-        names = {v.get('name') for v in (skill_data.get('versions') or [])}
-        if version_name not in names:
-            return {
-                'ok': False,
-                'msg': f"Version '{version_name}' not found for skill {skill_id}",
-            }
+        skill_data = result.get('data')
+        if not skill_data:
+            return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
 
-    try:
-        content = skill_to_md(skill_data, version_name=version_name)
-    except ValueError as exc:
-        return {'ok': False, 'msg': str(exc)}
+        if version_id is not None:
+            version = next(
+                (v for v in (skill_data.get('versions') or []) if v.get('id') == version_id),
+                None,
+            )
+            if not version:
+                return {
+                    'ok': False,
+                    'msg': f"Version '{version_id}' not found for skill {skill_id}",
+                }
+            # Render/name the export by the resolved version name (already validated).
+            version_name = version.get('name')
+        elif version_name:
+            names = {v.get('name') for v in (skill_data.get('versions') or [])}
+            if version_name not in names:
+                return {
+                    'ok': False,
+                    'msg': f"Version '{version_name}' not found for skill {skill_id}",
+                }
+
+        try:
+            content = skill_to_md(skill_data, version_name=version_name)
+            exported_version_id = _select_version(skill_data, version_name).get('id')
+        except ValueError as exc:
+            return {'ok': False, 'msg': str(exc)}
+        files = read_version_contents(project_id, exported_version_id, session=s) if exported_version_id else []
 
     name_slug = slugify(skill_data.get('name', '')) or 'skill'
     if version_name and version_name != DEFAULT_VERSION_NAME:
-        filename = f"{name_slug}.{slugify(version_name) or 'skill'}.md"
+        stem = f"{name_slug}.{slugify(version_name) or 'skill'}"
     else:
-        filename = f"{name_slug}.md"
+        stem = name_slug
 
-    return {'ok': True, 'filename': filename, 'content': content}
+    if not files:
+        return {'ok': True, 'filename': f"{stem}.md", 'content': content, 'mimetype': MD_MIMETYPE}
+    return {
+        'ok': True,
+        'filename': f"{stem}.zip",
+        'content': build_skill_zip(name_slug, content, files),
+        'mimetype': ZIP_MIMETYPE,
+    }
+
+
+def build_skill_zip(folder: str, skill_md: str, files: list) -> bytes:
+    """A Claude-layout skill archive with fixed timestamps, so the same version always exports the same bytes."""
+    members = [(SKILL_MD_NAME, skill_md.encode('utf-8'))] + [(entry['path'], data) for entry, data in files]
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for path, data in members:
+            info = zipfile.ZipInfo(f'{folder}/{path}', date_time=ZIP_TIMESTAMP)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, data)
+    return buffer.getvalue()
 
 
 def build_skill_fork_payload(
@@ -465,14 +510,76 @@ def unpack_embedded_skill_frontmatter(version: dict) -> dict:
 
 
 def validate_skill_import_filename(filename: Optional[str]) -> None:
-    """Validate the import file extension: ``.md`` only."""
+    """Validate the import file extension: ``.md``, or ``.zip`` for a skill with files."""
     if not filename:
         return
     lowered = filename.lower()
     if not any(lowered.endswith(ext) for ext in ALLOWED_SKILL_EXTENSIONS):
         raise ValueError(
-            'Invalid file extension. Skill import only accepts .md files.'
+            'Invalid file extension. Skill import only accepts .md or .zip files.'
         )
+
+
+def _read_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    try:
+        return archive.read(info)
+    except (zipfile.BadZipFile, RuntimeError, OSError, zlib.error) as exc:
+        raise SkillFileError(f"'{info.filename}' could not be read from the ZIP") from exc
+
+
+def _find_skill_md(members: list) -> zipfile.ZipInfo:
+    """The SKILL.md of either Claude layout: at the root, or alone in one top-level folder."""
+    candidates = [info for info in members if PurePosixPath(info.filename).name.lower() == SKILL_MD_NAME.lower()]
+    at_root = [info for info in candidates if '/' not in info.filename]
+    in_folder = [info for info in candidates if info.filename.count('/') == 1]
+    found = at_root or in_folder
+    if len(found) != 1:
+        raise SkillFileError(
+            'A skill ZIP must hold exactly one SKILL.md, at the root or inside one top-level folder; '
+            f'found {len(found)}'
+        )
+    return found[0]
+
+
+def read_skill_zip(data: bytes) -> tuple:
+    """The SKILL.md text and the file entries of a skill ZIP, refusing anything that could escape or overflow."""
+    try:
+        archive = zipfile.ZipFile(BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise SkillFileError('The file is not a valid ZIP archive') from exc
+    with archive:
+        members = [
+            info for info in archive.infolist()
+            if not info.is_dir()
+            and not info.filename.startswith(ZIP_LITTER_PREFIXES)
+            and PurePosixPath(info.filename).name not in ZIP_LITTER_NAMES
+        ]
+        for info in members:
+            if is_unsafe_zip_member(info) or is_compression_bomb(info):
+                raise SkillFileError(f"'{info.filename}' cannot be unpacked safely")
+            if is_encrypted_zip_member(info):
+                raise SkillFileError(f"'{info.filename}' is encrypted; export the skill without a password")
+        skill_md = _find_skill_md(members)
+        root = skill_md.filename[:-len(SKILL_MD_NAME)]
+        files = [info for info in members if info is not skill_md]
+        outside = next((info.filename for info in files if not info.filename.startswith(root)), None)
+        if outside:
+            raise SkillFileError(f"'{outside}' is outside the skill folder '{root.rstrip('/')}'")
+        if skill_md.file_size > get_max_file_bytes():
+            raise SkillFileError(
+                f'SKILL.md is {describe_size(skill_md.file_size)}; '
+                f'a skill file can be at most {describe_size(get_max_file_bytes())}'
+            )
+        validate_package([{'path': info.filename[len(root):], 'size': info.file_size} for info in files])
+        entries = [build_file_entry(info.filename[len(root):], _read_zip_member(archive, info)) for info in files]
+        validate_package(entries)
+        try:
+            content = _read_zip_member(archive, skill_md).decode('utf-8-sig')
+        except UnicodeDecodeError as exc:
+            raise SkillFileError('SKILL.md is not UTF-8 text') from exc
+    if not content.strip():
+        raise SkillFileError('SKILL.md is empty')
+    return content, entries
 
 
 def import_skill_md(
@@ -480,8 +587,9 @@ def import_skill_md(
     content: str,
     author_id: int,
     session=None,
+    files: tuple = (),
 ) -> dict:
-    """Import a skill from Markdown content (parse -> validate -> upsert).
+    """Import a skill from Markdown content (parse -> validate -> upsert), with the file entries of its ZIP.
 
     The imported skill is always created with version 'base', regardless of
     what version name was in the exported file's frontmatter. This ensures
@@ -495,6 +603,7 @@ def import_skill_md(
     passthrough = extract_non_elitea_frontmatter(raw_frontmatter)
     frontmatter = {**raw_frontmatter, **decode_elitea_metadata(raw_frontmatter.get('metadata') or {})}
     validate_skill_frontmatter(frontmatter)
+    validate_instructions_length(body)
 
     # Always use 'base' as the version name for imports. The elitea_version
     # field in the frontmatter is only informational (indicates which version
@@ -513,6 +622,8 @@ def import_skill_md(
     if passthrough:
         version['meta'] = {FRONTMATTER_META_KEY: passthrough}
 
+    entries = list(files)
+    staged = stage_version_files(project_id, entries)
     with _skill_session(session, project_id) as s:
         imported = import_skill(
             project_id=project_id,
@@ -522,5 +633,7 @@ def import_skill_md(
             author_id=author_id,
             session=s,
         )
+        if entries:
+            add_version_files(s, project_id, imported.versions[DEFAULT_VERSION_NAME], entries, staged)
         result = get_skill_details(project_id=project_id, skill_id=imported.id, session=s)
         return {**result.get('data'), 'unused_frontmatter_keys': list_unused_frontmatter_keys(passthrough)}

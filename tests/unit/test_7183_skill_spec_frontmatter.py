@@ -94,9 +94,9 @@ def md(monkeypatch):
     _install_packages(monkeypatch)
     recorder = ImportRecorder()
     for name in ('sqlalchemy', 'sqlalchemy.orm', f'{PKG}.models.skill', f'{PKG}.models.pd.skill',
-                 f'{PKG}.utils.export_import_utils', f'{PKG}.utils.skill_files'):
+                 f'{PKG}.utils.export_import_utils', f'{PKG}.utils.skill_files', f'{PKG}.utils.zip_safety'):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
-    skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
+    skill_utils = AnyModule(f'{PKG}.utils.skill_utils')
     skill_utils._skill_session = recorder.session
     skill_utils.import_skill = recorder.import_skill
     skill_utils.get_skill_details = recorder.get_skill_details

@@ -15,11 +15,12 @@ from ...utils.folder_access import require_folder_access
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Export a skill as a standalone Markdown file",
+        name="Export a skill as a Markdown file, or as a skill ZIP when it has files",
         description=(
             "Exports the specified skill as a downloadable Markdown (.md) file "
             "with YAML frontmatter (type, name, description, optional version and "
-            "tags) and the skill instructions as the body. When the version_id "
+            "tags) and the skill instructions as the body. A version with bundled files "
+            "exports as a ZIP holding <name>/SKILL.md and every file under <name>/. When the version_id "
             "query parameter is supplied that version is exported (404 if it "
             "does not exist); otherwise the default ('base') version is used."
         ),
@@ -63,7 +64,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return Response(
             result['content'],
-            mimetype='text/markdown; charset=utf-8',
+            mimetype=result['mimetype'],
             headers={
                 'Content-Disposition': content_disposition_attachment(result["filename"]),
                 'Access-Control-Expose-Headers': 'Content-Disposition',

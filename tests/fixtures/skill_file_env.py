@@ -493,6 +493,7 @@ def install(monkeypatch, limits: dict):
 
     load(monkeypatch, 'models/pd/skill_file.py', f'{PKG}.models.pd.skill_file')
     load(monkeypatch, 'utils/skill_frontmatter.py', f'{PKG}.utils.skill_frontmatter')
+    load(monkeypatch, 'utils/zip_safety.py', f'{PKG}.utils.zip_safety')
     load(monkeypatch, 'utils/platform_buckets.py', f'{PKG}.utils.platform_buckets')
     store = load(monkeypatch, 'utils/skill_file_store.py', f'{PKG}.utils.skill_file_store')
     skill_utils = load(monkeypatch, 'utils/skill_utils.py', f'{PKG}.utils.skill_utils')
