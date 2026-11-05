@@ -26,7 +26,7 @@ from flask import request
 from pydantic import ValidationError
 
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c, register_openapi, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...models.pd.generate_pipeline_draft import (
     GeneratePipelineDraftRequest,
@@ -34,12 +34,13 @@ from ...models.pd.generate_pipeline_draft import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
+    DraftSettingsError,
     answer_was_cut_short,
-    caller_chose,
+    apply_offered_origins,
     describe_parse_failure,
     describe_predict_failure,
     extract_answer,
-    resolve_model,
+    resolve_draft_llm_settings,
     timeout_response,
 )
 from ...utils.predict_utils import PredictPayloadError
@@ -62,6 +63,9 @@ _SERVICE_PROMPT_KEY_REFERENCE = "pipeline_authoring_reference"
 _AWAIT_TASK_TIMEOUT = 120
 _DEFAULT_MAX_TOKENS = 8192
 _DEFAULT_TEMPERATURE = 0.3
+# one repair call after a structurally invalid draft; each call can take up to _AWAIT_TASK_TIMEOUT
+_MAX_REPAIR_ATTEMPTS = 1
+_DRAFT_FAILURE_WARNINGS = frozenset({"missing_nodes", "no_end_node"})
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -103,67 +107,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_id = auth.current_user().get("id")
 
-        caller_set_max_tokens = caller_chose(req.llm_settings, "max_tokens")
-        caller_set_temperature = caller_chose(req.llm_settings, "temperature")
-
-        # Resolve LLM settings:
-        # 1. explicit override in request
-        # 2. pipeline's own llm_settings (edit mode only)
-        # 3. project default
         current_config = None
-        if req.llm_settings and req.llm_settings.model_name:
-            llm_settings = req.llm_settings.model_dump(exclude_none=True)
-            unavailable, owning_project_id = resolve_model(
-                project_id, llm_settings["model_name"], llm_settings.get("model_project_id")
+        if req.is_edit_mode:
+            current_config = fetch_application_for_edit(project_id, req.pipeline_id, req.version_id)
+            if current_config is None:
+                return {"error": "Pipeline or version not found."}, 404
+
+        try:
+            llm_settings = resolve_draft_llm_settings(
+                project_id,
+                req.llm_settings,
+                default_temperature=_DEFAULT_TEMPERATURE,
+                default_max_tokens=_DEFAULT_MAX_TOKENS,
+                fallback_settings=(current_config or {}).get("llm_settings"),
+                log_prefix="generate_pipeline_draft",
             )
-            if unavailable:
-                return {"error": unavailable}, 400
-            if owning_project_id is not None:
-                llm_settings["model_project_id"] = owning_project_id
-        else:
-            pipeline_llm_settings = {}
-            if req.is_edit_mode:
-                current_config = fetch_application_for_edit(
-                    project_id, req.pipeline_id, req.version_id
-                )
-                if current_config is None:
-                    return {"error": "Pipeline or version not found."}, 404
-                pipeline_llm_settings = current_config.get("llm_settings") or {}
+        except DraftSettingsError as exc:
+            return exc.body, exc.status
 
-            if pipeline_llm_settings.get("model_name"):
-                llm_settings = dict(pipeline_llm_settings)
-                if req.llm_settings:
-                    overrides = req.llm_settings.model_dump(
-                        exclude_none=True, exclude={"model_name", "model_project_id"}
-                    )
-                    llm_settings.update(overrides)
-            else:
-                try:
-                    llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(
-                        project_id, section="llm"
-                    )
-                    if not llm_settings or not llm_settings.get("model_name"):
-                        return {
-                            "error": (
-                                "No LLM model configured for this project. "
-                                "Go to Settings → Default model to set one."
-                            )
-                        }, 400
-                    if req.llm_settings:
-                        overrides = req.llm_settings.model_dump(
-                            exclude_none=True, exclude={"model_name", "model_project_id"}
-                        )
-                        llm_settings.update(overrides)
-                except Exception:
-                    log.exception("generate_pipeline_draft: failed to get default model")
-                    return {"error": "Failed to resolve project default LLM model."}, 400
-
-        if not caller_set_temperature:
-            llm_settings["temperature"] = _DEFAULT_TEMPERATURE
-        if not caller_set_max_tokens:
-            llm_settings["max_tokens"] = _DEFAULT_MAX_TOKENS
-
-        # Fetch resources
         try:
             toolkits, mcp, agents, pipelines, skills = fetch_project_resources(
                 project_id, req.user_description
@@ -172,7 +133,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.warning("generate_pipeline_draft: failed to fetch project resources")
             toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
 
-        # Fetch reference
         reference = get_service_prompt(_SERVICE_PROMPT_KEY_REFERENCE)
         if not reference:
             log.warning(
@@ -181,162 +141,37 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             reference = ""
 
+        template_key = _SERVICE_PROMPT_KEY_EDIT if req.is_edit_mode else _SERVICE_PROMPT_KEY_CREATE
+        template = get_service_prompt(template_key)
+        if not template:
+            return {"error": f"Service prompt '{template_key}' is not configured."}, 500
         if req.is_edit_mode:
-            if current_config is None:
-                current_config = fetch_application_for_edit(
-                    project_id, req.pipeline_id, req.version_id
-                )
-                if current_config is None:
-                    return {"error": "Pipeline or version not found."}, 404
-
-            template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
-            if not template:
-                return {
-                    "error": f"Service prompt '{_SERVICE_PROMPT_KEY_EDIT}' is not configured."
-                }, 500
             system_prompt = build_edit_pipeline_system_prompt(
-                template, reference, current_config, toolkits, mcp, agents, pipelines, skills
+                template, reference, project_id, current_config, toolkits, mcp, agents, pipelines, skills
             )
         else:
-            template = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
-            if not template:
-                return {
-                    "error": f"Service prompt '{_SERVICE_PROMPT_KEY_CREATE}' is not configured."
-                }, 500
             system_prompt = build_pipeline_system_prompt(
-                template, reference, toolkits, mcp, agents, pipelines, skills
+                template, reference, project_id, toolkits, mcp, agents, pipelines, skills
             )
-
         log.debug("generate_pipeline_draft: system_prompt length=%d", len(system_prompt))
 
-        # Call LLM
-        try:
-            result = self.module.predict_sio_llm(
-                sid=None,
-                data={
-                    "project_id": project_id,
-                    "user_input": req.user_description,
-                    "instructions": system_prompt,
-                    "llm_settings": llm_settings,
-                    "await_task_timeout": _AWAIT_TASK_TIMEOUT,
-                },
-                await_task_timeout=_AWAIT_TASK_TIMEOUT,
-                user_id=user_id,
-                skip_expansion=True,
-                return_chat_history=True,
+        user_input = req.user_description
+        for attempt in range(_MAX_REPAIR_ATTEMPTS + 1):
+            outcome = self._generate_once(project_id, user_id, user_input, system_prompt, llm_settings)
+            if outcome.response is not None:
+                return outcome.response
+            if outcome.parsed is not None:
+                break
+            if attempt == _MAX_REPAIR_ATTEMPTS:
+                return outcome.failure
+            log.info(
+                "generate_pipeline_draft: repair attempt %d with %d validator finding(s)",
+                attempt + 1, len(outcome.findings),
             )
-        except PredictPayloadError as exc:
-            return {"error": str(exc)}, 400
-        except PoolSaturationError as exc:
-            return {
-                "error": "temporarily_unavailable",
-                "message": "The service is busy. Please try again in a few seconds.",
-                "retry_after": exc.retry_after,
-            }, 503
-        except Exception:
-            log.exception("generate_pipeline_draft: LLM call failed")
-            return {"error": "LLM generation failed."}, 500
+            user_input = _repair_request(req.user_description, outcome.pipeline_yaml, outcome.findings)
 
-        timed_out = timeout_response(result, _AWAIT_TASK_TIMEOUT)
-        if timed_out:
-            return timed_out
-
-        raw_text = extract_answer(result)
-        if not raw_text:
-            failure = describe_predict_failure(result)
-            log.warning(
-                "generate_pipeline_draft: no draft text; %s; full result=%s",
-                failure or "no error reported", result,
-            )
-            return {"error": failure or "LLM returned an empty response."}, 500
-
-        extracted = extract_json_from_text(raw_text)
-        try:
-            parsed = json.loads(extracted)
-        except json.JSONDecodeError as exc:
-            log.warning(
-                "generate_pipeline_draft: draft did not parse: %s",
-                describe_parse_failure(raw_text, extracted, exc, result),
-            )
-            if answer_was_cut_short(result, extracted):
-                return {
-                    "error": (
-                        "LLM response was truncated. "
-                        "Increase max_tokens in llm_settings (recommended: 8192+)."
-                    )
-                }, 422
-            return {"error": "LLM returned unparseable output.", "parse_error": str(exc)}, 422
-
-        # Validate the generated pipeline YAML
-        pipeline_yaml = parsed.get("pipeline_yaml", "")
-        if not pipeline_yaml or not isinstance(pipeline_yaml, str):
-            return {
-                "error": "LLM did not return a 'pipeline_yaml' field.",
-                "raw": parsed,
-            }, 422
-
-        # Auto-fix the deprecated type: END / end_node pattern before validation
-        pipeline_yaml = fix_deprecated_end_node(pipeline_yaml)
-        # Inject missing toolkit_name / tool binding fields on AI-generated nodes
-        pipeline_yaml = fix_missing_node_bindings(pipeline_yaml)
-        parsed["pipeline_yaml"] = pipeline_yaml
-
-        validation_result = validate_pipeline_yaml(pipeline_yaml, project_id=project_id)
-        # An AI-generated pipeline must have nodes and a terminal path — treat
-        # missing_nodes and no_end_node as hard failures here even though the
-        # validator only warns (to allow draft saves).
-        _draft_warning_codes = {"missing_nodes", "no_end_node"}
-        structural_failures = validation_result.errors + [
-            w for w in validation_result.warnings if w.code in _draft_warning_codes
-        ]
-        if not validation_result.valid or structural_failures:
-            log.warning(
-                "generate_pipeline_draft: generated YAML failed validation: %s",
-                [e.model_dump() for e in structural_failures],
-            )
-            return {
-                "error": "Generated pipeline YAML failed structural validation.",
-                "validation_errors": [e.model_dump() for e in structural_failures],
-                "raw": parsed,
-            }, 422
-
-        # Inject validation result into parsed dict for response model
-        parsed["validation_result"] = validation_result.model_dump()
-
-        # Inject project_id into suggested agents/pipelines/skills so catalog items
-        # carry the public project ID and the frontend can link them correctly.
-        # Keyed by (catalog_project_id, application_id) to avoid collision: a user's
-        # own agent and a catalog agent can share the same numeric application_id across
-        # different project schemas.  Only catalog items have project_id set.
-        _catalog_app_project_id: dict[tuple, int] = {
-            (a["project_id"], a["application_id"]): a["project_id"]
-            for a in (agents + pipelines)
-            if a.get("project_id") is not None
-        }
-        # Reverse map: application_id → catalog project_id (catalog items are unique within their
-        # own project, and catalog project_id is always != current project_id by construction).
-        _app_to_catalog_project: dict[int, int] = {
-            app_id: cat_pid
-            for (cat_pid, app_id), cat_pid in _catalog_app_project_id.items()
-        }
-        _skill_to_catalog_project: dict[int, int] = {
-            s["id"]: s["project_id"]
-            for s in skills
-            if s.get("project_id") is not None
-        }
-        for key in ("suggested_agents", "suggested_pipelines"):
-            for item in parsed.get(key) or []:
-                if not isinstance(item, dict):
-                    continue
-                pid = _app_to_catalog_project.get(item.get("application_id"))
-                if pid is not None:
-                    item["project_id"] = pid
-        for item in parsed.get("suggested_skills") or []:
-            if not isinstance(item, dict):
-                continue
-            pid = _skill_to_catalog_project.get(item.get("id"))
-            if pid is not None:
-                item["project_id"] = pid
+        parsed = outcome.parsed
+        apply_offered_origins(parsed, project_id, agents, pipelines, skills)
 
         try:
             draft = GeneratePipelineDraftResponse.model_validate(parsed)
@@ -349,6 +184,145 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }, 422
 
         return draft.model_dump(exclude_none=True), 200
+
+    def _generate_once(self, project_id, user_id, user_input, system_prompt, llm_settings) -> "_Attempt":
+        """One LLM call plus the parse, auto-fix and structural validation of its pipeline YAML.
+
+        Returns a terminal ``response`` for failures no retry can fix (transport, timeout,
+        unparseable or truncated output), or ``findings`` when only the pipeline structure is wrong,
+        which the caller may feed back to the model once.
+        """
+        try:
+            result = self.module.predict_sio_llm(
+                sid=None,
+                data={
+                    "project_id": project_id,
+                    "user_input": user_input,
+                    "instructions": system_prompt,
+                    "llm_settings": llm_settings,
+                    "await_task_timeout": _AWAIT_TASK_TIMEOUT,
+                },
+                await_task_timeout=_AWAIT_TASK_TIMEOUT,
+                user_id=user_id,
+                skip_expansion=True,
+                return_chat_history=True,
+            )
+        except PredictPayloadError as exc:
+            return _Attempt.stop(({"error": str(exc)}, 400))
+        except PoolSaturationError as exc:
+            return _Attempt.stop(({
+                "error": "temporarily_unavailable",
+                "message": "The service is busy. Please try again in a few seconds.",
+                "retry_after": exc.retry_after,
+            }, 503))
+        except Exception:
+            log.exception("generate_pipeline_draft: LLM call failed")
+            return _Attempt.stop(({"error": "LLM generation failed."}, 500))
+
+        timed_out = timeout_response(result, _AWAIT_TASK_TIMEOUT)
+        if timed_out:
+            return _Attempt.stop(timed_out)
+
+        raw_text = extract_answer(result)
+        if not raw_text:
+            failure = describe_predict_failure(result)
+            log.warning(
+                "generate_pipeline_draft: no draft text; %s; full result=%s",
+                failure or "no error reported", result,
+            )
+            return _Attempt.stop(({"error": failure or "LLM returned an empty response."}, 500))
+
+        extracted = extract_json_from_text(raw_text)
+        try:
+            parsed = json.loads(extracted)
+        except json.JSONDecodeError as exc:
+            log.warning(
+                "generate_pipeline_draft: draft did not parse: %s",
+                describe_parse_failure(raw_text, extracted, exc, result),
+            )
+            if answer_was_cut_short(result, extracted):
+                return _Attempt.stop(({
+                    "error": (
+                        "LLM response was truncated. "
+                        "Increase max_tokens in llm_settings (recommended: 8192+)."
+                    )
+                }, 422))
+            return _Attempt.stop(({"error": "LLM returned unparseable output.", "parse_error": str(exc)}, 422))
+
+        pipeline_yaml = parsed.get("pipeline_yaml", "") if isinstance(parsed, dict) else ""
+        if not pipeline_yaml or not isinstance(pipeline_yaml, str):
+            return _Attempt.stop(({
+                "error": "LLM did not return a 'pipeline_yaml' field.",
+                "raw": parsed,
+            }, 422))
+
+        pipeline_yaml = fix_deprecated_end_node(pipeline_yaml)
+        pipeline_yaml = fix_missing_node_bindings(pipeline_yaml)
+        parsed["pipeline_yaml"] = pipeline_yaml
+
+        validation_result = validate_pipeline_yaml(pipeline_yaml, project_id=project_id)
+        # An AI-generated pipeline must have nodes and a terminal path, so these two warnings are
+        # treated as failures here even though a manual draft save accepts them.
+        structural_failures = validation_result.errors + [
+            w for w in validation_result.warnings if w.code in _DRAFT_FAILURE_WARNINGS
+        ]
+        if not validation_result.valid or structural_failures:
+            findings = [e.model_dump() for e in structural_failures]
+            log.warning("generate_pipeline_draft: generated YAML failed validation: %s", findings)
+            return _Attempt.repairable(pipeline_yaml, findings, ({
+                "error": "Generated pipeline YAML failed structural validation.",
+                "validation_errors": findings,
+                "raw": parsed,
+            }, 422))
+
+        parsed["validation_result"] = validation_result.model_dump()
+        return _Attempt.done(parsed)
+
+
+class _Attempt:
+    """Outcome of one generation: a final ``response``, a valid ``parsed`` draft, or repairable ``findings``."""
+
+    def __init__(self, response=None, parsed=None, pipeline_yaml="", findings=(), failure=None):
+        self.response = response
+        self.parsed = parsed
+        self.pipeline_yaml = pipeline_yaml
+        self.findings = list(findings)
+        self.failure = failure
+
+    @classmethod
+    def stop(cls, response):
+        return cls(response=response)
+
+    @classmethod
+    def done(cls, parsed):
+        return cls(parsed=parsed)
+
+    @classmethod
+    def repairable(cls, pipeline_yaml, findings, failure):
+        return cls(pipeline_yaml=pipeline_yaml, findings=findings, failure=failure)
+
+
+def _repair_request(user_description: str, pipeline_yaml: str, findings: list) -> str:
+    """The follow-up request that hands the validator's findings back to the model.
+
+    The validator messages are written for the model to act on, so they are passed through as-is
+    together with the YAML they describe.
+    """
+    lines = "\n".join(
+        f"- [{f.get('code')}]"
+        + (f" node '{f['node_id']}'" if f.get("node_id") else "")
+        + f": {f.get('message')}"
+        for f in findings
+    )
+    return (
+        f"{user_description}\n\n"
+        "Your previous answer produced this pipeline_yaml:\n"
+        f"```yaml\n{pipeline_yaml}\n```\n"
+        "It failed structural validation with these findings:\n"
+        f"{lines}\n\n"
+        "Return the complete JSON answer again in the same format, with pipeline_yaml fixed so that "
+        "none of these findings remain. Keep everything else that was correct."
+    )
 
 
 class API(api_tools.APIBase):

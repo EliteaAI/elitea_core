@@ -26,17 +26,17 @@ from flask import request
 from pydantic import ValidationError
 
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c, register_openapi, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...models.pd.configure_node import ConfigureNodeRequest, ConfigureNodeResponse
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
+    DraftSettingsError,
     answer_was_cut_short,
-    caller_chose,
     describe_parse_failure,
     describe_predict_failure,
     extract_answer,
-    resolve_model,
+    resolve_draft_llm_settings,
     timeout_response,
 )
 from ...utils.predict_utils import PredictPayloadError
@@ -91,44 +91,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_id = auth.current_user().get("id")
 
-        caller_set_max_tokens = caller_chose(req.llm_settings, "max_tokens")
-        caller_set_temperature = caller_chose(req.llm_settings, "temperature")
-
-        # Resolve LLM settings
-        if req.llm_settings and req.llm_settings.model_name:
-            llm_settings = req.llm_settings.model_dump(exclude_none=True)
-            unavailable, owning_project_id = resolve_model(
-                project_id, llm_settings["model_name"], llm_settings.get("model_project_id")
+        try:
+            llm_settings = resolve_draft_llm_settings(
+                project_id,
+                req.llm_settings,
+                default_temperature=_DEFAULT_TEMPERATURE,
+                default_max_tokens=_DEFAULT_MAX_TOKENS,
+                log_prefix="configure_pipeline_node",
             )
-            if unavailable:
-                return {"error": unavailable}, 400
-            if owning_project_id is not None:
-                llm_settings["model_project_id"] = owning_project_id
-        else:
-            try:
-                llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(
-                    project_id, section="llm"
-                )
-                if not llm_settings or not llm_settings.get("model_name"):
-                    return {
-                        "error": (
-                            "No LLM model configured for this project. "
-                            "Go to Settings → Default model to set one."
-                        )
-                    }, 400
-                if req.llm_settings:
-                    overrides = req.llm_settings.model_dump(
-                        exclude_none=True, exclude={"model_name", "model_project_id"}
-                    )
-                    llm_settings.update(overrides)
-            except Exception:
-                log.exception("configure_pipeline_node: failed to get default model")
-                return {"error": "Failed to resolve project default LLM model."}, 400
-
-        if not caller_set_temperature:
-            llm_settings["temperature"] = _DEFAULT_TEMPERATURE
-        if not caller_set_max_tokens:
-            llm_settings["max_tokens"] = _DEFAULT_MAX_TOKENS
+        except DraftSettingsError as exc:
+            return exc.body, exc.status
 
         # Fetch reference and configure template
         reference = get_service_prompt(_SERVICE_PROMPT_KEY_REFERENCE)

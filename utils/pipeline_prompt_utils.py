@@ -29,45 +29,7 @@ from __future__ import annotations
 
 import json
 
-
-# ---------------------------------------------------------------------------
-# Formatting helpers (shared with generate_application_utils patterns)
-# ---------------------------------------------------------------------------
-
-def _fmt_toolkits(items: list) -> str:
-    if not items:
-        return "(none)"
-    return "\n".join(
-        f'- id={t["id"]}  type="{t["type"]}"  name="{t["name"]}"  {(t.get("description") or "")[:120]}'
-        for t in items
-    )
-
-
-def _fmt_mcp(items: list) -> str:
-    if not items:
-        return "(none)"
-    return "\n".join(
-        f'- id={t["id"]}  name="{t["name"]}"  {(t.get("description") or "")[:120]}'
-        for t in items
-    )
-
-
-def _fmt_apps(items: list) -> str:
-    if not items:
-        return "(none)"
-    return "\n".join(
-        f'- application_id={a["application_id"]}  name="{a["name"]}"  {(a.get("description") or "")[:100]}'
-        for a in items
-    )
-
-
-def _fmt_skills(items: list) -> str:
-    if not items:
-        return "(none)"
-    return "\n".join(
-        f'- id={s["id"]}  name="{s["name"]}"  {(s.get("description") or "")[:120]}'
-        for s in items
-    )
+from .generate_application_utils import format_resource_sections
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +39,7 @@ def _fmt_skills(items: list) -> str:
 def build_pipeline_system_prompt(
     template: str,
     reference: str,
+    project_id: int,
     toolkits: list,
     mcp: list,
     agents: list,
@@ -91,11 +54,7 @@ def build_pipeline_system_prompt(
     always has the full schema context.
     """
     filled = template.format(
-        toolkits=_fmt_toolkits(toolkits),
-        mcp=_fmt_mcp(mcp),
-        agents=_fmt_apps(agents),
-        pipelines=_fmt_apps(pipelines),
-        skills=_fmt_skills(skills),
+        **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills)
     )
     return f"{reference}\n\n---\n\n{filled}"
 
@@ -103,6 +62,7 @@ def build_pipeline_system_prompt(
 def build_edit_pipeline_system_prompt(
     template: str,
     reference: str,
+    project_id: int,
     current_config: dict,
     toolkits: list,
     mcp: list,
@@ -118,11 +78,7 @@ def build_edit_pipeline_system_prompt(
     """
     filled = template.format(
         current_config=json.dumps(current_config, indent=2),
-        toolkits=_fmt_toolkits(toolkits),
-        mcp=_fmt_mcp(mcp),
-        agents=_fmt_apps(agents),
-        pipelines=_fmt_apps(pipelines),
-        skills=_fmt_skills(skills),
+        **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills),
     )
     return f"{reference}\n\n---\n\n{filled}"
 

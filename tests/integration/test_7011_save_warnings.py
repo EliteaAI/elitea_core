@@ -12,7 +12,7 @@ import sys
 import types
 
 import pytest
-from fixtures.helpers import load_module_with_stubs, register_pipeline_validator_module
+from fixtures.helpers import load_module_with_stubs
 from unit.test_7011_schedule_crud_api import PACKAGE, PLUGIN_ROOT, pipeline_body
 from unit.test_7011_schedule_crud_api import harness as _crud_harness
 
@@ -67,7 +67,6 @@ def real_scan(harness):
         descriptor=types.SimpleNamespace(config=types.SimpleNamespace(get=lambda key, default=None: policy.get(key, default))),
     ))
     load_module_with_stubs(PLUGIN_ROOT / 'utils/toolkit_security.py', f'{PACKAGE}.utils.toolkit_security')
-    register_pipeline_validator_module(PLUGIN_ROOT)
     load_module_with_stubs(PLUGIN_ROOT / 'utils/pipeline_utils.py', f'{PACKAGE}.utils.pipeline_utils')
     sys.modules[f'{PACKAGE}.utils.schedule_risk'] = load_module_with_stubs(
         PLUGIN_ROOT / 'utils/schedule_risk.py', f'{PACKAGE}.utils.schedule_risk',

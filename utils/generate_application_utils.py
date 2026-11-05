@@ -31,6 +31,12 @@ class ServicePromptTemplateError(Exception):
     """
 
 
+_MAX_QUERY_TOKENS = 12
+# rows fetched per kind before Python re-scores them; ranking happens in SQL first, so this
+# only needs to cover the top of the list plus what the nesting check may reject
+_CANDIDATE_POOL = 50
+
+
 def _score_item(query_tokens: set, name: str, description: str, extra: str = "") -> int:
     text = " ".join(filter(None, [name, description, extra])).lower()
     return sum(1 for t in query_tokens if t in text)
@@ -40,24 +46,103 @@ def _tokenize(text: str) -> set:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
+def _relevance(query_tokens: set, *columns):
+    """SQL expression counting how many query tokens appear in any of ``columns``.
+
+    Ordering by it before ``LIMIT`` keeps the best matches when a project has more rows than the
+    pool; the Python ``_score_item`` pass afterwards only breaks ties inside that pool. Short
+    tokens are skipped because they match almost everything.
+    """
+    from sqlalchemy import case, func, literal  # noqa: PLC0415
+
+    tokens = sorted(t for t in query_tokens if len(t) >= 3)[:_MAX_QUERY_TOKENS]
+    if not tokens:
+        return literal(0)
+    haystack = func.lower(func.concat(*[func.coalesce(col, "") for col in columns]))
+    return sum(case((haystack.contains(t), 1), else_=0) for t in tokens)
+
+
+def _ranked(query, query_tokens: set, *columns, limit: int = _CANDIDATE_POOL):
+    return query.order_by(_relevance(query_tokens, *columns).desc()).limit(limit).all()
+
+
+def _by_score(query_tokens: set, items: list, *fields) -> list:
+    return [
+        item for _, item in sorted(
+            ((_score_item(query_tokens, *(item.get(f) or "" for f in fields)), item) for item in items),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+    ]
+
+
+def _strip_internal(item: dict) -> dict:
+    return {k: v for k, v in item.items() if not k.startswith("_")}
+
+
+def _nesting_filter(project_id: int, session):
+    """Predicate rejecting agents that would exceed the nesting limit when attached to a pipeline.
+
+    A pipeline host consumes no tier, so a candidate whose own subtree already uses every tier can
+    never be attached; suggesting it only produces a bind-time error. Errors are permissive because
+    the bind-time guard is the real safety net.
+    """
+    try:
+        from ..utils.publish_utils import compute_agent_subtree_tiers, MAX_AGENT_NESTING_TIERS  # noqa: PLC0415
+    except ImportError:
+        return lambda item: True
+    max_candidate_tiers = MAX_AGENT_NESTING_TIERS - 1
+
+    def _fits(item: dict) -> bool:
+        version_id = item.get("_version_id")
+        if not version_id:
+            return True
+        try:
+            return compute_agent_subtree_tiers(project_id, version_id, session=session) <= max_candidate_tiers
+        except Exception:  # pylint: disable=W0703
+            return True
+
+    return _fits
+
+
+def _first_fitting(items: list, fits, cap: int) -> list:
+    """Up to ``cap`` items that pass ``fits``, checking lazily so at most a few walks run."""
+    result = []
+    for item in items:
+        if len(result) >= cap:
+            break
+        if fits(item):
+            result.append(_strip_internal(item))
+    return result
+
+
+def _forked_origins(session, model) -> set:
+    """``(shared_owner_id, shared_id)`` of every catalog item already forked into this project.
+
+    Read with its own query rather than from the ranked candidate rows, which are truncated and so
+    would miss forks that did not make the pool.
+    """
+    return {
+        (owner, shared)
+        for owner, shared in session.query(model.shared_owner_id, model.shared_id)
+        .filter(model.shared_owner_id.isnot(None), model.shared_id.isnot(None))
+        .all()
+    }
+
+
 def _fetch_catalog_agents(
     public_project_id: int,
     query_tokens: set,
     forked_ids: set,
 ) -> List[dict]:
-    """Fetch published catalog agents/pipelines from the public project.
+    """Published catalog agents and pipelines, one row per application, best matches first.
 
-    ``forked_ids`` is a set of (shared_owner_id, shared_id) tuples representing
-    catalog items already forked into the current project — those are excluded
-    to avoid duplicate suggestions.
-
-    Uses a subquery to select one representative published version per application
-    to avoid returning duplicate rows when an application has multiple published versions.
+    Already-forked items (``forked_ids`` holds ``(shared_owner_id, shared_id)``) are excluded,
+    and the nesting check runs against the catalog project, where their sub-agents live.
     """
     try:
         from sqlalchemy import func  # noqa: PLC0415
         with db.with_project_schema_session(public_project_id) as session:
-            # One row per application: take the max published version id as a stable representative.
             latest_published = (
                 session.query(
                     ApplicationVersion.application_id,
@@ -68,19 +153,17 @@ def _fetch_catalog_agents(
                 .group_by(ApplicationVersion.application_id, ApplicationVersion.agent_type)
                 .subquery()
             )
-            rows = (
+            rows = _ranked(
                 session.query(
                     Application.id,
                     Application.name,
                     Application.description,
                     latest_published.c.agent_type,
                     latest_published.c.version_id,
-                )
-                .join(latest_published, latest_published.c.application_id == Application.id)
-                .limit(50)
-                .all()
+                ).join(latest_published, latest_published.c.application_id == Application.id),
+                query_tokens, Application.name, Application.description,
             )
-            return [
+            items = _by_score(query_tokens, [
                 {
                     "application_id": r.id,
                     "name": r.name,
@@ -91,8 +174,13 @@ def _fetch_catalog_agents(
                 }
                 for r in rows
                 if (public_project_id, r.id) not in forked_ids
-            ]
-    except Exception:
+            ], "name", "description")
+            fits = _nesting_filter(public_project_id, session)
+            return (
+                _first_fitting([i for i in items if i["type"] == "agent"], fits, _MAX_AGENTS)
+                + _first_fitting([i for i in items if i["type"] == "pipeline"], fits, _MAX_PIPELINES)
+            )
+    except Exception:  # pylint: disable=W0703
         log.warning("fetch_project_resources: failed to query catalog agents from project %d", public_project_id)
         return []
 
@@ -102,25 +190,20 @@ def _fetch_catalog_skills(
     query_tokens: set,
     forked_skill_ids: set,
 ) -> List[dict]:
-    """Fetch published catalog skills from the public project.
-
-    ``forked_skill_ids`` is a set of (shared_owner_id, shared_id) tuples for
-    skills already forked into the current project.
-    """
+    """Published catalog skills, best matches first, excluding ones already forked here."""
     try:
         with db.with_project_schema_session(public_project_id) as session:
-            rows = (
+            rows = _ranked(
                 session.query(Skill.id, Skill.name, Skill.description)
-                .filter(Skill.versions.any(SkillVersion.status == PublishStatus.published))
-                .limit(50)
-                .all()
+                .filter(Skill.versions.any(SkillVersion.status == PublishStatus.published)),
+                query_tokens, Skill.name, Skill.description,
             )
-            return [
+            return _by_score(query_tokens, [
                 {"id": r.id, "name": r.name, "description": r.description, "project_id": public_project_id}
                 for r in rows
                 if (public_project_id, r.id) not in forked_skill_ids
-            ]
-    except Exception:
+            ], "name", "description")[:_MAX_SKILLS]
+    except Exception:  # pylint: disable=W0703
         log.warning("fetch_project_resources: failed to query catalog skills from project %d", public_project_id)
         return []
 
@@ -140,169 +223,75 @@ def fetch_project_resources(
         toolkit_rows = session.query(
             EliteATool.id, EliteATool.type, EliteATool.name, EliteATool.description
         ).all()
-        toolkits_scored = sorted(
-            (
-                (
-                    _score_item(query_tokens, r.name or r.type, r.description or "", r.type),
-                    {"id": r.id, "type": r.type, "name": r.name or r.type, "description": r.description},
-                )
-                for r in toolkit_rows
-            ),
-            key=lambda x: x[0],
-            reverse=True,
-        )
-        toolkits = [item for _, item in toolkits_scored if item["type"] != "mcp"][:_MAX_TOOLKITS]
-        mcp = [item for _, item in toolkits_scored if item["type"] == "mcp"][:_MAX_MCP]
+        toolkits_ranked = _by_score(query_tokens, [
+            {"id": r.id, "type": r.type, "name": r.name or r.type, "description": r.description}
+            for r in toolkit_rows
+        ], "name", "description", "type")
+        toolkits = [item for item in toolkits_ranked if item["type"] != "mcp"][:_MAX_TOOLKITS]
+        mcp = [item for item in toolkits_ranked if item["type"] == "mcp"][:_MAX_MCP]
 
-        agent_rows = (
-            session.query(
-                Application.id,
-                Application.name,
-                Application.description,
-                ApplicationVersion.agent_type,
-                ApplicationVersion.id.label("version_id"),
-                Application.shared_owner_id,
-                Application.shared_id,
-            )
-            .join(
-                ApplicationVersion,
-                (ApplicationVersion.application_id == Application.id)
-                & (ApplicationVersion.name == "base"),
-            )
-            .limit(200)
-            .all()
-        )
-        # Track which catalog items are already forked into this project (to deduplicate later)
-        forked_agent_ids = {
-            (r.shared_owner_id, r.shared_id)
-            for r in agent_rows
-            if r.shared_owner_id is not None and r.shared_id is not None
-        }
+        forked_agent_ids = _forked_origins(session, Application)
+        forked_skill_ids = _forked_origins(session, Skill)
 
-        agents_scored = sorted(
-            (
-                (
-                    _score_item(query_tokens, r.name or "", r.description or ""),
-                    {
-                        "application_id": r.id,
-                        "name": r.name,
-                        "description": r.description,
-                        "type": "pipeline" if r.agent_type == "pipeline" else "agent",
-                        "_version_id": r.version_id,
-                    },
-                )
-                for r in agent_rows
-            ),
-            key=lambda x: x[0],
-            reverse=True,
-        )
         # NOTE(#5680): these are ranked SUGGESTIONS shown to the LLM, not auto-bindings — a
         # suggested container agent only becomes a real sub-agent if the user accepts it, and
-        # that binding is now rejected at bind time (application_toolkit_change_relation) and
-        # at chat resolution. If this endpoint ever gains an owner-application context, filter
-        # it out here so an agent is never suggested as its own sub-agent.
-        #
-        # Filter out agents/pipelines that would immediately exceed the 3-tier nesting limit when
-        # added to a pipeline host (which itself consumes 0 tiers). An agent with tier contribution
-        # > MAX_AGENT_NESTING_TIERS - 1 would always fail the add-guard, so exclude it here to
-        # avoid suggesting something the user cannot actually attach.
-        try:
-            from ..utils.publish_utils import compute_agent_subtree_tiers, MAX_AGENT_NESTING_TIERS  # noqa: PLC0415
-            _max_candidate_tiers = MAX_AGENT_NESTING_TIERS - 1
-
-            def _fits_nesting(item: dict) -> bool:
-                vid = item.get("_version_id")
-                if not vid:
-                    return True
-                try:
-                    tiers = compute_agent_subtree_tiers(project_id, vid, session=session)
-                    return tiers <= _max_candidate_tiers
-                except Exception:
-                    return True  # be permissive on error; the bind-time guard is the safety net
-        except ImportError:
-            _fits_nesting = lambda item: True  # noqa: E731
-
-        def _strip_internal(item: dict) -> dict:
-            return {k: v for k, v in item.items() if not k.startswith("_")}
-
-        # Cap candidates before calling _fits_nesting to bound N+1 DB calls:
-        # at most _MAX_AGENTS*2 candidates are checked before returning _MAX_AGENTS results.
-        _agent_candidates = [item for _, item in agents_scored if item["type"] == "agent"]
-        _pipeline_candidates = [item for _, item in agents_scored if item["type"] == "pipeline"]
-        agents = [
-            _strip_internal(item)
-            for item in _agent_candidates[:_MAX_AGENTS * 2]
-            if _fits_nesting(item)
-        ][:_MAX_AGENTS]
-        pipelines = [
-            _strip_internal(item)
-            for item in _pipeline_candidates[:_MAX_PIPELINES * 2]
-            if _fits_nesting(item)
-        ][:_MAX_PIPELINES]
-
-        skill_rows = session.query(Skill.id, Skill.name, Skill.description,
-                                   Skill.shared_owner_id, Skill.shared_id).limit(100).all()
-        forked_skill_ids = {
-            (r.shared_owner_id, r.shared_id)
-            for r in skill_rows
-            if r.shared_owner_id is not None and r.shared_id is not None
-        }
-        skills_scored = sorted(
-            (
-                (
-                    _score_item(query_tokens, r.name or "", r.description or ""),
-                    {"id": r.id, "name": r.name, "description": r.description},
-                )
-                for r in skill_rows
-            ),
-            key=lambda x: x[0],
-            reverse=True,
+        # that binding is rejected at bind time (application_toolkit_change_relation) and at chat
+        # resolution. If this endpoint ever gains an owner-application context, filter it out
+        # here so an agent is never suggested as its own sub-agent.
+        base_versions = session.query(
+            Application.id,
+            Application.name,
+            Application.description,
+            ApplicationVersion.agent_type,
+            ApplicationVersion.id.label("version_id"),
+        ).join(
+            ApplicationVersion,
+            (ApplicationVersion.application_id == Application.id)
+            & (ApplicationVersion.name == "base"),
         )
-        skills = [item for _, item in skills_scored[:_MAX_SKILLS]]
+        fits = _nesting_filter(project_id, session)
+        apps_by_type = {}
+        for kind, is_pipeline in (("agent", False), ("pipeline", True)):
+            type_filter = (
+                ApplicationVersion.agent_type == "pipeline" if is_pipeline
+                else ApplicationVersion.agent_type != "pipeline"
+            )
+            rows = _ranked(
+                base_versions.filter(type_filter), query_tokens, Application.name, Application.description,
+            )
+            apps_by_type[kind] = _by_score(query_tokens, [
+                {
+                    "application_id": r.id,
+                    "name": r.name,
+                    "description": r.description,
+                    "type": kind,
+                    "_version_id": r.version_id,
+                }
+                for r in rows
+            ], "name", "description")
+        agents = _first_fitting(apps_by_type["agent"], fits, _MAX_AGENTS)
+        pipelines = _first_fitting(apps_by_type["pipeline"], fits, _MAX_PIPELINES)
 
-    # Include catalog (published) agents and skills from the public project
+        skill_rows = _ranked(
+            session.query(Skill.id, Skill.name, Skill.description),
+            query_tokens, Skill.name, Skill.description,
+        )
+        skills = _by_score(query_tokens, [
+            {"id": r.id, "name": r.name, "description": r.description} for r in skill_rows
+        ], "name", "description")[:_MAX_SKILLS]
+
+    # Fill remaining capacity with published catalog items; the project's own take priority
     try:
         from .utils import get_public_project_id  # noqa: PLC0415
         public_project_id = get_public_project_id()
         if public_project_id != project_id:
-            catalog_agent_rows = _fetch_catalog_agents(public_project_id, query_tokens, forked_agent_ids)
-            catalog_agents_scored = sorted(
-                (
-                    (
-                        _score_item(query_tokens, r["name"] or "", r["description"] or ""),
-                        r,
-                    )
-                    for r in catalog_agent_rows
-                ),
-                key=lambda x: x[0],
-                reverse=True,
-            )
-            catalog_agents = [
-                _strip_internal(item)
-                for _, item in catalog_agents_scored
-                if item["type"] == "agent"
-            ]
-            catalog_pipelines = [
-                _strip_internal(item)
-                for _, item in catalog_agents_scored
-                if item["type"] == "pipeline"
-            ]
-            # Fill remaining capacity with catalog items (private project items take priority)
-            agents = (agents + catalog_agents)[:_MAX_AGENTS]
-            pipelines = (pipelines + catalog_pipelines)[:_MAX_PIPELINES]
-
-            catalog_skill_rows = _fetch_catalog_skills(public_project_id, query_tokens, forked_skill_ids)
-            catalog_skills_scored = sorted(
-                (
-                    (_score_item(query_tokens, r["name"] or "", r["description"] or ""), r)
-                    for r in catalog_skill_rows
-                ),
-                key=lambda x: x[0],
-                reverse=True,
-            )
-            catalog_skills = [item for _, item in catalog_skills_scored]
-            skills = (skills + catalog_skills)[:_MAX_SKILLS]
-    except Exception:
+            catalog_apps = _fetch_catalog_agents(public_project_id, query_tokens, forked_agent_ids)
+            agents = (agents + [a for a in catalog_apps if a["type"] == "agent"])[:_MAX_AGENTS]
+            pipelines = (pipelines + [a for a in catalog_apps if a["type"] == "pipeline"])[:_MAX_PIPELINES]
+            skills = (
+                skills + _fetch_catalog_skills(public_project_id, query_tokens, forked_skill_ids)
+            )[:_MAX_SKILLS]
+    except Exception:  # pylint: disable=W0703
         log.warning("fetch_project_resources: failed to include catalog resources")
 
     return toolkits, mcp, agents, pipelines, skills
@@ -312,7 +301,7 @@ def _format_toolkit_lines(toolkits: list) -> list:
     if not toolkits:
         return ["(none)"]
     return [
-        f'- id={t["id"]}  type="{t["type"]}"  name="{t["name"]}"  {(t["description"] or "")[:120]}'
+        f'- id={t["id"]}  type="{t["type"]}"  name="{t["name"]}"  {(t.get("description") or "")[:120]}'
         for t in toolkits
     ]
 
@@ -321,40 +310,48 @@ def _format_mcp_lines(mcp: list) -> list:
     if not mcp:
         return ["(none)"]
     return [
-        f'- id={t["id"]}  name="{t["name"]}"  {(t["description"] or "")[:120]}'
+        f'- id={t["id"]}  name="{t["name"]}"  {(t.get("description") or "")[:120]}'
         for t in mcp
     ]
 
 
-def _format_agent_lines(agents: list) -> list:
-    if not agents:
+def _format_app_lines(apps: list, project_id: int) -> list:
+    """Agents and pipelines, each with the project it lives in: ids repeat across projects."""
+    if not apps:
         return ["(none)"]
     return [
-        f'- application_id={a["application_id"]}  name="{a["name"]}"  {(a["description"] or "")[:100]}'
-        for a in agents
+        f'- project_id={a.get("project_id") or project_id}  application_id={a["application_id"]}  '
+        f'name="{a["name"]}"  {(a.get("description") or "")[:100]}'
+        for a in apps
     ]
 
 
-def _format_pipeline_lines(pipelines: list) -> list:
-    if not pipelines:
-        return ["(none)"]
-    return [
-        f'- application_id={a["application_id"]}  name="{a["name"]}"  {(a["description"] or "")[:100]}'
-        for a in pipelines
-    ]
-
-
-def _format_skill_lines(skills: list) -> list:
+def _format_skill_lines(skills: list, project_id: int) -> list:
     if not skills:
         return ["(none)"]
     return [
-        f'- id={s["id"]}  name="{s["name"]}"  {(s["description"] or "")[:120]}'
+        f'- project_id={s.get("project_id") or project_id}  id={s["id"]}  '
+        f'name="{s["name"]}"  {(s.get("description") or "")[:120]}'
         for s in skills
     ]
 
 
+def format_resource_sections(
+    project_id: int, toolkits: list, mcp: list, agents: list, pipelines: list, skills: list,
+) -> dict:
+    """The resource placeholders every draft service prompt is formatted with."""
+    return {
+        "toolkits": "\n".join(_format_toolkit_lines(toolkits)),
+        "mcp": "\n".join(_format_mcp_lines(mcp)),
+        "agents": "\n".join(_format_app_lines(agents, project_id)),
+        "pipelines": "\n".join(_format_app_lines(pipelines, project_id)),
+        "skills": "\n".join(_format_skill_lines(skills, project_id)),
+    }
+
+
 def build_system_prompt(
     template: str,
+    project_id: int,
     toolkits: list,
     mcp: list,
     agents: list,
@@ -362,11 +359,7 @@ def build_system_prompt(
     skills: list,
 ) -> str:
     return template.format(
-        toolkits="\n".join(_format_toolkit_lines(toolkits)),
-        mcp="\n".join(_format_mcp_lines(mcp)),
-        agents="\n".join(_format_agent_lines(agents)),
-        pipelines="\n".join(_format_pipeline_lines(pipelines)),
-        skills="\n".join(_format_skill_lines(skills)),
+        **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills)
     )
 
 
@@ -468,6 +461,7 @@ def fetch_application_for_edit(
 
 def build_edit_system_prompt(
     template: str,
+    project_id: int,
     current_config: dict,
     toolkits: list,
     mcp: list,
@@ -477,11 +471,7 @@ def build_edit_system_prompt(
 ) -> str:
     return template.format(
         current_config=json.dumps(current_config, indent=2),
-        toolkits="\n".join(_format_toolkit_lines(toolkits)),
-        mcp="\n".join(_format_mcp_lines(mcp)),
-        agents="\n".join(_format_agent_lines(agents)),
-        pipelines="\n".join(_format_pipeline_lines(pipelines)),
-        skills="\n".join(_format_skill_lines(skills)),
+        **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills),
     )
 
 
