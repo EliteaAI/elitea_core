@@ -217,3 +217,26 @@ class TestSuggestedResources:
             ],
         })
         assert r.suggested_agents[0].project_id is None
+
+    def test_suggested_mcp_null_type_defaults_to_mcp(self, pd_module):
+        """LLM returns type: null for MCP suggestions — must not fail validation."""
+        r = _valid_response(pd_module, {
+            "suggested_mcp": [
+                {"id": 4, "type": None, "name": "Github"},
+                {"id": 6, "name": "Atlassian"},
+            ],
+        })
+        assert [(m.id, m.type, m.name) for m in r.suggested_mcp] == [
+            (4, "mcp", "Github"),
+            (6, "mcp", "Atlassian"),
+        ]
+
+    def test_suggested_mcp_explicit_type_kept(self, pd_module):
+        r = _valid_response(pd_module, {
+            "suggested_mcp": [{"id": 4, "type": "mcp", "name": "Github"}],
+        })
+        assert r.suggested_mcp[0].type == "mcp"
+
+    def test_suggested_mcp_null_list_becomes_empty(self, pd_module):
+        r = _valid_response(pd_module, {"suggested_mcp": None})
+        assert r.suggested_mcp == []

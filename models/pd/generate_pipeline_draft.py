@@ -19,7 +19,7 @@
 
 from typing import Optional, List
 
-from pydantic import BaseModel, ConfigDict, Field, constr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, constr, field_validator, model_validator
 
 from .predict_llm import LLMSettingsRequest
 from .generate_application_draft import (
@@ -105,3 +105,14 @@ class GeneratePipelineDraftResponse(BaseModel):
     suggested_agents: List[ApplicationSuggestion] = Field(default_factory=list)
     suggested_pipelines: List[ApplicationSuggestion] = Field(default_factory=list)
     suggested_skills: List[SkillSuggestion] = Field(default_factory=list)
+
+    @field_validator("suggested_mcp", mode="before")
+    @classmethod
+    def default_mcp_type(cls, v):
+        # The prompt lists MCP servers without a type, so the LLM often returns type: null
+        if not v:
+            return []
+        return [
+            {**item, "type": item.get("type") or "mcp"} if isinstance(item, dict) else item
+            for item in v
+        ]
