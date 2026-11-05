@@ -43,6 +43,7 @@ class _ParticipantTypes(str, enum.Enum):
     application = 'application'
     dummy = 'dummy'
     toolkit = 'toolkit'
+    skill = 'skill'
 
 
 @pytest.fixture(scope='module')
@@ -57,7 +58,7 @@ def export_module():
     _module(f'{PKG}.models.message_group', ConversationMessageGroup=object)
     _module(f'{PKG}.models.message_items.base', MessageItem=object)
     _module(f'{PKG}.utils.authors', get_authors_data=lambda ids: [])
-    _module(f'{PKG}.utils.utils', get_public_project_id=lambda: 1)
+    _module(f'{PKG}.utils.utils', get_public_project_id_or_none=lambda: 1)
 
     # A private 'tools' for this import only, so the shared stub other tests use is left as it is
     shared_tools = sys.modules.get('tools')

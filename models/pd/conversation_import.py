@@ -59,6 +59,7 @@ class ImportParticipant(_ImportBase):
     name: Optional[str] = None
     version: Optional[str] = None
     public: bool = False
+    toolkit_type: Optional[str] = None
 
 
 class ImportConversationInfo(_ImportBase):
