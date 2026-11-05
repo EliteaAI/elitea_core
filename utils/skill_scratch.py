@@ -10,11 +10,38 @@ from tools import MinioClient, db
 
 from ..models.conversation import Conversation
 from ..models.message_group import ConversationMessageGroup
+from .conversation_access import check_post_access
 from .internal_tools import get_default_attachment_bucket
 
 #: Twin of elitea_sdk runtime/tools/skill_script_runner.SCRATCH_ROOT_PREFIX: the runtime writes, this module removes
 SCRATCH_ROOT_PREFIX = '_skill_scratch'
 DEFAULT_IDLE_DAYS = 30
+
+
+def skill_scratch_for_run(project_id: int, conversation_uuid, user_id: int) -> dict:
+    """Where a run's skill scripts keep their files: under its conversation when that conversation is in the project
+    and the run's user may post in it, else under a uuid only this run knows; always in the bucket cleanup removes from."""
+    return {
+        'conversation_uuid': verified_conversation_uuid(project_id, conversation_uuid, user_id) or str(uuid.uuid4()),
+        'bucket': get_default_attachment_bucket(project_id),
+    }
+
+
+def verified_conversation_uuid(project_id: int, conversation_uuid, user_id: int) -> Optional[str]:
+    """The conversation's canonical uuid when it is in the project and the user may post in it, else None."""
+    if not is_conversation_uuid(conversation_uuid):
+        return None
+    try:
+        with db.get_session(project_id) as session:
+            conversation = session.query(Conversation).filter(
+                Conversation.uuid == uuid.UUID(conversation_uuid),
+            ).first()
+            if conversation is None or check_post_access(project_id, conversation, user_id) is not None:
+                return None
+            return str(conversation.uuid)
+    except Exception:  # pylint: disable=W0703 -- an unverifiable conversation only costs the run its earlier files
+        log.warning("skill scratch: conversation %s of project %s not verified", conversation_uuid, project_id, exc_info=True)
+        return None
 
 
 def scratch_prefix(conversation_uuid: str) -> str:
@@ -127,11 +154,11 @@ def sweep_idle_scratch(
     return {'removed': removed, 'kept': kept}
 
 
-def is_conversation_uuid(key: str) -> bool:
-    """Whether a scratch folder name can be a conversation; a run keyed otherwise has no conversation to keep it alive."""
+def is_conversation_uuid(key) -> bool:
+    """Whether a value can be a conversation's uuid; a scratch folder named otherwise has no conversation to keep it."""
     try:
         uuid.UUID(key)
-    except ValueError:
+    except (AttributeError, TypeError, ValueError):
         return False
     return True
 

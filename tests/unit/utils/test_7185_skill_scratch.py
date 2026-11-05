@@ -6,6 +6,7 @@ import datetime
 import pathlib
 import sys
 import types
+import uuid
 from unittest import mock
 
 import pytest
@@ -237,3 +238,95 @@ def test_a_project_with_no_scratch_asks_nothing_of_the_database(scratch):
     swept = scratch.sweep_idle_scratch(7, now=NOW, mc=storage, last_activity_of=lambda *args: pytest.fail('asked'))
 
     assert swept == {'removed': 0, 'kept': 0}
+
+
+def _conversation_lookup(scratch, monkeypatch, conversation, denied=None):
+    session = mock.MagicMock(name='session')
+    session.query.return_value.filter.return_value.first.return_value = conversation
+    monkeypatch.setattr(scratch.db, 'get_session', mock.MagicMock(name='get_session'))
+    scratch.db.get_session.return_value.__enter__.return_value = session
+    checked = []
+    monkeypatch.setattr(scratch, 'check_post_access', lambda project_id, found, user_id: checked.append((project_id, user_id)) or denied)
+    return session, checked
+
+
+def test_a_run_in_a_conversation_its_user_may_post_in_keeps_its_files_under_that_conversation(scratch, monkeypatch):
+    _session, checked = _conversation_lookup(scratch, monkeypatch, types.SimpleNamespace(uuid=uuid.UUID(ACTIVE)))
+
+    assert scratch.skill_scratch_for_run(7, ACTIVE, 9) == {'conversation_uuid': ACTIVE, 'bucket': BUCKET}
+    assert checked == [(7, 9)]
+
+
+@pytest.mark.parametrize('conversation, denied', [
+    (None, None),
+    (types.SimpleNamespace(uuid=uuid.UUID(ACTIVE)), ({'error': 'Conversation not found'}, 404)),
+])
+def test_a_conversation_missing_from_the_project_or_closed_to_the_user_gets_a_scratch_of_its_own(scratch, monkeypatch, conversation, denied):
+    _conversation_lookup(scratch, monkeypatch, conversation, denied)
+
+    first = scratch.skill_scratch_for_run(7, ACTIVE, 9)['conversation_uuid']
+    second = scratch.skill_scratch_for_run(7, ACTIVE, 9)['conversation_uuid']
+
+    assert len({first, second, ACTIVE}) == 3
+    assert str(uuid.UUID(first)) == first
+
+
+@pytest.mark.parametrize('key', [None, '', 'some-stream', '_skill_scratch', f'{ACTIVE}/../x', 42])
+def test_a_key_that_is_not_a_uuid_is_never_looked_up(scratch, monkeypatch, key):
+    session, _checked = _conversation_lookup(scratch, monkeypatch, types.SimpleNamespace(uuid=uuid.UUID(ACTIVE)))
+
+    run_scratch = scratch.skill_scratch_for_run(7, key, 9)
+
+    assert run_scratch['conversation_uuid'] != ACTIVE
+    assert str(uuid.UUID(run_scratch['conversation_uuid'])) == run_scratch['conversation_uuid']
+    assert session.query.call_count == 0
+
+
+def test_a_conversation_written_in_another_form_is_keyed_by_its_canonical_uuid(scratch, monkeypatch):
+    _conversation_lookup(scratch, monkeypatch, types.SimpleNamespace(uuid=uuid.UUID(ACTIVE)))
+
+    assert scratch.skill_scratch_for_run(7, ACTIVE.upper().replace('-', ''), 9)['conversation_uuid'] == ACTIVE
+
+
+def test_a_failed_verification_gives_the_run_a_scratch_of_its_own_instead_of_failing_it(scratch, monkeypatch):
+    _conversation_lookup(scratch, monkeypatch, types.SimpleNamespace(uuid=uuid.UUID(ACTIVE)))
+    monkeypatch.setattr(scratch, 'check_post_access', mock.MagicMock(side_effect=TimeoutError('admin check')))
+
+    assert scratch.skill_scratch_for_run(7, ACTIVE, 9)['conversation_uuid'] != ACTIVE
+
+
+class RecordingStorage:
+    """A storage client over several buckets that records which bucket each call used."""
+
+    def __init__(self, objects):
+        self.objects = {bucket: list(names) for bucket, names in objects.items()}
+        self.removed = []
+
+    def __getattr__(self, name):
+        return None
+
+    def list_bucket(self):
+        return list(self.objects)
+
+    def list_files(self, bucket, next_continuation_token=None):
+        return [{'name': name} for name in self.objects[bucket]]
+
+    def remove_file(self, bucket, name):
+        self.removed.append((bucket, name))
+        self.objects[bucket].remove(name)
+
+
+def test_with_a_non_default_bucket_the_run_writes_where_delete_and_sweep_remove(scratch, monkeypatch):
+    monkeypatch.setattr(scratch, 'get_default_attachment_bucket', lambda project_id: 'team-files')
+    _conversation_lookup(scratch, monkeypatch, types.SimpleNamespace(uuid=uuid.UUID(ACTIVE)))
+    storage = RecordingStorage({
+        'team-files': [f'_skill_scratch/{ACTIVE}/scratch.zip', f'_skill_scratch/{IDLE}/scratch.zip'],
+        'attachments': [f'_skill_scratch/{ACTIVE}/scratch.zip'],
+    })
+
+    written_to = scratch.skill_scratch_for_run(7, ACTIVE, 9)['bucket']
+    scratch.remove_conversation_scratch(7, ACTIVE, mc=storage)
+    scratch.sweep_idle_scratch(7, now=NOW, mc=storage, last_activity_of=lambda project_id, uuids: {})
+
+    assert written_to == 'team-files'
+    assert storage.removed == [('team-files', f'_skill_scratch/{ACTIVE}/scratch.zip'), ('team-files', f'_skill_scratch/{IDLE}/scratch.zip')]
