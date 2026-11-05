@@ -47,7 +47,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
             Application.name.label("entity_name"), S.version_id, ApplicationVersion.name.label("version_name"),
             S.cron, S.timezone, S.enabled, S.disabled_reason, S.next_run, S.last_run, S.last_run_status,
             last_reason.label("last_run_reason"), S.last_conversation_id, S.expires_at, S.created_by,
-            S.trigger_kind, S.webhook_type, S.uuid,
+            S.trigger_kind, S.webhook_type, S.gitlab_auth_method, S.uuid, S.previous_secret_until,
         )
         .join(Application, Application.id == S.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == S.version_id)

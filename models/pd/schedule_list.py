@@ -75,7 +75,11 @@ class ScheduleListItem(BaseModel):
     timezone: str | None = Field(None, description='IANA time zone name; null on webhooks')
     trigger_kind: str = Field('cron', description='cron or webhook')
     webhook_type: str | None = Field(None, description='Webhook sender: github, gitlab or custom')
+    gitlab_auth_method: str | None = Field(
+        None, description='GitLab webhooks: secret_token or signing_token; a rotate of a signing row takes a new token')
     webhook_url: str | None = Field(None, description='Delivery URL of a webhook; never carries the secret')
+    previous_secret_until: datetime | None = Field(
+        None, description='Webhooks: the previous secret is accepted until this time')
     enabled: bool = Field(description='True: active, false: paused')
     disabled_reason: str | None = Field(None, description='Why the system paused the schedule')
     next_run: datetime | None = Field(None, description='Time of the next run; null when paused or expired')

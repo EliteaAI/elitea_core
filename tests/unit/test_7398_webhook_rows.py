@@ -113,6 +113,25 @@ def test_7398_list_item_of_a_webhook_has_no_cron(list_model):
         owner={"id": 3}, allowed_actions=[], trigger_kind="webhook", webhook_type="github",
         webhook_url="/api/v2/elitea_core/hooks/prompt_lib/3/abc")
     assert item.cron is None and item.timezone is None
+    assert item.previous_secret_until is None
+
+
+# #7405: the Webhooks table marks a row whose previous secret is still accepted
+def test_7405_list_item_carries_the_rotation_window(list_model):
+    item = list_model.ScheduleListItem(
+        id=1, name="On push", entity_type="agent", application_id=1, entity_name="A", enabled=True,
+        owner={"id": 3}, allowed_actions=[], trigger_kind="webhook", webhook_type="github",
+        gitlab_auth_method=None, previous_secret_until="2026-11-06T10:00:00+00:00")
+    assert item.model_dump(mode="json")["previous_secret_until"].startswith("2026-11-06T10:00:00")
+
+
+# #7405: a rotate from the list must know a signing row, which takes a new pasted token
+def test_7405_list_item_carries_the_gitlab_method(list_model):
+    item = list_model.ScheduleListItem(
+        id=2, name="On MR", entity_type="agent", application_id=1, entity_name="A", enabled=True,
+        owner={"id": 3}, allowed_actions=[], trigger_kind="webhook", webhook_type="gitlab",
+        gitlab_auth_method="signing_token")
+    assert item.model_dump(mode="json")["gitlab_auth_method"] == "signing_token"
 
 
 # AC8 / #6440: a new version never takes another version's webhook secret refs
