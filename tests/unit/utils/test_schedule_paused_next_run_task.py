@@ -7,13 +7,16 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from test_6921_skill_run_settings_migration_task import PROJECTS, admin_tasks  # noqa: E402,F401  pylint: disable=C0413
+import test_6921_skill_run_settings_migration_task as migration_task  # noqa: E402  pylint: disable=C0413
+
+PROJECTS = migration_task.PROJECTS
+admin_tasks = migration_task.admin_tasks  # the fixture is bound here so pytest finds it in this module
 
 STATEMENT = "UPDATE p_{pid}.entity_schedules SET next_run = NULL WHERE NOT enabled AND next_run IS NOT NULL"
 
 
 @pytest.fixture
-def run_task(admin_tasks, monkeypatch):  # noqa: F811 -- the fixture is imported from the sibling test
+def run_task(admin_tasks, monkeypatch):  # pylint: disable=W0621
     calls = []
     stubs = {
         "schedule_lifecycle": {"CLEAR_PAUSED_NEXT_RUN": STATEMENT},
@@ -52,3 +55,9 @@ def test_a_named_project_is_the_only_one_cleared(run_task):
     _, calls = run_task("project_id=5;dry_run=false")
     assert [project_ids for project_ids, _ in calls] == [[5]]
 
+
+
+def test_the_task_is_registered_in_ready_and_unregistered_in_deinit():
+    text = (pathlib.Path(__file__).resolve().parents[3] / "module.py").read_text()
+    for call in ("register_admin_task", "unregister_admin_task"):
+        assert f'{call}(\n                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run' in text, call
