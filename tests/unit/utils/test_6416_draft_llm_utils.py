@@ -582,3 +582,49 @@ def test_a_malformed_generation_info_does_not_break_the_token_limit_check(draft_
 ])
 def test_is_truncated_json(draft_llm_utils, raw_text, truncated):
     assert draft_llm_utils.is_truncated_json(raw_text) is truncated
+
+
+PROVIDER_401 = (
+    "Error: status code: 401, message: AuthenticationError: OpenAIException - Invalid bearer token. "
+    "Received Model Group=6_broken.llm"
+)
+
+
+def _provider_failure(text, reasons=(None,)):
+    return {'result': {
+        'chat_history': [{'role': 'assistant', 'content': text}],
+        'thinking_steps': [{'text': text, 'generation_info': {'finish_reason': r}} for r in reasons],
+    }}
+
+
+def test_a_provider_error_returned_as_the_answer_is_reported(draft_llm_utils):
+    result = _provider_failure(PROVIDER_401)
+
+    message = draft_llm_utils.describe_provider_error(result, draft_llm_utils.extract_answer(result))
+
+    assert message == (
+        "LLM generation failed: status code: 401, message: AuthenticationError: OpenAIException - "
+        "Invalid bearer token. Received Model Group=6_broken.llm"
+    )
+
+
+def test_a_provider_error_with_no_trace_steps_is_reported(draft_llm_utils):
+    result = {'result': {'chat_history': [{'role': 'assistant', 'content': PROVIDER_401}]}}
+
+    assert draft_llm_utils.describe_provider_error(result, PROVIDER_401).startswith("LLM generation failed: ")
+
+
+def test_a_completed_answer_starting_with_error_is_not_a_provider_error(draft_llm_utils):
+    """A real completion records a finish reason, so its text is parsed even if it says "Error:"."""
+    result = _provider_failure('Error: {"name": "x"}', reasons=('stop',))
+
+    assert draft_llm_utils.describe_provider_error(result, 'Error: {"name": "x"}') is None
+
+
+@pytest.mark.parametrize('answer', [DRAFT, '', None, 'error: lowercase is not the SDK prefix'])
+def test_ordinary_answers_are_not_provider_errors(draft_llm_utils, answer):
+    assert draft_llm_utils.describe_provider_error(_provider_failure(answer or ''), answer) is None
+
+
+def test_a_bare_error_prefix_still_reports_a_failure(draft_llm_utils):
+    assert draft_llm_utils.describe_provider_error({}, 'Error: ') == "LLM generation failed."

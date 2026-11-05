@@ -21,6 +21,8 @@ LENGTH_RULES = (("max_length", "maximum"), ("min_length", "minimum"))
 VALIDATION_FAILURE_FALLBACK = "Generated draft failed validation"
 # mirrors llm_judge and evaluation_agent_runner, which keep their own copies to stay ORM-free
 ASSISTANT_ROLES = ("assistant", "ai")
+# the SDK LLM node's fallback answer when the model call raised (elitea_sdk/runtime/tools/llm.py)
+LLM_ERROR_PREFIX = "Error: "
 
 
 def _available_llm_models(project_id: int) -> Optional[dict]:
@@ -296,6 +298,23 @@ def extract_answer(result) -> str:
         if answer:
             return answer
     return extract_draft_text(result)
+
+
+def describe_provider_error(result, answer: str) -> Optional[str]:
+    """Return why the model call failed when the "answer" is really a provider error, else None.
+
+    The SDK's LLM node catches a failed call (an invalid key, an unknown model) and returns
+    ``AIMessage("Error: …")`` instead of raising, so the run finishes as a success and that sentence
+    arrives as the answer. Parsing it as a draft then reports "unparseable output". A real completion
+    always records a finish reason, so the error is recognised only when the text carries the SDK's
+    prefix *and* no step finished — a draft that happens to begin with "Error:" is still parsed.
+    """
+    if not isinstance(answer, str) or not answer.startswith(LLM_ERROR_PREFIX):
+        return None
+    if any(reason is not None for reason in finish_reasons(result)):
+        return None
+    detail = answer[len(LLM_ERROR_PREFIX):].strip()
+    return f"LLM generation failed: {detail}" if detail else "LLM generation failed."
 
 
 def describe_parse_failure(raw_text: str, candidate: str, error, result) -> str:

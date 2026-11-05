@@ -35,6 +35,7 @@ from ...utils.draft_llm_utils import (
     caller_chose,
     describe_parse_failure,
     describe_predict_failure,
+    describe_provider_error,
     extract_answer,
     resolve_model,
     timeout_response,
@@ -202,6 +203,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 failure or "no error reported", result,
             )
             return {"error": failure or "LLM returned an empty response."}, 500
+
+        provider_error = describe_provider_error(result, raw_text)
+        if provider_error:
+            log.warning("configure_pipeline_node: %s", provider_error)
+            return {"error": provider_error}, 502
 
         extracted = extract_json_from_text(raw_text)
         try:

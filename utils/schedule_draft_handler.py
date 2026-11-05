@@ -33,6 +33,7 @@ from ..models.pd.generate_schedule_draft import (
 )
 from .draft_llm_utils import (
     describe_predict_failure,
+    describe_provider_error,
     extract_answer,
     timeout_response,
 )
@@ -163,6 +164,9 @@ class ScheduleDraftHandler:
         raw_text = extract_answer(result)
         if not raw_text:
             return _refusal(_MODEL_FAILED, describe_predict_failure(result) or "LLM returned an empty response", 502)
+        provider_error = describe_provider_error(result, raw_text)
+        if provider_error:
+            return _refusal(_MODEL_FAILED, provider_error, 502)
         try:
             parsed = json.loads(extract_json_from_text(raw_text))
         except json.JSONDecodeError:
