@@ -243,26 +243,3 @@ def test_7011_r5_1_sort_by_a_column_in_both_directions(env, sort_by, sort_order,
     _add(env, name="none")
     _add(env, name="early", next_run=DAY)
     assert _names(_list(env, OWNER, sort_by=sort_by, sort_order=sort_order)) == expected
-
-
-def _paused_fixture(env):
-    _add(env, name="late", next_run=DAY + datetime.timedelta(days=2))
-    _add(env, name="stale-paused", enabled=False, next_run=DAY - datetime.timedelta(days=5))
-    _add(env, name="early", next_run=DAY)
-    _add(env, name="paused-none", enabled=False)
-
-
-@pytest.mark.parametrize("sort_order, expected", [
-    ("asc", ["early", "late", "stale-paused", "paused-none"]),
-    ("desc", ["late", "early", "stale-paused", "paused-none"]),
-])
-def test_next_run_sort_puts_paused_rows_last_in_both_directions(env, sort_order, expected):
-    _paused_fixture(env)
-    assert _names(_list(env, OWNER, sort_by="next_run", sort_order=sort_order)) == expected
-
-
-def test_list_shows_no_next_run_for_a_paused_row(env):
-    _paused_fixture(env)
-    rows = {r.name: r for r in _list(env, OWNER)[1]}
-    assert (rows["stale-paused"].next_run, rows["paused-none"].next_run) == (None, None)
-    assert rows["early"].next_run is not None

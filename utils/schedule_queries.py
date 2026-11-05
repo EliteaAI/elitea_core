@@ -1,16 +1,13 @@
 """Schedule list query (EL-7011, US-05)."""
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import func, or_, select
 
 from ..models.all import Application, ApplicationVersion
 from ..models.entity_schedule import EntitySchedule as S
 from ..models.entity_schedule import EntityScheduleRun as Run
 
-# A paused row shows no next run and sorts with the null ones, even when an older write left a stale value
-NEXT_RUN = case((S.enabled.is_(True), S.next_run), else_=None)
-
 SORT_COLUMNS = {
     "name": S.name, "entity_name": Application.name, "entity_type": S.entity_type,
-    "next_run": NEXT_RUN, "last_run": S.last_run, "enabled": S.enabled,
+    "next_run": S.next_run, "last_run": S.last_run, "enabled": S.enabled,
 }
 
 
@@ -48,7 +45,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
         select(
             S.id, S.name, S.description, S.entity_type, S.run_mode, S.application_id,
             Application.name.label("entity_name"), S.version_id, ApplicationVersion.name.label("version_name"),
-            S.cron, S.timezone, S.enabled, S.disabled_reason, NEXT_RUN.label("next_run"), S.last_run, S.last_run_status,
+            S.cron, S.timezone, S.enabled, S.disabled_reason, S.next_run, S.last_run, S.last_run_status,
             last_reason.label("last_run_reason"), S.last_conversation_id, S.expires_at, S.created_by,
             S.trigger_kind, S.webhook_type, S.gitlab_auth_method, S.uuid, S.previous_secret_until,
         )

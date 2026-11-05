@@ -210,11 +210,13 @@ def test_refusals_of_a_schedule_already_off_keep_its_reason_and_send_no_pause_no
 
 def test_the_whole_sequence_pause_resume_one_more_refusal(firing):
     """#7254 review S3: on the same rows, in order, with an outage inside the streak."""
+    firing.set_next_run(datetime.datetime(2030, 1, 1, 12, 0))
     firing.fire(REFUSED)
     firing.fire(OUTAGE)   # not counted
     firing.fire(REFUSED)
     firing.fire(REFUSED)
     assert firing.schedule() == (3, False, "governance_refused")
+    assert firing.next_run() is None   # a pause clears the next run
     assert [notice[1] for notice in firing.notices].count("schedule_disabled") == 1
     firing.resume()
     assert firing.schedule() == (0, True, None)

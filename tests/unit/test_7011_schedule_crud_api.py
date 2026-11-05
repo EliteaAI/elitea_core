@@ -14,7 +14,6 @@ import json
 import pathlib
 import sys
 import types
-from datetime import datetime
 
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
@@ -470,14 +469,6 @@ def test_7011_cr_pause_disables_the_schedule_and_answers_the_details(harness):
     assert (status, body['id'], body['enabled']) == (200, schedule_id, False)
     assert harness.row(schedule_id).enabled is False
     assert harness.row(schedule_id).updated_by == OWNER_ID
-
-
-def test_details_show_no_next_run_for_a_paused_row_with_a_stale_one(harness):
-    stale = datetime(2030, 1, 1, 12, 0)
-    paused = harness.seed(name='Paused', enabled=False, next_run=stale)
-    running = harness.seed(name='Running', next_run=stale)
-    assert harness.call('get', schedule_id=paused)[0]['next_run'] is None
-    assert harness.call('get', schedule_id=running)[0]['next_run'] is not None
 
 
 def test_7011_cr_resume_enables_the_schedule_and_computes_the_next_run(harness):
