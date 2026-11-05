@@ -294,7 +294,7 @@ Consequences:
 
 - Every firing of a refused schedule creates a conversation and a failure notice, until the schedule pauses itself
   after three refusals in a row (below).
-- **Run now** and **Test run** work for the schedule's owner only (below).
+- **Run now** and **Test run** work for the schedule's owner and for project admins (below).
 - An administrator who changes a schedule's owner, or edits it, can leave the new owner without a covering
   mandate. Check the mandate after such a change. *(Owner re-confirmation before a schedule runs on a mandate is
   planned with #7131.)*
@@ -318,10 +318,9 @@ firings need it. **Run now** and **Test run** are the owner's own run (below).
 | Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. | Runs. Evaluated as the owner's run (on the binding, or as a draft); no mandate row. |
 | Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the owner (entry point `schedule_test`, subject = the owner's verified sign-in; delegated credentials on the owner's live sign-in, `DENIED_ASSERTION_UNAVAILABLE` without one). A bound version runs its approved definition on its binding, as any bound run of that person (definition checked, `BINDING_DIGEST_MISMATCH` if it changed; sub-agents on their bindings; the owner's grants). An unbound version runs the draft, as the editor's test chat: the owner needs the right to edit the agent, and only the owner's own credentials and project ones granted to the owner are used. Either way the owner needs the right to run the agent (`DENIED_RBAC` otherwise) and no admin role; no mandate is read. An unbound version needs development runs on (`DEVELOPMENT_RUNS_DISABLED` otherwise); a bound one runs on its binding whatever the switch says. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably (run history and owner notice) but never count toward or reset the auto-pause. |
 
-**Run now and Test run.** Only the owner can start them. An administrator sees the controls disabled, with the
-hint "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has
-no name); the API answers 403 `not_owner`. In the row menu the hint is the hover tooltip of the disabled Run now; on
-the edit page it is a line next to the disabled Run test.
+**Run now and Test run.** The owner and a project admin can start them. Anyone else gets 403 `not_owner`. The run
+is admitted with the sign-in of the person who pressed the button, so a project admin is checked as that person, not
+as the owner.
 
 **Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
 mandate a run could use, the schedule is saved and the save shows:

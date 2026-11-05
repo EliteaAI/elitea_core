@@ -36,6 +36,7 @@ def runs(monkeypatch):
         monkeypatch.setitem(sys.modules, "plugins.elitea_core." + dotted, None)
     load("models/entity_schedule.py", fresh=True)
     load("utils/schedule_claim.py", fresh=True)  # fail_run, the one writer of a failed run
+    load("utils/schedule_rights.py", fresh=True)  # the rights rule of check_schedule_decision
     # The `tools` stub: schedule_runs imports `db` from it at load time
     module = types.ModuleType("tools")
     module.db = types.SimpleNamespace(get_session=None)

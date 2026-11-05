@@ -395,8 +395,8 @@ OPERATIONS = {
         "summary": "Run a schedule now",
         "description": _text(
             "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time.",
-            "the owner with `schedules.run`; an admin sees the schedule but cannot run it",
-            "400 an invalid trigger; 403 no permission or not the owner; 404 not found; "
+            "the owner or a project admin, with `schedules.run`",
+            "400 an invalid trigger; 403 no permission, or neither the owner nor a project admin; 404 not found; "
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,
@@ -499,8 +499,8 @@ OPERATIONS = {
         "description": _text(
             "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
             "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",
-            "the owner with `schedules.run`; an admin cannot decide",
-            "400 an invalid action; 403 no permission or not the owner; 404 not found; "
+            "the owner or a project admin, with `schedules.run`",
+            "400 an invalid action; 403 no permission, or neither the owner nor a project admin; 404 not found; "
             "409 the run is not waiting, or has a chat; 500 the run could not start"),
         "parameters": RUN_PARAMS,
         "request_body": ScheduleRunDecision,

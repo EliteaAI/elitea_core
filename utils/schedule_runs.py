@@ -21,7 +21,7 @@ CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a sch
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 DEFAULT_APPROVAL_WAIT_HOURS = 24
 MAX_APPROVAL_WAIT_HOURS = 720
-REJECT_REASON = 'rejected by the owner'
+REJECT_REASON = 'rejected'
 SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not ask the owner"
 # The owner's answer on a sign-in pause: `authorize` goes on, `skip` ends the run
 SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
@@ -40,7 +40,7 @@ PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the 
 
 
 class ScheduleDecisionForbidden(Exception):
-    """The caller of an approve or reject is not the schedule owner; an admin included (R2.3)."""
+    """The caller of an approve or reject is neither the schedule owner nor a project admin."""
 
 
 class ScheduleDecisionInvalid(Exception):
@@ -368,10 +368,10 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
                             fan_out: bool = False, sign_in: bool = False) -> str | None:
-    """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
+    """Check the decision on a waiting run without changing it; `reject` or `approve`.
 
-    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
-    included (R2.3); then `ScheduleDecisionInvalid` for an empty or unknown action; then
+    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but the owner (`created_by`) or a
+    project admin (`may_run_or_decide`); then `ScheduleDecisionInvalid` for an empty or unknown action; then
     `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
     that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
     the sign-in answers (`authorize`, `skip`) and map to approve and reject.
@@ -382,9 +382,12 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         run = session.get(EntityScheduleRun, run_id)
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
-        if run_owner_id(session, run) != caller_id:
-            raise ScheduleDecisionForbidden(run_id)
+        owner_id = run_owner_id(session, run)
         status, resumed_at = run.status, run.resumed_at
+    from .schedule_rights import may_run_or_decide  # late: the writers above load without it
+    # Outside the session: the admin lookup is an RPC
+    if not may_run_or_decide(project_id, owner_id, caller_id):
+        raise ScheduleDecisionForbidden(run_id)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
     if fan_out and status == 'running' and resumed_at is not None:
@@ -394,11 +397,12 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     return 'reject' if 'reject' in actions else 'approve'
 
 
-def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None:
+def apply_schedule_decision(project_id: int, run_id: int, decision: str, decided_by: int | None = None) -> None:
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
-    The run log gets the decision; only the owner decides (the check), so the owner is who decided.
+    The run log gets the decision and who made it: `decided_by`, or the owner when it is not given. The check
+    already let only the owner or a project admin through.
     """
     conversation_id = None
     with db.get_session(project_id) as session:
@@ -412,16 +416,18 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
             raise ScheduleRunNotWaiting(run_id)
         owner_id = run_owner_id(session, run)
         approved = decision == 'approve'
+        by = owner_id if decided_by is None else decided_by
+        who = 'the schedule owner' if by == owner_id else 'a project admin'
         append_run_events(session, run_id, run_event(
-            'decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
-            'info' if approved else 'warning', action=decision, by=owner_id))
+            'decision', f"{'Approved' if approved else 'Rejected'} by {who}",
+            'info' if approved else 'warning', action=decision, by=by))
         if approved:
             session.execute(
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
             _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
-        else:  # no notice: the owner made this end (R2.2)
+        else:  # no notice: a person made this end
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
             conversation_id = run.conversation_id

@@ -46,8 +46,8 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
             raise error
         return decision
 
-    def apply_schedule_decision(*args):
-        calls.append(('apply', *args))
+    def apply_schedule_decision(project_id, run_id, decision, decided_by=None):
+        calls.append(('apply', project_id, run_id, decision, decided_by))
         if apply_error:
             raise apply_error
 
@@ -87,11 +87,11 @@ def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decisio
     check, apply, calls = _helpers({'schedule_run_id': RUN_ID})
 
     pending, denied = check(_parsed(), OWNER)
-    assert (pending, denied) == ((RUN_ID, 'approve'), None)
+    assert (pending, denied) == ((RUN_ID, 'approve', OWNER), None)
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False})]
 
     assert apply(PROJECT_ID, pending) is None
-    assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve')
+    assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve', OWNER)
 
 
 def test_el_7011_r2_2_a_decision_list_passes_every_action():
@@ -139,7 +139,7 @@ def test_el_7011_r2_1_a_non_dict_decision_item_is_passed_as_no_action():
 def test_el_7011_r2_4_an_apply_that_lost_a_race_gets_409():
     _, apply, _ = _helpers({'schedule_run_id': RUN_ID}, apply_error=NotWaiting())
 
-    assert apply(PROJECT_ID, (RUN_ID, 'approve'))['status'] == 409
+    assert apply(PROJECT_ID, (RUN_ID, 'approve', OWNER))['status'] == 409
 
 
 @pytest.mark.parametrize('meta, parsed', [
@@ -246,7 +246,7 @@ def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
 
     pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize'), OWNER)
 
-    assert (pending, denied) == ((RUN_ID, 'approve'), None)
+    assert (pending, denied) == ((RUN_ID, 'approve', OWNER), None)
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True})]
 
 

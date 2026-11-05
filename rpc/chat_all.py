@@ -136,7 +136,7 @@ def _get_agent_type(
 
 # The answer of each refused schedule decision (EL-7011)
 _SCHEDULE_REFUSALS = {
-    ScheduleDecisionForbidden: {"error": "Only the schedule owner can approve or reject this run", "status": 403},
+    ScheduleDecisionForbidden: {"error": "Only the schedule owner or a project admin can approve or reject this run", "status": 403},
     ScheduleDecisionInvalid: {
         "error": "hitl_action must be approve, edit, answer, block_with_comment or reject",
         "field": "hitl_action", "status": 400,
@@ -149,7 +149,7 @@ _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field
 def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
-    The (run id, decision) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    The (run id, decision, caller id) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
@@ -177,7 +177,7 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    return ((run_id, decision) if decision else None), None
+    return ((run_id, decision, caller_id) if decision else None), None
 
 
 def _apply_schedule_decision(project_id, pending) -> dict | None:
@@ -2139,7 +2139,7 @@ class RPC:
         else:
             current_user = auth.current_user()
 
-        # Owner check of a scheduled run before any resume (EL-7011); an internal replay was checked already
+        # Rights check (owner or project admin) of a scheduled run before any resume; an internal replay was checked already
         schedule_decision = None
         if _internal_token is not INTERNAL_CONTINUE_TOKEN:
             schedule_decision, denied = _check_schedule_decision(parsed, current_user['id'])

@@ -1,10 +1,11 @@
-"""EL-7011 US-18: only the schedule owner decides a waiting run, and only while it waits.
+"""Only the schedule owner or a project admin decides a waiting run, and only while it waits.
 
 Contract under test: utils/schedule_runs.py (check_schedule_decision, apply_schedule_decision,
 ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting) on the real models,
 in-memory SQLite.
 Cases: TC-US18-05, TC-US18-08, TC-US18-09, TC-US18-10.
 """
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,6 +17,15 @@ from unit.utils.test_7011_schedule_runs_outcome import sent  # noqa: F401
 # ruff: noqa: F811
 
 OWNER, ADMIN = 12, 1
+
+
+@pytest.fixture(autouse=True)
+def project_admins(runs, monkeypatch):
+    """The users the admin role lookup answers true for; the rest of the rights module is real."""
+    admins = set()
+    rights = sys.modules["plugins.elitea_core.utils.schedule_rights"]
+    monkeypatch.setattr(rights, "is_project_admin", lambda project_id, user_id: user_id in admins)
+    return admins
 
 
 def _waiting(runs, session, **schedule_values):
@@ -90,11 +100,36 @@ def test_el_7011_r2_2_a_reject_fails_the_run_with_its_conversation(runs, session
 
     session.refresh(run)
     session.refresh(schedule)
-    assert (run.status, run.reason) == ("failed", "rejected by the owner")
+    assert (run.status, run.reason) == ("failed", "rejected")
     assert (schedule.last_run_status, schedule.last_conversation_id) == ("failed", 55)
 
 
-def test_el_7011_r2_3_an_admin_who_is_not_the_owner_gets_forbidden(runs, session, sent):
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_a_project_admin_who_is_not_the_owner_decides(runs, session, sent, project_admins, action):
+    project_admins.add(ADMIN)
+    _, run = _waiting(runs, session)
+
+    decision = runs.check_schedule_decision(1, run.id, ADMIN, [action])
+    runs.apply_schedule_decision(1, run.id, decision, ADMIN)
+
+    session.refresh(run)
+    assert run.status == ("running" if action == "approve" else "failed")
+    assert next(event for event in run.events if event["kind"] == "decision")["by"] == ADMIN
+
+
+def test_the_admin_role_is_not_asked_for_the_owner(runs, session, sent, monkeypatch):
+    _, run = _waiting(runs, session)
+    rights = sys.modules["plugins.elitea_core.utils.schedule_rights"]
+
+    def refuse(project_id, user_id):
+        raise AssertionError("the owner must not trigger the admin lookup")
+
+    monkeypatch.setattr(rights, "is_project_admin", refuse)
+
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"]) == "approve"
+
+
+def test_a_user_who_is_not_an_admin_or_the_owner_gets_forbidden(runs, session, sent):
     _, run = _waiting(runs, session)
 
     with pytest.raises(runs.ScheduleDecisionForbidden):

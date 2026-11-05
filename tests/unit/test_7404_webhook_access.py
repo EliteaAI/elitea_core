@@ -55,4 +55,4 @@ def test_7404_admin_may_resume_a_webhook_paused_for_another_reason(access):
 def test_7404_cron_rows_keep_the_schedule_matrix(access):
     row = types.SimpleNamespace(created_by=OWNER, enabled=True, version_id=10, trigger_kind="cron")
     actions = access.allowed_actions(row, _scope(access, ADMIN, *EDITOR_VERBS, "admin"))
-    assert actions == ["edit", "pause", "delete", "change_owner"]
+    assert actions == ["run", "edit", "pause", "delete", "change_owner"]

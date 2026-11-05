@@ -24,7 +24,7 @@ class Decisions:
     """Fake decision writers; `check_error` and `apply_error` are raised when set."""
 
     def __init__(self, runs):
-        self.checks, self.applied = [], []
+        self.checks, self.applied, self.applied_by = [], [], []
         self.check_error = None
         self.runs = runs
 
@@ -34,8 +34,9 @@ class Decisions:
             raise self.check_error
         return 'reject' if 'reject' in actions else 'approve'
 
-    def apply(self, project_id, run_id, decision):
+    def apply(self, project_id, run_id, decision, decided_by=None):
         self.applied.append((run_id, decision))
+        self.applied_by.append(decided_by)
 
 
 @pytest.fixture
@@ -171,7 +172,29 @@ def test_the_owner_rejects_and_the_run_does_not_start(harness, decisions):
     assert decisions.started == []
 
 
-def test_an_admin_who_is_not_the_owner_gets_403_not_owner(harness, decisions):
+@pytest.mark.parametrize('action', ['approve', 'reject'])
+def test_a_project_admin_who_is_not_the_owner_decides_and_is_recorded(harness, decisions, action):
+    harness.request_as(ADMIN_ID, ADMIN)
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+
+    body, status = decide(harness, schedule_id, run_id, action)
+
+    assert (status, body['status']) == (200, 'running' if action == 'approve' else 'failed')
+    assert decisions.checks == [(run_id, ADMIN_ID, [action])]
+    assert decisions.applied == [(run_id, action)] and decisions.applied_by == [ADMIN_ID]
+
+
+def test_the_owner_is_recorded_as_the_one_who_decided(harness, decisions):
+    schedule_id = harness.seed()
+    run_id = add_run(harness, schedule_id)
+
+    decide(harness, schedule_id, run_id)
+
+    assert decisions.applied_by == [OWNER_ID]
+
+
+def test_a_caller_the_check_refuses_gets_403_not_owner(harness, decisions):
     harness.request_as(ADMIN_ID, ADMIN)
     schedule_id = harness.seed()
     run_id = add_run(harness, schedule_id)
@@ -208,7 +231,7 @@ def test_a_failed_decision_write_leaves_no_credential_mark(harness, decisions):
     schedule_id = harness.seed()
     run_id = add_run(harness, schedule_id)
 
-    def lost_race(project_id, run_id, decision):
+    def lost_race(project_id, run_id, decision, decided_by=None):
         raise sys.modules[f'{PACKAGE}.utils.schedule_runs'].ScheduleRunNotWaiting()
 
     decisions.runs.apply_schedule_decision = lost_race
