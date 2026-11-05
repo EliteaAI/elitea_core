@@ -93,10 +93,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return e.errors(), 400
 
         # Create mode requires create permission; edit mode requires update permission.
-        caller_permissions = auth.resolve_permissions(
-            project_id=project_id,
-            permissions=["models.applications.applications.create", "models.applications.applications.update"],
-        )
+        caller_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
         if req.is_edit_mode:
             if "models.applications.applications.update" not in caller_permissions:
                 return {"error": "Permission denied."}, 403
