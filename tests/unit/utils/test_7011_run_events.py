@@ -144,6 +144,19 @@ def test_a_parallel_pause_lists_the_first_tool_once_when_both_interrupt_shapes_h
     assert event["text"] == "Paused for approval: github · create_issue, github · delete_issue"
 
 
+def test_a_pause_names_a_tool_once_when_it_waits_with_two_calls(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    first = SENSITIVE["hitl_interrupt"]
+    again = {**first, "tool_args": {"title": "other"}}
+    other = {**first, "tool_name": "delete_issue"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [first, again, other]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue, github · delete_issue"
+    assert (event["toolkit"], event["tool"]) == ("github", "create_issue")
+
+
 def test_a_pause_with_one_interrupt_shape_only_still_names_its_tool(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
 

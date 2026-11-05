@@ -349,7 +349,9 @@ def _paused_event(items: list[dict]) -> dict:
     The `toolkit` and `tool` fields name the first tool. A list too long for `TEXT_LIMIT` loses whole entries from
     its end and ends with the count of the hidden ones, so the owner sees that more tools wait.
     """
-    names = [tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name')) for item in items]
+    # Two calls of one tool wait as two items; the line names the tool once
+    names = list(dict.fromkeys(
+        tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name')) for item in items))
     entries = [f'{name} · {tool_name}' for name, tool_name in names]
     for shown in range(len(entries), 0, -1):
         hidden = len(entries) - shown
