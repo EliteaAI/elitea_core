@@ -133,6 +133,51 @@ def test_a_parallel_pause_names_the_toolkit_of_each_tool_without_arguments(runs,
     assert "secret" not in str(event)
 
 
+def test_a_parallel_pause_lists_the_first_tool_once_when_both_interrupt_shapes_hold_it(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    first = SENSITIVE["hitl_interrupt"]
+    second = {**first, "tool_name": "delete_issue"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": first, "hitl_interrupts": [first, second]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue, github · delete_issue"
+
+
+def test_a_pause_with_one_interrupt_shape_only_still_names_its_tool(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [SENSITIVE["hitl_interrupt"]]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue"
+
+
+def test_a_long_tool_list_is_cut_by_whole_entries_with_a_count_of_the_hidden_ones(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    tools = [{**SENSITIVE["hitl_interrupt"], "tool_name": f"tool_number_{number:02d}"} for number in range(30)]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": tools})
+
+    (event,) = _events(session, run)
+    text = event["text"]
+    shown = text.removeprefix("Paused for approval: ").rsplit(" (+", 1)[0].split(", ")
+    assert len(text) <= _claim().TEXT_LIMIT
+    assert shown == [f"github · tool_number_{number:02d}" for number in range(len(shown))]
+    assert text.endswith(f" (+{30 - len(shown)} more)") and len(shown) < 30
+    assert (event["toolkit"], event["tool"]) == ("github", "tool_number_00")
+
+
+def test_a_pause_with_tools_that_fit_shows_no_hidden_count(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    tools = [{**SENSITIVE["hitl_interrupt"], "tool_name": f"t{number}"} for number in range(5)]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": tools})
+
+    (event,) = _events(session, run)
+    assert "more)" not in event["text"] and event["text"].count("github") == 5
+
+
 def test_a_parallel_pause_skips_an_interrupt_that_is_not_a_sensitive_tool(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
     other = {"type": "hitl", "toolkit_name": "other", "tool_name": "other_tool"}

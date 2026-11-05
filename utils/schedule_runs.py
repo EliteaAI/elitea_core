@@ -8,7 +8,7 @@ from tools import db
 
 from ..models.entity_schedule import REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
-from .schedule_claim import append_run_events, fail_run, finished_event, run_event
+from .schedule_claim import TEXT_LIMIT, append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
 
 STALE_REASON = 'the run did not finish in time'
@@ -243,8 +243,8 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
     A schedule that does not ask the owner fails on a sign-in at once. `conversation_id` and `author_id` of the
     paused chat tie the pause to its own run (see `_own_conversation`).
     """
-    # A parallel pause carries its interrupts in `hitl_interrupts`
-    interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
+    # A parallel pause lists every interrupt in `hitl_interrupts`, the first one again in `hitl_interrupt`
+    interrupts = list(interrupt.get('hitl_interrupts') or [interrupt.get('hitl_interrupt') or {}])
     sensitive_items = [item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool']
     sensitive = sensitive_items[0] if sensitive_items else None
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
@@ -344,14 +344,19 @@ def _copy_status(session, run_id: int, status: str) -> None:
 
 
 def _paused_event(items: list[dict]) -> dict:
-    """The pause line of the run log: toolkit and tool of every pending tool, never the tool arguments.
+    """The pause line of the run log: toolkit and tool of the pending tools, never the tool arguments.
 
-    The `toolkit` and `tool` fields name the first tool. The text is bounded by `TEXT_LIMIT` in `run_event`.
+    The `toolkit` and `tool` fields name the first tool. A list too long for `TEXT_LIMIT` loses whole entries from
+    its end and ends with the count of the hidden ones, so the owner sees that more tools wait.
     """
     names = [tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name')) for item in items]
-    toolkit, tool = names[0]
-    text = 'Paused for approval: ' + ', '.join(f'{name} · {tool_name}' for name, tool_name in names)
-    return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
+    entries = [f'{name} · {tool_name}' for name, tool_name in names]
+    for shown in range(len(entries), 0, -1):
+        hidden = len(entries) - shown
+        text = 'Paused for approval: ' + ', '.join(entries[:shown]) + (f' (+{hidden} more)' if hidden else '')
+        if len(text) <= TEXT_LIMIT:
+            break  # one entry always fits: the names are cut at NAME_LIMIT
+    return run_event('paused', text, 'warning', toolkit=names[0][0], tool=names[0][1])
 
 
 def _sign_in_event(item: dict) -> dict:
