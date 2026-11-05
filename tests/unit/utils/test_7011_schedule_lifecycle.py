@@ -32,6 +32,7 @@ class EntitySchedule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean)
     disabled_reason: Mapped[str | None] = mapped_column(String)
     updated_at: Mapped[str | None] = mapped_column(String)
+    next_run: Mapped[str | None] = mapped_column(String)
 
 
 class RecordingSession:
@@ -85,6 +86,7 @@ def test_7011_r21_disable_sets_enabled_false_and_reason_for_every_schedule_of_th
     sql = _sql(session.statements[0])
     assert 'UPDATE entity_schedules SET enabled=false' in sql
     assert "disabled_reason='version_deleted'" in sql
+    assert 'next_run=NULL' in sql
     assert 'updated_at=now()' in sql
     assert 'version_id IN (8, 9)' in sql
     assert 'enabled' not in sql.split('WHERE')[1]  # a paused schedule is disabled too

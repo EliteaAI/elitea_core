@@ -119,7 +119,7 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
         session.execute(
             update(EntitySchedule)
             .where(EntitySchedule.id == schedule_id)
-            .values(enabled=False, disabled_reason=reason)
+            .values(enabled=False, disabled_reason=reason, next_run=None)
         )
         session.commit()
 
@@ -146,7 +146,8 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
                 .values({REFUSAL_STREAK: streak,
                          EntitySchedule.enabled: case((pause, False), else_=EntitySchedule.enabled),
                          EntitySchedule.disabled_reason: case((pause, GOVERNANCE_REFUSED),
-                                                              else_=EntitySchedule.disabled_reason)})
+                                                              else_=EntitySchedule.disabled_reason),
+                         EntitySchedule.next_run: case((pause, None), else_=EntitySchedule.next_run)})
                 .returning(REFUSAL_STREAK, EntitySchedule.enabled, EntitySchedule.disabled_reason)
             ).one_or_none()
             session.commit()

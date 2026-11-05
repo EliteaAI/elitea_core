@@ -13,7 +13,7 @@ def disable_version_schedules(session, version_ids) -> list[dict]:
     statement = (
         update(EntitySchedule)
         .where(EntitySchedule.version_id.in_(version_ids))
-        .values(enabled=False, disabled_reason='version_deleted', updated_at=func.now())
+        .values(enabled=False, disabled_reason='version_deleted', next_run=None, updated_at=func.now())
         .returning(EntitySchedule.id, EntitySchedule.name, EntitySchedule.created_by)
     )
     return [dict(row) for row in session.execute(statement).mappings().all()]

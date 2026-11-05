@@ -180,6 +180,34 @@ def test_7011_r2_3_enabling_a_paused_schedule_recomputes_next_run(env):
     assert utc(env.row(schedule_id).next_run) > datetime.now(UTC)
 
 
+def test_pausing_a_schedule_clears_next_run(env):
+    schedule_id = env.seed()
+    env.edit('update_schedule', schedule_id, env.scope(OWNER_ID), env.pd.ScheduleUpdate(enabled=False))
+    row = env.row(schedule_id)
+    assert (row.enabled, row.next_run) == (False, None)
+
+
+def test_cron_change_on_a_paused_schedule_keeps_next_run_empty(env):
+    schedule_id = env.seed(enabled=False, next_run=None)
+    env.edit('update_schedule', schedule_id, env.scope(OWNER_ID), env.pd.ScheduleUpdate(cron='30 6 * * *'))
+    assert env.row(schedule_id).next_run is None
+
+
+def test_pause_then_resume_sets_next_run_from_cron_and_timezone(env):
+    schedule_id = env.seed(cron='30 6 * * *', timezone='Asia/Tokyo')
+    scope = env.scope(OWNER_ID)
+    env.edit('update_schedule', schedule_id, scope, env.pd.ScheduleUpdate(enabled=False))
+    env.edit('update_schedule', schedule_id, scope, env.pd.ScheduleUpdate(enabled=True))
+    row = env.row(schedule_id)
+    expected = env.timing.compute_next_run('30 6 * * *', 'Asia/Tokyo', datetime.now(UTC))
+    assert abs(utc(row.next_run) - expected) < timedelta(minutes=1)
+
+
+def test_create_disabled_stores_no_next_run(env):
+    row = env.run('create_schedule', env.body(enabled=False), env.scope(OWNER_ID))
+    assert env.row(row.id).next_run is None
+
+
 def test_7011_r2_3_a_rename_leaves_next_run_alone(env):
     schedule_id = env.seed()
     env.edit('update_schedule', schedule_id, env.scope(OWNER_ID), env.pd.ScheduleUpdate(name='Renamed'))

@@ -244,6 +244,7 @@ def _details(row, scope: ScheduleScope) -> dict:
     confirmer = row.approval_confirmed_by
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
+        "next_run": row.next_run if row.enabled else None,  # an older pause may have left a stale value
         "owner": {"id": row.created_by, "name": _owner_name(row.created_by)},
         "approval_confirmed_by": _owner_name(confirmer) if confirmer is not None else None,
         "allowed_actions": allowed_actions(row, scope),
