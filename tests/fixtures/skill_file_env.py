@@ -5,6 +5,7 @@ a dict keyed by ``(bucket name with its project prefix, key)``, so a test can se
 """
 import contextlib
 import datetime
+import re
 import importlib.util
 import pathlib
 import sys
@@ -12,6 +13,7 @@ import types
 from unittest import mock
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
+SKILL_NAME_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 PKG = 'plugins.elitea_core'
 BUCKET = 'skill-files'
 
@@ -366,6 +368,13 @@ class Access:
         return 'no_access' if (user_id, project_id, entity_id) in self.restricted else 'full'
 
 
+def validate_skill_name(value):
+    """The Agent Skills name rule of ``models/pd/skill.py``: 64 chars, lowercase letters, digits and single hyphens."""
+    if len(value) > 64 or not SKILL_NAME_RE.match(value):
+        raise ValueError('not a skill name')
+    return value
+
+
 class PublishStatus:
     draft = 'draft'
     published = 'published'
@@ -484,6 +493,7 @@ def install(monkeypatch, limits: dict):
     models_skill.EntitySkillMapping = FakeEntitySkillMapping
     monkeypatch.setitem(sys.modules, models_skill.__name__, models_skill)
     sys.modules[f'{PKG}.models.pd.skill_version'].SkillVersionDetailModel = VersionDetail
+    sys.modules[f'{PKG}.models.pd.skill'].validate_skill_name = validate_skill_name
     enums = AnyModule(f'{PKG}.models.enums.all')
     enums.PublishStatus = PublishStatus
     monkeypatch.setitem(sys.modules, enums.__name__, enums)

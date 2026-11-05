@@ -10,7 +10,7 @@ import yaml
 from sqlalchemy.orm import selectinload
 
 from ..models.skill import Skill, SkillVersion
-from ..models.pd.skill import SkillExportModel
+from ..models.pd.skill import SkillExportModel, validate_skill_name
 from .export_import_utils import slugify
 from .skill_files import (
     add_version_files,
@@ -36,7 +36,7 @@ from .skill_utils import (
     import_skill,
     validate_instructions_length,
 )
-from .zip_safety import is_compression_bomb, is_encrypted_zip_member, is_unsafe_zip_member
+from .zip_safety import is_encrypted_zip_member, is_unsafe_zip_member
 
 
 DEFAULT_VERSION_NAME = 'base'
@@ -47,6 +47,7 @@ ZIP_MIMETYPE = 'application/zip'
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ZIP_LITTER_PREFIXES = ('__MACOSX/',)
 ZIP_LITTER_NAMES = ('.DS_Store',)
+ZIP_READ_ERRORS = (zipfile.BadZipFile, zlib.error, OSError, RuntimeError, ValueError, EOFError)
 
 REQUIRED_FRONTMATTER_FIELDS = ('name', 'description')
 
@@ -323,9 +324,17 @@ def export_skill_md(
     return {
         'ok': True,
         'filename': f"{stem}.zip",
-        'content': build_skill_zip(name_slug, content, files),
+        'content': build_skill_zip(_skill_folder(skill_data.get('name', ''), name_slug), content, files),
         'mimetype': ZIP_MIMETYPE,
     }
+
+
+def _skill_folder(name: str, slug: str) -> str:
+    """The archive folder Claude Code expects: the skill name when it is a valid Agent Skills name, else its slug."""
+    try:
+        return validate_skill_name(name)
+    except ValueError:
+        return slug
 
 
 def build_skill_zip(folder: str, skill_md: str, files: list) -> bytes:
@@ -521,9 +530,11 @@ def validate_skill_import_filename(filename: Optional[str]) -> None:
 
 
 def _read_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """The member's bytes, inflated only up to the size it declares, which the caps have already checked."""
     try:
-        return archive.read(info)
-    except (zipfile.BadZipFile, RuntimeError, OSError, zlib.error) as exc:
+        with archive.open(info) as member:
+            return member.read(info.file_size + 1)
+    except ZIP_READ_ERRORS as exc:
         raise SkillFileError(f"'{info.filename}' could not be read from the ZIP") from exc
 
 
@@ -545,7 +556,7 @@ def read_skill_zip(data: bytes) -> tuple:
     """The SKILL.md text and the file entries of a skill ZIP, refusing anything that could escape or overflow."""
     try:
         archive = zipfile.ZipFile(BytesIO(data))
-    except zipfile.BadZipFile as exc:
+    except ZIP_READ_ERRORS as exc:
         raise SkillFileError('The file is not a valid ZIP archive') from exc
     with archive:
         members = [
@@ -555,7 +566,7 @@ def read_skill_zip(data: bytes) -> tuple:
             and PurePosixPath(info.filename).name not in ZIP_LITTER_NAMES
         ]
         for info in members:
-            if is_unsafe_zip_member(info) or is_compression_bomb(info):
+            if is_unsafe_zip_member(info):
                 raise SkillFileError(f"'{info.filename}' cannot be unpacked safely")
             if is_encrypted_zip_member(info):
                 raise SkillFileError(f"'{info.filename}' is encrypted; export the skill without a password")

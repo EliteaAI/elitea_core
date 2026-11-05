@@ -59,7 +59,7 @@ def export_import():
     _package(f'{PKG}.utils')
 
     _module(f'{PKG}.models.skill', Skill=object, SkillVersion=object)
-    _module(f'{PKG}.models.pd.skill', SkillExportModel=object)
+    _module(f'{PKG}.models.pd.skill', SkillExportModel=object, validate_skill_name=None)
     _module(f'{PKG}.utils.export_import_utils', slugify=lambda value: value)
     _module(
         f'{PKG}.utils.skill_utils',

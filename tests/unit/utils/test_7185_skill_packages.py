@@ -7,7 +7,9 @@ writes files through the store, and the fork payload that lists the manifest.
 import hashlib
 import io
 import pathlib
+import struct
 import sys
+import tracemalloc
 import types
 import zipfile
 
@@ -139,13 +141,58 @@ class TestReadSkillZip:
         with pytest.raises(env.utils.SkillFileError, match='not a valid ZIP'):
             env.export.read_skill_zip(b'---\nname: x\n---\nbody')
 
-    def test_a_member_that_expands_far_beyond_its_stored_size_is_refused(self, env):
+    def test_a_highly_compressible_member_within_the_caps_is_accepted(self, env):
         def deflated(name, info):
             info.compress_type = zipfile.ZIP_DEFLATED
 
-        archive = _zip({'forms/SKILL.md': SKILL_MD, 'forms/zeros.bin': b'\0' * (2 * MB)}, deflated)
+        _, entries = env.export.read_skill_zip(_zip({'forms/SKILL.md': SKILL_MD, 'forms/rows.csv': b'a,b,c\n' * 400_000}, deflated))
 
-        with pytest.raises(env.utils.SkillFileError, match="'forms/zeros.bin' cannot be unpacked safely"):
+        assert [(e['path'], e['size']) for e in entries] == [('rows.csv', 2_400_000)]
+
+    def test_a_member_that_declares_a_smaller_size_than_it_holds_is_refused_without_inflating_it(self, env):
+        def deflated(name, info):
+            info.compress_type = zipfile.ZIP_DEFLATED
+
+        archive = bytearray(_zip({'forms/SKILL.md': SKILL_MD, 'forms/big.bin': b'\0' * (64 * MB)}, deflated))
+        local_name = archive.find(b'forms/big.bin')
+        central_name = archive.find(b'forms/big.bin', local_name + 1)
+        for signature, offset, name in ((b'PK\x03\x04', 22, local_name), (b'PK\x01\x02', 24, central_name)):
+            header = archive.rfind(signature, 0, name)
+            archive[header + offset:header + offset + 4] = struct.pack('<I', 100)
+
+        tracemalloc.start()
+        try:
+            with pytest.raises(env.utils.SkillFileError, match="'forms/big.bin' could not be read from the ZIP"):
+                env.export.read_skill_zip(bytes(archive))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert peak < 8 * MB
+
+    def test_a_member_that_declares_no_bytes_but_holds_some_is_refused_rather_than_stored_empty(self, env):
+        archive = bytearray(_zip({'forms/SKILL.md': SKILL_MD, 'forms/a.md': 'hello'}))
+        local_name = archive.find(b'forms/a.md')
+        central_name = archive.find(b'forms/a.md', local_name + 1)
+        for signature, offset, name in ((b'PK\x03\x04', 22, local_name), (b'PK\x01\x02', 24, central_name)):
+            header = archive.rfind(signature, 0, name)
+            archive[header + offset:header + offset + 4] = struct.pack('<I', 0)
+
+        with pytest.raises(env.utils.SkillFileError, match="'forms/a.md' could not be read from the ZIP"):
+            env.export.read_skill_zip(bytes(archive))
+
+    def test_a_central_directory_whose_offsets_point_before_the_file_is_refused(self, env):
+        archive = bytearray(_zip({'forms/SKILL.md': SKILL_MD, 'forms/a.md': 'x'}))
+        end_record = archive.rfind(b'PK\x05\x06')
+        archive[end_record + 16:end_record + 20] = struct.pack('<I', 0x7FFFFFF0)
+
+        with pytest.raises(env.utils.SkillFileError, match='could not be read from the ZIP'):
+            env.export.read_skill_zip(bytes(archive))
+
+    def test_a_member_name_that_is_not_utf8_is_refused(self, env):
+        archive = _zip({'forms/SKILL.md': SKILL_MD, 'forms/\u00c4.md': 'x'}).replace('\u00c4'.encode('utf-8'), b'\xff\xfe')
+
+        with pytest.raises(env.utils.SkillFileError, match='not a valid ZIP'):
             env.export.read_skill_zip(archive)
 
     def test_a_member_whose_bytes_do_not_match_its_checksum_is_refused(self, env):
@@ -168,9 +215,9 @@ def _seed_skill(env, files=((b'# Guide', 'references/guide.md'), (b'\x89PNG\x00'
     return session
 
 
-def _skill_details(monkeypatch, env, versions=({'id': 10, 'name': 'base'},)):
+def _skill_details(monkeypatch, env, versions=({'id': 10, 'name': 'base'},), name='forms'):
     data = {
-        'id': SKILL, 'name': 'forms', 'description': 'Fill forms.', 'versions': list(versions),
+        'id': SKILL, 'name': name, 'description': 'Fill forms.', 'versions': list(versions),
         'version_details': {'name': 'base', 'instructions': 'Read references/guide.md first.', 'tags': [], 'meta': {}},
     }
     monkeypatch.setattr(env.export, 'get_skill_details', lambda **kwargs: {'data': data})
@@ -188,6 +235,24 @@ class TestExport:
         assert archive.namelist() == ['forms/SKILL.md', 'forms/assets/logo.png', 'forms/references/guide.md']
         assert archive.read('forms/assets/logo.png') == b'\x89PNG\x00'
         assert {info.date_time for info in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+
+    def test_a_long_valid_name_is_the_archive_folder_in_full(self, env, monkeypatch):
+        _seed_skill(env)
+        name = 'a' * 30 + '-' + 'b' * 30
+        _skill_details(monkeypatch, env, name=name)
+
+        result = env.export.export_skill_md(PROJECT, SKILL, session=env.session_of(PROJECT))
+
+        assert result['filename'] == f'{name[:50]}.zip'
+        assert zipfile.ZipFile(io.BytesIO(result['content'])).namelist()[0] == f'{name}/SKILL.md'
+
+    def test_a_name_that_is_not_an_agent_skills_name_uses_its_slug_as_the_folder(self, env, monkeypatch):
+        _seed_skill(env)
+        _skill_details(monkeypatch, env, name='Fill Forms')
+
+        result = env.export.export_skill_md(PROJECT, SKILL, session=env.session_of(PROJECT))
+
+        assert zipfile.ZipFile(io.BytesIO(result['content'])).namelist()[0] == 'fill-forms/SKILL.md'
 
     def test_the_same_version_exports_the_same_bytes(self, env, monkeypatch):
         _seed_skill(env)
