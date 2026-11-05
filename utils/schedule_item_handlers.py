@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from tools import auth, db
 
-from ..models.entity_schedule import EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
     ScheduleCreate,
@@ -135,7 +135,7 @@ def _start_run(session, project_id: int, schedule_id: int, entity_type: str, app
         session.rollback()  # a draft written for this call must not stay half-saved
         active_id = session.scalar(select(EntityScheduleRun.id).where(
             EntityScheduleRun.schedule_id == schedule_id,
-            EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
+            EntityScheduleRun.status.in_(ACTIVE_STATUSES),
         ))
         return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
     session.commit()

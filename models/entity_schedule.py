@@ -24,7 +24,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from . import config as c
 from . import db, db_tools
 
-ACTIVE_RUN_STATUSES = "status IN ('running', 'waiting_for_approval')"
+ACTIVE_STATUSES = ('running', 'waiting_for_approval')
+ACTIVE_RUN_STATUSES = 'status IN (' + ', '.join(f"'{status}'" for status in ACTIVE_STATUSES) + ')'
 # A webhook may have several active runs; its caps are counted in code (#7400)
 ONE_ACTIVE_RUN = f"{ACTIVE_RUN_STATUSES} AND trigger <> 'webhook'"
 
