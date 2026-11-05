@@ -48,7 +48,7 @@ def schedule_scope(project_id: int) -> ScheduleScope:
 def allowed_actions(row, scope: ScheduleScope) -> list[str]:
     """Actions the caller may take on one schedule row; a pure function of the row and the scope.
 
-    `run` is shown to the owner and to a schedules admin; the run route then checks the project admin role
+    `run` is shown to the owner and to a schedules admin, the same test as the run route
     (`schedule_rights.may_run_or_decide`).
     """
     is_owner = row.created_by == scope.user_id

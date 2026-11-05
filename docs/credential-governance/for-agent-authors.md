@@ -123,8 +123,8 @@ development runs are off.
   approved by a second person.
 - A mandate made for **someone else** does not cover your schedule, even on the same version. You get
   `MANDATE_REQUIRED`.
-- **Run now** and **Test run** are for the schedule's owner and for project admins. Anyone else gets the answer
-  403 `not_owner`.
+- **Run now** and **Test run** are for the schedule's owner and for admins with the permission `schedules.admin`. Anyone
+  else gets the answer 403 `not_owner`. An admin's run acts as the admin, with the admin's rights and credentials.
 - When you save a schedule while governance is on and you have no mandate for its version, the schedule is saved
   and you see: "Scheduled (cron) runs need an approved mandate for you on this version; Run now and Test run act as
   you. Ask a project admin (Admin → Governance → Mandates)." Under audit only it adds "Until then each run is

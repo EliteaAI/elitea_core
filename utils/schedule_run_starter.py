@@ -63,9 +63,16 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
         agent = version and session.get(Application, version.application_id)
         if not agent:
             return None
+        trigger = getattr(run_row, 'trigger', 'cron')
+        # Run now by an admin acts as the admin: the checks, the credentials and the run use the caller, never the owner
+        requested_by = getattr(run_row, 'requested_by', None)
+        as_caller = (trigger in ('manual', 'test') and requested_by is not None
+                     and requested_by != schedule.created_by)
         return SimpleNamespace(
             schedule=SimpleNamespace(
-                id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
+                id=schedule.id, name=schedule.name,
+                principal={'kind': 'delegation', 'ref': requested_by} if as_caller else schedule.principal,
+                created_by=requested_by if as_caller else schedule.created_by, run_as_caller=as_caller,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
@@ -74,8 +81,7 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
                 credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
-            trigger=getattr(run_row, 'trigger', 'cron'),
-            resumed=getattr(run_row, 'resumed_at', None) is not None)
+            trigger=trigger, resumed=getattr(run_row, 'resumed_at', None) is not None)
 
 
 def _load_test_run(session, run_row) -> SimpleNamespace | None:
@@ -233,7 +239,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
     closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
     Under governance (C-1009) a cron firing is admitted on its owner's mandate or refused; a refusal ends it at once.
-    Run now and Test run (``owner_request``, built by the run endpoint) are the owner's own run: no mandate (#7254).
+    Run now and Test run (``owner_request``, built by the run endpoint) act as the person who pressed the button, the
+    owner or an admin: no mandate (#7254).
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
@@ -274,7 +281,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    manual = trigger in ('manual', 'test')  # Run now and Test run are the owner's own runs
+    manual = trigger in ('manual', 'test')  # Run now and Test run are the caller's own runs
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed

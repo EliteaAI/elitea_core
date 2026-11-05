@@ -20,7 +20,7 @@ from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
-PROJECT_ID, RUN_ID, OWNER = 7, 9, 12
+PROJECT_ID, RUN_ID, OWNER, CONVERSATION_ID = 7, 9, 12, 55
 HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision'}
 
 
@@ -40,8 +40,11 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
     """The real helpers on a fake conversation meta; `calls` records each schedule_runs call."""
     calls = []
 
-    def check_schedule_decision(*args, **kwargs):
-        calls.append(('check', *args, kwargs))
+    def check_schedule_decision(project_id, run_id, caller_id, actions, fan_out=False, sign_in=False, is_admin=None,
+                                conversation_id=None):
+        calls.append(('check', project_id, run_id, caller_id, actions,
+                      {'fan_out': fan_out, 'sign_in': sign_in, 'is_admin': is_admin,
+                       'conversation_id': conversation_id}))
         if error:
             raise error
         return decision
@@ -51,7 +54,8 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
         if apply_error:
             raise apply_error
 
-    query = types.SimpleNamespace(where=lambda *_: types.SimpleNamespace(scalar=lambda: meta))
+    query = types.SimpleNamespace(where=lambda *_: types.SimpleNamespace(
+        first=lambda: types.SimpleNamespace(id=CONVERSATION_ID, meta=meta)))
 
     @contextmanager
     def get_session(project_id):
@@ -64,7 +68,7 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
     ]
     namespace = {
         'db': types.SimpleNamespace(get_session=get_session),
-        'Conversation': types.SimpleNamespace(meta='meta', uuid='uuid'),
+        'Conversation': types.SimpleNamespace(id='id', meta='meta', uuid='uuid'),
         'check_schedule_decision': check_schedule_decision,
         'apply_schedule_decision': apply_schedule_decision,
         'ScheduleDecisionForbidden': Forbidden,
@@ -88,10 +92,19 @@ def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decisio
 
     pending, denied = check(_parsed(), OWNER)
     assert (pending, denied) == ((RUN_ID, 'approve', OWNER), None)
-    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False})]
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False, 'is_admin': None,
+                                                                  'conversation_id': CONVERSATION_ID})]
 
     assert apply(PROJECT_ID, pending) is None
     assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve', OWNER)
+
+
+def test_the_check_gets_the_id_of_the_conversation_that_holds_the_run_id():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(), OWNER)
+
+    assert calls[0][-1]['conversation_id'] == CONVERSATION_ID
 
 
 def test_el_7011_r2_2_a_decision_list_passes_every_action():
@@ -108,7 +121,7 @@ def test_el_7011_r2_4_a_fan_out_child_on_a_resumed_run_has_nothing_to_apply():
     pending, denied = check(_parsed(thread_id='child-1'), OWNER)
 
     assert (pending, denied) == (None, None)
-    assert calls[0][-1] == {'fan_out': True, 'sign_in': False}
+    assert calls[0][-1] == {'fan_out': True, 'sign_in': False, 'is_admin': None, 'conversation_id': CONVERSATION_ID}
     assert apply(PROJECT_ID, pending) is None
     assert [call[0] for call in calls] == ['check']
 
@@ -162,6 +175,16 @@ def test_el_7011_r2_3_the_check_runs_before_any_resume_return():
     assert body.index('if _internal_token is not INTERNAL_CONTINUE_TOKEN:') < check_index  # a replay was checked
     assert check_index < body.index('self.is_chat_run_stopped(parsed.message_id)')
     assert check_index < body.index('self._continue_child_resume(')
+
+
+def test_a_decided_run_resumes_as_the_user_it_acts_as_not_as_the_deciding_admin():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    body = body[:body.index('\n    def ', 1)]
+
+    assert body.index('schedule_run_actor_id(parsed.project_id, schedule_decision[0])') < body.index(
+        'ParticipantEntityUser(id=resume_user_id)')
+    assert 'ParticipantEntityUser(id=current_user' not in body
+    assert 'user_id=resume_user_id' in body and "user_id=current_user['id']" not in body
 
 
 def test_el_7011_r2_1_a_refused_later_guard_leaves_the_run_waiting():
@@ -247,7 +270,8 @@ def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
     pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize'), OWNER)
 
     assert (pending, denied) == ((RUN_ID, 'approve', OWNER), None)
-    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True})]
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True, 'is_admin': None,
+                                                                       'conversation_id': CONVERSATION_ID})]
 
 
 def test_one_skip_among_the_sign_in_answers_rejects_the_run():

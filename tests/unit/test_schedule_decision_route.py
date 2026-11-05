@@ -24,12 +24,14 @@ class Decisions:
     """Fake decision writers; `check_error` and `apply_error` are raised when set."""
 
     def __init__(self, runs):
-        self.checks, self.applied, self.applied_by = [], [], []
+        self.checks, self.applied, self.applied_by, self.admin_flags = [], [], [], []
         self.check_error = None
         self.runs = runs
 
-    def check(self, project_id, run_id, caller_id, actions):
+    def check(self, project_id, run_id, caller_id, actions, fan_out=False, sign_in=False, is_admin=None,
+              conversation_id=None):
         self.checks.append((run_id, caller_id, actions))
+        self.admin_flags.append(is_admin)
         if self.check_error:
             raise self.check_error
         return 'reject' if 'reject' in actions else 'approve'
@@ -50,7 +52,9 @@ def decisions(harness, monkeypatch):
         pass
 
     state = Decisions(runs)
-    runs.run_owner_id = lambda session, run: harness.row(run.schedule_id).created_by if run.schedule_id else run.requested_by
+    runs.run_actor_id = lambda session, run: (
+        run.requested_by if run.trigger in ('manual', 'test') and run.requested_by is not None
+        else harness.row(run.schedule_id).created_by if run.schedule_id else run.requested_by)
     runs.ScheduleDecisionForbidden, runs.ScheduleRunNotWaiting = ScheduleDecisionForbidden, ScheduleRunNotWaiting
     runs.check_schedule_decision, runs.apply_schedule_decision = state.check, state.apply
     monkeypatch.setitem(sys.modules, runs.__name__, runs)
@@ -182,6 +186,7 @@ def test_a_project_admin_who_is_not_the_owner_decides_and_is_recorded(harness, d
 
     assert (status, body['status']) == (200, 'running' if action == 'approve' else 'failed')
     assert decisions.checks == [(run_id, ADMIN_ID, [action])]
+    assert decisions.admin_flags == [True]
     assert decisions.applied == [(run_id, action)] and decisions.applied_by == [ADMIN_ID]
 
 

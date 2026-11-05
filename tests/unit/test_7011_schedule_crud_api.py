@@ -55,8 +55,6 @@ class Harness:
         self.governance_calls = []
         self.governance_owners = []  # (owner, saver) of each schedule notice (#7254)
         self.owner_requests = []  # the owner-run requests the run endpoint built (#7254, Roman 2026-10-30)
-        self.project_admin_ids = set()  # users the admin-role lookup of the project answers true for
-        self.admin_check_error = None
         self.owner_request = None  # what building answers: None is governance off
         self.owner_request_error = None
         self.fingerprint = 'fp-1'
@@ -175,13 +173,8 @@ def harness(isolated_sys_modules, monkeypatch):
         with_modes=lambda urls: urls,
         endpoint_metrics=lambda func: func,
     )
-    def admin_check_user_is_admin(project_id, user_id):
-        if harness.admin_check_error:
-            raise harness.admin_check_error
-        return user_id in harness.project_admin_ids
-
     tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
-        timeout=lambda seconds: types.SimpleNamespace(admin_check_user_is_admin=admin_check_user_is_admin))))
+        timeout=lambda seconds: types.SimpleNamespace())))
     tools.auth = types.SimpleNamespace(
         decorators=types.SimpleNamespace(check_api=harness.check_api),
         current_user=lambda: {'id': harness.user_id},

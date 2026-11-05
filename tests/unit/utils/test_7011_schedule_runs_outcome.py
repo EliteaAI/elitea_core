@@ -22,10 +22,10 @@ NOTICES = "plugins.elitea_core.utils.schedule_notifications"
 @pytest.fixture
 def sent(monkeypatch):
     """Everything the writers send: notices as (owner, event, run id) and room events as (owner, run id, status)."""
-    calls = types.SimpleNamespace(notices=[], emitted=[])
+    calls = types.SimpleNamespace(notices=[], emitted=[], extras=[])
     stand_in = types.ModuleType(NOTICES)
     stand_in.notify_schedule_event = lambda project_id, owner_id, event_type, schedule, run=None, extra=None: (
-        calls.notices.append((owner_id, str(event_type), run.id)))
+        calls.notices.append((owner_id, str(event_type), run.id)) or calls.extras.append(extra))
     stand_in.emit_schedule_run_finished = lambda owner_id, schedule_id, run_id, status, entity_id, conversation_id: (
         calls.emitted.append((owner_id, run_id, status, entity_id, conversation_id)))
     monkeypatch.setitem(sys.modules, NOTICES, stand_in)

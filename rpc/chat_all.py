@@ -65,7 +65,7 @@ from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
     ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
-    apply_schedule_decision, check_schedule_decision,
+    apply_schedule_decision, check_schedule_decision, schedule_run_actor_id,
 )
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
@@ -150,12 +150,15 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
     The (run id, decision, caller id) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    The caller is the owner or a holder of `schedules.admin`; the run must be linked to this conversation.
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
         return None, None
     with db.get_session(parsed.project_id) as session:
-        meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
+        chat = session.query(Conversation.id, Conversation.meta).where(
+            Conversation.uuid == parsed.conversation_uuid).first()
+    conversation_id, meta = (chat.id, chat.meta) if chat else (None, None)
     run_id = (meta or {}).get('schedule_run_id')
     if run_id is None:
         return None, None
@@ -170,9 +173,10 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         answers = getattr(parsed, 'mcp_auth_decisions', None)
         actions = ([item.get('action') if isinstance(item, dict) else None for item in answers]
                    if answers else [parsed.mcp_auth_action])
-    try:
+    try:  # the run id in the meta is client-written: the run must be linked to this chat
         decision = check_schedule_decision(
-            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in)
+            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
+            conversation_id=conversation_id)
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
@@ -2139,12 +2143,16 @@ class RPC:
         else:
             current_user = auth.current_user()
 
-        # Rights check (owner or project admin) of a scheduled run before any resume; an internal replay was checked already
+        # Rights check (owner or schedules admin) of a scheduled run before any resume; an internal replay was checked already
         schedule_decision = None
         if _internal_token is not INTERNAL_CONTINUE_TOKEN:
             schedule_decision, denied = _check_schedule_decision(parsed, current_user['id'])
             if denied:
                 return self._refuse_schedule_decision(sid, parsed, denied)
+        # An admin decides, but the run resumes as the user it started as; the run log keeps who decided
+        resume_user_id = current_user['id']
+        if schedule_decision is not None:
+            resume_user_id = schedule_run_actor_id(parsed.project_id, schedule_decision[0]) or resume_user_id
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
@@ -2434,7 +2442,7 @@ class RPC:
                     author_participant, _ = get_or_create_one(
                         session=session,
                         entity_name=ParticipantTypes.user,
-                        entity_meta=ParticipantEntityUser(id=current_user['id']),
+                        entity_meta=ParticipantEntityUser(id=resume_user_id),
                     )
                     msg_group, response_msg = create_pipeline_hitl_resume_segments(
                         session,
@@ -2671,7 +2679,7 @@ class RPC:
                     start_event_content=start_event_content,
                     chat_project_id=parsed.project_id,
                     await_task_timeout=await_task_timeout,
-                    user_id=current_user['id'],
+                    user_id=resume_user_id,
                     routing_projection=payload.pop('_routing_projection', None),
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,

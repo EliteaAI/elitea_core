@@ -113,36 +113,22 @@ def test_7011_r2_2_deleted_version_is_409_and_inserts_nothing(harness, started):
 
 
 @pytest.mark.parametrize('trigger', ['manual', 'test'])
-def test_a_project_admin_who_is_not_the_owner_runs_the_schedule(harness, started, trigger):
+def test_a_schedules_admin_who_is_not_the_owner_runs_the_schedule_as_themselves(harness, started, trigger):
     schedule_id = harness.seed(created_by=OTHER_ID)
     harness.request_as(ADMIN_ID, ADMIN)
-    harness.project_admin_ids = {ADMIN_ID}
     body, status = run(harness, schedule_id, trigger)
     assert status == 202
     assert runs(harness) == [(body['run_id'], schedule_id, trigger, 'running', ADMIN_ID)]
+    assert harness.owner_requests == [(ADMIN_ID, {'project_id': PROJECT_ID, 'application_id': 1, 'version_id': 10,
+                                                  'trigger_ref': f'schedule:entity:{schedule_id}'})]
     assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'], None)]
 
 
-def test_a_schedules_admin_without_the_project_admin_role_is_403_and_inserts_nothing(harness, started):
+def test_a_user_with_run_but_without_schedules_admin_cannot_run_another_owners_schedule(harness, started):
     schedule_id = harness.seed(created_by=OTHER_ID)
-    harness.request_as(ADMIN_ID, ADMIN)
-    assert_refusal(run(harness, schedule_id), 403, code='not_owner')
-    assert (runs(harness), started, harness.owner_requests) == ([], [], [])   # refused before any admission
-
-
-def test_a_failing_admin_role_lookup_refuses_the_run(harness, started):
-    schedule_id = harness.seed(created_by=OTHER_ID)
-    harness.request_as(ADMIN_ID, ADMIN)
-    harness.project_admin_ids = {ADMIN_ID}
-    harness.admin_check_error = TimeoutError('rpc timeout')
-    assert_refusal(run(harness, schedule_id), 403, code='not_owner')
-    assert (runs(harness), started) == ([], [])
-
-
-def test_the_owner_runs_without_an_admin_role_lookup(harness, started):
-    schedule_id = harness.seed()
-    harness.admin_check_error = AssertionError('the owner must not trigger the lookup')
-    assert run(harness, schedule_id)[1] == 202
+    harness.request_as(ADMIN_ID, EDITOR)
+    assert_refusal(run(harness, schedule_id), 404, NOT_FOUND['error'])
+    assert (runs(harness), started, harness.owner_requests) == ([], [], [])
 
 
 def test_7011_r3_2_regular_user_run_of_another_owners_schedule_is_404(harness, started):

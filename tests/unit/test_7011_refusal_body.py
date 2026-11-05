@@ -47,12 +47,6 @@ def test_7011_r8_1_a_missing_schedule_is_404_with_code_and_error(harness):
     assert_refusal(harness.call('get', schedule_id=9999), 404, code='not_found')
 
 
-def test_a_run_by_a_schedules_admin_without_the_admin_role_is_403_not_owner(harness):
-    schedule_id = harness.seed(created_by=OTHER_ID)
-    harness.request_as(ADMIN_ID, ADMIN)
-    assert_refusal(run(harness, schedule_id), 403, code='not_owner')
-
-
 def test_7011_r8_1_an_active_run_is_409_with_code_and_its_id(harness):
     harness.module.start_schedule_run = lambda *args: True
     schedule_id = harness.seed()

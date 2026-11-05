@@ -37,6 +37,13 @@ def runs(monkeypatch):
     load("models/entity_schedule.py", fresh=True)
     load("utils/schedule_claim.py", fresh=True)  # fail_run, the one writer of a failed run
     load("utils/schedule_rights.py", fresh=True)  # the rights rule of check_schedule_decision
+    # The permission read of a caller who is not the owner: `schedule_prerun` needs the RPC layer, so a stand-in
+    # answers it from `runs.permission_holders` (user ids that hold the admin verb)
+    holders = set()
+    prerun = types.ModuleType("plugins.elitea_core.utils.schedule_prerun")
+    prerun.check_owner_rights = lambda project_id, owner_id, entity_type=None, entity_id=None, verbs=("run",): (
+        None if owner_id in holders else "denied")
+    monkeypatch.setitem(sys.modules, prerun.__name__, prerun)
     # The `tools` stub: schedule_runs imports `db` from it at load time
     module = types.ModuleType("tools")
     module.db = types.SimpleNamespace(get_session=None)
@@ -47,6 +54,7 @@ def runs(monkeypatch):
     monkeypatch.setitem(sys.modules, "tools", module)
     runs = load("utils/schedule_runs.py", fresh=True)
     runs.EntityScheduleRun = sys.modules["plugins.elitea_core.models.entity_schedule"].EntityScheduleRun
+    runs.permission_holders = holders
     runs.emitted, runs.config = emitted, config  # the checkpoint events and the plugin config of the test
     return runs
 
