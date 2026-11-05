@@ -22,6 +22,7 @@ ROW_KEYS = {
     "version_id", "version_name", "cron", "timezone", "enabled", "disabled_reason", "next_run",
     "last_run", "last_run_status", "last_run_reason", "last_conversation_id", "expires_at",
     "owner", "allowed_actions", "trigger_kind", "webhook_type", "webhook_url",
+    "previous_secret_until", "gitlab_auth_method",
 }
 
 
