@@ -136,8 +136,10 @@ def test_the_release_script_creates_every_model_index_if_missing(skill_models):
     plain = sorted(tuple(column.name for column in index.columns) for index in indexes if not index.unique)
 
     assert plain == [('sha256',), ('skill_version_id',)]
-    assert 'CREATE INDEX IF NOT EXISTS ix_tenant_skill_version_files_skill_version_id ON {pid}.skill_version_files (skill_version_id);' in text
-    assert 'CREATE INDEX IF NOT EXISTS ix_tenant_skill_version_files_sha256 ON {pid}.skill_version_files (sha256);' in text
+    for index in indexes:
+        if not index.unique:
+            (column,) = index.columns
+            assert f'CREATE INDEX IF NOT EXISTS {index.name} ON {{pid}}.skill_version_files ({column.name});' in text
     assert 'INDEX IF NOT EXISTS ix_skill_version_files_' not in text
     assert (
         f'CREATE UNIQUE INDEX IF NOT EXISTS {INDEX} ON {{pid}}.skill_version_files (skill_version_id, lower(path));' in text
