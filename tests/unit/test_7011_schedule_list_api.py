@@ -325,6 +325,17 @@ def test_r4_3_el7011_dates_are_iso_strings_with_one_offset(env):
     assert row["last_run"] is None
 
 
+def test_a_paused_row_has_next_run_null_and_a_running_row_has_its_time(env):
+    env.grant(5, "list")
+    env.rows = [
+        make_row(1, 5, enabled=True, next_run=datetime(2026, 10, 21, 6, 0, tzinfo=UTC)),
+        make_row(2, 5, enabled=False, next_run=None),
+    ]
+    rows = {row["id"]: row for row in ok(env)["rows"]}
+    assert (rows[1]["enabled"], rows[1]["next_run"]) == (True, "2026-10-21T06:00:00Z")
+    assert (rows[2]["enabled"], rows[2]["next_run"]) == (False, None)
+
+
 # R5.2 (TC-US05-19)
 @pytest.mark.parametrize("limit", [0, 101, -1])
 def test_r5_2_el7011_limit_out_of_range_gives_400(env, limit):
