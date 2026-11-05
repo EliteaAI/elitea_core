@@ -1,9 +1,12 @@
 """The admin task that clears next_run of schedules paused before a pause cleared it (methods/admin_tasks.py)."""
+import ast
 import pathlib
 import sys
 import types
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
+from fixtures.cut_source import load_cut
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -12,6 +15,8 @@ import test_6921_skill_run_settings_migration_task as migration_task  # noqa: E4
 PROJECTS = migration_task.PROJECTS
 admin_tasks = migration_task.admin_tasks  # the fixture is bound here so pytest finds it in this module
 
+PACKAGE = "plugins.elitea_core"
+TASK = "clear_paused_schedule_next_run"
 STATEMENT = "UPDATE p_{pid}.entity_schedules SET next_run = NULL WHERE NOT enabled AND next_run IS NOT NULL"
 
 
@@ -56,8 +61,46 @@ def test_a_named_project_is_the_only_one_cleared(run_task):
     assert [project_ids for project_ids, _ in calls] == [[5]]
 
 
+class AdminModule:
+    """The two registration methods of the admin plugin, with their real signatures (admin/methods/tasks.py)."""
 
-def test_the_task_is_registered_in_ready_and_unregistered_in_deinit():
-    text = (pathlib.Path(__file__).resolve().parents[3] / "module.py").read_text()
-    for call in ("register_admin_task", "unregister_admin_task"):
-        assert f'{call}(\n                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run' in text, call
+    def register_admin_task(self, name, func, group=None):
+        raise NotImplementedError
+
+    def unregister_admin_task(self, name, func):
+        raise NotImplementedError
+
+
+@pytest.fixture
+def module_methods(monkeypatch):
+    """The real `ready` and `deinit` of module.py, cut out of its source, and a `self` that records their calls."""
+    admin = create_autospec(AdminModule, instance=True)
+    tools = types.ModuleType("tools")
+    tools.this = types.SimpleNamespace(for_module=lambda name: types.SimpleNamespace(module=admin))
+    trace_step_schema = types.ModuleType(f"{PACKAGE}.utils.trace_step_schema")
+    trace_step_schema.ensure_trace_step_schema = lambda engine: None
+    monkeypatch.setitem(sys.modules, "tools", tools)
+    monkeypatch.setitem(sys.modules, trace_step_schema.__name__, trace_step_schema)
+
+    tree = ast.parse((pathlib.Path(__file__).resolve().parents[3] / "module.py").read_text())
+    [module_class] = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Module"]
+    nodes = [node for node in module_class.body if getattr(node, "name", None) in ("ready", "deinit")]
+    namespace = load_cut(nodes, {
+        "db": MagicMock(), "auth": MagicMock(), "log": MagicMock(), "prompt_2_agent_migration": MagicMock(),
+        "CAPABILITIES_EVENT": "capabilities", "WITHHOLD_EVENT": "withhold",
+    }, f"{PACKAGE}.module")
+    return namespace["ready"], namespace["deinit"], MagicMock(name="module"), admin
+
+
+def test_the_task_is_registered_in_ready_under_a_release_group(module_methods):
+    ready, _, module, admin = module_methods
+    ready(module)
+    [call] = [call for call in admin.register_admin_task.call_args_list if call.args[0] == TASK]
+    assert call.args[1] is module.clear_paused_schedule_next_run
+    assert call.kwargs.get("group")
+
+
+def test_the_task_is_unregistered_in_deinit(module_methods):
+    _, deinit, module, admin = module_methods
+    deinit(module)
+    admin.unregister_admin_task.assert_any_call(TASK, module.clear_paused_schedule_next_run)
