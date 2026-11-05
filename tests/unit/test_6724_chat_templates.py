@@ -310,7 +310,10 @@ def _load_handler(session, module_name="chat_templates", validate_participants=_
         constants.PROMPT_LIB_MODE = "prompt_lib"
         validation = types.ModuleType("elitea_core.utils.chat_template_validation")
         validation.validate_template_participants = validate_participants
+        icons = types.ModuleType("elitea_core.utils.chat_template_icons")
+        icons.attach_participant_icons = lambda templates, _project_id: templates
         sys.modules.update({
+            "elitea_core.utils.chat_template_icons": icons,
             "elitea_core.models.chat_template": ct_orm,
             "elitea_core.models.pd.chat_template": ct_pd,
             "elitea_core.utils.constants": constants,
