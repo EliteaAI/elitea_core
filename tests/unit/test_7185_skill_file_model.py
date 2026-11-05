@@ -73,3 +73,13 @@ def test_a_second_path_differing_only_in_case_is_refused_by_the_database(skill_m
 
         with pytest.raises(IntegrityError):
             connection.execute(table.insert(), {**row, 'path': 'forms.md'})
+
+
+def test_the_release_script_creates_the_table_before_the_index_with_the_model_columns(skill_models):
+    text = ' '.join((PLUGIN_ROOT / 'db_migrations.txt').read_text().split())
+    start = text.index('CREATE TABLE IF NOT EXISTS {pid}.skill_version_files (')
+    body = text[start:text.index(');', start)]
+    columns = [part.split()[0] for part in body.split('(', 1)[1].split(', ')]
+
+    assert columns == [column.name for column in skill_models.SkillVersionFile.__table__.columns]
+    assert start < text.index(f'CREATE UNIQUE INDEX IF NOT EXISTS {INDEX} ON {{pid}}.skill_version_files')
