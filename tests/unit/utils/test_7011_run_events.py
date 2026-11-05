@@ -192,7 +192,7 @@ def test_a_pause_on_three_tools_of_two_toolkits_lists_each_with_its_toolkit(runs
     (event,) = _events(session, run)
     assert event["text"] == "Paused for approval: Artifact · create_file, Artifact · delete_file, ADO · list_indexes"
     assert (event["toolkit"], event["tool"]) == ("Artifact", "create_file")
-    assert "secret" not in str(event) and "more)" not in event["text"]
+    assert "secret" not in str(event)
 
 
 def test_a_pause_names_the_same_tool_of_two_toolkits_twice(runs, session, sent):
@@ -206,7 +206,22 @@ def test_a_pause_names_the_same_tool_of_two_toolkits_twice(runs, session, sent):
     assert event["text"] == "Paused for approval: github · create_issue, jira · create_issue"
 
 
-def test_a_pause_with_longest_names_stays_in_the_text_limit_and_keeps_whole_entries(runs, session, sent):
+def test_a_short_tool_after_a_longest_name_tool_still_fits_in_the_text(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    limit = sys.modules["plugins.elitea_core.utils.schedule_runs"].NAME_LIMIT
+    long_name = "a" * (limit + 50)
+    tools = [{**SENSITIVE["hitl_interrupt"], "toolkit_name": long_name, "tool_name": long_name},
+             {**SENSITIVE["hitl_interrupt"], "toolkit_name": "b", "tool_name": "c"}]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": tools})
+
+    (event,) = _events(session, run)
+    entry = f"{'a' * limit} · {'a' * limit}"
+    assert event["text"] == f"Paused for approval: {entry}, b · c"
+    assert (event["toolkit"], event["tool"]) == ("a" * limit, "a" * limit)
+
+
+def test_a_pause_with_longest_names_hides_the_entries_that_do_not_fit_with_a_count(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
     limit = sys.modules["plugins.elitea_core.utils.schedule_runs"].NAME_LIMIT
     tools = [{**SENSITIVE["hitl_interrupt"], "toolkit_name": mark * (limit + 50), "tool_name": mark * (limit + 50)}
@@ -218,7 +233,6 @@ def test_a_pause_with_longest_names_stays_in_the_text_limit_and_keeps_whole_entr
     entry = f"{'a' * limit} · {'a' * limit}"
     assert event["text"] == f"Paused for approval: {entry} (+2 more)"
     assert len(event["text"]) <= _claim().TEXT_LIMIT
-    assert (event["toolkit"], event["tool"]) == ("a" * limit, "a" * limit)
 
 
 def test_a_pause_with_tools_that_fit_shows_no_hidden_count(runs, session, sent):
