@@ -245,7 +245,8 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
     """
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
-    sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
+    sensitive_items = [item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool']
+    sensitive = sensitive_items[0] if sensitive_items else None
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
     if sign_in is not None and _approval_rule(project_id, run_id) == 'run_without_asking':
         name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
@@ -257,8 +258,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
                             conversation_id, author_id=author_id)
         return
-    event = _sign_in_event(waiting) if sign_in is not None else _paused_event(sensitive, sum(
-        item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1)
+    event = _sign_in_event(waiting) if sign_in is not None else _paused_event(sensitive_items)
     _park_run(project_id, run_id, event, _own_conversation(conversation_id, author_id))
 
 
@@ -343,10 +343,14 @@ def _copy_status(session, run_id: int, status: str) -> None:
     session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status=status))
 
 
-def _paused_event(item: dict, more: int = 0) -> dict:
-    """The pause line of the run log: toolkit and tool only, never the tool arguments; `more` counts the other tools."""
-    toolkit, tool = (str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name'))
-    text = f'Paused for approval: {toolkit} · {tool}' + (f' (+{more} more)' if more > 0 else '')
+def _paused_event(items: list[dict]) -> dict:
+    """The pause line of the run log: toolkit and tool of every pending tool, never the tool arguments.
+
+    The `toolkit` and `tool` fields name the first tool. The text is bounded by `TEXT_LIMIT` in `run_event`.
+    """
+    names = [tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name')) for item in items]
+    toolkit, tool = names[0]
+    text = 'Paused for approval: ' + ', '.join(f'{name} · {tool_name}' for name, tool_name in names)
     return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
 
 
