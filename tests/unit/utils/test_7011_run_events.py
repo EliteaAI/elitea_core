@@ -181,6 +181,46 @@ def test_a_long_tool_list_is_cut_by_whole_entries_with_a_count_of_the_hidden_one
     assert (event["toolkit"], event["tool"]) == ("github", "tool_number_00")
 
 
+def test_a_pause_on_three_tools_of_two_toolkits_lists_each_with_its_toolkit(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    first = {**SENSITIVE["hitl_interrupt"], "toolkit_name": "Artifact", "tool_name": "create_file"}
+    second = {**first, "tool_name": "delete_file"}
+    third = {**first, "toolkit_name": "ADO", "tool_name": "list_indexes"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": first, "hitl_interrupts": [first, second, third]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: Artifact · create_file, Artifact · delete_file, ADO · list_indexes"
+    assert (event["toolkit"], event["tool"]) == ("Artifact", "create_file")
+    assert "secret" not in str(event) and "more)" not in event["text"]
+
+
+def test_a_pause_names_the_same_tool_of_two_toolkits_twice(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    first = SENSITIVE["hitl_interrupt"]
+    other_toolkit = {**first, "toolkit_name": "jira"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [first, other_toolkit]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue, jira · create_issue"
+
+
+def test_a_pause_with_longest_names_stays_in_the_text_limit_and_keeps_whole_entries(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    limit = sys.modules["plugins.elitea_core.utils.schedule_runs"].NAME_LIMIT
+    tools = [{**SENSITIVE["hitl_interrupt"], "toolkit_name": mark * (limit + 50), "tool_name": mark * (limit + 50)}
+             for mark in "abc"]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": tools})
+
+    (event,) = _events(session, run)
+    entry = f"{'a' * limit} · {'a' * limit}"
+    assert event["text"] == f"Paused for approval: {entry} (+2 more)"
+    assert len(event["text"]) <= _claim().TEXT_LIMIT
+    assert (event["toolkit"], event["tool"]) == ("a" * limit, "a" * limit)
+
+
 def test_a_pause_with_tools_that_fit_shows_no_hidden_count(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
     tools = [{**SENSITIVE["hitl_interrupt"], "tool_name": f"t{number}"} for number in range(5)]
