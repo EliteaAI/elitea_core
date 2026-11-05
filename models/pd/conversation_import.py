@@ -58,6 +58,7 @@ class ImportParticipant(_ImportBase):
     entity_name: str
     name: Optional[str] = None
     version: Optional[str] = None
+    public: bool = False
 
 
 class ImportConversationInfo(_ImportBase):
