@@ -59,16 +59,25 @@ def export_import():
     _package(f'{PKG}.utils')
 
     _module(f'{PKG}.models.skill', Skill=object, SkillVersion=object)
-    _module(f'{PKG}.models.pd.skill', SkillExportModel=object)
+    _module(f'{PKG}.models.pd.skill', SkillExportModel=object, validate_skill_name=None)
     _module(f'{PKG}.utils.export_import_utils', slugify=lambda value: value)
     _module(
         f'{PKG}.utils.skill_utils',
         _skill_session=None,
         get_skill_details=None,
         import_skill=None,
+        SkillFileError=ValueError,
+        get_max_file_bytes=None,
+        get_max_package_bytes=None,
+        get_max_package_files=None,
+        validate_instructions_length=None,
     )
-    _module(f'{PKG}.utils.skill_files', list_version_manifest=None, read_version_contents=None,
+    _module(f'{PKG}.utils.skill_files', add_version_files=None, build_file_entry=None, describe_size=None,
+            list_version_manifest=None,
+            read_version_contents=None, stage_version_files=None, validate_package=None,
             SkillFileContentUnavailableError=Exception, SkillVersionExportUnavailableError=RuntimeError)
+    _module(f'{PKG}.utils.zip_safety', is_compression_bomb=None, is_encrypted_zip_member=None,
+            is_unsafe_zip_member=None)
 
     frontmatter_name = f'{PKG}.utils.skill_frontmatter'
     frontmatter_spec = importlib.util.spec_from_file_location(

@@ -54,6 +54,7 @@ from .conversation_utils import create_conversation
 from .file_utils import sanitize_filename
 from .internal_tools import get_default_attachment_bucket
 from .participant_utils import add_participant_to_conversation
+from .zip_safety import is_compression_bomb, is_encrypted_zip_member, is_unsafe_zip_member
 
 IMPORT_STAGING_DIR = os.path.join(tempfile.gettempdir(), 'elitea_chat_imports')
 STAGING_TTL_SECONDS = 3600
@@ -61,7 +62,6 @@ SUPPORTED_FORMAT_MAJOR = 1
 MAX_MESSAGES = 10000
 MAX_JSON_BYTES = 100 * 1024 * 1024
 MAX_ZIP_ENTRIES = 1000
-MAX_COMPRESSION_RATIO = 200
 DEFAULT_IMPORTED_NAME = 'Imported chat'
 CONVERSATION_NAME_MIN_LENGTH = 3
 
@@ -179,16 +179,6 @@ def parse_chat_export(data: dict) -> tuple[ChatExportEnvelope, list[ImportMessag
 
 # ---------- zip safety ----------
 
-def _is_unsafe_member(info: zipfile.ZipInfo) -> bool:
-    name = info.filename
-    if not name or name.startswith('/') or '\\' in name or '\x00' in name:
-        return True
-    if '..' in PurePosixPath(name).parts or ':' in name.split('/', 1)[0]:
-        return True
-    is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
-    return is_symlink
-
-
 def open_safe_zip(path: Path, max_total_bytes: int) -> tuple[zipfile.ZipFile, zipfile.ZipInfo]:
     """Open a decrypted archive after checking entry count, paths, sizes and compression ratio."""
     try:
@@ -201,12 +191,12 @@ def open_safe_zip(path: Path, max_total_bytes: int) -> tuple[zipfile.ZipFile, zi
             raise ChatImportError(f'Invalid file: the ZIP archive contains more than {MAX_ZIP_ENTRIES} files.')
         total = 0
         for info in infos:
-            if _is_unsafe_member(info):
+            if is_unsafe_zip_member(info):
                 raise ChatImportError(MSG_UNSAFE_ZIP)
-            if info.flag_bits & 0x1:
+            if is_encrypted_zip_member(info):
                 raise ChatImportError(MSG_BAD_ZIP)
             total += info.file_size
-            if info.file_size > 1024 * 1024 and info.file_size > max(info.compress_size, 1) * MAX_COMPRESSION_RATIO:
+            if is_compression_bomb(info):
                 raise ChatImportError(MSG_UNSAFE_ZIP)
         if total > max_total_bytes:
             raise ChatImportError(MSG_TOO_LARGE.format(max_total_bytes // (1024 * 1024)))
