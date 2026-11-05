@@ -48,6 +48,7 @@ def _chat_models(base):
         application_id = column(_sa.Integer)
         variables = column(_sa.JSON, default=list)
         name = column(_sa.String, default="v3")
+        tools = ()
 
     class Participant(base):
         locals().update(table("chat_participants"))
@@ -125,8 +126,8 @@ def world(monkeypatch):
     for name in ("db", "db_tools", "config"):
         monkeypatch.setitem(sys.modules, f"{models.__name__}.{name}", getattr(models, name))
     # Fresh loads of everything that holds a model or a session helper
-    for dotted in ("models.entity_schedule", "utils.schedule_claim", "utils.schedule_runs", "utils.schedule_prerun",
-                   "utils.pipeline_execution", "utils.schedule_run_starter"):
+    for dotted in ("models.entity_schedule", "utils.schedule_claim", "utils.schedule_timing", "utils.schedule_runs",
+                   "utils.schedule_prerun", "utils.pipeline_execution", "utils.schedule_run_starter"):
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", None)
 
     engine = _sa.create_engine("sqlite://", execution_options={"schema_translate_map": {"tenant": None}})
@@ -153,7 +154,9 @@ def world(monkeypatch):
             session, chat, entity_name, entity_meta)},
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace(chat_predict=types.SimpleNamespace(value="chat_predict"))},
         "utils.schedule_notifications": {"notify_schedule_event": lambda _p, owner_id, event, _s, run=None, extra=None:
-                                             notices.append((owner_id, event, run.reason))},
+                                             notices.append((owner_id, event, run.reason)),
+                                         "emit_schedule_run_finished": lambda *_args: None},
+        "utils.mandate_admission": {"prepare_schedule_run": lambda **_kwargs: {}},  # governance is off here
         "utils.budget_door": {"closed_budget_scope": lambda *_args: None},  # US-13 budget gate: always open here
         # The risk review (owner CR 2026-10-21) has its own tests; here it answers `blocking`, nothing else
         "utils.schedule_risk": {
@@ -167,7 +170,6 @@ def world(monkeypatch):
 
     schedules = load("models/entity_schedule.py", fresh=True)
     claim = load("utils/schedule_claim.py", fresh=True)
-    monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_timing", None)  # undone at teardown, so the module does not leak
     load("utils/schedule_timing.py", fresh=True)
     load("utils/schedule_runs.py", fresh=True)
     prerun = load("utils/schedule_prerun.py", fresh=True)
@@ -197,6 +199,7 @@ def world(monkeypatch):
             applications_predict_sio=predict, auth_check_user_in_project=auth.auth_check_user_in_project,
             auth_get_user=auth.auth_get_user)))
     monkeypatch.setattr(prerun, "check_owner_credentials", lambda _project, _schedule: None)
+    monkeypatch.setattr(prerun, "check_owner_rights", lambda *_args: None)  # the rights check has its own tests
 
     with _orm.Session(engine) as session:
         session.add_all([chat.Application(id=AGENT_ID, name="Daily report"),
@@ -303,14 +306,15 @@ def test_7011_r1_5_conversation_is_named_for_the_agent_and_holds_the_prompt_as_f
     assert world.first_message() == PROMPT
 
 
-# Owner CR 2026-10-21 (risk review): a blocking finding at run start ends the run as blocked with the reason
-def test_el7011_cr_blocking_finding_blocks_the_run_without_a_conversation(world):
-    world.blocking.append({"code": "personal_signin_required", "message": 'Toolkit "GitHub" needs a personal sign-in'})
+# A missing sign-in fails the run; a step that waits for a person blocks it. Both give the reason
+@pytest.mark.parametrize("code,status", [("personal_signin_required", "failed"), ("human_input_step", "blocked")])
+def test_a_blocking_finding_ends_the_run_without_a_conversation(world, code, status):
+    world.blocking.append({"code": code, "message": 'Toolkit "GitHub" needs a personal sign-in'})
 
     world.run()
 
     assert world.conversations() == [] and world.predictions == []
-    assert (world.run_row().status, world.run_row().reason) == ("blocked", 'Toolkit "GitHub" needs a personal sign-in')
+    assert (world.run_row().status, world.run_row().reason) == (status, 'Toolkit "GitHub" needs a personal sign-in')
 
 
 # TC-US11-02 / R1.3: a lost owner creates no conversation and starts no predict
