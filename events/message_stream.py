@@ -305,8 +305,6 @@ class Event:
                     error = metadata.get('error')
                     if not is_error and (answer_error := provider_error_answer(content)):
                         is_error, error = True, answer_error
-                        log.warning('chat_message_stream_end: schedule run %s answer is a provider error: %.300s',
-                                    run_id, content)
                     reason = None
                     if is_error:
                         # the run keeps one short sentence; the full error stays in the server log

@@ -196,6 +196,19 @@ def test_stream_end_with_a_provider_400_answer_and_no_flag_finishes_the_run_as_f
     assert finish in world.events, world.events
 
 
+@pytest.mark.parametrize(("content", "reason"), [
+    ("Error: LLM stream stalled: no data received for 120s. The model provider stopped responding; please retry.",
+     "The model provider stopped responding."),
+    ("Error: LLM stream interrupted: the connection closed before the response finished; please retry.",
+     "The connection to the model provider closed before the answer finished."),
+], ids=["stalled", "interrupted"])
+def test_stream_end_with_a_stalled_or_cut_stream_answer_and_no_flag_finishes_the_run_as_failed(make_world, content, reason):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({}, content=content)
+    finish = ("finish", PROJECT_ID, RUN_ID, "failed", f"short({reason})", CONVERSATION_ID, AUTHOR_ID)
+    assert finish in world.events, world.events
+
+
 def test_stream_end_keeps_the_worker_error_over_the_answer_text(make_world):
     world = make_world(dict(SCHEDULE_META))
     world.end({"is_error": True, "error": "the model failed"}, content=PROVIDER_400)

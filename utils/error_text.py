@@ -24,15 +24,23 @@ _TECHNICAL = re.compile(r'\b[A-Z]\w*(?:Error|Exception)\b|Traceback|validation e
 _MARKUP = re.compile(r'[\[\]<>`]+')
 
 
-# The SDK returns a refused model call as the answer text ("Error: Error code: 400 - {...}") and the
-# error flag may be missing (older SDK or worker), so the text is the second signal of a failed run
-_PROVIDER_ERROR_ANSWER = re.compile(r'\AError: Error code: ([45]\d\d)\b')
+# The SDK returns a failed model call as the answer text ("Error: Error code: 400 - {...}", "Error: LLM stream
+# stalled ...") and the error flag may be missing (older SDK or worker), so the text is the second signal of a failed run
+_PROVIDER_ERROR_ANSWER = re.compile(r'\AError: (?:Error code: ([45]\d\d)\b|LLM stream (stalled|interrupted)\b)')
+_STREAM_FAILURE_REASONS = {
+    'stalled': 'The model provider stopped responding.',
+    'interrupted': 'The connection to the model provider closed before the answer finished.',
+}
 
 
 def provider_error_answer(content):
-    """One short sentence when the whole answer is a model provider HTTP error; None for any other answer."""
+    """One short sentence when the whole answer is a failed model call (HTTP error, stalled or cut stream); None for any other answer."""
     match = _PROVIDER_ERROR_ANSWER.match(content.lstrip()) if isinstance(content, str) else None
-    return f'The model provider rejected the request (HTTP {match.group(1)}).' if match else None
+    if not match:
+        return None
+    if match.group(1):
+        return f'The model provider rejected the request (HTTP {match.group(1)}).'
+    return _STREAM_FAILURE_REASONS[match.group(2)]
 
 
 def is_technical(text) -> bool:
