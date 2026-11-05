@@ -9,6 +9,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import insert, select
 
 # Shared fixtures of the US-09 and US-13 writer tests: pytest injects them by name
 from unit.utils.test_7011_schedule_runs_fail import _run, _schedule, runs, session  # noqa: F401
@@ -270,3 +271,159 @@ def test_el_7011_r2_4_a_reject_of_a_finished_run_gets_not_waiting(runs, session,
 def test_el_7011_r2_4_an_unknown_run_gets_not_waiting(runs, session, sent):
     with pytest.raises(runs.ScheduleRunNotWaiting):
         runs.check_schedule_decision(1, 999, OWNER, ["approve"])
+
+
+SENSITIVE = {"hitl_interrupt": {"type": "hitl", "guardrail_type": "sensitive_tool"}}
+
+
+def _waiting_run(runs, session, trigger="cron", requested_by=None):
+    """A run of OWNER's schedule that waits for approval; a manual run was started by `requested_by`."""
+    schedule = _schedule(runs, session, created_by=OWNER)
+    run = _run(runs, session, schedule, status="waiting_for_approval")
+    run.trigger, run.requested_by, run.conversation_id = trigger, requested_by, 55
+    run.approval_expires_at = datetime.now(UTC) + timedelta(hours=24)
+    session.flush()
+    return schedule, run
+
+
+@pytest.mark.parametrize("action", ["edit", "answer", "block_with_comment"])
+def test_an_admin_cannot_edit_answer_or_note_a_run_that_acts_as_the_owner(runs, session, sent, action):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session)
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, ADMIN, [action])
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, ADMIN, ["approve", action])
+
+
+@pytest.mark.parametrize("action", ["approve", "edit", "answer", "block_with_comment", "reject"])
+def test_the_owner_cannot_decide_a_run_that_acts_as_an_admin(runs, session, sent, action):
+    _, run = _waiting_run(runs, session, "manual", ADMIN)
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, OWNER, [action])
+
+
+def test_the_user_a_run_acts_as_may_edit_it(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session, "manual", ADMIN)
+
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["edit"]) == "approve"
+
+
+def test_an_admin_who_lost_the_admin_permission_still_decides_their_own_run(runs, session, sent):
+    _, run = _waiting_run(runs, session, "manual", ADMIN)
+
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"]) == "approve"
+
+
+def test_a_sign_in_answer_of_an_admin_maps_to_approve_and_reject(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["authorize"], sign_in=True) == "approve"
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["skip"], sign_in=True) == "reject"
+
+
+def test_an_unknown_action_of_an_admin_is_invalid_not_forbidden(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session)
+
+    with pytest.raises(runs.ScheduleDecisionInvalid):
+        runs.check_schedule_decision(1, run.id, ADMIN, ["maybe"])
+
+
+def test_an_admin_approve_is_refused_when_the_user_the_run_acts_as_lost_access(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    runs.lost_access.add(OWNER)
+    _, run = _waiting_run(runs, session)
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], recheck_actor=True)
+
+    session.refresh(run)
+    assert run.status == "waiting_for_approval"
+
+
+def test_an_admin_approve_is_refused_when_the_rights_check_of_the_actor_cannot_answer(runs, session, sent, monkeypatch):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session)
+    monkeypatch.setattr(sys.modules["plugins.elitea_core.utils.schedule_prerun"], "check_owner_rights",
+                        lambda *args, **kwargs: "access check unavailable")
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], recheck_actor=True)
+
+
+def test_an_admin_reject_needs_no_rights_of_the_user_the_run_acts_as(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    runs.lost_access.add(OWNER)
+    _, run = _waiting_run(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["reject"], recheck_actor=True) == "reject"
+
+
+def test_the_recheck_asks_for_the_agent_of_the_schedule(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], recheck_actor=True) == "approve"
+    assert (OWNER, "agent", 1, ("run",)) in runs.rights_calls
+
+
+def test_the_recheck_asks_for_the_agent_of_a_test_run(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    session.execute(insert(runs.EntityScheduleRun.__table__).values(
+        trigger="test", status="waiting_for_approval", requested_by=OWNER, conversation_id=55,
+        form={"entity_type": "pipeline"}, application_id=1))
+    run_id = session.scalar(select(runs.EntityScheduleRun.id).where(runs.EntityScheduleRun.trigger == "test"))
+
+    assert runs.check_schedule_decision(1, run_id, ADMIN, ["approve"], recheck_actor=True) == "approve"
+    assert (OWNER, "pipeline", 1, ("run",)) in runs.rights_calls
+
+
+def test_the_user_a_run_acts_as_is_not_rechecked_for_their_own_decision(runs, session, sent):
+    runs.lost_access.add(OWNER)
+    _, run = _waiting_run(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"], recheck_actor=True) == "approve"
+    assert runs.rights_calls == []
+
+
+def test_the_recheck_is_off_unless_asked_for(runs, session, sent):
+    runs.permission_holders.add(ADMIN)
+    runs.lost_access.add(OWNER)
+    _, run = _waiting_run(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"]) == "approve"
+
+
+@pytest.mark.parametrize("trigger, requested_by, recipient", [
+    ("manual", ADMIN, ADMIN),   # Run now by an admin acts as the admin, who answers the card
+    ("cron", None, OWNER),
+    ("manual", OWNER, OWNER),
+])
+def test_the_approval_notice_goes_to_the_user_the_run_acts_as(runs, session, sent, trigger, requested_by, recipient):
+    schedule = _schedule(runs, session, created_by=OWNER)
+    run = _run(runs, session, schedule)
+    run.trigger, run.requested_by, run.conversation_id = trigger, requested_by, 55
+    session.flush()
+
+    runs.pause_schedule_run(1, run.id, SENSITIVE)
+
+    assert sent.notices == [(recipient, "schedule_approval_needed", run.id)]
+
+
+@pytest.mark.parametrize("trigger, requested_by, recipient", [("manual", ADMIN, ADMIN), ("cron", None, OWNER)])
+def test_the_end_notice_and_the_chat_event_go_to_the_user_the_run_acts_as(
+        runs, session, sent, trigger, requested_by, recipient):
+    schedule = _schedule(runs, session, created_by=OWNER)
+    run = _run(runs, session, schedule)
+    run.trigger, run.requested_by = trigger, requested_by
+    session.flush()
+
+    runs.finish_schedule_run(1, run.id, "failed", "Tool failed", conversation_id=55)
+
+    assert sent.notices == [(recipient, "schedule_run_failed", run.id)]
+    assert [(user, run_id) for user, run_id, *_ in sent.emitted] == [(recipient, run.id)]

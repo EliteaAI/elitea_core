@@ -134,17 +134,21 @@ def _setting_allows_auto_approve(project_id: int) -> bool:
 # identity service once. A display name only; nothing is decided on it
 OWNER_LABEL_TTL_S = 60.0
 MAX_OWNER_LABELS = 1024
-_OWNER_LABELS = {}   # owner id -> (label, monotonic until)
+_OWNER_LABELS = {}   # user id -> (name, monotonic until)
 _OWNER_LABELS_LOCK = threading.Lock()
 
 
-def _owner_label(owner_id: int) -> str:
-    """The account the run uses: its owner by name, else email, else id."""
+def _owner_label(owner_id: int, role: str = 'schedule owner') -> str:
+    """The account the run uses: by name, else email, else id, with its `role`.
+
+    Only the name is kept per user; the role comes from the run, as one user is the owner of one schedule and an
+    admin on another.
+    """
     now = time.monotonic()
     with _OWNER_LABELS_LOCK:
         kept = _OWNER_LABELS.get(owner_id)
         if kept is not None and kept[1] > now:
-            return kept[0]
+            return f'{kept[0]} ({role})'
     try:
         # Late: only the run log needs the auth lookup
         from .authors import get_authors_data
@@ -152,13 +156,13 @@ def _owner_label(owner_id: int) -> str:
     except Exception as e:  # noqa: BLE001 -- a name must never stop a run
         log.warning('Schedule run owner %s: name lookup failed: %s', owner_id, e)
         user = None
-    label = f"{(user or {}).get('name') or (user or {}).get('email') or f'user {owner_id}'} (schedule owner)"
+    name = (user or {}).get('name') or (user or {}).get('email') or f'user {owner_id}'
     if user is not None:   # a failed lookup is asked again by the next run
         with _OWNER_LABELS_LOCK:
             if len(_OWNER_LABELS) >= MAX_OWNER_LABELS:
                 _OWNER_LABELS.clear()
-            _OWNER_LABELS[owner_id] = (label, now + OWNER_LABEL_TTL_S)
-    return label
+            _OWNER_LABELS[owner_id] = (name, now + OWNER_LABEL_TTL_S)
+    return f'{name} ({role})'
 
 
 def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
@@ -255,7 +259,9 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return
-    label = _owner_label(check.owner_id)
+    # A run an admin started acts as the admin: the log names that account as the admin, not as the owner
+    role = 'admin' if getattr(loaded.schedule, 'run_as_caller', False) else 'schedule owner'
+    label = _owner_label(check.owner_id, role)
     record_run_events(project_id, run_id, run_event('account', f'Account: {label}'), principal_label=label)
     scope = closed_budget_scope(project_id, check.owner_id)  # fails open (R2.2)
     if scope:

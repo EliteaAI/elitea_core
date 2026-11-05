@@ -618,7 +618,7 @@ class ScheduleItemHandlers:
         """Start a run now (`manual`) or a test run (`test`) of a schedule.
 
         Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`. The run acts as the caller.
-        Errors: 400 invalid trigger; 403 neither the owner nor a schedules admin; 404; 409 deleted version or an active run
+        Errors: 400 invalid trigger; 403; 404 not found, or a schedule outside the caller's scope; 409 deleted version or an active run
         (the body has `active_run_id`); 500 the run could not start.
         """
         body, error = _parse_body(ScheduleRunRequest)
@@ -643,9 +643,13 @@ class ScheduleItemHandlers:
             except Exception:  # noqa: BLE001 -- nothing is stored yet; the caller can try again
                 log.exception('Schedule %s: cannot build the owner run request', schedule_id)
                 return refusal("run_start_failed", "The run could not start", 500)
-            return _start_run(
+            owner_id = row.created_by
+            started = _start_run(
                 session, project_id, schedule_id, entity_type, row.application_id, body.trigger, scope.user_id,
                 owner_request)
+            if started[1] == 202 and owner_id != scope.user_id:  # the run acts as the admin: tell the owner
+                notify_owner(project_id, owner_id, row, action='started a run of')
+            return started
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _test_run(self, project_id: int):
@@ -709,7 +713,8 @@ class ScheduleItemHandlers:
         Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
         Otherwise approve starts the run again. A run with a chat is decided in that chat.
         Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`.
-        Errors: 400 invalid action; 403 neither the owner nor a schedules admin; 404; 409 the run is not waiting, has a chat, or a credential is still missing.
+        Errors: 400 invalid action; 403; 404 not found, or a schedule outside the caller's scope; 409 the run is not waiting,
+        has a chat, or a credential is still missing.
         """
         body, error = _parse_body(ScheduleRunDecision)
         if error:

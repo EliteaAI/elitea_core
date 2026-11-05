@@ -124,6 +124,28 @@ def test_a_schedules_admin_who_is_not_the_owner_runs_the_schedule_as_themselves(
     assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'], None)]
 
 
+def test_the_owner_is_told_when_a_schedules_admin_starts_a_run_of_their_schedule(harness, started):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    assert run(harness, schedule_id)[1] == 202
+    assert harness.notices == [(OTHER_ID, 'schedule_edited_by_admin', schedule_id)]
+    assert harness.notice_extras == [{'action': 'started a run of'}]
+
+
+def test_the_owner_gets_no_start_notice_for_their_own_run(harness, started):
+    schedule_id = harness.seed()
+    assert run(harness, schedule_id)[1] == 202
+    assert harness.notices == []
+
+
+def test_no_start_notice_goes_out_when_the_admin_run_does_not_start(harness):
+    harness.module.start_schedule_run = lambda *args: False
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    assert run(harness, schedule_id)[1] == 500
+    assert harness.notices == []
+
+
 def test_a_user_with_run_but_without_schedules_admin_cannot_run_another_owners_schedule(harness, started):
     schedule_id = harness.seed(created_by=OTHER_ID)
     harness.request_as(ADMIN_ID, EDITOR)

@@ -234,3 +234,30 @@ def test_a_test_run_with_no_schedule_only_fails_its_run_when_the_owner_lost_acce
 
     assert (result.ok, result.reason) == (False, "owner lost access")
     assert recorder.effects() == ["principal", "access", "fail"]
+
+
+@pytest.mark.parametrize("answers, expected", [
+    ({"access": "owner lost access"}, ["principal", "access", "fail"]),
+    ({"rights": "owner lost access"}, ["principal", "access", "rights", "fail"]),
+    ({"rights": "access check unavailable"}, ["principal", "access", "rights", "fail"]),
+])
+def test_a_failed_check_of_an_admin_run_fails_the_run_but_keeps_the_schedule_and_tells_nobody(apply, answers, expected):
+    recorder = Recorder(**answers)
+    schedule = SimpleNamespace(id=5, created_by=OWNER + 1, run_as_caller=True, entity_type="agent",
+                               application_id=3, version_id=4)
+
+    result = apply(recorder, schedule)
+
+    assert (result.ok, result.owner_id) == (False, None)
+    assert recorder.effects() == expected  # no disable, no notice
+    assert recorder.calls[-1][:3] == ("fail", 34, RUN_ID)
+
+
+def test_the_same_failure_of_an_owner_run_still_disables_the_schedule_and_tells_the_owner(apply):
+    recorder = Recorder(access="owner lost access")
+    schedule = SimpleNamespace(id=5, created_by=OWNER, run_as_caller=False, entity_type="agent",
+                               application_id=3, version_id=4)
+
+    apply(recorder, schedule)
+
+    assert recorder.effects() == ["principal", "access", "fail", "disable", "notify"]

@@ -22,6 +22,7 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER, CONVERSATION_ID = 7, 9, 12, 55
 HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision'}
+ACTOR = 31  # the user a schedule run acts as, when it is not the caller
 
 
 class Forbidden(Exception):
@@ -41,10 +42,10 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
     calls = []
 
     def check_schedule_decision(project_id, run_id, caller_id, actions, fan_out=False, sign_in=False, is_admin=None,
-                                conversation_id=None):
+                                conversation_id=None, recheck_actor=False):
         calls.append(('check', project_id, run_id, caller_id, actions,
                       {'fan_out': fan_out, 'sign_in': sign_in, 'is_admin': is_admin,
-                       'conversation_id': conversation_id}))
+                       'conversation_id': conversation_id, 'recheck_actor': recheck_actor}))
         if error:
             raise error
         return decision
@@ -93,7 +94,8 @@ def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decisio
     pending, denied = check(_parsed(), OWNER)
     assert (pending, denied) == ((RUN_ID, 'approve', OWNER), None)
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False, 'is_admin': None,
-                                                                  'conversation_id': CONVERSATION_ID})]
+                                                                  'conversation_id': CONVERSATION_ID,
+                                                                  'recheck_actor': True})]
 
     assert apply(PROJECT_ID, pending) is None
     assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve', OWNER)
@@ -120,8 +122,9 @@ def test_el_7011_r2_4_a_fan_out_child_on_a_resumed_run_has_nothing_to_apply():
 
     pending, denied = check(_parsed(thread_id='child-1'), OWNER)
 
-    assert (pending, denied) == (None, None)
-    assert calls[0][-1] == {'fan_out': True, 'sign_in': False, 'is_admin': None, 'conversation_id': CONVERSATION_ID}
+    assert (pending, denied) == ((RUN_ID, None, OWNER), None)  # the rights check passed: a child card may be answered
+    assert calls[0][-1] == {'fan_out': True, 'sign_in': False, 'is_admin': None, 'conversation_id': CONVERSATION_ID,
+                            'recheck_actor': True}
     assert apply(PROJECT_ID, pending) is None
     assert [call[0] for call in calls] == ['check']
 
@@ -177,14 +180,54 @@ def test_el_7011_r2_3_the_check_runs_before_any_resume_return():
     assert check_index < body.index('self._continue_child_resume(')
 
 
-def test_a_decided_run_resumes_as_the_user_it_acts_as_not_as_the_deciding_admin():
+def _resume_user_id(actors):
+    """The real `_resume_user_id` cut out of rpc/chat_all.py; `actors` maps a run id to the user it acts as."""
+    nodes = [node for node in ast.parse(CHAT_ALL).body if getattr(node, 'name', None) == '_resume_user_id']
+    namespace = load_cut(nodes, {'schedule_run_actor_id': lambda project_id, run_id: actors.get(run_id)}, 'chat_all.py')
+    return namespace['_resume_user_id']
+
+
+@pytest.mark.parametrize('pending, caller, expected', [
+    ((RUN_ID, 'approve', 1), 1, ACTOR),           # an admin decides: the run goes on as the user it acts as
+    ((RUN_ID, 'approve', OWNER), OWNER, ACTOR),   # the user it acts as is the one stored, whoever the caller is
+    ((RUN_ID, None, 1), 1, ACTOR),                # a later fan-out child of an already resumed pause
+    ((RUN_ID + 1, 'approve', 1), 1, 1),           # the run is gone: the caller stays
+    (None, OWNER, OWNER),                         # no schedule run in this chat
+])
+def test_a_decided_run_resumes_as_the_user_it_acts_as_not_as_the_deciding_admin(pending, caller, expected):
+    assert _resume_user_id({RUN_ID: ACTOR})(PROJECT_ID, pending, caller) == expected
+
+
+def _chat_helper(name):
+    nodes = [node for node in ast.parse(CHAT_ALL).body if getattr(node, 'name', None) == name]
+    return load_cut(nodes, {}, 'chat_all.py')[name]
+
+
+@pytest.mark.parametrize('author, user, participant, decided, allowed', [
+    (OWNER, OWNER, False, False, True),    # the author
+    (OWNER, 1, True, False, True),         # a participant
+    (OWNER, 1, False, True, True),         # a schedules admin whose decision check passed
+    (OWNER, 1, False, False, False),       # a stranger
+    (OWNER, 1, None, False, False),        # no conversation row was read
+])
+def test_a_child_card_is_answered_by_the_author_a_participant_or_a_decided_caller(
+        author, user, participant, decided, allowed):
+    assert _chat_helper('_may_answer_child_card')(author, user, participant, decided) is allowed
+
+
+def test_the_child_card_check_gets_the_decision_of_the_caller():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    assert 'self._continue_child_resume(sid, parsed, current_user, decided=schedule_decision is not None)' in body
+
+
+def test_the_resume_user_of_the_helper_reaches_the_chat_entity_and_the_predict_call():
+    # A wiring pin: the helper above is tested on its values; the method needs the whole chat stack to run
     body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
     body = body[:body.index('\n    def ', 1)]
 
-    assert body.index('schedule_run_actor_id(parsed.project_id, schedule_decision[0])') < body.index(
-        'ParticipantEntityUser(id=resume_user_id)')
-    assert 'ParticipantEntityUser(id=current_user' not in body
-    assert 'user_id=resume_user_id' in body and "user_id=current_user['id']" not in body
+    assert "resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])" in body
+    assert 'ParticipantEntityUser(id=resume_user_id)' in body and 'user_id=resume_user_id' in body
+    assert 'ParticipantEntityUser(id=current_user' not in body and "user_id=current_user['id']" not in body
 
 
 def test_el_7011_r2_1_a_refused_later_guard_leaves_the_run_waiting():
@@ -271,7 +314,8 @@ def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
 
     assert (pending, denied) == ((RUN_ID, 'approve', OWNER), None)
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True, 'is_admin': None,
-                                                                       'conversation_id': CONVERSATION_ID})]
+                                                                       'conversation_id': CONVERSATION_ID,
+                                                                       'recheck_actor': True})]
 
 
 def test_one_skip_among_the_sign_in_answers_rejects_the_run():

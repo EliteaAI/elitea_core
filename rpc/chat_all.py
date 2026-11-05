@@ -150,7 +150,9 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
     The (run id, decision, caller id) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
-    The caller is the owner or a holder of `schedules.admin`; the run must be linked to this conversation.
+    The decision is None for a fan-out child of a pause that an earlier child already resumed: nothing to write, but
+    the rights check passed. The caller is the user the run acts as or a holder of `schedules.admin`; the run must be
+    linked to this conversation. An admin's approve also re-checks the rights of the user the run acts as.
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
@@ -176,17 +178,36 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     try:  # the run id in the meta is client-written: the run must be linked to this chat
         decision = check_schedule_decision(
             parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
-            conversation_id=conversation_id)
+            conversation_id=conversation_id, recheck_actor=True)
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    return ((run_id, decision, caller_id) if decision else None), None
+    return (run_id, decision, caller_id), None
+
+
+def _resume_user_id(project_id, pending, caller_id) -> int:
+    """The user a chat resume runs as: the user a decided schedule run acts as, else the caller.
+
+    An admin decides, but the tools run with the identity and credentials of the user the run started as.
+    """
+    if pending is None:
+        return caller_id
+    return schedule_run_actor_id(project_id, pending[0]) or caller_id
+
+
+def _may_answer_child_card(author_id, user_id, is_participant, decided) -> bool:
+    """True for the chat author, a participant, or a caller whose schedule decision check passed for this chat.
+
+    A schedules admin is neither author nor participant of the owner's schedule chat; the decision check already
+    proved the run is linked to this chat and the admin may decide it.
+    """
+    return author_id == user_id or bool(is_participant) or bool(decided)
 
 
 def _apply_schedule_decision(project_id, pending) -> dict | None:
     """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
-    if pending is None:
+    if pending is None or pending[1] is None:
         return None
     try:
         apply_schedule_decision(project_id, *pending)
@@ -2150,9 +2171,7 @@ class RPC:
             if denied:
                 return self._refuse_schedule_decision(sid, parsed, denied)
         # An admin decides, but the run resumes as the user it started as; the run log keeps who decided
-        resume_user_id = current_user['id']
-        if schedule_decision is not None:
-            resume_user_id = schedule_run_actor_id(parsed.project_id, schedule_decision[0]) or resume_user_id
+        resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
@@ -2204,7 +2223,7 @@ class RPC:
         # the approval belongs to the child's own agent identity + checkpoint.
         # The child resumes on its own thread; on completion it fires `stopped`
         # and the reconcile gate wakes the parent.
-        child_resume = self._continue_child_resume(sid, parsed, current_user)
+        child_resume = self._continue_child_resume(sid, parsed, current_user, decided=schedule_decision is not None)
         if child_resume is not None:
             # lean: the write follows the child start, so a decision that came too late is only logged;
             # move it into _continue_child_resume when a schedule run must refuse a parked child
@@ -2756,7 +2775,7 @@ class RPC:
         return denied
 
     @web.method()
-    def _continue_child_resume(self, sid, parsed, current_user):
+    def _continue_child_resume(self, sid, parsed, current_user, decided=False):
         """Resume a parked-fan-out child on its own thread, or None if N/A.
 
         A parallel sub-agent child pauses for HITL on its OWN thread_id and emits
@@ -2766,6 +2785,9 @@ class RPC:
         linkage meta so the child's eventual completion wakes the parent gate.
         Returns the start_task result dict, or None when thread_id is not a known
         child (caller then falls through to the normal parent continue flow).
+
+        `decided`: the schedule decision check passed for this caller (the run is linked to this chat), so a
+        schedules admin who is neither the author nor a participant may answer the card.
         """
         thread_id = getattr(parsed, 'thread_id', None)
         if not thread_id:
@@ -2810,10 +2832,7 @@ class RPC:
                 not conversation
                 or not response_msg
                 or response_msg.conversation_id != conversation.id
-                or (
-                    conversation.author_id != current_user['id']
-                    and not user_is_participant
-                )
+                or not _may_answer_child_card(conversation.author_id, current_user['id'], user_is_participant, decided)
             ):
                 raise SioValidationError(
                     sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
