@@ -21,6 +21,7 @@ class Unavailable(LookupError):
 @pytest.fixture
 def entra(monkeypatch, proxy):  # noqa: F811
     calls = []
+    state = types.SimpleNamespace(proxy=proxy, calls=calls, auto_refresh=True)
 
     def resolve_app_client(app_id, project_id, credential_type):
         calls.append((app_id, project_id, credential_type))
@@ -29,10 +30,10 @@ def entra(monkeypatch, proxy):  # noqa: F811
         if app_id != 'app-1':
             raise Unavailable('The Microsoft Entra ID app selected for this credential no longer exists')
         return {'client_id': 'admin-client', 'client_secret': 'admin-secret', 'token_endpoint': TOKEN_ENDPOINT,
-                'scopes': ['Chat.Read']}
+                'scopes': ['Chat.Read'], 'auto_refresh_token': state.auto_refresh}
 
     _module(monkeypatch, f'{ROOT}.configurations.oauth_apps', resolve_app_client=resolve_app_client)
-    return types.SimpleNamespace(proxy=proxy, calls=calls)
+    return state
 
 
 def _exchange(proxy, **body):
@@ -95,3 +96,11 @@ def test_default_app_sign_in_works_with_mcp_exposure_off(entra, monkeypatch):
     entra.proxy.posted.clear()
     _, status = _exchange(entra.proxy, token_endpoint=TOKEN_ENDPOINT)  # a non-app (MCP) exchange
     assert status == 403 and entra.proxy.posted == []
+
+
+def test_offline_access_follows_the_app_auto_refresh(entra):
+    """#7415: Auto refresh token off on the admin app -> no offline_access, so no refresh token."""
+    entra.auto_refresh = False
+    _exchange(entra.proxy, token_endpoint=TOKEN_ENDPOINT, oauth_app_id='app-1')
+    assert entra.proxy.posted[0][1]['scope'] == 'Chat.Read'
+
