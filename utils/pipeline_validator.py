@@ -282,6 +282,66 @@ def fix_deprecated_end_node(yaml_str: str) -> str:
     return safe_dump(data, allow_unicode=True, sort_keys=False)
 
 
+# Node types that bind to toolkit/mcp attachments via `toolkit_name`
+_TOOLKIT_BINDING_TYPES = frozenset({"toolkit", "mcp"})
+# Node types that bind to agent/pipeline attachments via `tool`
+_APP_BINDING_TYPES = frozenset({"agent", "pipeline"})
+
+
+def fix_missing_node_bindings(yaml_str: str) -> str:
+    """Inject missing binding fields on AI-generated pipeline nodes.
+
+    The LLM sets ``name:`` on every node but omits the binding fields that the
+    runtime uses to associate a node with its tool attachment:
+
+    - ``toolkit`` / ``mcp`` nodes need ``toolkit_name``
+    - ``agent`` / ``pipeline`` nodes need ``tool``
+
+    When these fields are absent the node can never be matched to an attachment
+    and the tool effectively does not run.  This function copies ``name`` into the
+    appropriate binding field for any node that is missing it.
+
+    If parsing fails or no fixable nodes exist the original string is returned
+    unchanged.
+    """
+    try:
+        data = safe_load(yaml_str)
+    except YAMLError:
+        return yaml_str
+
+    if not isinstance(data, dict):
+        return yaml_str
+
+    nodes_raw = data.get("nodes")
+    if not isinstance(nodes_raw, list):
+        return yaml_str
+
+    changed = False
+    for node in nodes_raw:
+        if not isinstance(node, dict):
+            continue
+
+        ntype = node.get("type")
+        if not isinstance(ntype, str):
+            continue
+        ntype_lower = ntype.strip().lower()
+        name = node.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+
+        if ntype_lower in _TOOLKIT_BINDING_TYPES and not node.get("toolkit_name"):
+            node["toolkit_name"] = name
+            changed = True
+        elif ntype_lower in _APP_BINDING_TYPES and not node.get("tool"):
+            node["tool"] = name
+            changed = True
+
+    if not changed:
+        return yaml_str
+
+    return safe_dump(data, allow_unicode=True, sort_keys=False)
+
+
 def validate_pipeline_yaml(
     yaml_str: str,
     *,

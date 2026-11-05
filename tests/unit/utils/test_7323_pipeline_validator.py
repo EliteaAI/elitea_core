@@ -13,7 +13,7 @@ import pytest
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from utils.pipeline_validator import fix_deprecated_end_node, validate_pipeline_yaml
+from utils.pipeline_validator import fix_deprecated_end_node, fix_missing_node_bindings, validate_pipeline_yaml
 
 
 # ---------------------------------------------------------------------------
@@ -638,3 +638,171 @@ entry_point: broken
         result = validate_pipeline_yaml(yaml_str)
         codes = [e.code for e in result.errors]
         assert "missing_node_type" in codes
+
+
+# ---------------------------------------------------------------------------
+# fix_missing_node_bindings
+# ---------------------------------------------------------------------------
+
+class TestFixMissingNodeBindings:
+    def test_toolkit_node_gets_toolkit_name_from_name(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: toolkit
+    name: GithubAgent
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        node = data["nodes"][0]
+        assert node["toolkit_name"] == "GithubAgent"
+
+    def test_mcp_node_gets_toolkit_name_from_name(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: mcp
+    name: Github
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        node = data["nodes"][0]
+        assert node["toolkit_name"] == "Github"
+
+    def test_agent_node_gets_tool_from_name(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: agent
+    name: AutoTest Assistant
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        node = data["nodes"][0]
+        assert node["tool"] == "AutoTest Assistant"
+
+    def test_pipeline_node_gets_tool_from_name(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: pipeline
+    name: MyPipeline
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        node = data["nodes"][0]
+        assert node["tool"] == "MyPipeline"
+
+    def test_existing_toolkit_name_not_overwritten(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: toolkit
+    name: Display Name
+    toolkit_name: real_binding
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        node = data["nodes"][0]
+        assert node["toolkit_name"] == "real_binding"
+
+    def test_existing_tool_not_overwritten(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: agent
+    name: Display Name
+    tool: real_binding
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        node = data["nodes"][0]
+        assert node["tool"] == "real_binding"
+
+    def test_llm_node_unchanged(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: llm
+    name: some_name
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        orig_data = yaml.safe_load(yaml_str)
+        result = fix_missing_node_bindings(yaml_str)
+        result_data = yaml.safe_load(result)
+        assert result_data == orig_data
+
+    def test_mixed_pipeline_all_bindings_set(self):
+        yaml_str = """
+nodes:
+  - id: get_data
+    type: mcp
+    name: Github
+    transition: review
+  - id: review
+    type: agent
+    name: AutoTest Assistant
+    transition: enrich
+  - id: enrich
+    type: toolkit
+    name: GithubAgent
+    transition: END
+entry_point: get_data
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        data = yaml.safe_load(result)
+        nodes = {n["id"]: n for n in data["nodes"]}
+        assert nodes["get_data"]["toolkit_name"] == "Github"
+        assert nodes["review"]["tool"] == "AutoTest Assistant"
+        assert nodes["enrich"]["toolkit_name"] == "GithubAgent"
+
+    def test_node_without_name_not_modified(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: toolkit
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        orig_data = yaml.safe_load(yaml_str)
+        result = fix_missing_node_bindings(yaml_str)
+        result_data = yaml.safe_load(result)
+        assert result_data == orig_data
+
+    def test_invalid_yaml_returns_original(self):
+        bad = "nodes: [{\n  bad:"
+        assert fix_missing_node_bindings(bad) == bad
+
+    def test_no_fixable_nodes_returns_equivalent(self):
+        yaml_str = """
+nodes:
+  - id: step1
+    type: llm
+    transition: END
+entry_point: step1
+"""
+        import yaml
+        result = fix_missing_node_bindings(yaml_str)
+        assert yaml.safe_load(result) == yaml.safe_load(yaml_str)

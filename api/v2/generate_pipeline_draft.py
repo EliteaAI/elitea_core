@@ -52,7 +52,7 @@ from ...utils.pipeline_prompt_utils import (
     build_pipeline_system_prompt,
     build_edit_pipeline_system_prompt,
 )
-from ...utils.pipeline_validator import fix_deprecated_end_node, validate_pipeline_yaml
+from ...utils.pipeline_validator import fix_deprecated_end_node, fix_missing_node_bindings, validate_pipeline_yaml
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.utils import extract_json_from_text
 
@@ -277,6 +277,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         # Auto-fix the deprecated type: END / end_node pattern before validation
         pipeline_yaml = fix_deprecated_end_node(pipeline_yaml)
+        # Inject missing toolkit_name / tool binding fields on AI-generated nodes
+        pipeline_yaml = fix_missing_node_bindings(pipeline_yaml)
         parsed["pipeline_yaml"] = pipeline_yaml
 
         validation_result = validate_pipeline_yaml(pipeline_yaml, project_id=project_id)
