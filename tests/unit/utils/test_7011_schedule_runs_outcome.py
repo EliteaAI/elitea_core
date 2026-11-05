@@ -350,11 +350,19 @@ def test_the_worker_sentence_goes_from_the_end_event_to_the_stored_run(runs, ses
 @pytest.mark.parametrize(("answer", "status"), [
     ("Error: Error code: 400 - {'error': {'message': 'bad'}}", 400),
     ("  Error: Error code: 429 - rate limited", 429),
-    ("Error: Error code: 503", 503),
 ])
-def test_provider_error_answer_names_the_http_status(answer, status):
+def test_provider_error_answer_names_the_rejected_request(answer, status):
     from plugins.elitea_core.utils.error_text import provider_error_answer
     assert provider_error_answer(answer) == f"The model provider rejected the request (HTTP {status})."
+
+
+@pytest.mark.parametrize(("answer", "status"), [
+    ("Error: Error code: 503", 503),
+    ("Error: Error code: 500 - {'error': {}}", 500),
+])
+def test_provider_error_answer_names_a_provider_server_error(answer, status):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == f"The model provider failed to answer (HTTP {status})."
 
 
 @pytest.mark.parametrize(("answer", "reason"), [

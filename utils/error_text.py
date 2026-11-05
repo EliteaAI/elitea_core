@@ -38,8 +38,11 @@ def provider_error_answer(content):
     match = _PROVIDER_ERROR_ANSWER.match(content.lstrip()) if isinstance(content, str) else None
     if not match:
         return None
-    if match.group(1):
-        return f'The model provider rejected the request (HTTP {match.group(1)}).'
+    status = match.group(1)
+    if status:
+        if status.startswith('5'):
+            return f'The model provider failed to answer (HTTP {status}).'
+        return f'The model provider rejected the request (HTTP {status}).'
     return _STREAM_FAILURE_REASONS[match.group(2)]
 
 
