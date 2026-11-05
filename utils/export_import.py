@@ -43,7 +43,6 @@ def _export_compound_application_tools(
     forked: bool = False,
     data_done: dict = None,
     follow_version_ids: set = None,
-    with_file_bytes: bool = True,
 ):
     tool_ids = defaultdict(set)
     toolkit_ref_app_version_ids = set()
@@ -83,7 +82,6 @@ def _export_compound_application_tools(
                            forked=forked,
                            data_done=data_done,
                            follow_version_ids=child_follow_version_ids,
-                           with_file_bytes=with_file_bytes,
                        )
 
         if not tools_result['ok']:
@@ -160,8 +158,7 @@ def _attach_toolkits(version: dict, published_toolkits: list, toolkits: list) ->
     version['tools'] = version_tools
 
 
-def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None,
-                             with_file_bytes: bool = True):
+def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None):
     with db.get_session(project_id) as session:
         applications = session.query(
             Application
@@ -246,7 +243,6 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             applications_serialized=applications_serialized,
             result=result,
             forked=forked,
-            with_file_bytes=with_file_bytes,
         )
     except SkillVersionExportUnavailableError:
         raise
@@ -271,7 +267,6 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             forked=forked,
             data_done=data_done,
             follow_version_ids=follow_version_ids,
-            with_file_bytes=with_file_bytes,
         )
     except SkillVersionExportUnavailableError:
         raise
@@ -287,13 +282,12 @@ def _export_skills_main(
     applications_serialized: list,
     result: list,
     forked: bool = False,
-    with_file_bytes: bool = True,
 ) -> list:
     """Export skills attached to the given application versions.
 
     A fork payload lists each version's files by hash, which the import copies from this project; an export file
-    carries each file's bytes, so it imports anywhere, unless ``with_file_bytes`` is off (the Markdown export). A
-    file whose bytes cannot be read fails the whole export, naming the skill, version and path."""
+    carries each file's bytes, so it imports anywhere. A file whose bytes cannot be read fails the whole export,
+    naming the skill, version and path."""
 
     version_skill_refs = {}
     skill_ids = set()
@@ -379,9 +373,7 @@ def _export_skills_main(
             for version, version_export in zip(versions, export_dict['versions']):
                 version_export['id'] = version.id
                 version_export['author_id'] = version.author_id
-                files = _version_files_for_export(
-                    session, project_id, skill, version, with_file_bytes=with_file_bytes and not forked,
-                )
+                files = _version_files_for_export(session, project_id, skill, version, with_file_bytes=not forked)
                 if files:
                     version_export['files'] = files
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
@@ -411,6 +403,19 @@ def _export_skills_main(
     return skills_serialized
 
 
+def _merge_skills_by_import_uuid(skills: list) -> list:
+    """One entry per skill, holding every version the exported agents use, so a nested agent that uses another
+    version of a skill its parent also uses keeps that version."""
+    merged = {}
+    for skill in skills:
+        kept = merged.setdefault(skill['import_uuid'], skill)
+        if kept is skill:
+            continue
+        kept_names = {version.get('name') for version in kept['versions']}
+        kept['versions'].extend(version for version in skill['versions'] if version.get('name') not in kept_names)
+    return list(merged.values())
+
+
 def _deduplicate_by_import_uuid(toolkits):
     res = []
     import_uuids = set()
@@ -436,17 +441,14 @@ def _version_files_for_export(session, project_id: int, skill, version, with_fil
     ]
 
 
-def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None,
-                       with_file_bytes: bool = True):
+def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None):
     # maps id/version ids to import uuid/import version uuids of already processed entities
     data_done = defaultdict(dict)
     if follow_version_ids is not None:
         follow_version_ids = set(follow_version_ids)
     else:
         follow_version_ids = None
-    result = _export_application_main(
-        project_id, user_id, application_ids, forked, data_done, follow_version_ids, with_file_bytes,
-    )
+    result = _export_application_main(project_id, user_id, application_ids, forked, data_done, follow_version_ids)
 
     if not result.get('ok'):
         return result
@@ -493,7 +495,7 @@ def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = 
                 }
 
     if result.get('skills'):
-        result['skills'] = _deduplicate_by_import_uuid(result['skills'])
+        result['skills'] = _merge_skills_by_import_uuid(result['skills'])
 
     result['_metadata'] = {'version': 2}
     if warnings := result.pop('warnings', None):
@@ -1012,6 +1014,12 @@ def _extract_skills_for_md(version: dict, skills: list) -> list:
         frontmatter = build_embedded_skill_frontmatter(skill_version)
         if frontmatter:
             block['frontmatter'] = frontmatter
+        if skill_version.get('files'):
+            block['files_folder'] = skill_version['files_folder']
+            block['files'] = [
+                {key: value for key, value in entry.items() if key != 'content_base64'}
+                for entry in skill_version['files']
+            ]
         out.append(block)
 
     return out
@@ -1185,6 +1193,30 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
     return f"---\n{yaml_str}---\n\n{body}"
 
 
+def assign_skill_file_folders(skills: list) -> list:
+    """Give each exported skill version with files its own ``skills/<name>`` folder and return the ZIP members that
+    hold the bytes; a non-base version gets ``skills/<name>.<version>``, a name clash a suffix from the skill uuid."""
+    members, taken = [], set()
+    for skill in skills:
+        name_slug = slugify(skill.get('name', '')) or 'skill'
+        for version in skill.get('versions') or []:
+            if not version.get('files'):
+                continue
+            version_name = version.get('name') or 'base'
+            folder = f'skills/{name_slug}'
+            if version_name != 'base':
+                folder = f"{folder}.{slugify(version_name) or 'version'}"
+            if folder in taken:
+                folder = f"{folder}-{(skill.get('import_uuid') or '')[:8]}"
+            taken.add(folder)
+            version['files_folder'] = folder
+            members.extend(
+                {'filename': f"{folder}/{entry['path']}", 'content': base64.b64decode(entry['content_base64'])}
+                for entry in version['files']
+            )
+    return members
+
+
 def create_zip_archive(files: List[Dict[str, str]]) -> BytesIO:
     """
     Create a ZIP archive from a list of files.
@@ -1231,7 +1263,6 @@ def export_application_md(
         application_ids=application_ids,
         forked=False,
         follow_version_ids=follow_version_ids,
-        with_file_bytes=False,
     )
 
     if not json_export.get('ok', True):
@@ -1243,6 +1274,7 @@ def export_application_md(
     all_applications = json_export.get('applications', [])
     all_toolkits = json_export.get('toolkits', [])
     all_skills = json_export.get('skills', [])
+    skill_file_members = assign_skill_file_folders(all_skills)
 
     # Convert each application version to MD (one file per version)
     for app in all_applications:
@@ -1285,8 +1317,8 @@ def export_application_md(
 
     return {
         'ok': True,
-        'files': md_files,
-        'has_dependencies': has_dependencies
+        'files': md_files + skill_file_members,
+        'has_dependencies': has_dependencies or bool(skill_file_members),
     }
 
 
