@@ -281,6 +281,14 @@ def test_r3_4_el7011_wrong_filter_type_gives_400_with_name(env, name, value):
     assert env.query_calls == []
 
 
+# The Running status filter reaches the query as typed
+def test_status_running_reaches_the_query_filters(env):
+    env.grant(9, "list", "admin")
+    env.rows = [make_row(1, 5)]
+    ok(env, status="running")
+    assert env.query_calls[0]["filters"].status == "running"
+
+
 # R4.1 (TC-US05-14)
 def test_r4_1_el7011_admin_gets_run_only_on_own_row_and_change_owner(env):
     env.grant(9, "list", "admin", "run")

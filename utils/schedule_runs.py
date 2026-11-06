@@ -6,7 +6,7 @@ from pylon.core.tools import log
 from sqlalchemy import and_, case, func, or_, select, update
 from tools import db
 
-from ..models.entity_schedule import REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
@@ -430,13 +430,23 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
-    """Insert a finished `skipped` cron run without a conversation and copy the status; the run id."""
+    """Insert a finished `skipped` cron run without a conversation; the run id.
+
+    The status goes to the schedule only when no run is active. An active run still owns `last_run_status`, so the
+    list and its Running filter keep showing it until it ends.
+    """
     run = EntityScheduleRun(
         schedule_id=schedule_id, trigger='cron', status='skipped', reason=reason, finished_at=func.now(),
         events=[finished_event('skipped', reason)])
     session.add(run)
     session.flush()
-    session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='skipped'))
+    active_run = select(EntityScheduleRun.id).where(
+        EntityScheduleRun.schedule_id == schedule_id,
+        EntityScheduleRun.status.in_(ACTIVE_STATUSES),
+    ).exists()
+    session.execute(
+        update(EntitySchedule).where(EntitySchedule.id == schedule_id, ~active_run).values(last_run_status='skipped')
+    )
     return run.id
 
 

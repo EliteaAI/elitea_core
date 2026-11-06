@@ -170,6 +170,28 @@ def test_7011_r3_1_filters_match_each_given_value(env):
     assert _names(_list(env, enabled=True, entity_id=2)) == []
 
 
+# The Running filter matches the schedules that still have an active run
+def test_running_filter_lists_the_schedules_with_an_active_run(env):
+    _add(env, name="busy", last_run_status="running")
+    _add(env, name="idle", last_run_status="success")
+    assert _names(_list(env, status="running")) == ["busy"]
+
+
+# A schedule whose last run ended is not listed under Running
+@pytest.mark.parametrize("ended", ["success", "failed", "blocked", "skipped"])
+def test_running_filter_leaves_out_a_schedule_whose_last_run_ended(env, ended):
+    _add(env, name="busy", last_run_status="running")
+    _add(env, name="ended", last_run_status=ended)
+    assert _names(_list(env, status="running")) == ["busy"]
+    assert _names(_list(env, status=ended)) == ["ended"]
+
+
+# A schedule that never ran has no status, so no status filter lists it
+def test_running_filter_leaves_out_a_schedule_that_never_ran(env):
+    _add(env, name="new")
+    assert _names(_list(env, status="running")) == []
+
+
 # R3.2: an admin narrows to the given owners
 def test_7011_r3_2_admin_owner_ids(env):
     _add(env, name="a", created_by=7)
