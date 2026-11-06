@@ -9,6 +9,11 @@ import types
 import pytest
 from unit._tool_spend_loader import load
 
+# Fixtures of the schedule writer tests: the chain test runs the real writer on an in-memory database
+from unit.utils.test_7011_schedule_runs_fail import _run, _schedule, runs, session  # noqa: F401
+
+# ruff: noqa: F811
+
 provider_error_answer = load("utils/error_text.py").provider_error_answer
 
 PROJECT_ID, RUN_ID, CONVERSATION_ID, AUTHOR_ID = 5, 9, 42, 17
@@ -74,10 +79,14 @@ class World:
         )
 
     fail_step = False
+    writer = None  # a test sets the real finish_schedule_run to run the whole chain
+    reason = staticmethod(lambda error: f"short({error})")
 
     def finish(self, *args, author_id=None):
         self.open_at_step.append(self.open_sessions)
         self.events.append(("finish", *args, author_id))
+        if self.writer:
+            self.writer(*args, author_id=author_id)
         if self.fail_step:
             raise RuntimeError("db down")
 
@@ -121,7 +130,7 @@ def make_world(monkeypatch):
             "utils.schedule_runs": {
                 "finish_schedule_run": world.finish, "pause_schedule_run": world.pause,
                 "CHILD_PAUSE_REASON": CHILD_PAUSE_REASON,
-                "run_failure_reason": lambda error: f"short({error})"},
+                "run_failure_reason": lambda error: world.reason(error)},
         }
         for dotted, names in stubs.items():
             name = "plugins.elitea_core." + dotted
@@ -228,6 +237,35 @@ def test_stream_end_with_a_normal_answer_finishes_the_run_as_success(make_world,
     world.end({}, content=content)
     finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)
     assert finish in world.events, world.events
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    """The owner notices the real writer sends, as (owner, event, run id)."""
+    name = "plugins.elitea_core.utils.schedule_notifications"
+    notices = []
+    stand_in = _module(
+        name,
+        notify_schedule_event=lambda project_id, owner_id, event_type, schedule, run=None, extra=None: (
+            notices.append((owner_id, str(event_type), run.id))),
+        emit_schedule_run_finished=lambda *args: None)
+    monkeypatch.setitem(sys.modules, name, stand_in)
+    return types.SimpleNamespace(notices=notices)
+
+
+def test_stream_end_with_a_provider_400_answer_stores_a_failed_run_and_notifies_the_owner(make_world, runs, session, sent):
+    schedule = _schedule(runs, session, created_by=AUTHOR_ID)
+    run = _run(runs, session, schedule)
+    world = make_world({**SCHEDULE_META, "schedule_run_id": run.id})
+    world.writer, world.reason = runs.finish_schedule_run, runs.run_failure_reason
+
+    world.end({}, content=PROVIDER_400)
+
+    session.refresh(run)
+    session.refresh(schedule)
+    assert (run.status, schedule.last_run_status) == ("failed", "failed")
+    assert run.events[-1]["text"] == f"Run finished: failed (The run failed: {PROVIDER_400_REASON})"
+    assert sent.notices == [(AUTHOR_ID, "schedule_run_failed", run.id)]
 
 
 def test_stream_end_of_a_chat_without_a_schedule_run_ignores_a_provider_400_answer(make_world):
