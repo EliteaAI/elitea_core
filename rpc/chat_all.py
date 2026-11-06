@@ -216,10 +216,23 @@ def _pause_refusal(parsed) -> dict | None:
     pending = {interrupt_identity(item) for item in items if item.get('guardrail_type') == 'sensitive_tool'}
     if shown is not None and set(shown) != pending:
         return _PAUSE_CHANGED_REFUSAL
-    # One click can answer a single item, or several sensitive tools whose ids the banner listed
-    if not (reject or own_rules) and len(items) > 1 and (shown is None or len(pending) != len(items)):
+    # One click can answer a single item, or several sensitive tools whose ids the banner listed and that all offer it
+    if not (reject or own_rules) and len(items) > 1 and (
+            shown is None or not _one_action_answers_all(items, parsed.hitl_action, parsed.hitl_value)):
         return _PAUSE_NOT_LISTED_REFUSAL
     return None
+
+
+def _one_action_answers_all(items, action, note) -> bool:
+    """True when one action with one note can answer every pending item of a scheduled run.
+
+    The banner lists sensitive tools only, and each one must offer the action, as the rule for one answer demands.
+    The note is copied to every tool, so it is a string or empty.
+    """
+    if note is not None and not isinstance(note, str):
+        return False
+    return all(item.get('guardrail_type') == 'sensitive_tool'
+               and action in (item.get('available_actions') or [action]) for item in items)
 
 
 def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:
@@ -241,11 +254,7 @@ def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:
     elif set(shown) != {interrupt_identity(item) for item in pending}:
         return []
     note = parsed.hitl_value
-    if note is not None and not isinstance(note, str):
-        return []
-    # The banner lists sensitive tools only, and each one must offer the action, as the rule for one answer demands
-    if any(item.get('guardrail_type') != 'sensitive_tool'
-           or action not in (item.get('available_actions') or [action]) for item in pending):
+    if not _one_action_answers_all(pending, action, note):
         return []
     return [{'interrupt_id': interrupt_identity(item), 'action': action, 'value': (note or '')[:SCHEDULE_VALUE_LIMIT]}
             for item in pending]

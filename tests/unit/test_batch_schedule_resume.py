@@ -96,7 +96,7 @@ def helpers():
         'apply_schedule_decision': apply_schedule_decision,
     }
     cut = load_cut(_nodes(CHAT_ALL, {
-        '_schedule_decisions', '_schedule_batch_kwargs', '_pause_refusal', '_check_schedule_decision',
+        '_schedule_decisions', '_schedule_batch_kwargs', '_pause_refusal', '_one_action_answers_all', '_check_schedule_decision',
         '_apply_schedule_decision', '_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_PAUSE_CHANGED_REFUSAL',
         '_PAUSE_NOT_LISTED_REFUSAL', 'SCHEDULE_VALUE_LIMIT'}),
         namespace, 'chat_all.py')
@@ -350,6 +350,35 @@ def test_any_non_reject_action_without_ids_on_several_tools_is_refused_and_the_r
 
     assert (decision, denied) == (None, helpers['_PAUSE_NOT_LISTED_REFUSAL'])
     assert helpers['run_state']['status'] == 'waiting_for_approval'
+
+
+def _meta_with_actions(*names):
+    return {'hitl_interrupts': [
+        {'interrupt_id': name, 'guardrail_type': SENSITIVE, 'available_actions': ['approve', 'reject', 'block_with_comment']}
+        for name in names]}
+
+
+@pytest.mark.parametrize('action', ['edit', 'answer'])
+def test_an_action_that_the_tools_do_not_offer_is_refused_with_the_listed_ids_and_the_run_keeps_waiting(helpers, action):
+    helpers['run_state']['status'] = 'waiting_for_approval'
+
+    decision, denied = _answer(helpers, _meta_with_actions('hitl_a', 'hitl_b'), ['hitl_a', 'hitl_b'], hitl_action=action)
+    helpers['_apply_schedule_decision'](1, decision)
+
+    assert (decision, denied) == (None, helpers['_PAUSE_NOT_LISTED_REFUSAL'])
+    assert helpers['run_state']['status'] == 'waiting_for_approval'
+
+
+@pytest.mark.parametrize('action', ['approve', 'block_with_comment'])
+def test_an_offered_action_with_the_listed_ids_is_accepted_and_fans_out(helpers, action):
+    meta = _meta_with_actions('hitl_a', 'hitl_b')
+    decision, denied = _answer(helpers, meta, ['hitl_a', 'hitl_b'], hitl_action=action)
+    pending = helpers['pending_interrupts'](meta)
+    decisions = helpers['_schedule_decisions'](
+        _parsed(hitl_action=action, interrupt_ids=['hitl_a', 'hitl_b']), pending, decision)
+
+    assert (decision, denied) == ((9, 'approve'), None)
+    assert [item['action'] for item in decisions] == [action, action]
 
 
 @pytest.mark.parametrize('action', ['approve', 'edit', 'answer', 'block_with_comment'])
