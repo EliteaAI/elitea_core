@@ -198,21 +198,28 @@ def _pause_refusal(parsed) -> dict | None:
 
     The banner of a scheduled run lists the sensitive tools of its last pause. An answer from an old banner must
     not approve the tools of a newer pause, so the ids it sends must be the whole pending set. An approval of
-    several pending tools without ids is refused too: the owner could not have seen which tools it covers, and
-    the resume would refuse it later, after the run was already set to running. A reject without ids passes: it
-    ends every pending tool. An own decision list and the answer of one fan-out child keep their own rules.
+    several pending tools without ids is refused too, whatever its action (approve, edit, answer or comment):
+    the owner could not have seen which tools it covers, and the resume would refuse it later, after the run was
+    already set to running. The same holds when any other kind of item waits beside the tools: one click cannot
+    answer it. A reject passes: it ends every pending item. An own decision list and the answer of one fan-out
+    child keep their own rules.
     """
     shown = getattr(parsed, 'interrupt_ids', None)
-    if shown is None and (parsed.hitl_action != 'approve' or parsed.hitl_decisions or parsed.thread_id):
+    reject = parsed.hitl_action == 'reject'
+    own_rules = bool(parsed.hitl_decisions or parsed.thread_id)
+    if shown is None and (reject or own_rules):
         return None
     with db.get_session(parsed.project_id) as session:
         meta = session.query(ConversationMessageGroup.meta).where(
             ConversationMessageGroup.uuid == parsed.message_id).scalar()
-    pending = {interrupt_identity(item) for item in pending_interrupts(meta)
-               if item.get('guardrail_type') == 'sensitive_tool'}
-    if shown is not None:
-        return _PAUSE_CHANGED_REFUSAL if set(shown) != pending else None
-    return _PAUSE_NOT_LISTED_REFUSAL if len(pending) > 1 else None
+    items = pending_interrupts(meta)
+    pending = {interrupt_identity(item) for item in items if item.get('guardrail_type') == 'sensitive_tool'}
+    if shown is not None and set(shown) != pending:
+        return _PAUSE_CHANGED_REFUSAL
+    # One click can answer a single item, or several sensitive tools whose ids the banner listed
+    if not (reject or own_rules) and len(items) > 1 and (shown is None or len(pending) != len(items)):
+        return _PAUSE_NOT_LISTED_REFUSAL
+    return None
 
 
 def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:

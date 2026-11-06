@@ -321,10 +321,40 @@ def test_an_own_decision_list_without_ids_keeps_its_rules_and_is_not_read(helper
     assert helpers['answers'] == []
 
 
-def test_only_the_sensitive_tools_count_as_the_pending_set(helpers):
-    meta = {'hitl_interrupts': [*_meta('hitl_a')['hitl_interrupts'], {'interrupt_id': 'q1', 'guardrail_type': 'x'}]}
+MIXED_META = {'hitl_interrupts': [*_meta('hitl_a')['hitl_interrupts'], {'interrupt_id': 'q1', 'guardrail_type': 'x'}]}
 
-    decision, denied = _answer(helpers, meta, ['hitl_a'])
+
+@pytest.mark.parametrize('shown', [None, ['hitl_a']], ids=['without_ids', 'with_sensitive_ids'])
+def test_an_approval_of_a_pause_that_holds_another_kind_of_item_is_refused_and_the_run_keeps_waiting(helpers, shown):
+    helpers['run_state']['status'] = 'waiting_for_approval'
+
+    decision, denied = _answer(helpers, MIXED_META, shown)
+    helpers['_apply_schedule_decision'](1, decision)
+
+    assert (decision, denied) == (None, helpers['_PAUSE_NOT_LISTED_REFUSAL'])
+    assert helpers['run_state']['status'] == 'waiting_for_approval'
+
+
+def test_a_reject_of_a_pause_that_holds_another_kind_of_item_is_still_accepted(helpers):
+    decision, denied = _answer(helpers, MIXED_META, None, hitl_action='reject')
+
+    assert (decision, denied) == ((9, 'reject'), None)
+
+
+@pytest.mark.parametrize('action', ['edit', 'answer', 'block_with_comment'])
+def test_any_non_reject_action_without_ids_on_several_tools_is_refused_and_the_run_keeps_waiting(helpers, action):
+    helpers['run_state']['status'] = 'waiting_for_approval'
+
+    decision, denied = _answer(helpers, _meta('hitl_a', 'hitl_b'), None, hitl_action=action)
+    helpers['_apply_schedule_decision'](1, decision)
+
+    assert (decision, denied) == (None, helpers['_PAUSE_NOT_LISTED_REFUSAL'])
+    assert helpers['run_state']['status'] == 'waiting_for_approval'
+
+
+@pytest.mark.parametrize('action', ['approve', 'edit', 'answer', 'block_with_comment'])
+def test_an_answer_without_ids_on_one_pending_tool_is_accepted(helpers, action):
+    decision, denied = _answer(helpers, _meta('hitl_a'), None, hitl_action=action)
 
     assert (decision, denied) == ((9, 'approve'), None)
 
