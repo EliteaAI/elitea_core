@@ -362,6 +362,59 @@ def collect_credential_uses(  # pylint: disable=R0913,R0914
     return sorted(uses.values(), key=lambda use: (use.toolkit_instance_id, use.field, use.configuration_uuid or ""))
 
 
+# --- a stored selector by title, resolved as the run resolves it (#7228) --------------------------------------
+
+TITLE_RESOLVE_TIMEOUT_S = 5
+
+
+def _expand_selector(project_id, settings, user_id):
+    """The run's own resolver of a configuration selector (``configurations_expand``), its values left as references."""
+    from tools import context  # pylint: disable=C0415
+    return context.rpc_manager.timeout(TITLE_RESOLVE_TIMEOUT_S).configurations_expand(
+        project_id=project_id, settings=settings, user_id=user_id, unsecret=False)
+
+
+def _resolved_pair(answer):
+    """``(configuration uuid, project id)`` of a resolver answer, or None."""
+    if not isinstance(answer, dict):
+        return None
+    project_id = answer.get("configuration_project_id")
+    try:
+        cfg_uuid = str(uuid.UUID(str(answer.get("configuration_uuid"))))
+    except ValueError:
+        return None
+    if not isinstance(project_id, int) or isinstance(project_id, bool):
+        return None
+    return cfg_uuid, project_id
+
+
+def resolve_title_uses(candidates, rows, user_id, project_id, expand=None) -> list:  # pylint: disable=R0913
+    """Each stored selector by title (``{elitea_title, private}``) resolved for ``user_id`` as the run resolves it
+    (the current project, or the user's personal project when ``private``), so it is decided exactly like a selection
+    by uuid: ``(configuration_uuid, configuration_project_id)`` from the resolver, selector ``uuid``. One call per title
+    use, at most ``MAX_GOVERNED_CREDENTIALS_PER_RUN``. A title that resolves to nothing stays a title use (refused
+    ``CREDENTIAL_REFERENCE_REQUIRED``), and so does one whose dispatched payload carries another configuration than the
+    title resolves to. Always resolved from ``project_id``, the run's own project (never one the payload names). An
+    unreachable resolver raises (the caller fails closed). ``expand``: the resolver (tests)."""
+    expand = expand or _expand_selector
+    stored = {str(tool.id): tool.settings for _, tool in rows or () if isinstance(getattr(tool, "settings", None), dict)}
+    resolved, calls = [], 0
+    for use in candidates:
+        value = (stored.get(use.toolkit_instance_id) or {}).get(use.field)
+        title = (value.get("elitea_title") or value.get("alita_title")) if isinstance(value, dict) else None
+        if use.selector == "title" and isinstance(title, str) and title and calls < MAX_GOVERNED_CREDENTIALS_PER_RUN:
+            calls += 1
+            try:
+                found = _resolved_pair(expand(project_id, {
+                    "elitea_title": title, "private": bool(value.get("private"))}, user_id))
+            except (LookupError, ValueError):
+                found = None
+            if found is not None and use.configuration_uuid in (None, found[0]):
+                use = replace(use, configuration_uuid=found[0], selector="uuid", configuration_project_id=found[1])
+        resolved.append(use)
+    return resolved
+
+
 # --- reading the facts -----------------------------------------------------------------------
 
 def _configuration_facts(project_id, uuids) -> dict:
