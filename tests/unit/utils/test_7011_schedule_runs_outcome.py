@@ -345,3 +345,48 @@ def test_the_worker_sentence_goes_from_the_end_event_to_the_stored_run(runs, ses
     session.refresh(run)
     assert run.reason == f"The run failed: {WORKER_SENTENCE}"
     assert run.events[-1]["text"] == f"Run finished: failed ({run.reason})"
+
+
+@pytest.mark.parametrize(("answer", "status"), [
+    ("Error: Error code: 400 - {'error': {'message': 'bad'}}", 400),
+    ("  Error: Error code: 429 - rate limited", 429),
+])
+def test_provider_error_answer_names_the_rejected_request(answer, status):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == f"The model provider rejected the request (HTTP {status})."
+
+
+@pytest.mark.parametrize(("answer", "status"), [
+    ("Error: Error code: 503", 503),
+    ("Error: Error code: 500 - {'error': {}}", 500),
+])
+def test_provider_error_answer_names_a_provider_server_error(answer, status):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == f"The model provider failed to answer (HTTP {status})."
+
+
+@pytest.mark.parametrize(("answer", "reason"), [
+    ("Error: LLM stream stalled: no data received for 120s. The model provider stopped responding; please retry.",
+     "The model provider stopped responding."),
+    ("Error: LLM stream interrupted: the connection closed before the response finished; please retry.",
+     "The connection to the model provider closed before the answer finished."),
+])
+def test_provider_error_answer_names_a_stalled_or_cut_stream(answer, reason):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == reason
+
+
+@pytest.mark.parametrize("answer", [
+    None, "", "All good", "Error: the file is missing", "Error: Error code: 200 - fine", "Error: Error code: 4000",
+    "Summary. Error: Error code: 400 - quoted", ["Error: Error code: 400"],
+    "The LLM stream stalled for a while", "Error: LLM stream stalledness",
+])
+def test_provider_error_answer_ignores_any_other_answer(answer):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) is None
+
+
+def test_provider_error_answer_gives_a_plain_stored_reason(reasons):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    reason = reasons.run_failure_reason(provider_error_answer("Error: Error code: 400 - {'error': {}}"))
+    assert reason == "The run failed: The model provider rejected the request (HTTP 400)."
