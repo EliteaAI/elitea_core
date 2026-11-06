@@ -506,17 +506,35 @@ class TestAgentExport:
         with pytest.raises(env.files.SkillVersionExportUnavailableError, match="'references/guide.md'"):
             _export(agent_export, forked=False)
 
-    def test_an_export_without_file_bytes_lists_the_manifest_and_reads_nothing(self, env, agent_export, monkeypatch):
+    def test_the_markdown_zip_puts_the_bytes_under_the_skill_folder_and_the_block_lists_them(self, env, agent_export):
         _seed(env)
-        env.storage.broken_reads = True
-        monkeypatch.setattr(agent_export, 'read_version_contents', lambda *a, **k: pytest.fail('bytes were read'))
-        applications = [{'versions': [{'name': 'base', 'skills': [{'skill_id': SKILL, 'version_name': 'base'}]}]}]
-        result = [{'versions': [{'name': 'base', 'import_version_uuid': 'agent-v'}]}]
+        skills = _export(agent_export)
 
-        [skill] = agent_export._export_skills_main(SOURCE, 1, applications, result, with_file_bytes=False)
+        members = agent_export.assign_skill_file_folders(skills)
+        [block] = agent_export._extract_skills_for_md({'skills': [{'import_uuid': skills[0]['import_uuid'],
+                                                                   'version_name': 'base'}]}, skills)
 
-        assert [set(f) for f in skill['versions'][0]['files']] == [
-            {'path', 'size', 'sha256', 'content_type', 'is_text'}] * 2
+        assert [(m['filename'], m['content']) for m in members] == [
+            ('skills/forms/assets/logo.png', b'\x89PNG\x00'), ('skills/forms/references/guide.md', b'# Guide')]
+        assert block['files_folder'] == 'skills/forms'
+        assert [set(f) for f in block['files']] == [{'path', 'size', 'sha256', 'content_type', 'is_text'}] * 2
+
+    def test_two_exported_skills_of_one_name_get_separate_folders(self, agent_export):
+        version = {'name': 'base', 'files': [{'path': 'a.md', 'content_base64': base64.b64encode(b'a').decode()}]}
+        skills = [{'name': 'forms', 'import_uuid': 'aaaaaaaa-1', 'versions': [dict(version)]},
+                  {'name': 'forms', 'import_uuid': 'bbbbbbbb-2', 'versions': [dict(version)]},
+                  {'name': 'forms', 'import_uuid': 'cccccccc-3', 'versions': [{**version, 'name': 'v2'}]}]
+
+        members = agent_export.assign_skill_file_folders(skills)
+
+        assert [m['filename'] for m in members] == [
+            'skills/forms/a.md', 'skills/forms-bbbbbbbb/a.md', 'skills/forms.v2/a.md']
+
+    def test_an_agent_whose_skills_have_no_files_adds_no_member(self, agent_export):
+        skills = [{'name': 'forms', 'import_uuid': 'u', 'versions': [{'name': 'base', 'instructions': 'x'}]}]
+
+        assert agent_export.assign_skill_file_folders(skills) == []
+        assert 'files_folder' not in skills[0]['versions'][0]
 
     def _agent_export_with_skills(self, agent_export, monkeypatch, skills_export):
         applications = types.SimpleNamespace(options=lambda *a: types.SimpleNamespace(all=lambda: []))
@@ -557,26 +575,6 @@ class TestAgentExport:
 
         assert result['warnings'] == ['Skill export failed: boom'] and 'skills' not in result
 
-    def test_the_markdown_export_asks_for_no_file_bytes(self, agent_export, monkeypatch):
-        asked = []
-        monkeypatch.setattr(agent_export, 'export_application', lambda **kwargs: asked.append(kwargs) or {
-            'ok': True, 'applications': [], 'toolkits': []})
-
-        agent_export.export_application_md(project_id=SOURCE, user_id=1, application_ids=[5])
-
-        assert [kwargs['with_file_bytes'] for kwargs in asked] == [False]
-
-    @pytest.mark.parametrize('with_file_bytes', [True, False])
-    def test_an_agent_export_tells_the_skill_export_whether_to_read_file_bytes(self, agent_export, monkeypatch,
-                                                                              with_file_bytes):
-        asked = []
-        self._agent_export_with_skills(
-            agent_export, monkeypatch, lambda **kwargs: asked.append(kwargs['with_file_bytes']) or [])
-
-        agent_export.export_application(SOURCE, 1, [], with_file_bytes=with_file_bytes)
-
-        assert asked == [with_file_bytes]
-
     @pytest.mark.parametrize('forked', [True, False])
     def test_an_agent_export_tells_the_skill_export_whether_it_is_a_fork(self, agent_export, monkeypatch, forked):
         asked = []
@@ -591,6 +589,106 @@ class TestAgentExport:
         agent_export._export_application_main(SOURCE, 1, [], forked, {})
 
         assert asked == [forked]
+
+
+def _agent_json_export(skill_files=()):
+    skill_version = {'name': 'base', 'instructions': 'Read references/guide.md first.'}
+    if skill_files:
+        skill_version['files'] = [
+            {'path': path, 'size': len(data), 'sha256': _sha(data), 'content_type': 'text/markdown', 'is_text': True,
+             'content_base64': base64.b64encode(data).decode()}
+            for data, path in skill_files
+        ]
+    return {
+        'ok': True,
+        'applications': [{'id': 5, 'name': 'Helper', 'description': 'Helps.', 'versions': [{
+            'name': 'base', 'agent_type': 'react', 'instructions': 'Help.', 'llm_settings': {'model_name': 'gpt-x'},
+            'meta': {}, 'tools': [], 'skills': [{'import_uuid': 'uuid-3-0000', 'version_name': 'base'}],
+        }]}],
+        'toolkits': [],
+        'skills': [{'name': 'forms', 'description': 'Fill forms.', 'import_uuid': 'uuid-3-0000',
+                    'versions': [skill_version]}],
+    }
+
+
+class TestAgentMarkdownExport:
+    def test_an_agent_whose_skill_has_files_exports_a_zip_with_the_bytes_under_the_skill_folder(
+            self, agent_export, monkeypatch):
+        monkeypatch.setattr(agent_export, 'export_application',
+                            lambda **kwargs: _agent_json_export(skill_files=[(b'# Guide', 'references/guide.md')]))
+
+        result = agent_export.export_application_md(SOURCE, 1, [5])
+
+        assert result['has_dependencies'] is True
+        assert {'filename': 'skills/forms/references/guide.md', 'content': b'# Guide'} in result['files']
+        [agent_md] = [f for f in result['files'] if f['filename'] == 'helper.agent.md']
+        assert '  files_folder: skills/forms\n' in agent_md['content']
+        assert 'content_base64' not in agent_md['content']
+
+    def test_an_agent_whose_skills_have_no_files_exports_the_markdown_it_exported_before(
+            self, agent_export, monkeypatch):
+        monkeypatch.setattr(agent_export, 'export_application', lambda **kwargs: _agent_json_export())
+
+        result = agent_export.export_application_md(SOURCE, 1, [5])
+
+        assert result == {
+            'ok': True,
+            'files': [{
+                'filename': 'helper.agent.md',
+                'content': '---\nname: Helper\ndescription: Helps.\nmodel: gpt-x\nagent_type: react\nskills:\n'
+                           '- name: forms\n  description: Fill forms.\n  version: base\n'
+                           '  instructions: Read references/guide.md first.\n---\n\nHelp.',
+                'is_original': True,
+            }],
+            'has_dependencies': False,
+        }
+
+
+
+def _skill_entry(version_name, data, path):
+    return {'name': 'pdf', 'description': 'PDF.', 'import_uuid': 'uuid-3-0000', 'versions': [{
+        'name': version_name, 'instructions': 'Read the files.',
+        'files': [{'path': path, 'size': len(data), 'sha256': _sha(data), 'content_type': 'text/markdown',
+                   'is_text': True, 'content_base64': base64.b64encode(data).decode()}],
+    }]}
+
+
+def _agent(app_id, name, skill_version_name):
+    return {'id': app_id, 'name': name, 'description': f'{name}.', 'versions': [{
+        'name': 'base', 'agent_type': 'react', 'instructions': 'Help.', 'llm_settings': {'model_name': 'gpt-x'},
+        'meta': {}, 'tools': [], 'skills': [{'import_uuid': 'uuid-3-0000', 'version_name': skill_version_name}],
+    }]}
+
+
+class TestNestedAgentSkillVersions:
+    def test_entries_of_one_skill_merge_their_versions_instead_of_dropping_the_later_one(self, agent_export):
+        result = {'ok': True, 'applications': [], 'toolkits': [], 'skills': [
+            {'import_uuid': 'u', 'name': 'pdf', 'versions': [{'name': 'base'}]},
+            {'import_uuid': 'u', 'name': 'pdf', 'versions': [{'name': 'v2'}]},
+            {'import_uuid': 'u', 'name': 'pdf', 'versions': [{'name': 'base'}]},
+            {'import_uuid': 'w', 'name': 'forms', 'versions': [{'name': 'base'}]},
+        ]}
+
+        skills = agent_export._post_export(SOURCE, result, {})['skills']
+
+        assert [(s['import_uuid'], [v['name'] for v in s['versions']]) for s in skills] == [
+            ('u', ['base', 'v2']), ('w', ['base'])]
+
+    def test_a_nested_agent_using_another_version_of_its_parents_skill_exports_that_versions_files(
+            self, agent_export, monkeypatch):
+        monkeypatch.setattr(agent_export, '_export_application_main', lambda *args: {
+            'ok': True,
+            'applications': [_agent(5, 'Parent', 'base'), _agent(6, 'Child', 'v2')],
+            'toolkits': [],
+            'skills': [_skill_entry('base', b'# Base', 'guide.md'), _skill_entry('v2', b'# V2', 'guide.md')],
+        })
+
+        result = agent_export.export_application_md(SOURCE, 1, [5])
+
+        members = {f['filename']: f['content'] for f in result['files']}
+        assert members['skills/pdf/guide.md'] == b'# Base'
+        assert members['skills/pdf.v2/guide.md'] == b'# V2'
+        assert '  files_folder: skills/pdf.v2\n' in members['child.agent.md']
 
 
 @pytest.fixture
@@ -625,6 +723,18 @@ class TestExportEndpoint:
             raise env.files.SkillVersionExportUnavailableError('forms', 'base', 'assets/logo.png')
 
         monkeypatch.setattr(export_api, 'export_application', unreadable)
+
+        response = export_api.PromptLibAPI().get(project_id=SOURCE, application_ids='5')
+
+        assert response == ({'error': "Skill 'forms' version 'base' could not be exported: the stored content of "
+                                      "'assets/logo.png' could not be read; try again later"}, 503)
+
+    def test_an_unreadable_skill_file_fails_the_markdown_export_with_the_same_503(self, env, export_api, monkeypatch):
+        def unreadable(**kwargs):
+            raise env.files.SkillVersionExportUnavailableError('forms', 'base', 'assets/logo.png')
+
+        monkeypatch.setattr(export_api, 'export_application_md', unreadable)
+        export_api.request.args = MultiDict({'format': 'md'})
 
         response = export_api.PromptLibAPI().get(project_id=SOURCE, application_ids='5')
 

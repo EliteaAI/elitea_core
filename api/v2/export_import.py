@@ -136,6 +136,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     application_ids=application_ids,
                     follow_version_ids=follow_version_ids
                 )
+            except SkillVersionExportUnavailableError as exc:
+                return {'error': str(exc)}, exc.http_status
             except Exception as e:
                 log.error(f"MD export failed: {e}")
                 return {'errors': {'applications': str(e)}}, 400
