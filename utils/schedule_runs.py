@@ -7,6 +7,7 @@ from sqlalchemy import and_, case, func, or_, select, update
 from tools import db
 
 from ..models.entity_schedule import REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
+from .constants import INTERRUPT_ID_MAX_LENGTH, PAUSE_LIST_LIMIT
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import TEXT_LIMIT, append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
@@ -15,7 +16,7 @@ STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
-PAIR_LIMIT = 50  # (toolkit, tool) pairs and interrupt ids kept in one run event
+PAIR_LIMIT = PAUSE_LIST_LIMIT  # (toolkit, tool) pairs and interrupt ids kept in one run event
 PARALLEL_PAUSE = 'parallel_sensitive_tools'  # the one pause that lists every sensitive call of an AI message
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
@@ -373,11 +374,6 @@ def pair_counts(items: list[dict], toolkit_key: str = 'toolkit', tool_key: str =
     return counts
 
 
-def tool_pairs(items: list[dict], toolkit_key: str = 'toolkit', tool_key: str = 'tool') -> list[tuple[str, str]]:
-    """The distinct (toolkit, tool) names of `items`, in order and cut at `NAME_LIMIT`; never arguments."""
-    return list(pair_counts(items, toolkit_key, tool_key))
-
-
 def _scanned_pairs(project_id: int, run_id: int) -> list[dict]:
     """The (toolkit, tool) pairs the risk check logged at the start of the run; none when it logged none."""
     try:
@@ -419,8 +415,10 @@ def _paused_event(items: list[dict], scanned: list[dict] | None = None) -> dict:
     later = {pair: count for pair, count in pair_counts(scanned or []).items()
              if (pair[0].lower(), pair[1].lower()) not in pending}
     ids = [item.get('interrupt_id') for item in items]
-    # Without an id for every item the banner could not name the pause it showed, so it sends none
-    shown_ids = {'interrupt_ids': [str(name) for name in ids[:PAIR_LIMIT]]} if all(ids) else {}
+    # Without an id for every item, or with an id the answer model would refuse as too long, the banner could not
+    # name the pause it showed, so it sends none
+    named = [str(name) for name in ids[:PAIR_LIMIT]]
+    shown_ids = {'interrupt_ids': named} if all(ids) and all(len(name) <= INTERRUPT_ID_MAX_LENGTH for name in named) else {}
     return run_event('paused', text, 'warning', toolkit=names[0][0], tool=names[0][1],
                      tools=_listed(counts), hidden=max(0, len(counts) - PAIR_LIMIT),
                      later_tools=_listed(later), later_hidden=max(0, len(later) - PAIR_LIMIT), **shown_ids)

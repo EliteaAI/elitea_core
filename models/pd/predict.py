@@ -1,12 +1,13 @@
 import mimetypes
 import uuid
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Annotated, Optional, Dict, Any, List
 from uuid import UUID
-from pydantic import BaseModel, Field, field_validator, model_validator, ValidationInfo, ConfigDict
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator, ValidationInfo, ConfigDict
 from tools import db, VaultClient
 
 from ...models.participants import Participant
+from ...utils.constants import INTERRUPT_ID_MAX_LENGTH, PAUSE_LIST_LIMIT
 from ...utils.tool_call_format import format_tool_call_as_user_input
 from .attachment import AttachmentMessageItemPredict
 from .participant_settings import EntitySettingsLlm
@@ -181,9 +182,9 @@ class SioContinuePredictModel(BaseModel):
         default=None,
         description="Per-child HITL decisions for a parallel sub-agent resume",
     )
-    # The same cap as PAIR_LIMIT of utils/schedule_runs.py: the paused event of a run lists at most that many ids
-    interrupt_ids: Optional[List[str]] = Field(
-        default=None, max_length=50,
+    # The caps are those of the ids the paused event of a run lists (utils/schedule_runs.py)
+    interrupt_ids: Optional[List[Annotated[str, StringConstraints(max_length=INTERRUPT_ID_MAX_LENGTH)]]] = Field(
+        default=None, max_length=PAUSE_LIST_LIMIT,
         description="The interrupt ids the answer was meant for: a schedule run banner sends those of its paused "
                     "event, and a different pending set is refused with 409",
     )

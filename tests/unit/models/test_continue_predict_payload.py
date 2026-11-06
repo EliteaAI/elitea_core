@@ -14,7 +14,7 @@ from pydantic import ValidationError
 TESTS_DIR = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TESTS_DIR))
 
-from fixtures.helpers import load_module_with_stubs
+from fixtures.helpers import load_module_with_stubs, register_constants_module
 
 UUID_STR = "550e8400-e29b-41d4-a716-446655440000"
 MSG_ID = "a1b2c3d4-e29b-41d4-a716-446655440000"
@@ -22,6 +22,7 @@ MSG_ID = "a1b2c3d4-e29b-41d4-a716-446655440000"
 
 @pytest.fixture(scope="module")
 def payload_model(models_path):
+    register_constants_module(models_path.parent)
     module = load_module_with_stubs(
         models_path / "pd" / "continue_predict.py",
         "plugins.elitea_core.models.pd.continue_predict",
@@ -120,3 +121,24 @@ class TestContinuePredictPayload:
     @pytest.mark.parametrize("ok", [-1, 0, 30, 300])
     def test_await_timeout_valid(self, payload_model, ok):
         assert payload_model.model_validate(_base(await_task_timeout=ok)).await_task_timeout == ok
+
+    def test_interrupt_ids_default_to_none(self, payload_model):
+        assert payload_model.model_validate(_base()).interrupt_ids is None
+
+    def test_interrupt_ids_keep_the_list_of_the_banner(self, payload_model):
+        assert payload_model.model_validate(_base(interrupt_ids=["hitl_a", "hitl_b"])).interrupt_ids == [
+            "hitl_a", "hitl_b"]
+
+    def test_interrupt_ids_accept_the_list_limit_and_refuse_one_more(self, payload_model):
+        limit = sys.modules["plugins.elitea_core.utils.constants"].PAUSE_LIST_LIMIT
+
+        assert len(payload_model.model_validate(_base(interrupt_ids=["a"] * limit)).interrupt_ids) == limit
+        with pytest.raises(ValidationError):
+            payload_model.model_validate(_base(interrupt_ids=["a"] * (limit + 1)))
+
+    def test_interrupt_id_accepts_the_length_limit_and_refuses_one_more(self, payload_model):
+        limit = sys.modules["plugins.elitea_core.utils.constants"].INTERRUPT_ID_MAX_LENGTH
+
+        assert payload_model.model_validate(_base(interrupt_ids=["a" * limit])).interrupt_ids == ["a" * limit]
+        with pytest.raises(ValidationError):
+            payload_model.model_validate(_base(interrupt_ids=["a" * (limit + 1)]))

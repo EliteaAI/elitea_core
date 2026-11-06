@@ -246,3 +246,12 @@ def test_a_pause_with_an_item_that_has_no_interrupt_id_lists_no_ids(runs, sessio
     runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, without_id]})
 
     assert "interrupt_ids" not in _paused(session, run)
+
+
+def test_a_pause_with_an_interrupt_id_too_long_for_the_answer_lists_no_ids(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    too_long = {**ARTIFACT_DELETE, "interrupt_id": "x" * (sys.modules[RUNS].INTERRUPT_ID_MAX_LENGTH + 1)}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, too_long]})
+
+    assert "interrupt_ids" not in _paused(session, run)

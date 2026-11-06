@@ -23,6 +23,7 @@ PENDING = [
     {'interrupt_id': 'hitl_c', 'tool_call_id': 'c3', 'toolkit_name': 'ADO', 'tool_name': 'list_indexes'},
 ]
 SCHEDULE_DECISION = (9, 'approve')
+IDS = ['hitl_a', 'hitl_b', 'hitl_c']
 
 
 PAIR_LIMIT = 50
@@ -103,44 +104,44 @@ def _parsed(hitl_action='approve', hitl_value=None, hitl_decisions=None, interru
 
 @pytest.mark.parametrize('action', ['approve', 'reject'])
 def test_one_action_on_a_schedule_run_becomes_a_decision_for_every_pending_tool(helpers, action):
-    decisions = helpers['_schedule_decisions'](_parsed(hitl_action=action), PENDING, SCHEDULE_DECISION)
+    decisions = helpers['_schedule_decisions'](_parsed(hitl_action=action, interrupt_ids=IDS), PENDING, SCHEDULE_DECISION)
 
     assert decisions == [{'interrupt_id': name, 'action': action, 'value': ''}
                          for name in ('hitl_a', 'hitl_b', 'hitl_c')]
 
 
 def test_each_decision_has_exactly_the_keys_of_the_resume(helpers):
-    decisions = helpers['_schedule_decisions'](_parsed(), PENDING, SCHEDULE_DECISION)
+    decisions = helpers['_schedule_decisions'](_parsed(interrupt_ids=IDS), PENDING, SCHEDULE_DECISION)
 
     assert all(set(decision) == {'interrupt_id', 'action', 'value'} for decision in decisions)
 
 
 def test_the_value_of_the_action_goes_to_every_decision(helpers):
-    decisions = helpers['_schedule_decisions'](_parsed(hitl_value='checked'), PENDING, SCHEDULE_DECISION)
+    decisions = helpers['_schedule_decisions'](_parsed(hitl_value='checked', interrupt_ids=IDS), PENDING, SCHEDULE_DECISION)
 
     assert [decision['value'] for decision in decisions] == ['checked'] * 3
 
 
 def test_a_plain_chat_has_no_schedule_decision_and_keeps_its_rules(helpers):
-    assert helpers['_schedule_decisions'](_parsed(), PENDING, None) == []
+    assert helpers['_schedule_decisions'](_parsed(interrupt_ids=IDS), PENDING, None) == []
 
 
 def test_the_own_decision_list_of_the_caller_is_kept(helpers):
     own = [{'interrupt_id': 'hitl_a', 'action': 'approve', 'value': ''}]
 
-    assert helpers['_schedule_decisions'](_parsed(hitl_decisions=own), PENDING, SCHEDULE_DECISION) == []
+    assert helpers['_schedule_decisions'](_parsed(hitl_decisions=own, interrupt_ids=IDS), PENDING, SCHEDULE_DECISION) == []
 
 
 @pytest.mark.parametrize('pending', [[], PENDING[:1]], ids=['nothing pending', 'one tool pending'])
 def test_a_pause_with_less_than_two_tools_is_not_changed(helpers, pending):
-    assert helpers['_schedule_decisions'](_parsed(), pending, SCHEDULE_DECISION) == []
+    assert helpers['_schedule_decisions'](_parsed(interrupt_ids=IDS[:len(pending)]), pending, SCHEDULE_DECISION) == []
 
 
 def test_a_pending_tool_without_an_interrupt_id_gets_its_thread_identity(helpers):
     pending = [{'guardrail_type': SENSITIVE, 'thread_id': 't1', 'tool_call_id': 'c1'},
                {'guardrail_type': SENSITIVE, 'interrupt_id': 'hitl_b'}]
 
-    decisions = helpers['_schedule_decisions'](_parsed(), pending, SCHEDULE_DECISION)
+    decisions = helpers['_schedule_decisions'](_parsed(interrupt_ids=['t1:c1', 'hitl_b']), pending, SCHEDULE_DECISION)
 
     assert [decision['interrupt_id'] for decision in decisions] == ['t1:c1', 'hitl_b']
 
@@ -157,39 +158,62 @@ def test_the_batch_flag_goes_to_the_application_predict_of_a_schedule_run_only(h
 def test_a_pause_that_holds_another_kind_of_item_is_not_answered_by_one_click(helpers):
     pending = [*PENDING, {'interrupt_id': 'hitl_q', 'guardrail_type': 'clarifying_question'}]
 
-    assert helpers['_schedule_decisions'](_parsed(), pending, SCHEDULE_DECISION) == []
+    assert helpers['_schedule_decisions'](_parsed(interrupt_ids=[*IDS, 'hitl_q']), pending, SCHEDULE_DECISION) == []
 
 
 @pytest.mark.parametrize('action', ['edit', 'answer'])
 def test_an_action_that_a_pending_tool_does_not_offer_gets_no_decisions(helpers, action):
-    assert helpers['_schedule_decisions'](_parsed(hitl_action=action, hitl_value='x'), PENDING, SCHEDULE_DECISION) == []
+    assert helpers['_schedule_decisions'](_parsed(hitl_action=action, hitl_value='x', interrupt_ids=IDS), PENDING, SCHEDULE_DECISION) == []
 
 
 def test_one_tool_that_does_not_offer_the_action_stops_the_whole_batch(helpers):
     pending = [PENDING[0], {**PENDING[1], 'available_actions': ['approve']}, PENDING[2]]
 
-    assert helpers['_schedule_decisions'](_parsed(hitl_action='reject'), pending, SCHEDULE_DECISION) == []
+    assert helpers['_schedule_decisions'](_parsed(hitl_action='reject', interrupt_ids=IDS), pending, SCHEDULE_DECISION) == []
 
 
 def test_a_tool_without_a_list_of_actions_accepts_the_action_as_the_single_answer_rule_does(helpers):
     pending = [{key: value for key, value in item.items() if key != 'available_actions'} for item in PENDING]
 
-    decisions = helpers['_schedule_decisions'](_parsed(), pending, SCHEDULE_DECISION)
+    decisions = helpers['_schedule_decisions'](_parsed(interrupt_ids=IDS), pending, SCHEDULE_DECISION)
 
     assert len(decisions) == 3
 
 
 def test_an_answer_object_is_not_copied_to_the_tools(helpers):
-    assert helpers['_schedule_decisions'](_parsed(hitl_value={'a': 'b'}), PENDING, SCHEDULE_DECISION) == []
+    assert helpers['_schedule_decisions'](_parsed(hitl_value={'a': 'b'}, interrupt_ids=IDS), PENDING, SCHEDULE_DECISION) == []
 
 
 def test_a_long_note_is_cut_before_it_is_copied_to_every_tool(helpers):
     limit = helpers['SCHEDULE_VALUE_LIMIT']
 
     decisions = helpers['_schedule_decisions'](
-        _parsed(hitl_action='block_with_comment', hitl_value='n' * (limit + 500)), PENDING, SCHEDULE_DECISION)
+        _parsed(hitl_action='block_with_comment', hitl_value='n' * (limit + 500), interrupt_ids=IDS), PENDING, SCHEDULE_DECISION)
 
     assert [len(decision['value']) for decision in decisions] == [limit] * 3
+
+
+def test_an_answer_without_ids_gets_no_decisions_so_the_single_answer_rule_applies(helpers):
+    assert helpers['_schedule_decisions'](_parsed(interrupt_ids=None), PENDING, SCHEDULE_DECISION) == []
+
+
+@pytest.mark.parametrize('shown', [IDS[:2], [*IDS, 'hitl_x'], ['hitl_a', 'hitl_b', 'hitl_x'], []],
+                         ids=['fewer', 'more', 'other', 'none'])
+def test_ids_that_differ_from_the_pending_tools_get_no_decisions(helpers, shown):
+    assert helpers['_schedule_decisions'](_parsed(interrupt_ids=shown), PENDING, SCHEDULE_DECISION) == []
+
+
+def test_ids_in_another_order_still_cover_every_pending_tool(helpers):
+    decisions = helpers['_schedule_decisions'](_parsed(interrupt_ids=IDS[::-1]), PENDING, SCHEDULE_DECISION)
+
+    assert [decision['interrupt_id'] for decision in decisions] == IDS
+
+
+def test_a_pause_longer_than_the_id_list_limit_gets_no_decisions(helpers):
+    names = [f'hitl_{number}' for number in range(PAIR_LIMIT + 3)]
+    pending = [{'interrupt_id': name, 'guardrail_type': SENSITIVE} for name in names]
+
+    assert helpers['_schedule_decisions'](_parsed(interrupt_ids=names[:PAIR_LIMIT]), pending, SCHEDULE_DECISION) == []
 
 
 def _answer(helpers, message_meta, interrupt_ids, hitl_action='approve'):

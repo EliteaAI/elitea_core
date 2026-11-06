@@ -211,9 +211,14 @@ def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:
     The banner of a scheduled run sends one `hitl_action` for a pause that lists several tools. Only a checked
     schedule decision gets this (`schedule_decision`); an own decision list, one pending tool and a plain chat
     keep their rules. An empty list means no change, and then the rule for one answer applies: it refuses
-    when more than one interrupt is pending.
+    when more than one interrupt is pending. The answer must name exactly the pending interrupts: no ids, or
+    fewer than are pending (the paused event lists at most `PAIR_LIMIT`), never approves a tool the owner
+    did not see.
     """
     if schedule_decision is None or parsed.hitl_decisions or len(pending) < 2:
+        return []
+    shown = getattr(parsed, 'interrupt_ids', None)
+    if shown is None or set(shown) != {interrupt_identity(item) for item in pending}:
         return []
     note = parsed.hitl_value
     if note is not None and not isinstance(note, str):

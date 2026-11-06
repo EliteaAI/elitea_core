@@ -191,13 +191,14 @@ def post(monkeypatch):
     tools.db = types.SimpleNamespace()
     tools.config = types.SimpleNamespace(ADMINISTRATION_MODE='administration', DEFAULT_MODE='default')
     tools.register_openapi = decorator
+    request = types.SimpleNamespace(json={})
     payload = types.SimpleNamespace(model_validate=lambda raw: types.SimpleNamespace(
         conversation_uuid='c-1', message_id='m-1', mcp_auth_resume=False, hitl_resume=True,
         hitl_action='approve', hitl_value=None, hitl_decisions=None, mcp_auth_action=None,
         mcp_auth_decisions=None, authorization_request_id=None, user_input=None, thread_id=None,
-        interrupt_ids=None, await_task_timeout=-1))
+        interrupt_ids=raw.get('interrupt_ids'), await_task_timeout=-1))
     stubs = {
-        'flask': types.SimpleNamespace(request=types.SimpleNamespace(json={})),
+        'flask': types.SimpleNamespace(request=request),
         'tools': tools,
         'pylon.core.tools': types.SimpleNamespace(log=types.SimpleNamespace(error=print)),
         'plugins.elitea_core.models.conversation': types.SimpleNamespace(Conversation=None),
@@ -221,10 +222,20 @@ def post(monkeypatch):
         monkeypatch.setitem(sys.modules, name, stub)
     module = load_module_with_stubs(
         PLUGIN_ROOT / 'api' / 'v2' / 'continue_predict.py', 'plugins.elitea_core.api.v2.continue_predict')
-    rpc = types.SimpleNamespace(result=None)
+    rpc = types.SimpleNamespace(result=None, body={}, seen={})
+
+    def chat_continue_predict_sio(sid, data, await_task_timeout):
+        rpc.seen.update(sid=sid, data=data, await_task_timeout=await_task_timeout)
+        return rpc.result
+
     handler = module.PromptLibAPI()
-    handler.module = types.SimpleNamespace(chat_continue_predict_sio=lambda **_: rpc.result)
-    return rpc, lambda: handler.post(PROJECT_ID, 'c-1')
+    handler.module = types.SimpleNamespace(chat_continue_predict_sio=chat_continue_predict_sio)
+
+    def call():
+        request.json = rpc.body
+        return handler.post(PROJECT_ID, 'c-1')
+
+    return rpc, call
 
 
 @pytest.mark.parametrize('status', [400, 403, 409])
@@ -275,3 +286,23 @@ def test_a_sign_in_answer_in_a_chat_without_a_schedule_run_is_left_alone():
 
     assert check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='skip'), OWNER) == (None, None)
     assert calls == []
+
+
+def test_rest_hands_the_interrupt_ids_of_the_banner_to_the_owner_check(post):
+    rpc, call = post
+    rpc.result = {'stopped': True}
+    rpc.body = {'message_id': 'm-1', 'interrupt_ids': ['hitl_a']}
+
+    call()
+
+    assert rpc.seen['data']['interrupt_ids'] == ['hitl_a']
+
+
+def test_rest_hands_no_interrupt_ids_on_when_the_request_has_none(post):
+    rpc, call = post
+    rpc.result = {'stopped': True}
+    rpc.body = {'message_id': 'm-1'}
+
+    call()
+
+    assert 'interrupt_ids' in rpc.seen['data'] and rpc.seen['data']['interrupt_ids'] is None

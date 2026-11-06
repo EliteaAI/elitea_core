@@ -11,6 +11,11 @@ ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API: int = 210
 
 ICON_PATH_DELIMITER: str = '___'
 
+# The interrupt ids that the paused event of a scheduled run lists and its answer sends back: both sides use
+# these two caps, so a listed id always fits the answer
+PAUSE_LIST_LIMIT: int = 50
+INTERRUPT_ID_MAX_LENGTH: int = 128
+
 # Predefined agent categories shown in the publish modal and Agent Studio filter
 # bar. These are non-removable system defaults; admins may add extra categories
 # via the guardrails configuration. "Other" is the permanent fallback category.

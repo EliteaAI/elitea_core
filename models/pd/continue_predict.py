@@ -1,7 +1,9 @@
 from uuid import UUID
-from typing import Optional, List, Dict, Any, Literal
+from typing import Annotated, Optional, List, Dict, Any, Literal
 
-from pydantic import BaseModel, Field, conint, model_validator
+from pydantic import BaseModel, Field, StringConstraints, conint, model_validator
+
+from ...utils.constants import INTERRUPT_ID_MAX_LENGTH, PAUSE_LIST_LIMIT
 
 
 class ContinuePredictPayload(BaseModel):
@@ -21,11 +23,12 @@ class ContinuePredictPayload(BaseModel):
         None, description="Edited text for 'edit', the user's note for 'block_with_comment', or the answers object for a clarifying-question 'answer'.")
     hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
         None, description="Per-child HITL decisions for a parallel sub-agent resume.")
-    interrupt_ids: Optional[List[str]] = Field(
-        None, max_length=50,
+    interrupt_ids: Optional[List[Annotated[str, StringConstraints(max_length=INTERRUPT_ID_MAX_LENGTH)]]] = Field(
+        None, max_length=PAUSE_LIST_LIMIT,
         description="The interrupt ids the answer was meant for. The banner of a scheduled run sends the ids of its "
-                    "paused event (at most 50). When they differ from the pending ones, nothing changes and the "
-                    "answer is 409. Without it the answer applies to what is pending.")
+                    f"paused event (at most {PAUSE_LIST_LIMIT}, each at most {INTERRUPT_ID_MAX_LENGTH} characters). "
+                    "When they differ from the pending ones, nothing changes and the answer is 409. A pause with "
+                    "several tools is answered with one action only when the ids name every pending tool.")
     mcp_auth_resume: bool = Field(
         False, description="Whether this request resumes a durable Toolkit authorization interrupt.")
     mcp_auth_action: Optional[Literal["authorize", "skip"]] = Field(
