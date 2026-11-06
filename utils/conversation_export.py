@@ -13,6 +13,7 @@ from ..models.folder import ConversationFolder
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.base import MessageItem
 from .authors import get_authors_data
+from .utils import get_public_project_id_or_none
 
 EXPORT_FORMAT_VERSION = '1.0'
 ATTACHMENTS_DIR = 'attachments'
@@ -177,6 +178,8 @@ def build_export_payload(
                     'entity_name': p['entity_name'],
                     'name': participant_display_name(p),
                     **({'version': p['version']} if p.get('version') else {}),
+                    **({'public': True} if p.get('public') else {}),
+                    **({'toolkit_type': p['toolkit_type']} if p.get('toolkit_type') else {}),
                 }
                 for p in participants
             ],
@@ -277,6 +280,9 @@ def _item_to_dict(item) -> dict:
     return result
 
 
+_PUBLIC_ENTITY_NAMES = {ParticipantTypes.application.value, ParticipantTypes.skill.value}
+
+
 def _resolve_participants(participants) -> list[dict]:
     result = [
         {
@@ -289,9 +295,13 @@ def _resolve_participants(participants) -> list[dict]:
     ]
     user_ids = [p['entity_meta'].get('id') for p in result if p['entity_name'] == ParticipantTypes.user.value]
     authors_by_id = {a['id']: a for a in (get_authors_data(user_ids) if user_ids else [])}
+    public_project_id = get_public_project_id_or_none()
 
     for p in result:
         entity_meta = p['entity_meta']
+        if public_project_id is not None and p['entity_name'] in _PUBLIC_ENTITY_NAMES \
+                and entity_meta.get('project_id') == public_project_id:
+            p['public'] = True
         try:
             match p['entity_name']:
                 case ParticipantTypes.user.value:
@@ -315,6 +325,8 @@ def _resolve_participants(participants) -> list[dict]:
                         toolkit_id=entity_meta.get('id'),
                     ) or {}
                     p['meta']['name'] = details.get('name') or details.get('toolkit_name')
+                    if details.get('type'):
+                        p['toolkit_type'] = details['type']
                 case ParticipantTypes.skill.value:
                     from .skill_participant_utils import load_skill_participant_details  # pylint: disable=C0415
                     p['meta']['name'] = load_skill_participant_details(entity_meta).get('name')

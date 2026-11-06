@@ -14,15 +14,17 @@ import time
 import uuid
 import zipfile
 from base64 import b64encode
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 from pylon.core.tools import log
-from tools import MinioClient, VaultClient, auth, rpc_tools
+from tools import MinioClient, VaultClient, auth, db, rpc_tools
 
 from ..models.all import Application
+from ..models.elitea_tools import EliteATool
 from ..models.conversation import Conversation
 from ..models.enums.all import CanvasTypes, ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -38,6 +40,7 @@ from ..models.pd.conversation_import import (
     ImportTextItem,
 )
 from ..models.pd.participant import ParticipantCreate
+from ..models.pd.tool import ToolDetails
 from ..models.skill import Skill
 from .authors import get_authors_data
 from .attachments import FileToAIProcessorCollector, NotSupportableProcessorExtension, parse_filepath
@@ -54,6 +57,7 @@ from .conversation_utils import create_conversation
 from .file_utils import sanitize_filename
 from .internal_tools import get_default_attachment_bucket
 from .participant_utils import add_participant_to_conversation
+from .utils import get_public_project_id_or_none
 
 IMPORT_STAGING_DIR = os.path.join(tempfile.gettempdir(), 'elitea_chat_imports')
 STAGING_TTL_SECONDS = 3600
@@ -408,57 +412,136 @@ def prepare_import(project_id: int, user_id: int, encrypted_path: Path, file_nam
 _LINKABLE_AI_MODELS = {
     ParticipantTypes.application.value: Application,
     ParticipantTypes.skill.value: Skill,
+    ParticipantTypes.toolkit.value: EliteATool,
 }
+_PUBLIC_LINKABLE_AI = {ParticipantTypes.application.value, ParticipantTypes.skill.value}
 
 
-def _find_entity_id_by_name(session, model, name: str) -> int | None:
-    row = session.query(model.id).filter(model.name == name).order_by(model.id.asc()).first()
-    return row[0] if row else None
+def _linked_entity_settings(entity_name: str, entity) -> dict:
+    if entity_name == ParticipantTypes.application.value:
+        version = entity.get_default_version() or min(entity.versions, key=lambda v: v.id, default=None)
+        return {'agent_type': version.agent_type} if version else {}
+    if entity_name == ParticipantTypes.toolkit.value:
+        settings = {'toolkit_type': entity.type}
+        url = (entity.settings or {}).get('url')
+        if url:
+            settings['mcp_server_url'] = url
+        return settings
+    return {}
+
+
+def _toolkit_display_name(toolkit) -> str | None:
+    """Name the export wrote for a toolkit whose name column is empty."""
+    try:
+        return ToolDetails.model_validate(toolkit, context={'authors_map': {}}).toolkit_name
+    except Exception:  # pylint: disable=W0703
+        return None
+
+
+def _find_toolkits_by_name(session, participant) -> list:
+    toolkits = session.query(EliteATool).filter(EliteATool.name == participant.name).order_by(EliteATool.id).all()
+    if not toolkits:
+        unnamed = session.query(EliteATool).filter(EliteATool.name.is_(None)).order_by(EliteATool.id).all()
+        toolkits = [t for t in unnamed if _toolkit_display_name(t) == participant.name]
+    if participant.toolkit_type:
+        toolkits.sort(key=lambda t: t.type != participant.toolkit_type)
+    return toolkits[:1]
+
+
+def _find_entities_by_name(session, participant) -> list[tuple[int, dict]]:
+    if participant.entity_name == ParticipantTypes.toolkit.value:
+        entities = _find_toolkits_by_name(session, participant)
+    else:
+        model = _LINKABLE_AI_MODELS[participant.entity_name]
+        entities = session.query(model).filter(model.name == participant.name).order_by(model.id).limit(1).all()
+    return [(e.id, _linked_entity_settings(participant.entity_name, e)) for e in entities]
+
+
+def _participant_candidates(session, project_id: int, public_session, public_project_id, participant) -> list:
+    """Same-name entities to try in order: the public project first for catalog participants.
+
+    Returns [(project id, entity id, entity settings)].
+    """
+    sources = [(project_id, session)]
+    if public_session is not None and participant.entity_name in _PUBLIC_LINKABLE_AI:
+        sources.insert(0 if participant.public else 1, (public_project_id, public_session))
+    candidates = []
+    for source_project_id, source_session in sources:
+        try:
+            found = _find_entities_by_name(source_session, participant)
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning(
+                "Chat import: lookup of %s %r in project %s failed: %s",
+                participant.entity_name, participant.name, source_project_id, exc,
+            )
+            continue
+        candidates.extend((source_project_id, entity_id, settings) for entity_id, settings in found)
+    return candidates
 
 
 def _participant_key(participant) -> tuple:
     entity_meta = participant.entity_meta or {}
-    return participant.entity_name, entity_meta.get('id')
+    return participant.entity_name, entity_meta.get('project_id'), entity_meta.get('id')
+
+
+def _add_linked_participant(session, project_id: int, user_id: int, conversation, entity_name: str, candidate) -> bool:
+    entity_project_id, entity_id, entity_settings = candidate
+    try:
+        add_participant_to_conversation(
+            project_id=project_id,
+            session=session,
+            participant=ParticipantCreate(
+                entity_name=entity_name,
+                entity_meta={'id': entity_id, 'project_id': entity_project_id},
+                entity_settings=entity_settings,
+            ),
+            conversation=conversation,
+            initiator_id=user_id,
+        )
+        session.flush()
+        return True
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning(
+            "Chat import: could not add %s %s from project %s to conversation %s: %s",
+            entity_name, entity_id, entity_project_id, conversation.id, exc,
+        )
+        return False
 
 
 def _link_ai_participants(session, project_id: int, user_id: int, conversation, envelope) -> dict[int, int]:
-    """Re-add agents and skills that exist in this project by exact name.
+    """Re-add agents, pipelines, skills, toolkits and MCPs that exist in this or the public project by exact name.
 
     Returns {original participant id: new participant id}.
     """
-    wanted = {}
-    for participant in envelope.conversation.participants:
-        model = _LINKABLE_AI_MODELS.get(participant.entity_name)
-        if model is None or not participant.name or participant.id is None:
-            continue
-        entity_id = _find_entity_id_by_name(session, model, participant.name)
-        if entity_id is None:
-            continue
-        wanted.setdefault((participant.entity_name, entity_id), []).append(participant.id)
-
-    for entity_name, entity_id in wanted:
-        try:
-            add_participant_to_conversation(
-                project_id=project_id,
-                session=session,
-                participant=ParticipantCreate(
-                    entity_name=entity_name,
-                    entity_meta={'id': entity_id, 'project_id': project_id},
-                ),
-                conversation=conversation,
-                initiator_id=user_id,
-            )
-            session.flush()
-        except Exception as exc:  # pylint: disable=W0703
-            log.warning(
-                "Chat import: could not add %s %s to conversation %s: %s",
-                entity_name, entity_id, conversation.id, exc,
-            )
+    public_project_id = get_public_project_id_or_none()
+    if public_project_id == project_id:
+        public_project_id = None
+    linked, failed = {}, set()
+    with ExitStack() as stack:
+        public_session = None
+        if public_project_id is not None:
+            try:
+                public_session = stack.enter_context(db.get_session(public_project_id))
+            except Exception as exc:  # pylint: disable=W0703
+                log.warning("Chat import: could not open public project %s: %s", public_project_id, exc)
+        for participant in envelope.conversation.participants:
+            if participant.entity_name not in _LINKABLE_AI_MODELS or not participant.name or participant.id is None:
+                continue
+            candidates = _participant_candidates(session, project_id, public_session, public_project_id, participant)
+            for candidate in candidates:
+                key = (participant.entity_name, candidate[0], candidate[1])
+                if key in failed:
+                    continue
+                if key in linked or _add_linked_participant(
+                        session, project_id, user_id, conversation, participant.entity_name, candidate):
+                    linked.setdefault(key, []).append(participant.id)
+                    break
+                failed.add(key)
 
     session.refresh(conversation)
     by_key = {_participant_key(p): p.id for p in conversation.participants}
     mapping = {}
-    for key, original_ids in wanted.items():
+    for key, original_ids in linked.items():
         new_id = by_key.get(key)
         if new_id:
             for original_id in original_ids:
@@ -706,7 +789,6 @@ def _import_messages(session, conversation, messages, participants: dict, upload
 
 
 def _delete_conversation(project_id: int, conversation_id: int | None) -> None:
-    from tools import db  # pylint: disable=C0415
     if conversation_id is None:
         return
     try:
