@@ -390,3 +390,18 @@ def test_provider_error_answer_gives_a_plain_stored_reason(reasons):
     from plugins.elitea_core.utils.error_text import provider_error_answer
     reason = reasons.run_failure_reason(provider_error_answer("Error: Error code: 400 - {'error': {}}"))
     assert reason == "The run failed: The model provider rejected the request (HTTP 400)."
+
+
+def test_a_provider_400_answer_ends_the_run_as_failed_with_the_event_the_status_and_the_notice(runs, session, sent):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule)
+    reason = runs.run_failure_reason(provider_error_answer("Error: Error code: 400 - {'error': {'message': 'bad'}}"))
+
+    runs.finish_schedule_run(1, run.id, "failed", reason, conversation_id=55)
+
+    session.refresh(run)
+    session.refresh(schedule)
+    assert (run.status, schedule.last_run_status) == ("failed", "failed")
+    assert run.events[-1]["text"] == "Run finished: failed (The run failed: The model provider rejected the request (HTTP 400).)"
+    assert sent.notices == [(12, "schedule_run_failed", run.id)]
