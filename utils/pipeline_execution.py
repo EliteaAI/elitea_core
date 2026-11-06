@@ -253,6 +253,7 @@ def execute_pipeline_via_predict_sio(
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_ticket: str | None = None,
     unattended: bool = False,
+    batch_sensitive_approvals: bool = False,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -273,6 +274,8 @@ def execute_pipeline_via_predict_sio(
         mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
         unattended: an owner schedule's run under governance (#7011): admitted on its ticket or refused, never as a
             person's chat run; sent only when set
+        batch_sensitive_approvals: the run pauses once for all sensitive calls of one model turn, not once for each;
+            sent only when set
 
     Returns:
         Dict with task_id from the RPC call, or ``{code, error}`` when a governed admission refused the run
@@ -280,6 +283,8 @@ def execute_pipeline_via_predict_sio(
     extra = {"mandate_ticket": mandate_ticket} if mandate_ticket is not None else {}
     if unattended:
         extra["unattended"] = True
+    if batch_sensitive_approvals:
+        extra["batch_sensitive_approvals"] = True
     result = rpc_tools.RpcMixin().rpc.timeout(5).applications_predict_sio(
         sid=None,  # No socket connection for triggered runs
         sio_event=SioEvents.chat_predict.value,  # Required for metadata persistence

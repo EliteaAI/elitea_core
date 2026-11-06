@@ -130,7 +130,9 @@ RUN_DETAIL_EXAMPLE = {
          "text": "Tool call: github · list_issues (1200 ms): 12 open issues", "toolkit": "github",
          "tool": "list_issues", "summary": "12 open issues", "duration_ms": 1200},
         {"at": "2026-10-21T09:00:09.000000+00:00", "kind": "paused", "level": "warning",
-         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue"},
+         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue",
+         "tools": [{"toolkit": "github", "tool": "create_issue"}],
+         "later_tools": [{"toolkit": "github", "tool": "delete_file"}]},
         {"at": "2026-10-21T09:00:30.000000+00:00", "kind": "decision", "level": "info",
          "text": "Approved by the schedule owner", "action": "approve", "by": 20},
         {"at": "2026-10-21T09:00:38.000000+00:00", "kind": "finished", "level": "success",
@@ -516,7 +518,10 @@ OPERATIONS = {
             "(`principal_label`), the risk check outcome, a `summary` (duration, tokens, cost) and `events`. "
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
             "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
-            "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
+            "the list holds at most 200 events. A `paused` event names the first pending tool in `toolkit` and "
+            "`tool`, and every pending tool in `tools` (a list of `toolkit` and `tool` names, never arguments). "
+            "`later_tools` lists the tools of the risk check at the start of the run that are not pending now: "
+            "they may ask for approval later. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
             "while the status is `running` or `waiting_for_approval`.",

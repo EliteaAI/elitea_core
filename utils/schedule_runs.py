@@ -15,6 +15,8 @@ STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
+PAIR_LIMIT = 50  # (toolkit, tool) pairs kept in one run event
+PARALLEL_PAUSE = 'parallel_sensitive_tools'  # the one pause that lists every sensitive call of an AI message
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
@@ -243,8 +245,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
     A schedule that does not ask the owner fails on a sign-in at once. `conversation_id` and `author_id` of the
     paused chat tie the pause to its own run (see `_own_conversation`).
     """
-    # A parallel pause lists every interrupt in `hitl_interrupts`, the first one again in `hitl_interrupt`
-    interrupts = list(interrupt.get('hitl_interrupts') or [interrupt.get('hitl_interrupt') or {}])
+    interrupts = _pause_items(interrupt)
     sensitive_items = [item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool']
     sensitive = sensitive_items[0] if sensitive_items else None
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
@@ -258,7 +259,10 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
                             conversation_id, author_id=author_id)
         return
-    event = _sign_in_event(waiting) if sign_in is not None else _paused_event(sensitive_items)
+    if sign_in is not None:
+        event = _sign_in_event(waiting)
+    else:
+        event = _paused_event(sensitive_items, _scanned_pairs(project_id, run_id))
     _park_run(project_id, run_id, event, _own_conversation(conversation_id, author_id))
 
 
@@ -343,22 +347,63 @@ def _copy_status(session, run_id: int, status: str) -> None:
     session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status=status))
 
 
-def _paused_event(items: list[dict]) -> dict:
+def _pause_items(interrupt: dict) -> list[dict]:
+    """The interrupts of one pause payload, one item for each pending tool.
+
+    A parallel pause lists every interrupt in `hitl_interrupts`, the first one again in `hitl_interrupt`. The
+    aggregate pause (`parallel_sensitive_tools`) holds them in `pending`; each becomes a sensitive-tool item.
+    """
+    single = interrupt.get('hitl_interrupt') or (interrupt if interrupt.get('guardrail_type') == PARALLEL_PAUSE else {})
+    items = []
+    for item in interrupt.get('hitl_interrupts') or [single]:
+        pending = item.get('pending') if item.get('guardrail_type') == PARALLEL_PAUSE else None
+        if isinstance(pending, list) and pending:
+            items.extend({**entry, 'guardrail_type': 'sensitive_tool'} for entry in pending if isinstance(entry, dict))
+        else:
+            items.append(item)
+    return items
+
+
+def tool_pairs(items: list[dict], toolkit_key: str = 'toolkit', tool_key: str = 'tool') -> list[tuple[str, str]]:
+    """The distinct (toolkit, tool) names of `items`, in order and cut at `NAME_LIMIT`; never arguments."""
+    return list(dict.fromkeys(
+        tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in (toolkit_key, tool_key)) for item in items))
+
+
+def _scanned_pairs(project_id: int, run_id: int) -> list[dict]:
+    """The (toolkit, tool) pairs the risk check logged at the start of the run; none when it logged none."""
+    try:
+        with db.get_session(project_id) as session:
+            events = session.scalar(select(EntityScheduleRun.events).where(EntityScheduleRun.id == run_id))
+    except Exception:  # noqa: BLE001 -- the list is a hint; the pause must not fail for it
+        log.exception('Schedule run %s: cannot read the risk check', run_id)
+        return []
+    check = next((event for event in reversed(events or []) if event.get('kind') == 'risk_check'), {})
+    return [pair for pair in check.get('tools') or [] if isinstance(pair, dict)]
+
+
+def _paused_event(items: list[dict], scanned: list[dict] | None = None) -> dict:
     """The pause line of the run log: toolkit and tool of the pending tools, never the tool arguments.
 
-    The `toolkit` and `tool` fields name the first tool. A list too long for `TEXT_LIMIT` loses whole entries from
-    its end and ends with the count of the hidden ones, so the owner sees that more tools wait.
+    The `toolkit` and `tool` fields name the first tool; `tools` holds every pending pair. `later_tools` holds the
+    pairs of the risk check at the start of the run that are not pending now, so the owner sees what may ask next.
+    A list too long for `TEXT_LIMIT` loses whole entries from its end and ends with the count of the hidden
+    ones, so the owner sees that more tools wait.
     """
     # Two calls of one tool wait as two items; the line names the tool once
-    names = list(dict.fromkeys(
-        tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name')) for item in items))
+    names = tool_pairs(items, 'toolkit_name', 'tool_name')
     entries = [f'{name} · {tool_name}' for name, tool_name in names]
     for shown in range(len(entries), 0, -1):
         hidden = len(entries) - shown
         text = 'Paused for approval: ' + ', '.join(entries[:shown]) + (f' (+{hidden} more)' if hidden else '')
         if len(text) <= TEXT_LIMIT:
             break  # one entry always fits: the names are cut at NAME_LIMIT
-    return run_event('paused', text, 'warning', toolkit=names[0][0], tool=names[0][1])
+    pending = {(toolkit.lower(), tool.lower()) for toolkit, tool in names}
+    later = [(toolkit, tool) for toolkit, tool in tool_pairs(scanned or [])
+             if (toolkit.lower(), tool.lower()) not in pending]
+    return run_event('paused', text, 'warning', toolkit=names[0][0], tool=names[0][1],
+                     tools=[{'toolkit': toolkit, 'tool': tool} for toolkit, tool in names[:PAIR_LIMIT]],
+                     later_tools=[{'toolkit': toolkit, 'tool': tool} for toolkit, tool in later[:PAIR_LIMIT]])
 
 
 def _sign_in_event(item: dict) -> dict:

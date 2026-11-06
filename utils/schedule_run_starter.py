@@ -40,6 +40,7 @@ START_FAILED = 'the run could not start'
 PREDICT_FAILED = 'the run call failed'
 ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
 BUDGET_CLOSED = 'the {} budget is used up'
+SCAN_PAIR_LIMIT = 50  # sensitive pairs kept in the risk check event
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
 
@@ -203,6 +204,15 @@ def _confirmed_pairs(review: dict):
     return list(dict.fromkeys(pairs)) or False
 
 
+def _listed_pairs(review: dict) -> list[dict]:
+    """The distinct (toolkit, tool) pairs of the listed sensitive tools, named as the SDK names them (cut at a limit)."""
+    pairs = dict.fromkeys(
+        (item['toolkit'], _runtime_tool_name(item['tool']) if item.get('from_list') else item['tool'])
+        for item in review['sensitive']
+        if item.get('code') == 'sensitive_action' and item.get('toolkit') and item.get('tool'))
+    return [{'toolkit': toolkit, 'tool': tool} for toolkit, tool in list(pairs)[:SCAN_PAIR_LIMIT]]
+
+
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
     """The risk outcome of the run for the run log and its `risk_check` event (owner CR 2026-10-21).
 
@@ -221,7 +231,8 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
             text += '; Run without asking is on'
         elif rule == 'run_without_asking':
             text += '; Run without asking does not hold, so the run pauses and asks'
-        return 'needs_approval', run_event('risk_check', text, 'warning')
+        # The pairs go into the log, so a pause can list the tools that may ask later (names only)
+        return 'needs_approval', run_event('risk_check', text, 'warning', tools=_listed_pairs(review))
     if not scan_complete(review):
         return 'unknown', run_event('risk_check', 'Risk check: not complete', 'warning')
     return 'ok', run_event('risk_check', 'Risk check: OK')
@@ -317,7 +328,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source=trigger_type, is_system_user=False,
-            auto_approve_sensitive_actions=approved, **governance,
+            auto_approve_sensitive_actions=approved, batch_sensitive_approvals=True, **governance,
         )
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
         log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)

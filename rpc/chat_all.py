@@ -180,6 +180,27 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     return ((run_id, decision) if decision else None), None
 
 
+def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:
+    """One decision for each pending tool when the owner answers a scheduled run with one action.
+
+    The banner of a scheduled run sends one `hitl_action` for a pause that lists several tools. Only a checked
+    schedule decision gets this (`schedule_decision`); an own decision list, one pending tool and a plain chat
+    keep their rules. An empty list means no change.
+    """
+    if schedule_decision is None or parsed.hitl_decisions or len(pending) < 2:
+        return []
+    value = '' if parsed.hitl_value is None else parsed.hitl_value
+    return [{'interrupt_id': interrupt_identity(item), 'action': parsed.hitl_action, 'value': value}
+            for item in pending]
+
+
+def _schedule_batch_kwargs(schedule_decision, rpc_func: str) -> dict:
+    """The batch flag for the resume of a scheduled run; the other chats and predict RPCs take none."""
+    if schedule_decision is None or rpc_func != CHAT_PREDICT_MAPPER[ParticipantTypes.application]:
+        return {}
+    return {'batch_sensitive_approvals': True}
+
+
 def _apply_schedule_decision(project_id, pending) -> dict | None:
     """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
     if pending is None:
@@ -2338,6 +2359,9 @@ class RPC:
                     dict(item) for item in (parsed.hitl_decisions or [])
                     if isinstance(item, dict)
                 ]
+                batch = _schedule_decisions(parsed, pending, schedule_decision)
+                if batch:
+                    parsed.hitl_decisions = decisions = batch
                 if decisions:
                     try:
                         # Track-1/in-process aggregates share one root worker
@@ -2677,7 +2701,7 @@ class RPC:
                     **skill_rpc_kwargs,
                     **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
                     **_chat_trigger_kwargs(rpc_func),
-
+                    **_schedule_batch_kwargs(schedule_decision, rpc_func),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

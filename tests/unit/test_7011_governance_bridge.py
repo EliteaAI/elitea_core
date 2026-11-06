@@ -329,7 +329,7 @@ def test_off_the_predict_call_is_exactly_mains_and_nothing_is_read_or_minted(ns,
                  "chat_history": [], "message_id": "response-1", "stream_id": "conv-uuid",
                  "conversation_id": "conv-uuid"},
         "await_task_timeout": -1, "user_id": OWNER, "is_system_user": False, "non_interactive": True,
-        "trigger_source": "scheduled", "auto_approve_sensitive_actions": False}
+        "trigger_source": "scheduled", "auto_approve_sensitive_actions": False, "batch_sensitive_approvals": True}
     assert reads == [] and sessions == [] and writes == [] and env.denied == []
     assert starter.writes.streak == []   # #7254: off neither counts nor ends a refusal streak
 

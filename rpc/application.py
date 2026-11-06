@@ -396,6 +396,7 @@ class RPC:
                     mandate_ticket: Optional[str] = None,
                     authoring: bool = False,
                     unattended: bool = False,
+                    batch_sensitive_approvals: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -575,6 +576,10 @@ class RPC:
 
         if eligible_for_autoapproval:
             payload['auto_approve_sensitive_actions'] = True
+
+        # An RPC argument, never a field of `data`: a client payload must not switch the batch pause on
+        if batch_sensitive_approvals:
+            payload['batch_sensitive_approvals'] = True
 
         if not user_context:
             user_context = {
