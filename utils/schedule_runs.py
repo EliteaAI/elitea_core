@@ -43,7 +43,11 @@ PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the 
 
 
 class ScheduleDecisionForbidden(Exception):
-    """The caller of an approve or reject is neither the schedule owner nor a schedules admin."""
+    """The caller of an approve or reject is not the schedule owner, the user the run acts as or a schedules admin."""
+
+
+class ScheduleEditForbidden(ScheduleDecisionForbidden):
+    """The caller may approve or reject, but sends an edit, an answer, a note or text for a run that acts as another user."""
 
 
 class ScheduleDecisionInvalid(Exception):
@@ -415,15 +419,18 @@ def _actor_lost_rights(project_id: int, actor_id: int | None, entity: tuple | No
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
                             fan_out: bool = False, sign_in: bool = False, is_admin: bool | None = None,
-                            conversation_id: int | None = None, recheck_actor: bool = False) -> str | None:
+                            conversation_id: int | None = None, recheck_actor: bool = False,
+                            has_text: bool = False) -> str | None:
     """Check the decision on a waiting run without changing it; `reject` or `approve`.
 
     A chat passes its `conversation_id`: the run must be linked to that chat, else `ScheduleRunNotWaiting`,
     because the run id in the conversation meta is written by the client. Any `reject` in `actions` rejects.
-    `ScheduleDecisionForbidden` for anyone but the user the run acts as (`run_actor_id`) or a holder of
-    `schedules.admin` (`may_run_or_decide`; `is_admin` None reads the permission); then `ScheduleDecisionInvalid`
-    for an empty or unknown action; then `ScheduleDecisionForbidden` when a caller who is not that user sends
-    anything but approve or reject; then `ScheduleRunNotWaiting` when the run is not waiting. None when a
+    `ScheduleDecisionForbidden` for anyone but the user the run acts as (`run_actor_id`), the owner of the run or a
+    holder of `schedules.admin` (`may_run_or_decide`; `is_admin` None reads the permission); then
+    `ScheduleDecisionInvalid` for an empty or unknown action; then `ScheduleEditForbidden` when a caller who is not
+    the user the run acts as sends anything but approve or reject, or any text (`has_text`): only that user edits,
+    answers or notes, because the tools run with their identity; then `ScheduleRunNotWaiting` when the run is not
+    waiting. None when a
     fan-out child decides a run that an earlier decision of the same pause resumed: nothing to change. With
     `sign_in`, the actions are the sign-in answers (`authorize`, `skip`) and map to approve and reject.
     With `recheck_actor`, an approve by another user is refused while the user the run acts as lost project
@@ -436,15 +443,16 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         if run is None or (conversation_id is not None and run.conversation_id != conversation_id):
             raise ScheduleRunNotWaiting(run_id)
         actor_id = run_actor_id(session, run)
+        owner_id = run_owner_id(session, run)
         entity = _run_entity(session, run) if recheck_actor else None
         status, resumed_at = run.status, run.resumed_at
     # Outside the session: the permission read of a chat caller is an RPC
-    if not may_run_or_decide(project_id, actor_id, caller_id, is_admin):
+    if caller_id != actor_id and not may_run_or_decide(project_id, owner_id, caller_id, is_admin):
         raise ScheduleDecisionForbidden(run_id)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
-    if caller_id != actor_id and not all(action in OTHER_USER_ACTIONS for action in actions):
-        raise ScheduleDecisionForbidden(run_id)
+    if caller_id != actor_id and (has_text or not all(action in OTHER_USER_ACTIONS for action in actions)):
+        raise ScheduleEditForbidden(run_id)
     if fan_out and status == 'running' and resumed_at is not None:
         return None
     if status != 'waiting_for_approval':
@@ -461,7 +469,8 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, decided
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
     The run log gets the decision and who made it: `decided_by`, or the owner when it is not given. The check
-    already let only the owner or a schedules admin through; the owner is told when an admin decided.
+    already let only the owner, the user the run acts as or a schedules admin through; the owner is told when
+    a user other than the owner decided.
     """
     conversation_id = None
     with db.get_session(project_id) as session:

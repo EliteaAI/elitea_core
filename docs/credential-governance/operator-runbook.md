@@ -319,14 +319,17 @@ firings need it. **Run now** and **Test run** act as the person who presses the 
 | Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the person who pressed the button, the owner or an admin (entry point `schedule_test`, subject = that person's verified sign-in; delegated credentials on that person's live sign-in, `DENIED_ASSERTION_UNAVAILABLE` without one). A bound version runs its approved definition on its binding, as any bound run of that person (definition checked, `BINDING_DIGEST_MISMATCH` if it changed; sub-agents on their bindings; that person's grants). An unbound version runs the draft, as the editor's test chat: that person needs the right to edit the agent, and only their own credentials and project ones granted to them are used. Either way that person needs the right to run the agent (`DENIED_RBAC` otherwise) and no admin role; no mandate is read. An unbound version needs development runs on (`DEVELOPMENT_RUNS_DISABLED` otherwise); a bound one runs on its binding whatever the switch says. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably (run history and owner notice) but never count toward or reset the auto-pause. |
 
 **Run now and Test run.** The owner and a holder of the permission `schedules.admin` can start them. Anyone else gets
-404, because the schedule is not in their view. A decision on a run that acts as another person is 403 `not_owner`.
+404, because the schedule is not in their view. A decision by a user who is not the owner, the person the run acts as or a
+holder of `schedules.admin` is 403 `not_owner`.
 The run is admitted and runs as the person who pressed
 the button, so an admin is checked as the admin and uses the admin's rights and credentials, never the owner's. The
 Run action in the schedule list follows the same permission. When an admin approves or rejects a waiting run of
 another person, the run log names the admin and the owner gets a notice; an admin's Run now also tells the owner when it
-starts. The run's own notices and its chat event go to the person it acts as. In the chat an admin can only approve or
-reject: edit, answer and note stay with the person the run acts as. An admin's approve is refused (403) when that person
-lost project access or the right to run the agent; the run keeps waiting.
+starts. The run's own notices and its chat event go to the person it acts as. The schedule owner may also approve or
+reject a run that an admin started; the run still acts as the admin. In the chat, anyone but the person the run acts as
+can only approve or reject: edit, answer and note stay with that person, the owner included, and text from anyone else is
+refused (403). An approve by another person is refused (403) when the person the run acts as lost project access or the
+right to run the agent; the run keeps waiting.
 
 **Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
 mandate a run could use, the schedule is saved and the save shows:

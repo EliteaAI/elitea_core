@@ -64,7 +64,7 @@ from ..utils.toolkit_authorization import (
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
-    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
+    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleEditForbidden, ScheduleRunNotWaiting,
     apply_schedule_decision, check_schedule_decision, schedule_run_actor_id,
 )
 from ..utils.internal_tools import (
@@ -136,6 +136,7 @@ def _get_agent_type(
 
 # The answer of each refused schedule decision (EL-7011)
 _SCHEDULE_REFUSALS = {
+    ScheduleEditForbidden: {"error": "Only the user this run acts as can edit or answer in its chat", "status": 403},
     ScheduleDecisionForbidden: {"error": "Only the schedule owner or a project admin can approve or reject this run", "status": 403},
     ScheduleDecisionInvalid: {
         "error": "hitl_action must be approve, edit, answer, block_with_comment or reject",
@@ -146,13 +147,27 @@ _SCHEDULE_REFUSALS = {
 _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field": "mcp_auth_action", "status": 400}
 
 
+def _carries_text(parsed) -> bool:
+    """True when the request sends text: a `hitl_value`, or a `value` in a decision or sign-in answer item.
+
+    An empty string, None and an empty dict or list are no text: the schedule panel sends `value: ''` with an approve.
+    """
+    def filled(value) -> bool:
+        return value not in (None, '', {}, [])
+
+    items = [*(parsed.hitl_decisions or []), *(getattr(parsed, 'mcp_auth_decisions', None) or [])]
+    return filled(parsed.hitl_value) or any(isinstance(item, dict) and filled(item.get('value')) for item in items)
+
+
 def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
     The (run id, decision, caller id) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
     The decision is None for a fan-out child of a pause that an earlier child already resumed: nothing to write, but
-    the rights check passed. The caller is the user the run acts as or a holder of `schedules.admin`; the run must be
-    linked to this conversation. An admin's approve also re-checks the rights of the user the run acts as.
+    the rights check passed. The caller is the user the run acts as, the schedule owner or a holder of
+    `schedules.admin`; the run must be linked to this conversation. Every action field the worker reads is checked:
+    each decision, the top-level `hitl_action` and the sign-in answers. Only the user the run acts as may send an
+    edit, an answer, a note or any text. Another user's approve also re-checks the rights of the user the run acts as.
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
@@ -168,17 +183,22 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     # A non-dict item has no action, so it is refused as invalid (400) instead of failing (500)
     actions = (
         [item.get('action') if isinstance(item, dict) else None for item in decisions]
-        if decisions else [parsed.hitl_action]
+        if decisions else []
     )
+    # The worker reads the top-level action before the list, so it is checked next to the list
+    if parsed.hitl_action is not None or not actions:
+        actions.append(parsed.hitl_action)
     if sign_in:
         # One answer per request: a single skip among them rejects the run, whatever the top action says
         answers = getattr(parsed, 'mcp_auth_decisions', None)
         actions = ([item.get('action') if isinstance(item, dict) else None for item in answers]
                    if answers else [parsed.mcp_auth_action])
+        if parsed.hitl_action is not None:
+            actions.append(parsed.hitl_action)
     try:  # the run id in the meta is client-written: the run must be linked to this chat
         decision = check_schedule_decision(
             parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
-            conversation_id=conversation_id, recheck_actor=True)
+            conversation_id=conversation_id, recheck_actor=True, has_text=_carries_text(parsed))
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:

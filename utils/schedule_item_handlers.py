@@ -712,7 +712,8 @@ class ScheduleItemHandlers:
 
         Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
         Otherwise approve starts the run again. A run with a chat is decided in that chat.
-        Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`.
+        Who may call: the owner, the user the run acts as or a holder of `schedules.admin`, with `schedules.run`.
+        A caller outside the schedule's scope gets 404; the body holds only approve or reject, no text.
         Errors: 400 invalid action; 403; 404 not found, or a schedule outside the caller's scope; 409 the run is not waiting,
         has a chat, or a credential is still missing.
         """
