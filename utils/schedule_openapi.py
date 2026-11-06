@@ -311,11 +311,12 @@ OPERATIONS = {
             "An edit sends `schedule_id`: the scan runs as the schedule owner, and the answer adds `confirmed`, "
             "true when the schedule keeps \"Run without asking\" with this fingerprint stored, so the save "
             "needs no new `risk_ack`. A waiting run sends `schedule_id` and `run_id`: the scan runs as the user "
-            "the run acts as (the person who pressed Run now, else the owner), never as a user the client names.",
-            "a project member with `schedules.create`, as for a create",
+            "the run acts as (the person who pressed Run now, else the owner), never as a user the client names, "
+            "and the answer has no `confirmed`.",
+            "a project member with `schedules.create`, as for a create; with `run_id` also `schedules.run`",
             "400 an invalid field (`run_id` needs `schedule_id`), or a version that is not of the agent or "
-            "pipeline; 403 no permission; 404 the agent or pipeline, or the `schedule_id`, is not visible, or "
-            "the `run_id` is unknown or of another schedule"),
+            "pipeline; 403 no permission, or `run_id` without `schedules.run`; 404 the agent or pipeline, or the "
+            "`schedule_id`, is not visible, or the `run_id` is unknown or of another schedule"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleRiskCheck,
         "responses": _responses(200, "The risk review", CHECK_EXAMPLE, {

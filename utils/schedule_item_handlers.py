@@ -477,12 +477,13 @@ class ScheduleItemHandlers:
         fingerprint, and the answer adds `confirmed`: true when the schedule keeps "Run without asking"
         with this fingerprint stored (R9.2).
         With `schedule_id` and `run_id` (a waiting run) the scan runs as the user the run acts as: the person
-        who pressed Run now or Test run, else the schedule owner. The client never names that user.
-        Who may call: a project member with `schedules.create`, as for a create.
+        who pressed Run now or Test run, else the schedule owner. The client never names that user. The answer
+        has no `confirmed`: the stored fingerprint is the owner's, not the run actor's.
+        Who may call: a project member with `schedules.create`, as for a create; with `run_id` also `schedules.run`.
         Errors: 400 invalid field (also `run_id` without `schedule_id`), a version that is not of the agent or
         pipeline, or an agent or pipeline that is not the one of `schedule_id`; 403, also `not_owner` for another
-        version without the right to edit the schedule; 404 not visible, also a `schedule_id` the caller may not
-        see, and a `run_id` that is unknown or of another schedule.
+        version without the right to edit the schedule, and for a `run_id` without `schedules.run`; 404 not
+        visible, also a `schedule_id` the caller may not see, and a `run_id` that is unknown or of another schedule.
         """
         from .schedule_risk import scan_complete, scan_schedule
         from .schedule_settings import is_run_without_asking_allowed
@@ -501,6 +502,8 @@ class ScheduleItemHandlers:
                     owner_id, stored = row.created_by, _kept_fingerprint(row)
                     rule = rule or row.approval_rule
                     if body.run_id is not None:
+                        if SCHEDULE_PERMISSIONS["run"] not in scope.permissions:
+                            return refusal("not_owner", "Only a user who may run this schedule can check a run", 403)
                         # Late: the run writers load the run models, which the handler tests fake
                         from .schedule_runs import run_actor_id
                         run = session.get(EntityScheduleRun, body.run_id) if body.run_id <= MAX_DB_ID else None
@@ -513,7 +516,7 @@ class ScheduleItemHandlers:
         review = scan_schedule(project_id, body.version_id, owner_id, rule)
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
         answer = {**review, "run_without_asking_allowed": allowed}
-        if body.schedule_id is not None:
+        if body.schedule_id is not None and body.run_id is None:
             answer["confirmed"] = stored is not None and stored == review["fingerprint"]
         return answer, 200
 

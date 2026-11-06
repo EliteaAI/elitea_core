@@ -359,45 +359,67 @@ def _seed_run(harness, schedule_id, columns):
 
 
 @pytest.fixture
-def run_actor(harness, monkeypatch):
-    """`utils/schedule_runs` with the run actor rule: the starter of a manual or test run, else the owner."""
+def run_actor(monkeypatch):
+    """`utils/schedule_runs` with a fixed actor per run id; a test sets `run_actor[run_id]`.
+
+    The real rule (starter of a manual or test run, else the owner) is tested in test_7011_schedule_resume.
+    """
+    actors = {}
     runs = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')
-    runs.run_actor_id = lambda session, run: (
-        run.requested_by if run.trigger in ('manual', 'test') and run.requested_by is not None
-        else harness.row(run.schedule_id).created_by)
+    runs.run_actor_id = lambda session, run: actors[run.id]
     monkeypatch.setitem(sys.modules, runs.__name__, runs)
+    return actors
 
 
 @pytest.mark.usefixtures('run_actor')
 class TestCheckAsRunActor:
-    def test_check_with_a_run_id_scans_as_the_user_who_started_the_run(self, harness):
+    def test_check_with_a_run_id_scans_as_the_run_actor_and_has_no_confirmed(self, harness, run_actor):
         schedule_id = harness.seed(created_by=OTHER_ID, approval_rule='pause_and_ask')
         run_id = _seed_run(harness, schedule_id, {'trigger': 'manual', 'requested_by': ADMIN_ID})
+        run_actor[run_id] = ADMIN_ID
         harness.request_as(ADMIN_ID, ADMIN)
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': run_id},
                                     suffix='/check')
         assert status == 200, body
+        assert 'confirmed' not in body
         assert harness.scans == [(PROJECT_ID, 10, ADMIN_ID, 'pause_and_ask')]
 
-    def test_owner_check_of_an_admin_started_run_scans_as_the_admin(self, harness):
+    def test_owner_check_of_a_run_scans_as_the_run_actor(self, harness, run_actor):
         schedule_id = harness.seed(created_by=OWNER_ID)
         run_id = _seed_run(harness, schedule_id, {'trigger': 'manual', 'requested_by': ADMIN_ID})
+        run_actor[run_id] = ADMIN_ID
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': run_id},
                                     suffix='/check')
         assert status == 200, body
         assert harness.scans[-1][2] == ADMIN_ID
 
-    @pytest.mark.parametrize('columns', [{'trigger': 'cron'}, {'trigger': 'cron', 'requested_by': ADMIN_ID}])
-    def test_check_with_the_run_id_of_a_cron_run_scans_as_the_owner(self, harness, columns):
+    def test_check_with_a_run_id_scans_as_the_actor_the_rule_names_even_when_it_is_the_owner(
+            self, harness, run_actor):
         schedule_id = harness.seed(created_by=OTHER_ID)
-        run_id = _seed_run(harness, schedule_id, columns)
+        run_id = _seed_run(harness, schedule_id, {'trigger': 'cron'})
+        run_actor[run_id] = OTHER_ID
         harness.request_as(ADMIN_ID, ADMIN)
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': run_id},
                                     suffix='/check')
         assert status == 200, body
         assert harness.scans[-1][2] == OTHER_ID
 
-    def test_check_refuses_a_run_id_of_another_schedule(self, harness):
+    def test_check_with_a_run_id_needs_the_run_permission(self, harness, run_actor):
+        schedule_id = harness.seed()
+        run_id = _seed_run(harness, schedule_id, {'trigger': 'manual', 'requested_by': OWNER_ID})
+        run_actor[run_id] = OWNER_ID
+        request = {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': run_id}
+        harness.request_as(OWNER_ID, EDITOR - {PERMISSION_PREFIX + 'run'})
+        body, status = harness.call('post', request, suffix='/check')
+        assert (status, body['code']) == (403, 'not_owner')
+        assert harness.scans == []
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert status == 200, body
+        harness.request_as(OWNER_ID, EDITOR)
+        body, status = harness.call('post', request, suffix='/check')
+        assert status == 200, body
+
+    def test_check_refuses_a_run_id_of_another_schedule(self, harness, run_actor):
         schedule_id = harness.seed()
         other_id = harness.seed(name='Other')
         run_id = _seed_run(harness, other_id, {'trigger': 'manual', 'requested_by': ADMIN_ID})
@@ -426,7 +448,7 @@ class TestCheckAsRunActor:
         assert (status, body['code'], body['field']) == (400, 'invalid_input', 'run_id')
         assert harness.scans == []
 
-    def test_check_with_a_run_id_hides_a_schedule_outside_the_scope(self, harness):
+    def test_check_with_a_run_id_hides_a_schedule_outside_the_scope(self, harness, run_actor):
         schedule_id = harness.seed(created_by=OTHER_ID)
         run_id = _seed_run(harness, schedule_id, {'trigger': 'manual', 'requested_by': OWNER_ID})
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': run_id},
