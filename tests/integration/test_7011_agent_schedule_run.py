@@ -48,6 +48,7 @@ def _chat_models(base):
         application_id = column(_sa.Integer)
         variables = column(_sa.JSON, default=list)
         name = column(_sa.String, default="v3")
+        tools = ()
 
     class Participant(base):
         locals().update(table("chat_participants"))

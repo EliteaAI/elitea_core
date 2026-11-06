@@ -610,6 +610,10 @@ class Module(module.ModuleModel):
                 "migrate_schedule_test_runs", self.migrate_schedule_test_runs,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run,
+                group="R-2.0.9",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -1520,6 +1524,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_schedule_test_runs", self.migrate_schedule_test_runs
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

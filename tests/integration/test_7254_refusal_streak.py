@@ -8,6 +8,7 @@ nothing) and the predict answer (a refusal is `{code, error}`, as `predict_sio` 
 Run via:
     python tests/run_tests.py -m integration -v integration/test_7254_refusal_streak.py
 """
+import datetime
 import sys
 import types
 
@@ -74,6 +75,15 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
             session.execute(_sa.update(schedules.EntitySchedule).values({schedules.REFUSAL_STREAK: value}))
             session.commit()
 
+    def next_run():
+        with tools.db.get_session(PROJECT_ID) as session:
+            return session.get(schedules.EntitySchedule, 1).next_run
+
+    def set_next_run(value):
+        with tools.db.get_session(PROJECT_ID) as session:
+            session.execute(_sa.update(schedules.EntitySchedule).values(next_run=value))
+            session.commit()
+
     def run_reason(run_id):
         with tools.db.get_session(PROJECT_ID) as session:
             run = session.get(schedules.EntityScheduleRun, run_id)
@@ -94,7 +104,8 @@ def firing(world, monkeypatch):  # noqa: F811 -- the fixture extends the importe
                                     service.ScheduleScope(user_id=OWNER, is_admin=False, permissions=frozenset()))
 
     return types.SimpleNamespace(fire=fire, schedule=schedule, set_streak=set_streak, run_reason=run_reason,
-                                 notices=world.notices, set_off=set_off, resume=resume)
+                                 notices=world.notices, set_off=set_off, resume=resume, next_run=next_run,
+                                 set_next_run=set_next_run)
 
 
 def _update_model():
@@ -113,6 +124,8 @@ def _service(monkeypatch):
     folder = types.ModuleType(f"{PKG}.utils.folder_access")
     folder.entity_access_error = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, folder.__name__, folder)
+    trace = types.SimpleNamespace(get_current_span=lambda: types.SimpleNamespace(set_attribute=lambda *_a: None))
+    monkeypatch.setitem(sys.modules, "opentelemetry", types.SimpleNamespace(trace=trace))   # the audit span of the service
     monkeypatch.setattr(sys.modules[f"{PKG}.models.enums.all"], "AgentTypes", types.SimpleNamespace(), raising=False)
     _update_model()
     monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_timing"], "this", types.SimpleNamespace(
@@ -131,6 +144,17 @@ def test_three_refusals_in_a_row_pause_the_schedule_and_tell_the_owner_once(firi
                        "3 runs in a row were refused (The run failed: This scheduled run needs an approved mandate). "
                        "Fix the cause and resume it.")]
     assert [notice[1] for notice in firing.notices].count("schedule_run_failed") == 3
+
+
+def test_the_pausing_refusal_clears_next_run_and_the_ones_before_keep_it(firing):
+    due = datetime.datetime(2030, 1, 1, 12, 0)
+    firing.set_next_run(due)
+    firing.fire(REFUSED)
+    firing.fire(REFUSED)
+    assert firing.next_run() == due
+    firing.fire(REFUSED)
+    assert firing.schedule() == (3, False, "governance_refused")
+    assert firing.next_run() is None
 
 
 def test_two_refusals_do_not_pause_the_schedule(firing):
@@ -186,14 +210,17 @@ def test_refusals_of_a_schedule_already_off_keep_its_reason_and_send_no_pause_no
 
 def test_the_whole_sequence_pause_resume_one_more_refusal(firing):
     """#7254 review S3: on the same rows, in order, with an outage inside the streak."""
+    firing.set_next_run(datetime.datetime(2030, 1, 1, 12, 0))
     firing.fire(REFUSED)
     firing.fire(OUTAGE)   # not counted
     firing.fire(REFUSED)
     firing.fire(REFUSED)
     assert firing.schedule() == (3, False, "governance_refused")
+    assert firing.next_run() is None   # a pause clears the next run
     assert [notice[1] for notice in firing.notices].count("schedule_disabled") == 1
     firing.resume()
     assert firing.schedule() == (0, True, None)
+    assert firing.next_run() is not None   # a resume sets the next run again
     firing.fire(REFUSED)
     assert firing.schedule() == (1, True, None)
     assert [notice[1] for notice in firing.notices].count("schedule_disabled") == 1
