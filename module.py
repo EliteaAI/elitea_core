@@ -1597,6 +1597,13 @@ class Module(module.ModuleModel):
                     'active': True,
                 },
                 {
+                    'rpc_func': 'applications_sweep_skill_scratch',
+                    'rpc_kwargs': {'idle_days': 30},
+                    'name': 'skill_scratch_sweep',
+                    'cron': '0 4 * * *',
+                    'active': True,
+                },
+                {
                     'rpc_func': 'elitea_core_check_pat_expiration',
                     'rpc_kwargs': {},
                     'name': 'pat_expiration_check',
