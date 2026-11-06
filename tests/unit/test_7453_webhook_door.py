@@ -268,7 +268,7 @@ def test_7453_same_delivery_id_is_a_duplicate_for_24h_and_starts_one_run(door):
         session.commit()
     assert _post(door, row_uuid, headers)[:2] == (200, {'duplicate': True})
     assert door.started == [] and len(_runs(door)) == 1
-    key = f'webhook:{schedule_id}:{headers["X-GitHub-Delivery"]}'
+    key = f'webhook:{row_uuid}:{headers["X-GitHub-Delivery"]}'  # uuid: row ids repeat across projects
     assert door.redis.calls[0] == (key, True, 24 * 3600)
     assert door.row(schedule_id).last_delivery_outcome == 'duplicate'
 
@@ -327,6 +327,23 @@ def test_7453_retry_with_the_same_delivery_id_after_a_503_starts_the_run(door):
     status, data, _ = _post(door, row_uuid, headers)
     assert status == 202, data  # neither 503 left the id claimed
     assert _post(door, row_uuid, headers)[:2] == (200, {'duplicate': True})  # the accepted one keeps it
+
+
+def test_7453_an_exception_during_admission_releases_the_claim(door):
+    _, row_uuid = _webhook(door)
+    headers = _github(BODY)
+
+    def broken(session, row_id):
+        raise RuntimeError('database is down')
+    admit = door.door.admit_webhook_run
+    door.door.admit_webhook_run = broken
+    try:
+        with pytest.raises(RuntimeError):
+            _post(door, row_uuid, headers)
+    finally:
+        door.door.admit_webhook_run = admit
+    assert door.redis.keys == {}  # the 500 left no claim behind
+    assert _post(door, row_uuid, headers)[0] == 202
 
 
 def test_7453_redeliver_after_the_owner_regains_access_is_not_a_duplicate(door):

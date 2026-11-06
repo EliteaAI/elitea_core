@@ -65,12 +65,16 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             _record(project_id, row.id, 'ping', now)
             return {'ping': True}, 200
         redis = this.module.get_redis_client()
-        if not door.claim_delivery(redis, row.id, delivery):
+        if not door.claim_delivery(redis, row.uuid, delivery):
             _record(project_id, row.id, 'duplicate', now)
             return {'duplicate': True}, 200
-        answer, outcome = self._admit_and_start(project_id, row, body, now)
+        try:
+            answer, outcome = self._admit_and_start(project_id, row, body, now)
+        except Exception:
+            door.release_delivery(redis, row.uuid, delivery)  # a 500 must leave the retry runnable
+            raise
         if outcome != 'accepted':  # a retry with the same delivery id must not be a duplicate
-            door.release_delivery(redis, row.id, delivery)
+            door.release_delivery(redis, row.uuid, delivery)
         return answer
 
     @staticmethod

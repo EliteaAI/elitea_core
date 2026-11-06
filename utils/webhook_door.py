@@ -89,29 +89,30 @@ def is_ping(row, headers) -> bool:
     return row.webhook_type == 'github' and headers.get('X-GitHub-Event') == 'ping'
 
 
-def _dedup_key(row_id: int, delivery: str) -> str:
-    return f'webhook:{row_id}:{delivery}'
+def _dedup_key(row_uuid, delivery: str) -> str:
+    # The uuid, not the id: row ids repeat across project schemas and Redis is shared
+    return f'webhook:{row_uuid}:{delivery}'
 
 
-def claim_delivery(redis, row_id: int, delivery: str | None) -> bool:
+def claim_delivery(redis, row_uuid, delivery: str | None) -> bool:
     """False for a delivery id seen in the last 24 h; a Redis failure lets the delivery through."""
     if delivery is None:
         return True
     try:
-        return bool(redis.set(_dedup_key(row_id, delivery), '1', nx=True, ex=DEDUP_SECONDS))
+        return bool(redis.set(_dedup_key(row_uuid, delivery), '1', nx=True, ex=DEDUP_SECONDS))
     except Exception:  # noqa: BLE001
-        log.warning('Webhook %s delivery %s: dedup unavailable, accepted', row_id, delivery)
+        log.warning('Webhook %s delivery %s: dedup unavailable, accepted', row_uuid, delivery)
         return True
 
 
-def release_delivery(redis, row_id: int, delivery: str | None) -> None:
+def release_delivery(redis, row_uuid, delivery: str | None) -> None:
     """Forget a claimed id when the delivery was not run, so the sender's retry is not a duplicate."""
     if delivery is None:
         return
     try:
-        redis.delete(_dedup_key(row_id, delivery))
+        redis.delete(_dedup_key(row_uuid, delivery))
     except Exception:  # noqa: BLE001 -- the key expires in 24 h; the retry is then refused as a duplicate
-        log.warning('Webhook %s delivery %s: cannot release the dedup claim', row_id, delivery)
+        log.warning('Webhook %s delivery %s: cannot release the dedup claim', row_uuid, delivery)
 
 
 def admit_webhook_run(session, row_id: int) -> int | None:
