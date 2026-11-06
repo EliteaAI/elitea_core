@@ -8,13 +8,15 @@ from tools import db
 
 from ..models.entity_schedule import ACTIVE_STATUSES, REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
-from .schedule_claim import append_run_events, fail_run, finished_event, run_event
+from .schedule_claim import TEXT_LIMIT, append_run_events, fail_run, finished_event, run_event
 from .schedule_timing import at_least_one
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
+MORE_RESERVE = len(' (+999 more)')
+PAUSE_LIST_LIMIT = 50  # tools named in one pause line; the rest are counted. lean: raise it when a real run shows more
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
@@ -243,22 +245,20 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
     A schedule that does not ask the owner fails on a sign-in at once. `conversation_id` and `author_id` of the
     paused chat tie the pause to its own run (see `_own_conversation`).
     """
-    # A parallel pause carries its interrupts in `hitl_interrupts`
-    interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
-    sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
+    # The worker sends the same pause under both keys; the plural list is the whole pause, so read it alone
+    interrupts = interrupt.get('hitl_interrupts') or [interrupt.get('hitl_interrupt') or {}]
+    sensitive = [item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool']
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
     if sign_in is not None and _approval_rule(project_id, run_id) == 'run_without_asking':
         name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
         finish_schedule_run(project_id, run_id, 'failed', SIGN_IN_REASON.format(name), conversation_id,
                             author_id=author_id)
         return
-    waiting = sensitive or sign_in
-    if waiting is None:
+    if not sensitive and sign_in is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
                             conversation_id, author_id=author_id)
         return
-    event = _sign_in_event(waiting) if sign_in is not None else _paused_event(sensitive, sum(
-        item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1)
+    event = _paused_event(sensitive) if sensitive else _sign_in_event(sign_in)
     _park_run(project_id, run_id, event, _own_conversation(conversation_id, author_id))
 
 
@@ -343,11 +343,57 @@ def _copy_status(session, run_id: int, status: str) -> None:
     session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status=status))
 
 
-def _paused_event(item: dict, more: int = 0) -> dict:
-    """The pause line of the run log: toolkit and tool only, never the tool arguments; `more` counts the other tools."""
-    toolkit, tool = (str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name'))
-    text = f'Paused for approval: {toolkit} · {tool}' + (f' (+{more} more)' if more > 0 else '')
-    return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
+def _tool_names(items: list[dict], toolkit_key: str, tool_key: str) -> list[dict]:
+    """The distinct `{toolkit, tool}` of `items`, names only: a tool argument never gets here."""
+    names = dict.fromkeys((str(item.get(toolkit_key) or '?')[:NAME_LIMIT], str(item.get(tool_key) or '?')[:NAME_LIMIT])
+                          for item in items)
+    return [{'toolkit': toolkit, 'tool': tool} for toolkit, tool in names]
+
+
+def _pause_text(prefix: str, tools: list[dict]) -> str:
+    """`prefix` and `toolkit · tool` for each tool; the tools over `PAUSE_LIST_LIMIT`, or over the room the event text has, are counted."""
+    labels = []
+    for item in tools[:PAUSE_LIST_LIMIT]:
+        shown = ', '.join([*labels, f"{item['toolkit']} · {item['tool']}"])
+        if len(prefix) + len(shown) + MORE_RESERVE > TEXT_LIMIT:
+            break
+        labels.append(f"{item['toolkit']} · {item['tool']}")
+    rest = len(tools) - len(labels)
+    return prefix + ', '.join(labels) + (f' (+{rest} more)' if rest else '')
+
+
+def _paused_event(items: list[dict]) -> dict:
+    """The pause line of the run log: every tool of the pause by toolkit and tool name, never the arguments."""
+    tools = _tool_names(items, 'toolkit_name', 'tool_name')
+    return run_event('paused', _pause_text('Paused for approval: ', tools), 'warning',
+                     toolkit=tools[0]['toolkit'], tool=tools[0]['tool'], tools=tools[:PAUSE_LIST_LIMIT])
+
+
+def listed_tools(review: dict) -> list[dict]:
+    """The sensitive tools of a risk review that need the owner's approval: `{toolkit, tool}`, a toolkit name required.
+
+    A personal credential item has no tool and a nameless toolkit cannot be approved as a pair: neither is listed.
+    """
+    return _tool_names([item for item in review['sensitive'] if item.get('code') == 'sensitive_action' and item.get('toolkit')],
+                       'toolkit', 'tool')
+
+
+def park_before_start(project_id: int, run_id: int, review: dict) -> bool:
+    """Make a run wait for the owner's approval of its sensitive tools before the first tool call.
+
+    The run has no conversation yet; the owner decides it through the run decision route, as for a missing
+    credential. The event holds the tools, the tools that may still ask during the run, and the fingerprint of
+    the review: the restart approves the listed pairs only when the review still has that fingerprint.
+    False, with nothing written, when the review lists no tool or the run is not running.
+    """
+    tools = listed_tools(review)
+    if not tools:
+        return False
+    may_ask = _tool_names([item for item in review['notices'] if item.get('may_apply')], 'toolkit', 'tool')
+    return _park_run(project_id, run_id, run_event(
+        'paused', _pause_text('Paused for approval before the first tool call: ', tools), 'warning',
+        need='tools', tools=tools[:PAUSE_LIST_LIMIT], may_ask=may_ask[:PAUSE_LIST_LIMIT] or None,
+        fingerprint=review['fingerprint']), [])
 
 
 def _sign_in_event(item: dict) -> dict:

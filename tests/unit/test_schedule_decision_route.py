@@ -101,6 +101,16 @@ def test_the_owner_approves_and_the_run_starts(harness, decisions):
     assert decisions.checks == [(run_id, OWNER_ID, ['approve'])]
 
 
+def test_approve_of_a_pre_start_pause_starts_the_run_as_running(harness, decisions):
+    schedule_id = harness.seed()
+    pause = {'kind': 'paused', 'need': 'tools', 'fingerprint': 'fp-1', 'tools': [{'toolkit': 'github', 'tool': 'delete_file'}]}
+    run_id = add_run(harness, schedule_id, events=[pause])
+
+    assert decide(harness, schedule_id, run_id) == ({'run_id': run_id, 'status': 'running'}, 200)
+    assert decisions.applied == [(run_id, 'approve')]
+    assert decisions.started == [('agent', PROJECT_ID, schedule_id, run_id)]
+
+
 def test_approve_while_the_credential_is_missing_is_409_and_the_run_keeps_waiting(harness, decisions):
     schedule_id = harness.seed()
     run_id = add_run(harness, schedule_id)

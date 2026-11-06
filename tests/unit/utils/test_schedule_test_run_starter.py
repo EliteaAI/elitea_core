@@ -148,10 +148,10 @@ def starter(monkeypatch):
 
 
 def _load_from_form(starter, form=FORM, version=types.SimpleNamespace(id=4, application_id=3, name="v4"),
-                    agent=types.SimpleNamespace(name="Agent")):
+                    agent=types.SimpleNamespace(name="Agent"), **run_values):
     session = FakeSession(form, version, agent)
     session.models = starter
-    run = types.SimpleNamespace(id=7, requested_by=OWNER, trigger="test", resumed_at=None)
+    run = types.SimpleNamespace(**{"id": 7, "requested_by": OWNER, "trigger": "test", "resumed_at": None, **run_values})
     starter.credential_toolkit_refs = lambda version: []
     return starter._load_test_run(session, run)
 
@@ -166,6 +166,20 @@ def test_load_of_a_run_with_no_schedule_builds_the_values_from_its_form(starter)
         "Try", "agent", "prompt", 3, 4)
     assert (loaded.prompt, loaded.variables, loaded.trigger, loaded.resumed, loaded.entity_name) == (
         "Go {{ x }}", [{"name": "x", "value": "1"}], "test", False, "Agent")
+
+
+def test_a_resumed_test_run_starts_with_the_listed_pairs(starter, monkeypatch):
+    pause = {"kind": "paused", "need": "tools", "fingerprint": "fp-1"}
+    loaded = _load_from_form(starter, resumed_at="2026-11-06", events=[{"kind": "started"}, pause])
+    review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
+
+    assert (loaded.resumed, loaded.pre_start_pause) == (True, pause)
+    assert pause["fingerprint"] == review["fingerprint"]
+    assert starter._confirmed_pairs(review, exact=True) == [("Outlook", "send_email")]
+
+
+def test_a_test_run_never_parked_has_no_pre_start_pause(starter):
+    assert _load_from_form(starter).pre_start_pause is None
 
 
 @pytest.mark.parametrize("version", [None, types.SimpleNamespace(id=4, application_id=99, name="v4")])

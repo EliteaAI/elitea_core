@@ -22,7 +22,7 @@ SENSITIVE = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_ema
 
 @pytest.fixture
 def run(monkeypatch):
-    predicts, setting_reads, blocks, scans, finishes, outcomes = [], [], [], [], [], []
+    predicts, setting_reads, blocks, scans, finishes, outcomes, parks = [], [], [], [], [], [], []
     state = types.SimpleNamespace(review=clean_review())
 
     def allowed(project_id):
@@ -32,8 +32,14 @@ def run(monkeypatch):
     monkeypatch.setitem(
         sys.modules, f"{PKG}.utils.schedule_settings", _module(f"{PKG}.utils.schedule_settings",
                                                            is_run_without_asking_allowed=allowed))
+    def park(project_id, run_id, review):
+        # the real writer parks when the review lists a tool with a toolkit name (tested with the writers)
+        parks.append((project_id, run_id, review))
+        return any(item.get("code") == "sensitive_action" and item.get("toolkit") for item in review["sensitive"])
+
     starter = load_starter(
         monkeypatch,
+        park=park,
         create=lambda **kw: ("uuid-1", 7, "resp-1"),
         predict=lambda **kw: predicts.append(kw),
         prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
@@ -45,19 +51,23 @@ def run(monkeypatch):
     monkeypatch.setattr(starter, "record_run_events",
                         lambda *args, **kw: outcomes.append(kw["risk_outcome"]) if "risk_outcome" in kw else None)
 
-    def start(rule, setting, entity_type="pipeline", confirmed="fp-1", confirmed_by=OWNER):
+    def start(rule, setting, entity_type="pipeline", confirmed="fp-1", confirmed_by=OWNER, resumed=False,
+              pre_start_pause=None):
         allowed.value = setting
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
                 id=SCHEDULE_ID, entity_type=entity_type, run_mode="prompt", approval_rule=rule,
                 approval_fingerprint=confirmed, created_by=OWNER, approval_confirmed_by=confirmed_by),
-            version=types.SimpleNamespace(id=9, name="v3"), entity_name="Flow", prompt="Go", variables=[])
+            version=types.SimpleNamespace(id=9, name="v3"), entity_name="Flow", prompt="Go", variables=[],
+            resumed=resumed, pre_start_pause=pre_start_pause)
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID)
         return predicts[-1] if predicts else None, setting_reads
 
     start.state, start.blocks, start.scans, start.predicts = state, blocks, scans, predicts
+    start.starter = starter
     start.finishes = finishes
+    start.parks = parks
     start.outcomes = outcomes
     return start
 
@@ -112,22 +122,22 @@ def test_a_confirmed_run_with_a_personal_credential_item_auto_approves(run):
 
 
 @pytest.mark.parametrize("confirmed_by", [None, OWNER + 1])
-def test_a_confirmation_by_someone_else_dispatches_as_pause_and_ask(run, confirmed_by):
+def test_a_confirmation_by_someone_else_parks_the_run_before_the_start(run, confirmed_by):
     run.state.review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
 
     kwargs, _ = run("run_without_asking", True, confirmed_by=confirmed_by)
 
-    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert kwargs is None and len(run.parks) == 1
 
 
 # Owner CR 2026-10-21: new sensitive tools since the confirmation run as "Pause and ask me"
 @pytest.mark.parametrize("confirmed", ["fp-1", None])
-def test_el7011_cr_a_changed_fingerprint_dispatches_as_pause_and_ask(run, confirmed):
+def test_a_changed_fingerprint_parks_the_run_before_the_start(run, confirmed):
     run.state.review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-2"}
 
     kwargs, _ = run("run_without_asking", True, confirmed=confirmed)
 
-    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert kwargs is None and len(run.parks) == 1
     assert run.blocks == []
 
 
@@ -228,12 +238,12 @@ def test_pause_and_ask_without_a_sensitive_tool_starts_without_a_stop_and_with_o
     assert run.outcomes == ["ok"]
 
 
-def test_pause_and_ask_with_a_listed_tool_gives_needs_approval(run):
+def test_pause_and_ask_with_a_listed_tool_gives_needs_approval_and_starts_no_run(run):
     run.state.review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
 
     kwargs, _ = run("pause_and_ask", True)
 
-    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert kwargs is None
     assert run.outcomes == ["needs_approval"]
 
 
@@ -244,3 +254,125 @@ def test_a_personal_credential_alone_does_not_give_needs_approval(run):
     run("pause_and_ask", True)
 
     assert run.outcomes == ["ok"]
+
+
+REVIEW_TWO_TOOLS = {**clean_review(), "fingerprint": "fp-1", "sensitive": [
+    {"code": "sensitive_action", "toolkit": "GitHub", "tool": "create_pull_request"},
+    {"code": "sensitive_action", "toolkit": "GitHub", "tool": "delete_file"}]}
+PRE_START_PAUSE = {"kind": "paused", "need": "tools", "fingerprint": "fp-1"}
+
+
+def test_pause_and_ask_parks_the_run_before_the_first_call_and_lists_every_sensitive_tool(run):
+    run.state.review = REVIEW_TWO_TOOLS
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs is None and run.predicts == []
+    assert run.parks == [(PROJECT_ID, RUN_ID, REVIEW_TWO_TOOLS)]
+    assert run.outcomes == ["needs_approval"]
+
+
+def test_run_without_asking_that_does_not_hold_parks_before_start(run):
+    run.state.review = REVIEW_TWO_TOOLS
+
+    kwargs, _ = run("run_without_asking", False)
+
+    assert kwargs is None and len(run.parks) == 1
+
+
+def test_run_without_asking_that_holds_does_not_park(run):
+    run.state.review = REVIEW_TWO_TOOLS
+
+    kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
+
+    assert run.parks == []
+    assert kwargs["auto_approve_sensitive_actions"] == [("GitHub", "create_pull_request"), ("GitHub", "delete_file")]
+
+
+def test_a_review_without_a_listed_tool_does_not_park(run):
+    personal = {"code": "personal_credential", "toolkit": "GitHub", "tool": None}
+    run.state.review = {**clean_review(), "sensitive": [personal]}
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert run.parks == [] and kwargs is not None
+
+
+def test_a_failing_park_ends_the_run_as_failed_and_starts_nothing(run, monkeypatch):
+    run.state.review = REVIEW_TWO_TOOLS
+    failed = []
+
+    def broken(*_args):
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(run.starter, "park_before_start", broken)
+    monkeypatch.setattr(run.starter, "fail_schedule_run", lambda *a: failed.append(a))
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs is None and failed == [(PROJECT_ID, RUN_ID, run.starter.START_FAILED)]
+
+
+def test_a_resumed_run_with_the_same_fingerprint_starts_with_the_listed_pairs(run):
+    run.state.review = REVIEW_TWO_TOOLS
+
+    kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=PRE_START_PAUSE)
+
+    assert run.parks == []
+    assert kwargs["auto_approve_sensitive_actions"] == [("GitHub", "create_pull_request"), ("GitHub", "delete_file")]
+    assert run.outcomes == ["needs_approval"]
+
+
+def test_a_resumed_run_never_sends_a_wildcard_for_a_listed_tool(run):
+    listed = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "Outlook___Send-Email", "from_list": True}
+    personal = {"code": "personal_credential", "toolkit": "GitHub", "tool": None}
+    run.state.review = {**clean_review(), "sensitive": [listed, personal], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=PRE_START_PAUSE)
+
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send-email")]
+
+
+def test_a_may_apply_tool_is_not_in_the_pairs_of_a_resumed_run(run):
+    maybe = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "delete_mail", "from_list": True,
+             "may_apply": True}
+    run.state.review = {**REVIEW_TWO_TOOLS, "notices": [maybe]}
+
+    kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=PRE_START_PAUSE)
+
+    pairs = kwargs["auto_approve_sensitive_actions"]
+    assert pairs is not True and all(toolkit != "Outlook" for toolkit, _ in pairs)
+
+
+def test_a_resumed_run_with_a_changed_fingerprint_parks_again(run):
+    run.state.review = {**REVIEW_TWO_TOOLS, "fingerprint": "fp-2"}
+
+    kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=PRE_START_PAUSE)
+
+    assert kwargs is None and len(run.parks) == 1
+
+
+def test_a_resumed_run_after_another_pause_keeps_the_pause_at_the_call(run):
+    run.state.review = REVIEW_TWO_TOOLS
+
+    kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=None)
+
+    assert run.parks == [] and kwargs["auto_approve_sensitive_actions"] is False
+
+
+def test_a_resumed_run_with_a_blocking_finding_still_blocks(run):
+    run.state.review = {**REVIEW_TWO_TOOLS, "blocking": [{"code": "human_input_step", "message": "x"}]}
+
+    kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=PRE_START_PAUSE)
+
+    assert kwargs is None and run.parks == [] and len(run.blocks) == 1
+
+
+def test_the_newest_pre_start_pause_of_a_run_is_the_one_the_restart_reads(run):
+    older = {"kind": "paused", "need": "tools", "fingerprint": "fp-0"}
+    other = {"kind": "paused", "need": "credential"}
+    row = types.SimpleNamespace(events=[older, PRE_START_PAUSE, other, {"kind": "decision"}])
+
+    assert run.starter._pre_start_pause(row) is PRE_START_PAUSE
+    assert run.starter._pre_start_pause(types.SimpleNamespace(events=[other])) is None
+    assert run.starter._pre_start_pause(types.SimpleNamespace(events=None)) is None

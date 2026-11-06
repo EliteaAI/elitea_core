@@ -130,7 +130,8 @@ RUN_DETAIL_EXAMPLE = {
          "text": "Tool call: github · list_issues (1200 ms): 12 open issues", "toolkit": "github",
          "tool": "list_issues", "summary": "12 open issues", "duration_ms": 1200},
         {"at": "2026-10-21T09:00:09.000000+00:00", "kind": "paused", "level": "warning",
-         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue"},
+         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue",
+         "tools": [{"toolkit": "github", "tool": "create_issue"}]},
         {"at": "2026-10-21T09:00:30.000000+00:00", "kind": "decision", "level": "info",
          "text": "Approved by the schedule owner", "action": "approve", "by": 20},
         {"at": "2026-10-21T09:00:38.000000+00:00", "kind": "finished", "level": "success",
@@ -497,8 +498,10 @@ OPERATIONS = {
         "name": "Decide a waiting run",
         "summary": "Decide a waiting run",
         "description": _text(
-            "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
-            "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",
+            "Answer a run that waits for the owner to add credentials, or to approve its sensitive tools before the first "
+            "tool call (a `paused` event with `need` `tools`, `tools` and `may_ask`). `approve` starts the run again "
+            "and checks the credentials once more; the run then approves exactly the listed tools, for this run only. "
+            "`reject` ends it as failed. A run with a chat is decided in that chat.",
             "the owner with `schedules.run`; an admin cannot decide",
             "400 an invalid action; 403 no permission or not the owner; 404 not found; "
             "409 the run is not waiting, or has a chat; 500 the run could not start"),
@@ -515,7 +518,10 @@ OPERATIONS = {
             "Answer one run for the Test schedule panel: the run fields, the version and its name, the account "
             "(`principal_label`), the risk check outcome, a `summary` (duration, tokens, cost) and `events`. "
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
-            "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
+            "agent_started, tool_call, paused, decision and finished. A `paused` event names every tool of the pause in "
+            "`tools` (`toolkit`, `tool`). A pause before the first tool call has `need` `tools`, the tools that may "
+            "still ask during the run in `may_ask`, and the `fingerprint` of the risk review the owner saw. "
+            "Tool calls come from the run conversation; "
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
