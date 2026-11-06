@@ -398,8 +398,9 @@ def _paused_event(items: list[dict], scanned: list[dict] | None = None) -> dict:
     The `toolkit` and `tool` fields name the first tool; `tools` holds every pending pair with `count`, the calls
     that wait for it, and `hidden` counts the pairs cut at `PAIR_LIMIT`. `later_tools` and `later_hidden` do the
     same for the pairs of the risk check at the start of the run that are not pending now, so the owner sees
-    what may ask next. `interrupt_ids` names the pending interrupts: the banner sends them back with its answer,
-    so an answer reaches only the pause it showed. A list too long for `TEXT_LIMIT` loses whole entries from its
+    what may ask next. `interrupt_ids` names every pending interrupt: the banner sends them back with its answer,
+    so an answer reaches only the pause it showed. The field is left out when an id is missing, an id is longer
+    than `INTERRUPT_ID_MAX_LENGTH` or more than `PAIR_LIMIT` interrupts wait. A list too long for `TEXT_LIMIT` loses whole entries from its
     end and ends with the count of the hidden ones, so the owner sees that more tools wait.
     """
     # Two calls of one tool wait as two items; the line names the tool once
@@ -415,10 +416,12 @@ def _paused_event(items: list[dict], scanned: list[dict] | None = None) -> dict:
     later = {pair: count for pair, count in pair_counts(scanned or []).items()
              if (pair[0].lower(), pair[1].lower()) not in pending}
     ids = [item.get('interrupt_id') for item in items]
-    # Without an id for every item, or with an id the answer model would refuse as too long, the banner could not
-    # name the pause it showed, so it sends none
-    named = [str(name) for name in ids[:PAIR_LIMIT]]
-    shown_ids = {'interrupt_ids': named} if all(ids) and all(len(name) <= INTERRUPT_ID_MAX_LENGTH for name in named) else {}
+    # The banner sends the ids back with its approval, and the answer must name every pending tool. When an id is
+    # missing, too long for the answer model, or the list is longer than the answer model accepts, the ids would
+    # only be refused later, so the event sends none and the UI does not offer the one-click approval
+    named = [str(name) for name in ids]
+    fits = all(ids) and len(named) <= PAIR_LIMIT and all(len(name) <= INTERRUPT_ID_MAX_LENGTH for name in named)
+    shown_ids = {'interrupt_ids': named} if fits else {}
     return run_event('paused', text, 'warning', toolkit=names[0][0], tool=names[0][1],
                      tools=_listed(counts), hidden=max(0, len(counts) - PAIR_LIMIT),
                      later_tools=_listed(later), later_hidden=max(0, len(later) - PAIR_LIMIT), **shown_ids)

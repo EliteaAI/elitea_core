@@ -64,7 +64,7 @@ from ..utils.toolkit_authorization import (
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
-    PAIR_LIMIT, ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
+    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
     apply_schedule_decision, check_schedule_decision,
 )
 from ..utils.internal_tools import (
@@ -148,6 +148,10 @@ _PAUSE_CHANGED_REFUSAL = {
     "error": "The tools waiting for approval changed since you opened this run. Reload the run and answer again",
     "status": 409,
 }
+_PAUSE_NOT_LISTED_REFUSAL = {
+    "error": "This run waits for several tools and the banner did not list all of them. Answer in the chat of the run",
+    "status": 409,
+}
 SCHEDULE_VALUE_LIMIT = 2000  # characters of one note; the SDK cuts a comment at the same length
 
 
@@ -182,27 +186,33 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    if decision and parsed.hitl_resume and _pause_changed(parsed):
-        return None, _PAUSE_CHANGED_REFUSAL
+    if decision and parsed.hitl_resume:
+        refusal = _pause_refusal(parsed)
+        if refusal:
+            return None, refusal
     return ((run_id, decision) if decision else None), None
 
 
-def _pause_changed(parsed) -> bool:
-    """True when the answer names the interrupts the banner showed and they are not the ones pending now.
+def _pause_refusal(parsed) -> dict | None:
+    """The 409 dict when the answer does not match the sensitive tools pending now; the run stays as it is.
 
     The banner of a scheduled run lists the sensitive tools of its last pause. An answer from an old banner must
-    not approve the tools of a newer pause. No ids sent means no check. The paused event lists at most
-    `PAIR_LIMIT` ids, so the pending ids are cut at the same count.
+    not approve the tools of a newer pause, so the ids it sends must be the whole pending set. An approval of
+    several pending tools without ids is refused too: the owner could not have seen which tools it covers, and
+    the resume would refuse it later, after the run was already set to running. A reject without ids passes: it
+    ends every pending tool. An own decision list and the answer of one fan-out child keep their own rules.
     """
     shown = getattr(parsed, 'interrupt_ids', None)
-    if shown is None:
-        return False
+    if shown is None and (parsed.hitl_action != 'approve' or parsed.hitl_decisions or parsed.thread_id):
+        return None
     with db.get_session(parsed.project_id) as session:
         meta = session.query(ConversationMessageGroup.meta).where(
             ConversationMessageGroup.uuid == parsed.message_id).scalar()
-    pending = [interrupt_identity(item) for item in pending_interrupts(meta)
-               if item.get('guardrail_type') == 'sensitive_tool']
-    return set(shown) != set(pending[:PAIR_LIMIT])
+    pending = {interrupt_identity(item) for item in pending_interrupts(meta)
+               if item.get('guardrail_type') == 'sensitive_tool'}
+    if shown is not None:
+        return _PAUSE_CHANGED_REFUSAL if set(shown) != pending else None
+    return _PAUSE_NOT_LISTED_REFUSAL if len(pending) > 1 else None
 
 
 def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:
@@ -211,19 +221,21 @@ def _schedule_decisions(parsed, pending, schedule_decision) -> list[dict]:
     The banner of a scheduled run sends one `hitl_action` for a pause that lists several tools. Only a checked
     schedule decision gets this (`schedule_decision`); an own decision list, one pending tool and a plain chat
     keep their rules. An empty list means no change, and then the rule for one answer applies: it refuses
-    when more than one interrupt is pending. The answer must name exactly the pending interrupts: no ids, or
-    fewer than are pending (the paused event lists at most `PAIR_LIMIT`), never approves a tool the owner
-    did not see.
+    when more than one interrupt is pending. An approval must name exactly the pending interrupts, so it never
+    approves a tool the owner did not see. A reject without ids rejects every pending tool.
     """
     if schedule_decision is None or parsed.hitl_decisions or len(pending) < 2:
         return []
     shown = getattr(parsed, 'interrupt_ids', None)
-    if shown is None or set(shown) != {interrupt_identity(item) for item in pending}:
+    action = parsed.hitl_action
+    if shown is None:
+        if action != 'reject':
+            return []
+    elif set(shown) != {interrupt_identity(item) for item in pending}:
         return []
     note = parsed.hitl_value
     if note is not None and not isinstance(note, str):
         return []
-    action = parsed.hitl_action
     # The banner lists sensitive tools only, and each one must offer the action, as the rule for one answer demands
     if any(item.get('guardrail_type') != 'sensitive_tool'
            or action not in (item.get('available_actions') or [action]) for item in pending):

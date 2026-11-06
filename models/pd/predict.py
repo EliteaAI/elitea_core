@@ -186,7 +186,8 @@ class SioContinuePredictModel(BaseModel):
     interrupt_ids: Optional[List[Annotated[str, StringConstraints(max_length=INTERRUPT_ID_MAX_LENGTH)]]] = Field(
         default=None, max_length=PAUSE_LIST_LIMIT,
         description="The interrupt ids the answer was meant for: a schedule run banner sends those of its paused "
-                    "event, and a different pending set is refused with 409",
+                    "event (listed only for a pause of at most the limit of this field), and a different pending "
+                    "set is refused with 409. An approval of several tools without ids is refused too",
     )
     mcp_auth_resume: bool = Field(default=False, description="Resume a durable toolkit authorization interrupt")
     mcp_auth_action: Optional[str] = Field(default=None, description="Toolkit authorization action: authorize or skip")

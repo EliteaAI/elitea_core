@@ -1,6 +1,6 @@
 """One answer on a scheduled run with several pending tools becomes one decision for each tool.
 
-Contract under test: rpc/chat_all.py `_schedule_decisions`, `_schedule_batch_kwargs`, `_pause_changed` and the
+Contract under test: rpc/chat_all.py `_schedule_decisions`, `_schedule_batch_kwargs`, `_pause_refusal` and the
 409 of `_check_schedule_decision`. Nothing loads rpc/chat_all.py in the unit env, so the helpers are compiled from
 the file's source (fixtures/cut_source.py) next to the real `interrupt_identity` and `pending_interrupts`.
 `continue_predict_sio` itself is too large to load here; the helpers carry its logic.
@@ -71,8 +71,13 @@ def helpers():
         forbidden=type('ScheduleDecisionForbidden', (Exception,), {}),
         invalid=type('ScheduleDecisionInvalid', (Exception,), {}),
         not_waiting=type('ScheduleRunNotWaiting', (Exception,), {}))
+    run_state = {'status': 'waiting_for_approval'}
+
     def check_schedule_decision(project_id, run_id, caller_id, actions, fan_out=False, sign_in=False):
         return 'reject' if 'reject' in actions else 'approve'
+
+    def apply_schedule_decision(project_id, run_id, decision):
+        run_state['status'] = 'failed' if decision == 'reject' else 'running'
 
     namespace = {
         'interrupt_identity': parallel['interrupt_identity'],
@@ -88,12 +93,15 @@ def helpers():
         'ScheduleDecisionInvalid': refusals.invalid,
         'ScheduleRunNotWaiting': refusals.not_waiting,
         'check_schedule_decision': check_schedule_decision,
+        'apply_schedule_decision': apply_schedule_decision,
     }
     cut = load_cut(_nodes(CHAT_ALL, {
-        '_schedule_decisions', '_schedule_batch_kwargs', '_pause_changed', '_check_schedule_decision',
-        '_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_PAUSE_CHANGED_REFUSAL', 'SCHEDULE_VALUE_LIMIT'}),
+        '_schedule_decisions', '_schedule_batch_kwargs', '_pause_refusal', '_check_schedule_decision',
+        '_apply_schedule_decision', '_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_PAUSE_CHANGED_REFUSAL',
+        '_PAUSE_NOT_LISTED_REFUSAL', 'SCHEDULE_VALUE_LIMIT'}),
         namespace, 'chat_all.py')
     cut['answers'] = answers
+    cut['run_state'] = run_state
     return cut
 
 
@@ -253,13 +261,64 @@ def test_a_banner_list_that_differs_from_the_pending_set_is_refused(helpers, sho
     assert (decision, denied['status']) == (None, 409)
 
 
-def test_an_answer_without_ids_keeps_the_old_behavior(helpers):
-    helpers['answers'][:] = [{'schedule_run_id': 9}]
-
-    decision, denied = helpers['_check_schedule_decision'](_parsed(interrupt_ids=None), 20)
+def test_an_approval_without_ids_of_one_pending_tool_is_accepted(helpers):
+    decision, denied = _answer(helpers, _meta('hitl_a'), None)
 
     assert (decision, denied) == ((9, 'approve'), None)
-    assert helpers['answers'] == []  # the paused message was not read
+
+
+def test_an_approval_without_ids_of_several_pending_tools_is_refused_and_the_run_keeps_waiting(helpers):
+    helpers['run_state']['status'] = 'waiting_for_approval'
+
+    decision, denied = _answer(helpers, _meta('hitl_a', 'hitl_b'), None)
+    helpers['_apply_schedule_decision'](1, decision)  # the handler writes only what the check returned
+
+    assert (decision, denied['status']) == (None, 409)
+    assert denied is helpers['_PAUSE_NOT_LISTED_REFUSAL']
+    assert helpers['run_state']['status'] == 'waiting_for_approval'
+
+
+def test_an_accepted_approval_sets_the_run_to_running_when_the_handler_applies_it(helpers):
+    helpers['run_state']['status'] = 'waiting_for_approval'
+
+    decision, denied = _answer(helpers, _meta('hitl_a', 'hitl_b'), ['hitl_a', 'hitl_b'])
+    helpers['_apply_schedule_decision'](1, decision)
+
+    assert denied is None
+    assert helpers['run_state']['status'] == 'running'
+
+
+def test_a_reject_without_ids_of_several_pending_tools_is_accepted_without_reading_the_pause(helpers):
+    helpers['answers'][:] = [{'schedule_run_id': 9}]
+
+    decision, denied = helpers['_check_schedule_decision'](_parsed(hitl_action='reject', interrupt_ids=None), 20)
+
+    assert (decision, denied) == ((9, 'reject'), None)
+    assert helpers['answers'] == []
+
+
+def test_a_reject_without_ids_rejects_every_pending_tool(helpers):
+    decisions = helpers['_schedule_decisions'](_parsed(hitl_action='reject', interrupt_ids=None), PENDING, SCHEDULE_DECISION)
+
+    assert decisions == [{'interrupt_id': name, 'action': 'reject', 'value': ''} for name in IDS]
+
+
+def test_a_reject_without_ids_rejects_every_pending_tool_of_a_pause_over_the_id_list_limit(helpers):
+    pending = [{'interrupt_id': f'hitl_{number}', 'guardrail_type': SENSITIVE} for number in range(PAIR_LIMIT + 3)]
+
+    decisions = helpers['_schedule_decisions'](_parsed(hitl_action='reject', interrupt_ids=None), pending, SCHEDULE_DECISION)
+
+    assert [decision['interrupt_id'] for decision in decisions] == [item['interrupt_id'] for item in pending]
+
+
+def test_an_own_decision_list_without_ids_keeps_its_rules_and_is_not_read(helpers):
+    helpers['answers'][:] = [{'schedule_run_id': 9}]
+    own = [{'interrupt_id': 'hitl_a', 'action': 'approve', 'value': ''}]
+
+    decision, denied = helpers['_check_schedule_decision'](_parsed(hitl_decisions=own, interrupt_ids=None), 20)
+
+    assert (decision, denied) == ((9, 'approve'), None)
+    assert helpers['answers'] == []
 
 
 def test_only_the_sensitive_tools_count_as_the_pending_set(helpers):
@@ -270,12 +329,12 @@ def test_only_the_sensitive_tools_count_as_the_pending_set(helpers):
     assert (decision, denied) == ((9, 'approve'), None)
 
 
-def test_a_banner_that_showed_the_limit_matches_a_longer_pending_set(helpers):
+def test_a_banner_list_cut_at_the_limit_does_not_match_a_longer_pending_set(helpers):
     names = [f'hitl_{number}' for number in range(PAIR_LIMIT + 3)]
 
     decision, denied = _answer(helpers, _meta(*names), names[:PAIR_LIMIT])
 
-    assert (decision, denied) == ((9, 'approve'), None)
+    assert (decision, denied['status']) == (None, 409)
 
 
 def test_a_chat_that_is_not_a_schedule_run_has_no_pause_check(helpers):

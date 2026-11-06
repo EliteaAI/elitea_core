@@ -161,7 +161,7 @@ def test_the_tool_lists_are_cut_at_the_pair_limit_and_count_what_is_cut(runs, se
     event = _paused(session, run)
     assert (len(event["tools"]), len(event["later_tools"])) == (limit, limit)
     assert (event["hidden"], event["later_hidden"]) == (10, 10)
-    assert len(event["interrupt_ids"]) == limit
+    assert "interrupt_ids" not in event  # a cut list could never name every pending tool in the answer
 
 
 @pytest.mark.parametrize("payload", [
@@ -255,3 +255,34 @@ def test_a_pause_with_an_interrupt_id_too_long_for_the_answer_lists_no_ids(runs,
     runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, too_long]})
 
     assert "interrupt_ids" not in _paused(session, run)
+
+
+def test_a_pause_with_exactly_the_list_limit_of_tools_lists_every_id(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    limit = sys.modules[RUNS].PAIR_LIMIT
+    items = [{**ARTIFACT_CREATE, "tool_name": f"tool_{number}", "interrupt_id": f"hitl_{number}"}
+             for number in range(limit)]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    assert _paused(session, run)["interrupt_ids"] == [f"hitl_{number}" for number in range(limit)]
+
+
+def test_a_pause_one_tool_over_the_list_limit_lists_no_ids(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    limit = sys.modules[RUNS].PAIR_LIMIT
+    items = [{**ARTIFACT_CREATE, "tool_name": f"tool_{number}", "interrupt_id": f"hitl_{number}"}
+             for number in range(limit + 1)]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    assert "interrupt_ids" not in _paused(session, run)
+
+
+def test_an_interrupt_id_of_exactly_the_longest_accepted_length_is_listed(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    longest = "x" * sys.modules[RUNS].INTERRUPT_ID_MAX_LENGTH
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, {**ARTIFACT_DELETE, "interrupt_id": longest}]})
+
+    assert _paused(session, run)["interrupt_ids"] == ["hitl_a", longest]

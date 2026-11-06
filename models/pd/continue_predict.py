@@ -26,9 +26,10 @@ class ContinuePredictPayload(BaseModel):
     interrupt_ids: Optional[List[Annotated[str, StringConstraints(max_length=INTERRUPT_ID_MAX_LENGTH)]]] = Field(
         None, max_length=PAUSE_LIST_LIMIT,
         description="The interrupt ids the answer was meant for. The banner of a scheduled run sends the ids of its "
-                    f"paused event (at most {PAUSE_LIST_LIMIT}, each at most {INTERRUPT_ID_MAX_LENGTH} characters). "
-                    "When they differ from the pending ones, nothing changes and the answer is 409. A pause with "
-                    "several tools is answered with one action only when the ids name every pending tool.")
+                    f"paused event, which lists them only for at most {PAUSE_LIST_LIMIT} tools, each id at most "
+                    f"{INTERRUPT_ID_MAX_LENGTH} characters. When they differ from the pending ones, nothing changes "
+                    "and the answer is 409. A pause with several tools is approved with one action only when the ids "
+                    "name every pending tool; a reject without ids rejects every pending tool.")
     mcp_auth_resume: bool = Field(
         False, description="Whether this request resumes a durable Toolkit authorization interrupt.")
     mcp_auth_action: Optional[Literal["authorize", "skip"]] = Field(

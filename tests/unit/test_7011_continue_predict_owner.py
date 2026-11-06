@@ -21,7 +21,8 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER = 7, 9, 12
-HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_PAUSE_CHANGED_REFUSAL', '_pause_changed',
+HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_PAUSE_CHANGED_REFUSAL',
+           '_PAUSE_NOT_LISTED_REFUSAL', '_pause_refusal',
            '_check_schedule_decision', '_apply_schedule_decision'}
 
 
@@ -66,6 +67,9 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
     namespace = {
         'db': types.SimpleNamespace(get_session=get_session),
         'Conversation': types.SimpleNamespace(meta='meta', uuid='uuid'),
+        'ConversationMessageGroup': types.SimpleNamespace(meta='meta', uuid='uuid'),
+        'interrupt_identity': lambda item: item.get('interrupt_id'),
+        'pending_interrupts': lambda _meta: [],  # the fake conversation has no paused message
         'check_schedule_decision': check_schedule_decision,
         'apply_schedule_decision': apply_schedule_decision,
         'ScheduleDecisionForbidden': Forbidden,
@@ -78,7 +82,7 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
 
 def _parsed(**values):
     return types.SimpleNamespace(**{
-        'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'hitl_resume': True,
+        'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'message_id': 'm-1', 'hitl_resume': True,
         'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None,
         'mcp_auth_resume': False, 'mcp_auth_action': None, **values,
     })

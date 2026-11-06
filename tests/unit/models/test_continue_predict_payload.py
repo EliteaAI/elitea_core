@@ -14,7 +14,7 @@ from pydantic import ValidationError
 TESTS_DIR = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TESTS_DIR))
 
-from fixtures.helpers import load_module_with_stubs, register_constants_module
+from fixtures.helpers import load_module_with_stubs
 
 UUID_STR = "550e8400-e29b-41d4-a716-446655440000"
 MSG_ID = "a1b2c3d4-e29b-41d4-a716-446655440000"
@@ -22,7 +22,6 @@ MSG_ID = "a1b2c3d4-e29b-41d4-a716-446655440000"
 
 @pytest.fixture(scope="module")
 def payload_model(models_path):
-    register_constants_module(models_path.parent)
     module = load_module_with_stubs(
         models_path / "pd" / "continue_predict.py",
         "plugins.elitea_core.models.pd.continue_predict",
