@@ -405,3 +405,114 @@ def is_truncated_json(raw_text: str) -> bool:
         raw_text.count('{') > raw_text.count('}')
         or raw_text.count('[') > raw_text.count(']')
     )
+
+
+class DraftSettingsError(Exception):
+    """A draft request whose LLM settings cannot be resolved; carries the (body, status) to return."""
+
+    def __init__(self, body: dict, status: int):
+        super().__init__(body.get("error"))
+        self.body = body
+        self.status = status
+
+
+def resolve_draft_llm_settings(
+    project_id: int,
+    requested,
+    *,
+    default_temperature: float,
+    default_max_tokens: int,
+    fallback_settings: Optional[dict] = None,
+    log_prefix: str = "draft",
+) -> dict:
+    """The LLM settings a draft endpoint runs with, or raise :class:`DraftSettingsError`.
+
+    Precedence: an explicit ``model_name`` in the request, then ``fallback_settings`` (an edited
+    entity's own settings, when it names a model), then the project default model. Request
+    overrides other than the model itself apply on top of the latter two; ``model_project_id``
+    only qualifies a ``model_name``, so it is dropped when the request names no model. Temperature
+    and max_tokens take the endpoint defaults unless the caller really chose them
+    (:func:`caller_chose`).
+    """
+    caller_set_max_tokens = caller_chose(requested, "max_tokens")
+    caller_set_temperature = caller_chose(requested, "temperature")
+    overrides = (
+        requested.model_dump(exclude_none=True, exclude={"model_name", "model_project_id"})
+        if requested else {}
+    )
+
+    if requested and requested.model_name:
+        llm_settings = requested.model_dump(exclude_none=True)
+        unavailable, owning_project_id = resolve_model(
+            project_id, llm_settings["model_name"], llm_settings.get("model_project_id")
+        )
+        if unavailable:
+            raise DraftSettingsError({"error": unavailable}, 400)
+        if owning_project_id is not None:
+            llm_settings["model_project_id"] = owning_project_id
+    elif fallback_settings and fallback_settings.get("model_name"):
+        llm_settings = {**fallback_settings, **overrides}
+    else:
+        try:
+            llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(
+                project_id, section="llm"
+            )
+        except Exception:  # pylint: disable=W0703
+            log.exception("%s: failed to get default model", log_prefix)
+            raise DraftSettingsError({"error": "Failed to resolve project default LLM model."}, 400)
+        if not llm_settings or not llm_settings.get("model_name"):
+            raise DraftSettingsError({
+                "error": (
+                    "No LLM model configured for this project. "
+                    "Go to Settings → Default model to set one."
+                )
+            }, 400)
+        llm_settings = {**llm_settings, **overrides}
+
+    if not caller_set_temperature:
+        llm_settings["temperature"] = default_temperature
+    if not caller_set_max_tokens:
+        llm_settings["max_tokens"] = default_max_tokens
+    return llm_settings
+
+
+def apply_offered_origins(
+    parsed: dict, current_project_id: int, agents: list, pipelines: list, skills: list,
+) -> None:
+    """Keep only suggestions that were offered, stamping each with the project it came from.
+
+    Ids are only unique within one project schema, so the user's own agent 5 and catalog agent 5
+    can both be on offer. The prompt prints each item's ``project_id`` and the model echoes it back;
+    a suggestion is accepted only when its ``(project_id, id)`` pair was offered. One that omits
+    ``project_id`` is accepted only when that id was offered from a single project, and anything
+    else is dropped rather than guessed at. Items from the current project are stamped ``None``,
+    which is how the response models spell "this project".
+    """
+    def _origin(item):
+        return item.get("project_id") or current_project_id
+
+    def _filter(key, offered_items, id_key):
+        offered = {(_origin(item), item.get(id_key)) for item in offered_items}
+        projects_by_id: dict = {}
+        for project, item_id in offered:
+            projects_by_id.setdefault(item_id, set()).add(project)
+        kept = []
+        for item in parsed.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get(id_key)
+            echoed = item.get("project_id")
+            if echoed is not None:
+                project = echoed if (echoed, item_id) in offered else None
+            else:
+                projects = projects_by_id.get(item_id) or set()
+                project = next(iter(projects)) if len(projects) == 1 else None
+            if project is None:
+                continue
+            item["project_id"] = None if project == current_project_id else project
+            kept.append(item)
+        parsed[key] = kept
+
+    _filter("suggested_agents", agents, "application_id")
+    _filter("suggested_pipelines", pipelines, "application_id")
+    _filter("suggested_skills", skills, "id")

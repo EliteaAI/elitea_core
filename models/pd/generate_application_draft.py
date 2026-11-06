@@ -74,6 +74,7 @@ class ApplicationSuggestion(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     type: Optional[str] = None
+    project_id: Optional[int] = None  # None = current project; set for catalog agents
 
     def model_post_init(self, __context):
         if self.id is None:
@@ -84,6 +85,7 @@ class SkillSuggestion(BaseModel):
     id: int = Field(description="Skill ID from skills table")
     name: str = Field(description="Skill name")
     description: Optional[str] = Field(default=None, description="Skill description")
+    project_id: Optional[int] = None  # None = current project; set for catalog skills
 
 
 class GenerateApplicationDraftResponse(BaseModel):
