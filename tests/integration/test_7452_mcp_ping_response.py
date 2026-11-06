@@ -13,7 +13,8 @@ import sys
 import types
 
 import pytest
-from mcp import types as mcp_types
+
+mcp_types = pytest.importorskip("mcp.types")
 
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
