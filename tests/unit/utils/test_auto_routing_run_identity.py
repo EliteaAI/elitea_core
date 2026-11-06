@@ -117,3 +117,31 @@ def test_routing_instructions_include_legacy_inline_context_but_not_progressive_
             assert ('fault injection' in projected) is not progressive, surface
             assert 'Authored requirements' in projected
             assert ('project_context' in result) is progressive
+
+
+def test_regenerate_endpoint_stamps_escalation_next_to_is_regenerate():
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+    root = Path(__file__).resolve().parents[3]
+    tree = ast.parse((root / 'api/v2/regenerate.py').read_text())
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and len(n.targets) == 1
+               and isinstance(n.targets[0], ast.Subscript)
+               and ast.unparse(n.targets[0]) in ("regenerate_payload['is_regenerate']",
+                                                 "regenerate_payload['escalation']")]
+    assert [ast.unparse(a.targets[0]) for a in assigns] == ["regenerate_payload['is_regenerate']",
+                                                            "regenerate_payload['escalation']"]
+    chat_source = (root / 'models/pd/chat.py').read_text()
+    helpers = ast.Module([n for n in ast.parse(chat_source).body
+                          if (isinstance(n, ast.FunctionDef) and n.name in ('normalize_escalation', 'build_regenerate_escalation'))
+                          or (isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'ESCALATION_EVENTS')], [])
+    base = {}
+    exec(compile(helpers, 'chat.py', 'exec'), base)
+    for client, expected_event in [(None, 'regenerate'), ({'event': 'upgrade_control'}, 'upgrade_control')]:
+        payload = {}
+        ns = {**base, 'regenerate_payload': payload, 'msg_group': SimpleNamespace(uuid='group-uuid'),
+              'parsed': SimpleNamespace(payload={'escalation': client} if client else {})}
+        for a in assigns:
+            exec(compile(ast.Module([a], []), 'regenerate.py', 'exec'), ns)
+        assert payload['is_regenerate'] is True
+        assert payload['escalation'] == {'event': expected_event, 'from_message_id': 'group-uuid'}
