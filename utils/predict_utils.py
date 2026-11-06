@@ -10,8 +10,8 @@ from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
 from .context_window import (
-    BALANCED, budget_for_model_config, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed,
-    strategy_for_predict,
+    BALANCED, budget_for_model_config, get_auto_model_limits, is_platform_admin, manual_context_tokens,
+    manual_context_tokens_allowed, strategy_for_predict,
 )
 from .llm_settings import normalize_runtime_max_tokens
 from .mcp_oauth import refresh_token
@@ -264,13 +264,15 @@ def allowed_manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
 
 def apply_context_budget(
         context_settings, model_configuration: dict, llm_max_tokens=None, manual_max_context_tokens=None,
+        window_source: Optional[str] = None,
 ) -> Optional[dict]:
     """Resolve the window mode against the request's model and set the SDK summarization trigger."""
     if context_settings is None:
         return None
     mode = getattr(context_settings, 'context_window_mode', None)
     legacy_trigger = getattr(context_settings, 'max_context_tokens', None)
-    budget = budget_for_model_config(mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens))
+    budget = budget_for_model_config(
+        mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens), window_source)
     if mode is None and legacy_trigger:
         log.warning('context_settings.max_context_tokens without context_window_mode is deprecated')
         context_settings.max_context_tokens = min(int(legacy_trigger), budget['usable_input'])
@@ -412,9 +414,12 @@ def generate_predict_payload(
     if parsed.context_settings is not None:
         context_conversation_id = getattr(parsed, 'conversation_id', None) or parsed.stream_id
         context_meta = load_context_meta(parsed.project_id, context_conversation_id)
+        # Auto: the smallest limits among the models it can pick; model parameters stay the Gateway's
+        context_model_limits = get_auto_model_limits(parsed.project_id, user_id) if is_auto else llm_model_configuration
         context_budget = apply_context_budget(
-            parsed.context_settings, llm_model_configuration, getattr(parsed.llm_settings, 'max_tokens', None),
-            allowed_manual_context_tokens(context_meta.get('context_strategy')))
+            parsed.context_settings, context_model_limits, getattr(parsed.llm_settings, 'max_tokens', None),
+            allowed_manual_context_tokens(context_meta.get('context_strategy')),
+            window_source='auto' if is_auto else None)
         store_context_budget(
             parsed.project_id, context_conversation_id, context_budget, context_meta.get('context_budget'))
 
