@@ -36,6 +36,22 @@ def runs(monkeypatch):
         monkeypatch.setitem(sys.modules, "plugins.elitea_core." + dotted, None)
     load("models/entity_schedule.py", fresh=True)
     load("utils/schedule_claim.py", fresh=True)  # fail_run, the one writer of a failed run
+    load("utils/schedule_rights.py", fresh=True)  # the rights rule of check_schedule_decision
+    # The access and rights reads of a user who is not the caller: `schedule_prerun` needs the RPC layer, so a stand-in
+    # answers them. `runs.permission_holders` are the user ids that hold the admin verb; `runs.lost_access` are the
+    # users who lost project access or `schedules.run`; `runs.rights_calls` records each `check_owner_rights` call
+    holders, lost, rights_calls = set(), set(), []
+    prerun = types.ModuleType("plugins.elitea_core.utils.schedule_prerun")
+
+    def check_owner_rights(project_id, owner_id, entity_type=None, entity_id=None, verbs=("run",)):
+        rights_calls.append((owner_id, entity_type, entity_id, verbs))
+        if verbs == ("admin",):
+            return None if owner_id in holders else "denied"
+        return "owner lost access" if owner_id in lost else None
+
+    prerun.check_owner_rights = check_owner_rights
+    prerun.check_owner_access = lambda project_id, owner_id: "owner lost access" if owner_id in lost else None
+    monkeypatch.setitem(sys.modules, prerun.__name__, prerun)
     # The `tools` stub: schedule_runs imports `db` from it at load time
     module = types.ModuleType("tools")
     module.db = types.SimpleNamespace(get_session=None)
@@ -46,6 +62,7 @@ def runs(monkeypatch):
     monkeypatch.setitem(sys.modules, "tools", module)
     runs = load("utils/schedule_runs.py", fresh=True)
     runs.EntityScheduleRun = sys.modules["plugins.elitea_core.models.entity_schedule"].EntityScheduleRun
+    runs.permission_holders, runs.lost_access, runs.rights_calls = holders, lost, rights_calls
     runs.emitted, runs.config = emitted, config  # the checkpoint events and the plugin config of the test
     return runs
 

@@ -173,6 +173,8 @@ def harness(isolated_sys_modules, monkeypatch):
         with_modes=lambda urls: urls,
         endpoint_metrics=lambda func: func,
     )
+    tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
+        timeout=lambda seconds: types.SimpleNamespace())))
     tools.auth = types.SimpleNamespace(
         decorators=types.SimpleNamespace(check_api=harness.check_api),
         current_user=lambda: {'id': harness.user_id},
@@ -233,6 +235,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/constants.py', 'utils.constants')
     load('utils/schedule_timing.py', 'utils.schedule_timing')
     load('utils/schedule_access.py', 'utils.schedule_access')
+    load('utils/schedule_rights.py', 'utils.schedule_rights')
     load('models/pd/index.py', 'models.pd.index')
     load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
     load('models/pd/schedule_run.py', 'models.pd.schedule_run')

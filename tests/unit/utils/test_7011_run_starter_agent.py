@@ -83,6 +83,7 @@ def world(monkeypatch):
 
     def prerun(project_id, schedule, run_id):
         state.calls.append(("prerun", project_id, schedule.id, schedule.created_by, run_id))
+        state.checked = schedule
         return SimpleNamespace(ok=state.prerun_ok, owner_id=OWNER if state.prerun_ok else None)
 
     def create(**kwargs):
@@ -119,7 +120,7 @@ def world(monkeypatch):
             "scan_complete": lambda review: True},
         "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
         "utils.pipeline_execution": {
-            "TriggerType": SimpleNamespace(SCHEDULED="scheduled"),
+            "TriggerType": SimpleNamespace(SCHEDULED="scheduled", SCHEDULE_MANUAL="schedule_manual"),
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
             "finish_trigger_run_with_error": lambda *args: state.calls.append(("finish_error", *args)),
@@ -199,6 +200,52 @@ def test_7011_r2_6_predict_gets_the_owner_and_no_schedule_variables(world):
 def test_7011_r3_1_cron_run_sends_trigger_source_scheduled(world):
     _run(world)
     assert world.call("predict")[1]["trigger_source"] == "scheduled"
+
+
+@pytest.mark.parametrize(("trigger", "requested_by", "acts_as"), [
+    ("manual", OWNER + 1, OWNER + 1),   # Run now by another user acts as that user
+    ("test", OWNER + 1, OWNER + 1),
+    ("manual", OWNER, OWNER),
+    ("cron", OWNER + 1, OWNER),         # a scheduled tick always acts as the owner
+])
+def test_the_run_acts_as_the_user_who_pressed_run_now(world, trigger, requested_by, acts_as):
+    world.run.trigger, world.run.requested_by = trigger, requested_by
+    _run(world)
+    assert world.call("prerun")[3] == acts_as
+
+
+@pytest.mark.parametrize(("trigger", "requested_by", "as_caller"), [
+    ("manual", OWNER + 1, True),
+    ("test", OWNER + 1, True),
+    ("manual", OWNER, False),
+    ("cron", OWNER + 1, False),
+])
+def test_a_run_now_of_another_user_is_checked_as_that_user_and_marked_so(world, trigger, requested_by, as_caller):
+    world.run.trigger, world.run.requested_by = trigger, requested_by
+    _run(world)
+    checked = world.checked
+    assert checked.run_as_caller is as_caller
+    assert checked.principal == ({"kind": "delegation", "ref": requested_by} if as_caller else {})
+
+
+def test_the_account_line_names_an_admin_run_as_admin_and_other_runs_as_schedule_owner(world, monkeypatch):
+    roles = []
+    monkeypatch.setattr(world.module, "_owner_label", lambda owner_id, role: roles.append(role) or "label")
+    for trigger, requested_by in (("manual", OWNER + 1), ("manual", OWNER), ("cron", None)):
+        world.run.trigger, world.run.requested_by = trigger, requested_by
+        world.run.conversation_id = None
+        _run(world)
+    assert roles == ["admin", "schedule owner", "schedule owner"]
+
+
+def test_the_cached_name_gets_the_role_of_each_run(world, monkeypatch):
+    asked = []
+    authors = SimpleNamespace(get_authors_data=lambda ids: asked.append(list(ids)) or [{"id": OWNER, "name": "Ann Smith"}])
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.authors", authors)
+    world.module._OWNER_LABELS.clear()   # pylint: disable=W0212
+    assert world.module._owner_label(OWNER, "admin") == "Ann Smith (admin)"   # pylint: disable=W0212
+    assert world.module._owner_label(OWNER) == "Ann Smith (schedule owner)"   # pylint: disable=W0212
+    assert asked == [[OWNER]]
 
 
 def test_7011_r2_5_predict_error_ends_the_run_message_with_the_error(world):

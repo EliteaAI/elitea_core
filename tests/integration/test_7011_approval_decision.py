@@ -1,4 +1,4 @@
-"""EL-7011 US-18 R2.1, R2.2, R2.3, R2.4: the owner decides on a run that waits for approval.
+"""The owner or a project admin decides on a run that waits for approval.
 
 Real: `check_schedule_decision` and `apply_schedule_decision` of `utils/schedule_runs.py` and the schedule models, over SQLite tables.
 The harness is the `world` fixture of the US-11 integration test.
@@ -27,9 +27,10 @@ def waiting(world):  # noqa: F811 -- the fixture extends the imported one
     return type("Waiting", (), {"world": world, "runs": runs})
 
 
-def _decide(runs, caller, action):
+def _decide(runs, caller, action, is_admin=None):
     """The decision path of continue_predict: the check, then the write."""
-    runs.apply_schedule_decision(PROJECT_ID, 1, runs.check_schedule_decision(PROJECT_ID, 1, caller, [action]))
+    runs.apply_schedule_decision(
+        PROJECT_ID, 1, runs.check_schedule_decision(PROJECT_ID, 1, caller, [action], is_admin=is_admin))
 
 
 # R2.1: the owner approves, the run goes on and the expiry is cleared
@@ -46,18 +47,29 @@ def test_7011_r2_2_the_owner_reject_fails_the_run_with_the_reason(waiting):
     _decide(waiting.runs, OWNER, "reject")
 
     run = waiting.world.run_row()
-    assert (run.status, run.reason, run.finished_at is not None) == ("failed", "rejected by the owner", True)
+    assert (run.status, run.reason, run.finished_at is not None) == ("failed", "rejected", True)
     assert waiting.world.schedule().last_run_status == "failed"
 
 
-# R2.3: another user, an admin included, is refused and the run keeps waiting
+# A user who is neither the owner nor a schedules admin is refused and the run keeps waiting
 @pytest.mark.parametrize("caller", [ADMIN, OWNER + 1])
 @pytest.mark.parametrize("action", ["approve", "reject"])
-def test_7011_r2_3_another_user_is_refused_and_the_run_keeps_waiting(waiting, caller, action):
+def test_another_user_is_refused_and_the_run_keeps_waiting(waiting, caller, action):
     with pytest.raises(waiting.runs.ScheduleDecisionForbidden):
-        _decide(waiting.runs, caller, action)
+        _decide(waiting.runs, caller, action, is_admin=False)
 
     assert waiting.world.run_row().status == "waiting_for_approval"
+
+
+@pytest.mark.parametrize("action, status", [("approve", "running"), ("reject", "failed")])
+def test_a_schedules_admin_who_is_not_the_owner_decides_and_the_log_names_the_admin(waiting, action, status):
+    waiting.runs.apply_schedule_decision(
+        PROJECT_ID, 1, waiting.runs.check_schedule_decision(PROJECT_ID, 1, ADMIN, [action], is_admin=True), ADMIN)
+
+    run = waiting.world.run_row()
+    assert run.status == status
+    decision = next(event for event in run.events if event["kind"] == "decision")
+    assert (decision["text"].endswith("by an admin"), decision["by"]) == (True, ADMIN)
 
 
 # R2.4: a second decision finds the run no longer waiting

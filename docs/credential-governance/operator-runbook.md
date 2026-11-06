@@ -268,7 +268,7 @@ mandate only if the mandate's owner is its custodian. A version has one current 
 | Trigger | Under Enforce |
 |---|---|
 | A person's schedule (owner schedule) of an agent or a pipeline: cron firings | An active mandate **of the schedule's owner** on that version. |
-| The same schedule: Run now and Test run by its owner | No mandate: the owner's run, on the version's binding when it is bound; an unbound version needs development runs on and the edit right (Scheduled runs, below). |
+| The same schedule: Run now and Test run by its owner, or by an admin with `schedules.admin` | No mandate: the run of the person who pressed the button, on the version's binding when it is bound; an unbound version needs development runs on and the edit right (Scheduled runs, below). |
 | Webhook | An active mandate on that version. |
 | Legacy cron trigger | An active mandate on that version. |
 | A person chatting, using the editor, calling the API as themselves | No mandate. |
@@ -294,7 +294,7 @@ Consequences:
 
 - Every firing of a refused schedule creates a conversation and a failure notice, until the schedule pauses itself
   after three refusals in a row (below).
-- **Run now** and **Test run** work for the schedule's owner only (below).
+- **Run now** and **Test run** work for the schedule's owner and for holders of the permission `schedules.admin` (below).
 - An administrator who changes a schedule's owner, or edits it, can leave the new owner without a covering
   mandate. Check the mandate after such a change. *(Owner re-confirmation before a schedule runs on a mandate is
   planned with #7131.)*
@@ -310,18 +310,26 @@ owner.
 
 **Who needs the mandate.** The schedule owner, on the schedule's version: one current mandate per version (its
 latest revision), made for the owner (`owner` = the schedule owner), active, allowing `run:schedule`. Only cron
-firings need it. **Run now** and **Test run** are the owner's own run (below).
+firings need it. **Run now** and **Test run** act as the person who presses the button: the owner, or an admin with `schedules.admin` (below).
 
-| Mode | A cron firing | Run now / Test run (the owner, signed in) |
+| Mode | A cron firing | Run now / Test run (the person who pressed the button, signed in) |
 |---|---|---|
 | Off | Runs as before. Nothing is read or recorded. | Runs as before. |
-| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. | Runs. Evaluated as the owner's run (on the binding, or as a draft); no mandate row. |
-| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the owner (entry point `schedule_test`, subject = the owner's verified sign-in; delegated credentials on the owner's live sign-in, `DENIED_ASSERTION_UNAVAILABLE` without one). A bound version runs its approved definition on its binding, as any bound run of that person (definition checked, `BINDING_DIGEST_MISMATCH` if it changed; sub-agents on their bindings; the owner's grants). An unbound version runs the draft, as the editor's test chat: the owner needs the right to edit the agent, and only the owner's own credentials and project ones granted to the owner are used. Either way the owner needs the right to run the agent (`DENIED_RBAC` otherwise) and no admin role; no mandate is read. An unbound version needs development runs on (`DEVELOPMENT_RUNS_DISABLED` otherwise); a bound one runs on its binding whatever the switch says. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably (run history and owner notice) but never count toward or reset the auto-pause. |
+| Audit only | Runs. If enforce would refuse it for its mandate, one `would_deny` row (`MANDATE_REQUIRED`, `MANDATE_INACTIVE`, `MANDATE_EXPIRED` or `DENIED_OPERATION`, caller `schedule:entity:<id>`). Never paused. | Runs. Evaluated as that person's run (on the binding, or as a draft); no mandate row. |
+| Enforce | Runs on the owner's mandate, or is refused and ended at once (failed, owner notice, chat message). | Acts as the person who pressed the button, the owner or an admin (entry point `schedule_test`, subject = that person's verified sign-in; delegated credentials on that person's live sign-in, `DENIED_ASSERTION_UNAVAILABLE` without one). A bound version runs its approved definition on its binding, as any bound run of that person (definition checked, `BINDING_DIGEST_MISMATCH` if it changed; sub-agents on their bindings; that person's grants). An unbound version runs the draft, as the editor's test chat: that person needs the right to edit the agent, and only their own credentials and project ones granted to them are used. Either way that person needs the right to run the agent (`DENIED_RBAC` otherwise) and no admin role; no mandate is read. An unbound version needs development runs on (`DEVELOPMENT_RUNS_DISABLED` otherwise); a bound one runs on its binding whatever the switch says. Started with an API token: refused `SCHEDULE_RUN_TOKEN_NOT_ADMITTED`. Its refusals end the run readably (run history and owner notice) but never count toward or reset the auto-pause. |
 
-**Run now and Test run.** Only the owner can start them. An administrator sees the controls disabled, with the
-hint "Only the schedule owner, <owner name>, can run it." ("Only the schedule owner can run it." when the owner has
-no name); the API answers 403 `not_owner`. In the row menu the hint is the hover tooltip of the disabled Run now; on
-the edit page it is a line next to the disabled Run test.
+**Run now and Test run.** The owner and a holder of the permission `schedules.admin` can start them. Anyone else gets
+404, because the schedule is not in their view. A decision by a user who is not the owner, the person the run acts as or a
+holder of `schedules.admin` is 403 `not_owner`.
+The run is admitted and runs as the person who pressed
+the button, so an admin is checked as the admin and uses the admin's rights and credentials, never the owner's. The
+Run action in the schedule list follows the same permission. When an admin approves or rejects a waiting run of
+another person, the run log names the admin and the owner gets a notice; an admin's Run now also tells the owner when it
+starts. The run's own notices and its chat event go to the person it acts as. The schedule owner may also approve or
+reject a run that an admin started; the run still acts as the admin. In the chat, anyone but the person the run acts as
+can only approve or reject: edit, answer and note stay with that person, the owner included, and text from anyone else is
+refused (403). An approve by another person is refused (403) when the person the run acts as lost project access or the
+right to run the agent; the run keeps waiting.
 
 **Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
 mandate a run could use, the schedule is saved and the save shows:
