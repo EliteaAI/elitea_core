@@ -23,7 +23,7 @@ SENSITIVE = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_ema
 @pytest.fixture
 def run(monkeypatch):
     predicts, setting_reads, blocks, scans, finishes, outcomes, parks = [], [], [], [], [], [], []
-    state = types.SimpleNamespace(review=clean_review())
+    state = types.SimpleNamespace(review=clean_review(), parked=None)
 
     def allowed(project_id):
         setting_reads.append(project_id)
@@ -32,14 +32,19 @@ def run(monkeypatch):
     monkeypatch.setitem(
         sys.modules, f"{PKG}.utils.schedule_settings", _module(f"{PKG}.utils.schedule_settings",
                                                            is_run_without_asking_allowed=allowed))
+    def listed(review):
+        return [item for item in review["sensitive"] if item.get("code") == "sensitive_action" and item.get("toolkit")]
+
     def park(project_id, run_id, review):
-        # the real writer parks when the review lists a tool with a toolkit name (tested with the writers)
+        # the real writer parks when the review lists a tool with a toolkit name and the run is still running
+        # (both tested with the writers); state.parked overrides the answer for a run that has ended
         parks.append((project_id, run_id, review))
-        return any(item.get("code") == "sensitive_action" and item.get("toolkit") for item in review["sensitive"])
+        return bool(listed(review)) if state.parked is None else state.parked
 
     starter = load_starter(
         monkeypatch,
         park=park,
+        listed_tools=listed,
         create=lambda **kw: ("uuid-1", 7, "resp-1"),
         predict=lambda **kw: predicts.append(kw),
         prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
@@ -352,12 +357,21 @@ def test_a_resumed_run_with_a_changed_fingerprint_parks_again(run):
     assert kwargs is None and len(run.parks) == 1
 
 
-def test_a_resumed_run_after_another_pause_keeps_the_pause_at_the_call(run):
+def test_a_resumed_run_after_another_pause_parks_once_for_the_tools(run):
     run.state.review = REVIEW_TWO_TOOLS
 
     kwargs, _ = run("pause_and_ask", True, resumed=True, pre_start_pause=None)
 
-    assert run.parks == [] and kwargs["auto_approve_sensitive_actions"] is False
+    assert kwargs is None and run.parks == [(PROJECT_ID, RUN_ID, REVIEW_TWO_TOOLS)]
+
+
+def test_a_run_that_is_no_longer_running_is_not_started_after_a_false_park(run):
+    run.state.review = REVIEW_TWO_TOOLS
+    run.state.parked = False
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs is None and run.predicts == [] and len(run.parks) == 1
 
 
 def test_a_resumed_run_with_a_blocking_finding_still_blocks(run):

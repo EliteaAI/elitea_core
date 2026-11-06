@@ -29,6 +29,7 @@ from .schedule_runs import (
     end_refusal_streak,
     fail_schedule_run,
     finish_schedule_run,
+    listed_tools,
     park_before_start,
     record_run_events,
     run_event,
@@ -291,11 +292,12 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         else:
             block_schedule_run(project_id, run_id, reasons, 'error')
         return
-    # A first start, or a restart after the tools changed since the owner looked, waits for the owner before the
-    # first tool call. A restart after another pause (a missing credential) keeps the pause at the call
-    if outcome == 'needs_approval' and not approved and (not getattr(loaded, 'resumed', False) or pre_start_pause):
+    # Until the owner approved the listed tools for this run (same fingerprint), the run waits before the first
+    # tool call. A restart after a missing credential has no tools pause yet, so it waits once and then runs
+    if outcome == 'needs_approval' and not approved:
         try:
-            if park_before_start(project_id, run_id, review):
+            # False with listed tools: the run is not running any more, so no chat and no agent turn for it
+            if park_before_start(project_id, run_id, review) or listed_tools(review):
                 return
         except Exception:  # noqa: BLE001 -- a run left running would block the schedule
             log.exception('Schedule %s run %s: cannot pause the run for the tool approval', schedule_id, run_id)

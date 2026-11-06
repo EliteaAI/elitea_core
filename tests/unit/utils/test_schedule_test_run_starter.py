@@ -141,6 +141,10 @@ class FakeSession:
 def starter(monkeypatch):
     module = load_starter(monkeypatch, create=lambda **kw: None, predict=lambda **kw: None,
                           prerun=lambda *a: None)
+    return _fake_models(module, monkeypatch)
+
+
+def _fake_models(module, monkeypatch):
     module.ApplicationVersion, module.Application = object(), type("Application", (), {})
     monkeypatch.setattr(module, "select", lambda *a: types.SimpleNamespace(where=lambda *w: None))
     monkeypatch.setattr(module, "EntityScheduleRun", types.SimpleNamespace(id=None))
@@ -168,14 +172,23 @@ def test_load_of_a_run_with_no_schedule_builds_the_values_from_its_form(starter)
         "Go {{ x }}", [{"name": "x", "value": "1"}], "test", False, "Agent")
 
 
-def test_a_resumed_test_run_starts_with_the_listed_pairs(starter, monkeypatch):
+def test_a_resumed_test_run_starts_with_the_listed_pairs(monkeypatch):
+    predicts = []
     pause = {"kind": "paused", "need": "tools", "fingerprint": "fp-1"}
-    loaded = _load_from_form(starter, resumed_at="2026-11-06", events=[{"kind": "started"}, pause])
     review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
+    module = _fake_models(load_starter(
+        monkeypatch, create=lambda **kw: ("uuid-1", 7, "resp-1"), predict=lambda **kw: predicts.append(kw),
+        prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER), review=lambda *a: review,
+        listed_tools=lambda found: [{"toolkit": "Outlook", "tool": "send_email"}]), monkeypatch)
+    form = {**FORM, "approval_rule": "pause_and_ask"}
+    loaded = _load_from_form(module, form=form, resumed_at="2026-11-06", events=[{"kind": "started"}, pause])
+    monkeypatch.setattr(module, "_load", lambda *a: loaded)
+    monkeypatch.setattr(module, "TriggerType", types.SimpleNamespace(SCHEDULED="scheduled", SCHEDULE_MANUAL="manual"))
+
+    module.run_owner_schedule(34, None, 7)
 
     assert (loaded.resumed, loaded.pre_start_pause) == (True, pause)
-    assert pause["fingerprint"] == review["fingerprint"]
-    assert starter._confirmed_pairs(review, exact=True) == [("Outlook", "send_email")]
+    assert predicts[-1]["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
 
 
 def test_a_test_run_never_parked_has_no_pre_start_pause(starter):
