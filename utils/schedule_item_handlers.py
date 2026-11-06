@@ -476,10 +476,13 @@ class ScheduleItemHandlers:
         With `schedule_id` (an edit) the scan runs as the schedule owner, so an admin gets the owner's
         fingerprint, and the answer adds `confirmed`: true when the schedule keeps "Run without asking"
         with this fingerprint stored (R9.2).
+        With `schedule_id` and `run_id` (a waiting run) the scan runs as the user the run acts as: the person
+        who pressed Run now or Test run, else the schedule owner. The client never names that user.
         Who may call: a project member with `schedules.create`, as for a create.
-        Errors: 400 invalid field, a version that is not of the agent or pipeline, or an agent or pipeline
-        that is not the one of `schedule_id`; 403, also `not_owner` for another version without the right
-        to edit the schedule; 404 not visible, also a `schedule_id` the caller may not see.
+        Errors: 400 invalid field (also `run_id` without `schedule_id`), a version that is not of the agent or
+        pipeline, or an agent or pipeline that is not the one of `schedule_id`; 403, also `not_owner` for another
+        version without the right to edit the schedule; 404 not visible, also a `schedule_id` the caller may not
+        see, and a `run_id` that is unknown or of another schedule.
         """
         from .schedule_risk import scan_complete, scan_schedule
         from .schedule_settings import is_run_without_asking_allowed
@@ -497,6 +500,13 @@ class ScheduleItemHandlers:
                         return refused
                     owner_id, stored = row.created_by, _kept_fingerprint(row)
                     rule = rule or row.approval_rule
+                    if body.run_id is not None:
+                        # Late: the run writers load the run models, which the handler tests fake
+                        from .schedule_runs import run_actor_id
+                        run = session.get(EntityScheduleRun, body.run_id) if body.run_id <= MAX_DB_ID else None
+                        if run is None or run.schedule_id != row.id:
+                            return RUN_NOT_FOUND
+                        owner_id = run_actor_id(session, run)
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response

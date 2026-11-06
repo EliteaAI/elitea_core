@@ -95,6 +95,8 @@ class RiskAck(BaseModel):
 EntityType = Annotated[Literal['agent', 'pipeline'], Field(description='Kind of the scheduled entity', examples=['agent'])]
 ApplicationId = Annotated[int, Field(description='Id of the agent or pipeline', examples=[12])]
 VersionId = Annotated[int, Field(description=VERSION_TEXT, examples=[34])]
+# The upper bound (the database integer range) is checked in the handler: this module loads without `schedule_list`
+RunId = Annotated[int, Field(ge=1, description='Id of a run of `schedule_id`', examples=[41])]
 
 
 class ScheduleRiskCheck(BaseModel):
@@ -108,10 +110,20 @@ class ScheduleRiskCheck(BaseModel):
     schedule_id: int | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
+    run_id: RunId | None = Field(
+        default=None, description='Id of a run of `schedule_id`: the scan runs as the user the run acts as, '
+        'not as the schedule owner. Needs `schedule_id`')
     approval_rule: ApprovalRule | None = Field(
         None, description='The rule to check under. With `pause_and_ask`, a missing credential or a personal '
         'sign-in is a notice, not a block. Without it, an edit uses the rule of the stored schedule',
         examples=['pause_and_ask'])
+
+    @field_validator('run_id')
+    @classmethod
+    def validate_run_needs_schedule(cls, v: int | None, info: ValidationInfo) -> int | None:
+        if v is not None and info.data.get('schedule_id') is None:
+            raise ValueError('run_id needs schedule_id')
+        return v
 
 
 class ScheduleVariable(BaseModel):
