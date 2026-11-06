@@ -115,7 +115,7 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     signing_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_secret_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Time and outcome of the last authentic delivery (accepted, duplicate, ping, disabled, refused)
+    # Time and outcome of the last authentic delivery (accepted, duplicate, ping, disabled, refused, start_failed)
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_delivery_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # The old URL key of a migrated legacy webhook (#7402)

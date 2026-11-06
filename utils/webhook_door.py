@@ -12,7 +12,7 @@ from .pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG, get_webhook_signature_header, normalize_secret_value, validate_webhook_secret,
 )
 from .schedule_claim import insert_run
-from .webhook_secrets import _current_key, is_signing_row, prev_key
+from .webhook_secrets import current_key, is_signing_row, prev_key
 
 MAX_BODY_BYTES = 512 * 1024
 DEDUP_SECONDS = 24 * 3600
@@ -48,7 +48,7 @@ def find_row(session, uuid: str):
 def row_secrets(project_id: int, row, now: datetime) -> list[str]:
     """The current secret, plus the rotated-out one while its overlap window is open."""
     hidden = VaultClient(project_id).get_hidden_secrets() or {}
-    keys = [_current_key(row)]
+    keys = [current_key(row)]
     until = row.previous_secret_until
     if until is not None and (until if until.tzinfo else until.replace(tzinfo=UTC)) > now:
         keys.append(prev_key(row.uuid))
@@ -89,24 +89,38 @@ def is_ping(row, headers) -> bool:
     return row.webhook_type == 'github' and headers.get('X-GitHub-Event') == 'ping'
 
 
+def _dedup_key(row_id: int, delivery: str) -> str:
+    return f'webhook:{row_id}:{delivery}'
+
+
 def claim_delivery(redis, row_id: int, delivery: str | None) -> bool:
     """False for a delivery id seen in the last 24 h; a Redis failure lets the delivery through."""
     if delivery is None:
         return True
     try:
-        return bool(redis.set(f'webhook:{row_id}:{delivery}', '1', nx=True, ex=DEDUP_SECONDS))
+        return bool(redis.set(_dedup_key(row_id, delivery), '1', nx=True, ex=DEDUP_SECONDS))
     except Exception:  # noqa: BLE001
         log.warning('Webhook %s delivery %s: dedup unavailable, accepted', row_id, delivery)
         return True
 
 
-def admit_webhook_run(session, row) -> int | None:
+def release_delivery(redis, row_id: int, delivery: str | None) -> None:
+    """Forget a claimed id when the delivery was not run, so the sender's retry is not a duplicate."""
+    if delivery is None:
+        return
+    try:
+        redis.delete(_dedup_key(row_id, delivery))
+    except Exception:  # noqa: BLE001 -- the key expires in 24 h; the retry is then refused as a duplicate
+        log.warning('Webhook %s delivery %s: cannot release the dedup claim', row_id, delivery)
+
+
+def admit_webhook_run(session, row_id: int) -> int | None:
     """Insert the webhook run row; the caps of #7400 go here."""
-    return insert_run(session, row.id, 'webhook')
+    return insert_run(session, row_id, 'webhook')
 
 
-def record_delivery(session, row, outcome: str, now: datetime) -> None:
-    session.execute(update(EntitySchedule).where(EntitySchedule.id == row.id)
+def record_delivery(session, row_id: int, outcome: str, now: datetime) -> None:
+    session.execute(update(EntitySchedule).where(EntitySchedule.id == row_id)
                     .values(last_delivery_at=now, last_delivery_outcome=outcome))
 
 

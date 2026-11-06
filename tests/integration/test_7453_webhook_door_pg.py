@@ -28,7 +28,7 @@ def _door(world, monkeypatch):
         f"{PACKAGE}.utils.pipeline_trigger": {
             "WEBHOOK_TYPE_CONFIG": {}, "get_webhook_signature_header": None,
             "normalize_secret_value": None, "validate_webhook_secret": None},
-        f"{PACKAGE}.utils.webhook_secrets": {"_current_key": None, "is_signing_row": None, "prev_key": None},
+        f"{PACKAGE}.utils.webhook_secrets": {"current_key": None, "is_signing_row": None, "prev_key": None},
     }.items():
         monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(**attrs))
     sys.modules["tools"].VaultClient = None
@@ -58,8 +58,8 @@ def test_7453_admit_inserts_parallel_webhook_runs_and_record_delivery_writes_the
     now = datetime.now(UTC)
     with world.session() as session:
         row = session.get(world.models.EntitySchedule, hook)
-        first, second = door.admit_webhook_run(session, row), door.admit_webhook_run(session, row)
-        door.record_delivery(session, row, "accepted", now)
+        first, second = door.admit_webhook_run(session, hook), door.admit_webhook_run(session, hook)
+        door.record_delivery(session, hook, "accepted", now)
         session.commit()
     assert first and second and first != second  # webhook runs are outside the active-run index
     runs = world.sql(f"SELECT trigger, status FROM {SCHEMA}.entity_schedule_runs WHERE schedule_id = :i", i=hook)

@@ -35,6 +35,10 @@ class FakeRedis:
         self.keys[key] = value
         return True
 
+    def delete(self, key):
+        self.calls.append((key, 'delete', None))
+        self.keys.pop(key, None)
+
 
 class Headers(dict):
     """Case-insensitive like werkzeug's headers, which senders rely on."""
@@ -86,6 +90,8 @@ def door(env, monkeypatch):
     env.access_result = None
     prerun = types.ModuleType(f'{PACKAGE}.utils.schedule_prerun')
     prerun.ACCESS_CHECK_UNAVAILABLE = 'access check unavailable'
+    prerun.OWNER_LOST_ACCESS = 'owner lost access'
+    prerun.PRINCIPAL_MISMATCH = 'principal does not match the owner'
     prerun.check_principal = lambda row: None if (row.principal or {}).get('ref') == row.created_by else \
         'principal does not match the owner'
     prerun.check_owner_access = lambda project_id, owner_id: env.access_result
@@ -298,12 +304,38 @@ def test_7453_access_check_unavailable_answers_503_so_the_sender_retries(door):
 # --- step 7: no free slot
 
 def test_7453_no_free_slot_answers_503_and_closes_the_run_failed(door):
-    _, row_uuid = _webhook(door)
+    schedule_id, row_uuid = _webhook(door)
     door.start_ok = False
     status, data, headers = _post(door, row_uuid, _github(BODY))
     assert (status, data, headers['Retry-After']) == (503, {'code': 'no_free_slot'}, '30')
     (run,) = _runs(door)
     assert (run.status, run.reason) == ('failed', 'the run could not start')
+    assert door.row(schedule_id).last_delivery_outcome == 'start_failed'
+
+
+# --- review: a refused or busy delivery releases its dedup claim, so the sender's retry runs
+
+def test_7453_retry_with_the_same_delivery_id_after_a_503_starts_the_run(door):
+    _, row_uuid = _webhook(door)
+    headers = _github(BODY)
+    door.access_result = 'access check unavailable'
+    assert _post(door, row_uuid, headers)[0] == 503
+    door.access_result = None
+    door.start_ok = False
+    assert _post(door, row_uuid, headers)[0] == 503
+    door.start_ok = True
+    status, data, _ = _post(door, row_uuid, headers)
+    assert status == 202, data  # neither 503 left the id claimed
+    assert _post(door, row_uuid, headers)[:2] == (200, {'duplicate': True})  # the accepted one keeps it
+
+
+def test_7453_redeliver_after_the_owner_regains_access_is_not_a_duplicate(door):
+    _, row_uuid = _webhook(door)
+    headers = _github(BODY)
+    door.access_result = 'owner lost access'
+    assert _post(door, row_uuid, headers)[0] == 403
+    door.access_result = None
+    assert _post(door, row_uuid, headers)[0] == 202
 
 
 # --- the other sender types

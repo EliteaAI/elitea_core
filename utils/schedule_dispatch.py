@@ -28,10 +28,13 @@ def _slot_pool() -> threading.BoundedSemaphore:
         return _slots
 
 
-def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None, **payload) -> None:
+def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None, payload=None) -> None:
     # Imported here, so the wrapper is needed: the starter map loads without the database layer
     from .schedule_run_starter import run_owner_schedule
-    run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request), **payload)
+    if payload is None:  # cron and Run now keep their exact pre-#7453 arguments
+        run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request))
+    else:
+        run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request), payload=payload)
 
 
 def _extra(owner_request) -> tuple:

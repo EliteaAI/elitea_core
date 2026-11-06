@@ -23,7 +23,7 @@ COLUMNS = (
     ("legacy_application_id", "INTEGER", "Migrated legacy agent webhook: the old URL application id"),
     ("credential_refs", "JSONB", "configuration_uuids the version uses, written by the Connections check"),
     ("last_delivery_at", "TIMESTAMPTZ", "Webhook rows: time of the last authentic delivery"),
-    ("last_delivery_outcome", "VARCHAR(16)", "Webhook rows: accepted, duplicate, ping, disabled or refused"),
+    ("last_delivery_outcome", "VARCHAR(16)", "Webhook rows: accepted, duplicate, ping, disabled, refused or start_failed"),
 )
 RELAXED = (
     ("cron", "Cron rows only; NULL on webhook rows"),
