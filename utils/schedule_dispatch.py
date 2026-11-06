@@ -28,10 +28,13 @@ def _slot_pool() -> threading.BoundedSemaphore:
         return _slots
 
 
-def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None) -> None:
+def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None, payload=None) -> None:
     # Imported here, so the wrapper is needed: the starter map loads without the database layer
     from .schedule_run_starter import run_owner_schedule
-    run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request))
+    if payload is None:  # cron and Run now keep their exact pre-#7453 arguments
+        run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request))
+    else:
+        run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request), payload=payload)
 
 
 def _extra(owner_request) -> tuple:
@@ -62,9 +65,9 @@ def _close_unstarted_run(project_id: int, schedule_id: int, run_id: int) -> None
 
 
 def _run_starter(starter: Callable[..., None], project_id: int, schedule_id: int, run_id: int,
-                 owner_request=None) -> None:
+                 owner_request=None, **payload) -> None:
     try:
-        starter(project_id, schedule_id, run_id, *_extra(owner_request))
+        starter(project_id, schedule_id, run_id, *_extra(owner_request), **payload)
     except Exception:  # noqa: BLE001 -- a failed starter must not stop the tick thread (R3.5)
         log.exception("Schedule %s run %s of project %s: the starter failed", schedule_id, run_id, project_id)
         _close_unstarted_run(project_id, schedule_id, run_id)
@@ -73,11 +76,11 @@ def _run_starter(starter: Callable[..., None], project_id: int, schedule_id: int
 
 
 def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_id: int,
-                       owner_request=None) -> bool:
+                       owner_request=None, payload: bytes | None = None) -> bool:
     """Start the run in a daemon thread and return at once; False when the type has no starter or no thread starts.
 
     ``owner_request``: the admission request of the owner's Run now or Test run (#7254), built by the run endpoint; it
-    stays in this process."""
+    stays in this process. ``payload``: a webhook delivery body, kept in memory only (#7453)."""
     starter = RUN_STARTERS.get(entity_type)
     if starter is None:
         return False
@@ -85,8 +88,10 @@ def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_
         log.warning("Schedule %s run %s: no free run slot, the run is refused; raise max_parallel_runs", schedule_id, run_id)
         return False
     try:
+        # A payload is passed only when present, so cron and Run now threads keep their exact arguments
+        extra = {} if payload is None else {'kwargs': {'payload': payload}}
         threading.Thread(target=_run_starter, args=(starter, project_id, schedule_id, run_id, *_extra(owner_request)),
-                         daemon=True).start()
+                         daemon=True, **extra).start()
     except RuntimeError:  # no thread left in the process; the tick closes the run
         _slot_pool().release()
         log.exception("Schedule %s run %s: cannot start the run thread", schedule_id, run_id)

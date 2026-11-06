@@ -227,7 +227,8 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
 
-def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None) -> None:
+def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None,
+                       payload: bytes | None = None) -> None:  # pylint: disable=W0613 -- payload is used by #7454
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
