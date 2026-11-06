@@ -181,6 +181,12 @@ class SioContinuePredictModel(BaseModel):
         default=None,
         description="Per-child HITL decisions for a parallel sub-agent resume",
     )
+    # The same cap as PAIR_LIMIT of utils/schedule_runs.py: the paused event of a run lists at most that many ids
+    interrupt_ids: Optional[List[str]] = Field(
+        default=None, max_length=50,
+        description="The interrupt ids the answer was meant for: a schedule run banner sends those of its paused "
+                    "event, and a different pending set is refused with 409",
+    )
     mcp_auth_resume: bool = Field(default=False, description="Resume a durable toolkit authorization interrupt")
     mcp_auth_action: Optional[str] = Field(default=None, description="Toolkit authorization action: authorize or skip")
     mcp_auth_decisions: Optional[List[Dict[str, Any]]] = Field(default=None, description="Per-request toolkit authorization decisions")

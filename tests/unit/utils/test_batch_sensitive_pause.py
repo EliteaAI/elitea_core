@@ -11,9 +11,11 @@ import pytest
 from unit.utils import test_7011_schedule_runs_fail as run_fixtures
 from unit.utils import test_7011_schedule_runs_outcome as outcome_fixtures
 
-# The fixtures of the run writer tests, bound as attributes so pytest injects them by name
+# The fixtures of the run writer tests, bound as attributes so pytest injects them by name; listed in __all__
+# because the tests take them as arguments, which a static check does not count as a use
 runs, session, sent = run_fixtures.runs, run_fixtures.session, outcome_fixtures.sent
 _run, _schedule = run_fixtures._run, run_fixtures._schedule  # pylint: disable=W0212
+__all__ = ["runs", "session", "sent"]
 
 CLAIM = "plugins.elitea_core.utils.schedule_claim"
 RUNS = "plugins.elitea_core.utils.schedule_runs"
@@ -28,6 +30,7 @@ AGGREGATE = {"guardrail_type": "parallel_sensitive_tools", "batch": "sequential"
     {"interrupt_id": "hitl_c", "tool_call_id": "c3", "toolkit_name": "ADO", "tool_name": "list_indexes"}]}
 PAIRS = [{"toolkit": "Artifact", "tool": "create_file"}, {"toolkit": "Artifact", "tool": "delete_file"},
          {"toolkit": "ADO", "tool": "list_indexes"}]
+COUNTED = [{**pair, "count": 1} for pair in PAIRS]
 
 
 def _events(session, run):
@@ -52,7 +55,7 @@ def test_a_pause_lists_every_pending_tool_by_name_in_tools(runs, session, sent):
     runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, ARTIFACT_DELETE, ADO_LIST]})
 
     event = _paused(session, run)
-    assert event["tools"] == PAIRS
+    assert event["tools"] == COUNTED
     assert (event["toolkit"], event["tool"]) == ("Artifact", "create_file")
     assert "secret" not in str(event)
 
@@ -62,8 +65,8 @@ def test_the_paused_event_has_exactly_these_keys(runs, session, sent):
 
     runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, ARTIFACT_DELETE]})
 
-    assert set(_paused(session, run)) == {"at", "kind", "text", "level", "toolkit", "tool", "tools", "later_tools",
-                                          "wait_hours"}
+    assert set(_paused(session, run)) == {"at", "kind", "text", "level", "toolkit", "tool", "tools", "hidden",
+                                          "later_tools", "later_hidden", "interrupt_ids", "wait_hours"}
 
 
 def test_a_single_tool_pause_keeps_its_text_and_lists_one_tool(runs, session, sent):
@@ -73,7 +76,7 @@ def test_a_single_tool_pause_keeps_its_text_and_lists_one_tool(runs, session, se
 
     event = _paused(session, run)
     assert event["text"] == "Paused for approval: Artifact · create_file"
-    assert (event["tools"], event["later_tools"]) == ([PAIRS[0]], [])
+    assert (event["tools"], event["later_tools"]) == ([COUNTED[0]], [])
 
 
 def test_later_tools_are_the_scanned_pairs_that_are_not_pending(runs, session, sent):
@@ -83,8 +86,8 @@ def test_later_tools_are_the_scanned_pairs_that_are_not_pending(runs, session, s
     runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, ARTIFACT_DELETE]})
 
     event = _paused(session, run)
-    assert event["tools"] == PAIRS[:2]
-    assert event["later_tools"] == [PAIRS[2], {"toolkit": "GitHub", "tool": "create_pull_request"}]
+    assert event["tools"] == COUNTED[:2]
+    assert event["later_tools"] == [COUNTED[2], {"toolkit": "GitHub", "tool": "create_pull_request", "count": 1}]
 
 
 def test_a_scanned_pair_that_is_pending_with_other_letter_case_is_not_later(runs, session, sent):
@@ -110,7 +113,7 @@ def test_later_tools_carry_names_only(runs, session, sent):
 
     runs.pause_schedule_run(1, run.id, {"hitl_interrupt": ARTIFACT_CREATE})
 
-    assert _paused(session, run)["later_tools"] == [{"toolkit": "GitHub", "tool": "delete_file"}]
+    assert _paused(session, run)["later_tools"] == [{"toolkit": "GitHub", "tool": "delete_file", "count": 1}]
 
 
 def test_a_failed_scan_read_gives_no_later_tools_and_the_pause_goes_on(runs, session, sent, monkeypatch):
@@ -146,16 +149,19 @@ def test_a_long_tool_list_keeps_the_text_trim_and_lists_every_tool(runs, session
     assert [pair["tool"] for pair in event["tools"]] == [f"tool_number_{number:02d}" for number in range(30)]
 
 
-def test_the_tool_lists_are_cut_at_the_pair_limit(runs, session, sent):
+def test_the_tool_lists_are_cut_at_the_pair_limit_and_count_what_is_cut(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
     limit = sys.modules[RUNS].PAIR_LIMIT
-    items = [{**ARTIFACT_CREATE, "tool_name": f"tool_{number}"} for number in range(limit + 10)]
+    items = [{**ARTIFACT_CREATE, "tool_name": f"tool_{number}", "interrupt_id": f"hitl_{number}"}
+             for number in range(limit + 10)]
     _log_scan(runs, run, *({"toolkit": "Other", "tool": f"scan_{number}"} for number in range(limit + 10)))
 
     runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
 
     event = _paused(session, run)
     assert (len(event["tools"]), len(event["later_tools"])) == (limit, limit)
+    assert (event["hidden"], event["later_hidden"]) == (10, 10)
+    assert len(event["interrupt_ids"]) == limit
 
 
 @pytest.mark.parametrize("payload", [
@@ -170,7 +176,7 @@ def test_the_aggregate_pause_is_read_from_pending(runs, session, sent, payload):
 
     event = _paused(session, run)
     assert event["text"] == "Paused for approval: Artifact · create_file, Artifact · delete_file, ADO · list_indexes"
-    assert event["tools"] == PAIRS
+    assert event["tools"] == COUNTED
     assert run.status == "waiting_for_approval"
 
 
@@ -202,3 +208,41 @@ def test_one_approve_of_a_pause_with_three_tools_resumes_the_run_once(runs, sess
 
     assert [event["kind"] for event in _events(session, run)] == ["paused", "decision"]
     assert run.status == "running"
+
+
+def test_calls_of_the_same_tool_are_one_entry_with_their_number(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    third = {**ARTIFACT_CREATE, "interrupt_id": "hitl_d", "tool_call_id": "c4"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, ARTIFACT_DELETE, third]})
+
+    event = _paused(session, run)
+    assert event["tools"] == [{**PAIRS[0], "count": 2}, {**PAIRS[1], "count": 1}]
+    assert event["interrupt_ids"] == ["hitl_a", "hitl_b", "hitl_d"]
+
+
+def test_a_short_list_has_nothing_hidden(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    _log_scan(runs, run, *PAIRS)
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, ARTIFACT_DELETE]})
+
+    event = _paused(session, run)
+    assert (event["hidden"], event["later_hidden"]) == (0, 0)
+
+
+def test_the_event_names_the_pending_interrupts_for_the_banner_to_send_back(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": AGGREGATE})
+
+    assert _paused(session, run)["interrupt_ids"] == ["hitl_a", "hitl_b", "hitl_c"]
+
+
+def test_a_pause_with_an_item_that_has_no_interrupt_id_lists_no_ids(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    without_id = {key: value for key, value in ARTIFACT_DELETE.items() if key != "interrupt_id"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [ARTIFACT_CREATE, without_id]})
+
+    assert "interrupt_ids" not in _paused(session, run)

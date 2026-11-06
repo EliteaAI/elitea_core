@@ -24,6 +24,7 @@ from .pipeline_execution import (
 )
 from .schedule_prerun import credential_toolkit_refs, run_prerun_check
 from .schedule_runs import (
+    PAIR_LIMIT,
     block_schedule_run,
     count_refusal,
     end_refusal_streak,
@@ -40,7 +41,6 @@ START_FAILED = 'the run could not start'
 PREDICT_FAILED = 'the run call failed'
 ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
 BUDGET_CLOSED = 'the {} budget is used up'
-SCAN_PAIR_LIMIT = 50  # sensitive pairs kept in the risk check event
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
 
@@ -210,7 +210,7 @@ def _listed_pairs(review: dict) -> list[dict]:
         (item['toolkit'], _runtime_tool_name(item['tool']) if item.get('from_list') else item['tool'])
         for item in review['sensitive']
         if item.get('code') == 'sensitive_action' and item.get('toolkit') and item.get('tool'))
-    return [{'toolkit': toolkit, 'tool': tool} for toolkit, tool in list(pairs)[:SCAN_PAIR_LIMIT]]
+    return [{'toolkit': toolkit, 'tool': tool} for toolkit, tool in list(pairs)[:PAIR_LIMIT]]
 
 
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:

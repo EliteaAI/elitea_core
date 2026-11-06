@@ -15,7 +15,7 @@ STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
-PAIR_LIMIT = 50  # (toolkit, tool) pairs kept in one run event
+PAIR_LIMIT = 50  # (toolkit, tool) pairs and interrupt ids kept in one run event
 PARALLEL_PAUSE = 'parallel_sensitive_tools'  # the one pause that lists every sensitive call of an AI message
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
@@ -364,10 +364,18 @@ def _pause_items(interrupt: dict) -> list[dict]:
     return items
 
 
+def pair_counts(items: list[dict], toolkit_key: str = 'toolkit', tool_key: str = 'tool') -> dict[tuple[str, str], int]:
+    """The distinct (toolkit, tool) names of `items`, in order and cut at `NAME_LIMIT`, with the items for each; never arguments."""
+    counts: dict[tuple[str, str], int] = {}
+    for item in items:
+        pair = tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in (toolkit_key, tool_key))
+        counts[pair] = counts.get(pair, 0) + 1
+    return counts
+
+
 def tool_pairs(items: list[dict], toolkit_key: str = 'toolkit', tool_key: str = 'tool') -> list[tuple[str, str]]:
     """The distinct (toolkit, tool) names of `items`, in order and cut at `NAME_LIMIT`; never arguments."""
-    return list(dict.fromkeys(
-        tuple(str(item.get(key) or '?')[:NAME_LIMIT] for key in (toolkit_key, tool_key)) for item in items))
+    return list(pair_counts(items, toolkit_key, tool_key))
 
 
 def _scanned_pairs(project_id: int, run_id: int) -> list[dict]:
@@ -382,16 +390,25 @@ def _scanned_pairs(project_id: int, run_id: int) -> list[dict]:
     return [pair for pair in check.get('tools') or [] if isinstance(pair, dict)]
 
 
+def _listed(counts: dict[tuple[str, str], int]) -> list[dict]:
+    """The first `PAIR_LIMIT` pairs of `counts` as event entries: names and the number of calls for each."""
+    return [{'toolkit': toolkit, 'tool': tool, 'count': count}
+            for (toolkit, tool), count in list(counts.items())[:PAIR_LIMIT]]
+
+
 def _paused_event(items: list[dict], scanned: list[dict] | None = None) -> dict:
     """The pause line of the run log: toolkit and tool of the pending tools, never the tool arguments.
 
-    The `toolkit` and `tool` fields name the first tool; `tools` holds every pending pair. `later_tools` holds the
-    pairs of the risk check at the start of the run that are not pending now, so the owner sees what may ask next.
-    A list too long for `TEXT_LIMIT` loses whole entries from its end and ends with the count of the hidden
-    ones, so the owner sees that more tools wait.
+    The `toolkit` and `tool` fields name the first tool; `tools` holds every pending pair with `count`, the calls
+    that wait for it, and `hidden` counts the pairs cut at `PAIR_LIMIT`. `later_tools` and `later_hidden` do the
+    same for the pairs of the risk check at the start of the run that are not pending now, so the owner sees
+    what may ask next. `interrupt_ids` names the pending interrupts: the banner sends them back with its answer,
+    so an answer reaches only the pause it showed. A list too long for `TEXT_LIMIT` loses whole entries from its
+    end and ends with the count of the hidden ones, so the owner sees that more tools wait.
     """
     # Two calls of one tool wait as two items; the line names the tool once
-    names = tool_pairs(items, 'toolkit_name', 'tool_name')
+    counts = pair_counts(items, 'toolkit_name', 'tool_name')
+    names = list(counts)
     entries = [f'{name} · {tool_name}' for name, tool_name in names]
     for shown in range(len(entries), 0, -1):
         hidden = len(entries) - shown
@@ -399,11 +416,14 @@ def _paused_event(items: list[dict], scanned: list[dict] | None = None) -> dict:
         if len(text) <= TEXT_LIMIT:
             break  # one entry always fits: the names are cut at NAME_LIMIT
     pending = {(toolkit.lower(), tool.lower()) for toolkit, tool in names}
-    later = [(toolkit, tool) for toolkit, tool in tool_pairs(scanned or [])
-             if (toolkit.lower(), tool.lower()) not in pending]
+    later = {pair: count for pair, count in pair_counts(scanned or []).items()
+             if (pair[0].lower(), pair[1].lower()) not in pending}
+    ids = [item.get('interrupt_id') for item in items]
+    # Without an id for every item the banner could not name the pause it showed, so it sends none
+    shown_ids = {'interrupt_ids': [str(name) for name in ids[:PAIR_LIMIT]]} if all(ids) else {}
     return run_event('paused', text, 'warning', toolkit=names[0][0], tool=names[0][1],
-                     tools=[{'toolkit': toolkit, 'tool': tool} for toolkit, tool in names[:PAIR_LIMIT]],
-                     later_tools=[{'toolkit': toolkit, 'tool': tool} for toolkit, tool in later[:PAIR_LIMIT]])
+                     tools=_listed(counts), hidden=max(0, len(counts) - PAIR_LIMIT),
+                     later_tools=_listed(later), later_hidden=max(0, len(later) - PAIR_LIMIT), **shown_ids)
 
 
 def _sign_in_event(item: dict) -> dict:

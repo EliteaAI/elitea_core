@@ -36,6 +36,7 @@ def starter(ns):
         "utils.schedule_prerun": {"credential_toolkit_refs": lambda version: [], "run_prerun_check": lambda project_id, schedule, run_id: types.SimpleNamespace(
             ok=True, owner_id=schedule.created_by)},
         "utils.schedule_runs": {
+            "PAIR_LIMIT": 50,
             "fail_schedule_run": lambda *args: writes.calls.append(("fail", *args)),
             "block_schedule_run": lambda *args: writes.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args, **kwargs: writes.calls.append(("finish", *args)),

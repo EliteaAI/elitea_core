@@ -66,10 +66,10 @@ def test_a_finding_without_a_toolkit_or_tool_or_of_another_kind_is_left_out(monk
 
 def test_the_listed_pairs_are_cut_at_the_limit(monkeypatch):
     starter = _starter(monkeypatch)
-    over = starter.SCAN_PAIR_LIMIT + 5
+    over = starter.PAIR_LIMIT + 5
     review = {**clean_review(), "sensitive": [_item("Artifact", f"tool_{n}") for n in range(over)]}
 
-    assert len(starter._listed_pairs(review)) == starter.SCAN_PAIR_LIMIT  # pylint: disable=W0212
+    assert len(starter._listed_pairs(review)) == starter.PAIR_LIMIT  # pylint: disable=W0212
 
 
 def test_the_risk_check_line_that_needs_approval_carries_the_tools_with_exact_keys(monkeypatch):

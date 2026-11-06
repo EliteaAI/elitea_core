@@ -105,6 +105,7 @@ def world(monkeypatch):
                                    "RUN_FORM": object, "RUN_APPLICATION_ID": object},
         "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {
+            "PAIR_LIMIT": 50,
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args: state.calls.append(("finish", *args)),

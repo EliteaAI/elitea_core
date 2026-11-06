@@ -21,6 +21,11 @@ class ContinuePredictPayload(BaseModel):
         None, description="Edited text for 'edit', the user's note for 'block_with_comment', or the answers object for a clarifying-question 'answer'.")
     hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
         None, description="Per-child HITL decisions for a parallel sub-agent resume.")
+    interrupt_ids: Optional[List[str]] = Field(
+        None, max_length=50,
+        description="The interrupt ids the answer was meant for. The banner of a scheduled run sends the ids of its "
+                    "paused event (at most 50). When they differ from the pending ones, nothing changes and the "
+                    "answer is 409. Without it the answer applies to what is pending.")
     mcp_auth_resume: bool = Field(
         False, description="Whether this request resumes a durable Toolkit authorization interrupt.")
     mcp_auth_action: Optional[Literal["authorize", "skip"]] = Field(

@@ -21,7 +21,8 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER = 7, 9, 12
-HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision'}
+HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_PAUSE_CHANGED_REFUSAL', '_pause_changed',
+           '_check_schedule_decision', '_apply_schedule_decision'}
 
 
 class Forbidden(Exception):
@@ -194,7 +195,7 @@ def post(monkeypatch):
         conversation_uuid='c-1', message_id='m-1', mcp_auth_resume=False, hitl_resume=True,
         hitl_action='approve', hitl_value=None, hitl_decisions=None, mcp_auth_action=None,
         mcp_auth_decisions=None, authorization_request_id=None, user_input=None, thread_id=None,
-        await_task_timeout=-1))
+        interrupt_ids=None, await_task_timeout=-1))
     stubs = {
         'flask': types.SimpleNamespace(request=types.SimpleNamespace(json={})),
         'tools': tools,

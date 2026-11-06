@@ -79,6 +79,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "hitl_action": parsed.hitl_action,
             "hitl_value": parsed.hitl_value,
             "hitl_decisions": parsed.hitl_decisions,
+            "interrupt_ids": parsed.interrupt_ids,
             "mcp_auth_resume": parsed.mcp_auth_resume,
             "mcp_auth_action": parsed.mcp_auth_action,
             "mcp_auth_decisions": parsed.mcp_auth_decisions,
