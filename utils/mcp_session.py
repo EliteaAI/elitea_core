@@ -79,7 +79,7 @@ class SseSession:
             types.JSONRPCResponse(
                 jsonrpc="2.0",
                 id=id,
-                result=types.EmptyResult()
+                result=types.EmptyResult().model_dump(by_alias=True, exclude_none=True),
             ).model_dump_json()
         )
 
