@@ -10,9 +10,10 @@ import pytest
 from unit._tool_spend_loader import load
 
 # Fixtures of the schedule writer tests: the chain test runs the real writer on an in-memory database
-from unit.utils.test_7011_schedule_runs_fail import _run, _schedule, runs, session  # noqa: F401
+from unit.utils import test_7011_schedule_runs_fail as schedule_writer_fixtures
 
-# ruff: noqa: F811
+runs, session = schedule_writer_fixtures.runs, schedule_writer_fixtures.session
+_run, _schedule = schedule_writer_fixtures._run, schedule_writer_fixtures._schedule
 
 provider_error_answer = load("utils/error_text.py").provider_error_answer
 
@@ -240,6 +241,17 @@ def test_stream_end_with_a_normal_answer_finishes_the_run_as_success(make_world,
 
 
 @pytest.fixture
+def schedule_timing(monkeypatch):
+    """The sibling module the real writer imports; an earlier suite can leave it out of sys.modules.
+
+    The module is removed again after the test: it binds the `tools` stub of this test, and a later suite loads its own.
+    """
+    name = "plugins.elitea_core.utils.schedule_timing"
+    monkeypatch.setitem(sys.modules, name, sys.modules.get(name))
+    return load("utils/schedule_timing.py", fresh=True)
+
+
+@pytest.fixture
 def sent(monkeypatch):
     """The owner notices the real writer sends, as (owner, event, run id)."""
     name = "plugins.elitea_core.utils.schedule_notifications"
@@ -253,7 +265,8 @@ def sent(monkeypatch):
     return types.SimpleNamespace(notices=notices)
 
 
-def test_stream_end_with_a_provider_400_answer_stores_a_failed_run_and_notifies_the_owner(make_world, runs, session, sent):
+def test_stream_end_with_a_provider_400_answer_stores_a_failed_run_and_notifies_the_owner(
+        schedule_timing, make_world, runs, session, sent):
     schedule = _schedule(runs, session, created_by=AUTHOR_ID)
     run = _run(runs, session, schedule)
     world = make_world({**SCHEDULE_META, "schedule_run_id": run.id})
