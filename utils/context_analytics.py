@@ -11,8 +11,9 @@ from ..models.conversation import Conversation
 from ..models.message_group import ConversationMessageGroup
 from ..models.pd.context import ContextStrategy
 from .context_window import (
-    get_model_limits, is_platform_admin, legacy_context_tokens, manual_context_tokens, manual_context_tokens_allowed,
-    normalize_mode, pick_chat_llm_settings, resolve_context_budget, status_max_tokens,
+    get_auto_model_limits, get_model_limits, is_auto_selection, is_platform_admin, legacy_context_tokens,
+    manual_context_tokens, manual_context_tokens_allowed, normalize_mode, pick_chat_llm_settings,
+    resolve_context_budget, status_max_tokens,
 )
 
 
@@ -138,8 +139,11 @@ def update_context_analytics_after_message_delete(
     update_conversation_meta(project_id, conversation_id, {'context_analytics': updated_analytics})
 
 
-def _conversation_model_budget(project_id: int, conversation_id: int, mode: str) -> dict:
-    """Budget before the first response: resolve from the chat model (the user participant's llm_settings)."""
+def _conversation_model_budget(project_id: int, conversation_id: int, mode: str, user_id: int | None = None) -> dict:
+    """Budget before the first response: resolve from the chat model (the user participant's llm_settings).
+
+    An Auto chat uses the smallest limits among the models Auto can pick for ``user_id``.
+    """
     from ..models.participants import Participant, ParticipantMapping
     llm_settings = {}
     try:
@@ -152,11 +156,15 @@ def _conversation_model_budget(project_id: int, conversation_id: int, mode: str)
         llm_settings = pick_chat_llm_settings(mappings)
     except Exception as e:
         log.warning(f"Failed to read conversation {conversation_id} model: {e}")
-    limits = get_model_limits(llm_settings.get('model_project_id') or project_id, llm_settings.get('model_name'))
+    if is_auto_selection(llm_settings):
+        limits, window_source = get_auto_model_limits(project_id, user_id), 'auto'
+    else:
+        limits = get_model_limits(llm_settings.get('model_project_id') or project_id, llm_settings.get('model_name'))
+        window_source = None
     max_tokens = llm_settings.get('max_tokens')
     return resolve_context_budget(
         mode, limits.get('context_window'), limits.get('max_output_tokens'),
-        None if max_tokens in (None, -1) else max_tokens,
+        None if max_tokens in (None, -1) else max_tokens, window_source,
     )
 
 
@@ -180,7 +188,7 @@ def get_context_data(
     mode = normalize_mode(context_strategy.get('context_window_mode'))
     budget = meta.get('context_budget')
     if not isinstance(budget, dict) or budget.get('window_mode') != mode:
-        budget = _conversation_model_budget(project_id, conversation_id, mode)
+        budget = _conversation_model_budget(project_id, conversation_id, mode, user_id)
     strategy_name = context_strategy.get('name', 'default')
     manual = _manual_context_info(context_strategy, user_id)
     legacy = legacy_context_tokens(context_strategy)
