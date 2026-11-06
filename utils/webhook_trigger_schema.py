@@ -22,6 +22,8 @@ COLUMNS = (
     ("legacy_version_id", "INTEGER", "Migrated legacy pipeline webhook: the old URL version id"),
     ("legacy_application_id", "INTEGER", "Migrated legacy agent webhook: the old URL application id"),
     ("credential_refs", "JSONB", "configuration_uuids the version uses, written by the Connections check"),
+    ("last_delivery_at", "TIMESTAMPTZ", "Webhook rows: time of the last authentic delivery"),
+    ("last_delivery_outcome", "VARCHAR(16)", "Webhook rows: accepted, duplicate, ping, disabled or refused"),
 )
 RELAXED = (
     ("cron", "Cron rows only; NULL on webhook rows"),
@@ -41,11 +43,11 @@ INDEXES = (
 )
 TABLE_COMMENT = "Triggers of agent and pipeline versions: cron schedules and webhooks (trigger_kind)"
 
-# A schema needs the task while the column is missing or the active-run index still covers webhook runs
+# A schema needs the task while the newest column is missing or the active-run index still covers webhook runs
 _PENDING_QUERY = text(
     "SELECT t.table_schema FROM information_schema.tables t WHERE t.table_name = :table "
     "AND t.table_schema ~ '^p_[0-9]+$' AND (NOT EXISTS (SELECT 1 FROM information_schema.columns col "
-    "WHERE col.table_schema = t.table_schema AND col.table_name = :table AND col.column_name = 'trigger_kind') "
+    "WHERE col.table_schema = t.table_schema AND col.table_name = :table AND col.column_name = 'last_delivery_outcome') "
     "OR EXISTS (SELECT 1 FROM pg_indexes i WHERE i.schemaname = t.table_schema AND i.indexname = :index "
     "AND i.indexdef NOT LIKE '%webhook%'))")
 
