@@ -205,6 +205,35 @@ def test_a_run_parked_before_the_start_logs_the_listed_tools_and_the_fingerprint
     assert [notice[1] for notice in sent.notices] == ["schedule_approval_needed"]
 
 
+ISSUE_TOOLS = [("Artifact", "create_file"), ("Artifact", "delete_file"), ("ADO", "list_indexes")]
+
+
+@pytest.mark.parametrize("count", [1, 3], ids=["one tool", "three tools of two toolkits"])
+def test_a_run_parked_before_the_start_names_every_tool_with_its_toolkit(runs, session, sent, count):
+    run = _run(runs, session, _schedule(runs, session))
+    chosen = ISSUE_TOOLS[:count]
+    review = {**REVIEW, "notices": [], "sensitive": [
+        {"code": "sensitive_action", "toolkit": toolkit, "tool": tool} for toolkit, tool in chosen]}
+
+    assert runs.park_before_start(1, run.id, review) is True
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval before the first tool call: " + ", ".join(
+        f"{toolkit} · {tool}" for toolkit, tool in chosen)
+    assert event["tools"] == [{"toolkit": toolkit, "tool": tool} for toolkit, tool in chosen]
+    assert event.get("may_ask") is None
+
+
+def test_the_owner_rejects_a_run_parked_before_the_start_and_it_fails(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session, created_by=12))
+    runs.park_before_start(1, run.id, REVIEW)
+
+    runs.apply_schedule_decision(1, run.id, runs.check_schedule_decision(1, run.id, 12, ["reject"]))
+
+    assert run.status == "failed"
+    assert [event["kind"] for event in _events(session, run)] == ["paused", "decision", "finished"]
+
+
 def test_a_review_without_a_listed_tool_does_not_park_the_run(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
     review = {**REVIEW, "sensitive": [REVIEW["sensitive"][2], REVIEW["sensitive"][3]]}
