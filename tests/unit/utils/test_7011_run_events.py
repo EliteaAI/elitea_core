@@ -205,13 +205,13 @@ def test_a_run_parked_before_the_start_logs_the_listed_tools_and_the_fingerprint
     assert [notice[1] for notice in sent.notices] == ["schedule_approval_needed"]
 
 
-ISSUE_TOOLS = [("Artifact", "create_file"), ("Artifact", "delete_file"), ("ADO", "list_indexes")]
+MIXED_TOOLKIT_TOOLS = [("Artifact", "create_file"), ("Artifact", "delete_file"), ("ADO", "list_indexes")]
 
 
 @pytest.mark.parametrize("count", [1, 3], ids=["one tool", "three tools of two toolkits"])
 def test_a_run_parked_before_the_start_names_every_tool_with_its_toolkit(runs, session, sent, count):
     run = _run(runs, session, _schedule(runs, session))
-    chosen = ISSUE_TOOLS[:count]
+    chosen = MIXED_TOOLKIT_TOOLS[:count]
     review = {**REVIEW, "notices": [], "sensitive": [
         {"code": "sensitive_action", "toolkit": toolkit, "tool": tool} for toolkit, tool in chosen]}
 
@@ -222,6 +222,18 @@ def test_a_run_parked_before_the_start_names_every_tool_with_its_toolkit(runs, s
         f"{toolkit} · {tool}" for toolkit, tool in chosen)
     assert event["tools"] == [{"toolkit": toolkit, "tool": tool} for toolkit, tool in chosen]
     assert event.get("may_ask") is None
+
+
+def test_a_run_parked_before_the_start_names_a_repeated_pair_once(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    item = {"code": "sensitive_action", "toolkit": "Artifact", "tool": "create_file"}
+    review = {**REVIEW, "notices": [], "sensitive": [item, dict(item)]}
+
+    assert runs.park_before_start(1, run.id, review) is True
+
+    (event,) = _events(session, run)
+    assert event["tools"] == [{"toolkit": "Artifact", "tool": "create_file"}]
+    assert event["text"] == "Paused for approval before the first tool call: Artifact · create_file"
 
 
 def test_the_owner_rejects_a_run_parked_before_the_start_and_it_fails(runs, session, sent):
