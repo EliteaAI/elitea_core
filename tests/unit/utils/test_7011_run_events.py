@@ -106,19 +106,181 @@ def test_cr_el7011_a_sensitive_pause_logs_the_toolkit_and_tool_but_never_the_arg
     assert (event["kind"], event["level"], event["toolkit"], event["tool"]) == (
         "paused", "warning", "github", "create_issue")
     assert event["text"] == "Paused for approval: github · create_issue"
+    assert event["tools"] == [{"toolkit": "github", "tool": "create_issue"}]
     assert "secret" not in str(event)
 
 
-def test_cr_el7011_a_parallel_pause_names_the_first_tool_and_counts_the_rest(runs, session, sent):
+def test_a_pause_that_carries_the_same_tool_in_both_payload_keys_names_it_once(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
-    second = {**SENSITIVE["hitl_interrupt"], "tool_name": "delete_issue"}
-    third = {**SENSITIVE["hitl_interrupt"], "tool_name": "close_issue"}
+    item = SENSITIVE["hitl_interrupt"]
 
-    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [SENSITIVE["hitl_interrupt"], second, third]})
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": item, "hitl_interrupts": [item]})
 
     (event,) = _events(session, run)
-    assert event["text"] == "Paused for approval: github · create_issue (+2 more)"
-    assert event["tool"] == "create_issue"
+    assert event["text"] == "Paused for approval: github · create_issue"
+    assert "more" not in event["text"]
+    assert event["tools"] == [{"toolkit": "github", "tool": "create_issue"}]
+
+
+def test_a_parallel_pause_lists_every_tool_by_name(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    first = SENSITIVE["hitl_interrupt"]
+    second = {**first, "tool_name": "delete_issue"}
+    third = {**first, "toolkit_name": "jira", "tool_name": "close_issue"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": first, "hitl_interrupts": [first, second, third]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue, github · delete_issue, jira · close_issue"
+    assert event["tools"] == [
+        {"toolkit": "github", "tool": "create_issue"}, {"toolkit": "github", "tool": "delete_issue"},
+        {"toolkit": "jira", "tool": "close_issue"}]
+    assert (event["toolkit"], event["tool"]) == ("github", "create_issue")
+
+
+def test_a_pause_over_the_list_limit_counts_the_rest(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    limit = runs.PAUSE_LIST_LIMIT
+    items = [{**SENSITIVE["hitl_interrupt"], "tool_name": f"tool_{number}"} for number in range(limit + 3)]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    (event,) = _events(session, run)
+    shown = event["text"].count(" · ")
+    assert len(event["tools"]) == limit
+    assert shown < len(items)
+    assert event["text"].endswith(f"(+{len(items) - shown} more)")
+    assert len(event["text"]) <= _claim().TEXT_LIMIT
+
+
+def test_a_pause_over_the_list_limit_with_short_names_counts_only_the_tools_over_the_limit(runs, session, sent, monkeypatch):
+    run = _run(runs, session, _schedule(runs, session))
+    items = [{**SENSITIVE["hitl_interrupt"], "toolkit_name": "a", "tool_name": f"t{number}"} for number in range(53)]
+    monkeypatch.setattr(runs, "PAUSE_LIST_LIMIT", 4)
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: a · t0, a · t1, a · t2, a · t3 (+49 more)"
+    assert len(event["tools"]) == 4
+
+
+def test_a_pause_with_a_tool_argument_in_every_item_never_stores_it(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    items = [{**SENSITIVE["hitl_interrupt"], "tool_name": name} for name in ("create_issue", "delete_issue")]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    (event,) = _events(session, run)
+    assert "secret" not in str(event)
+
+
+REVIEW = {
+    "blocking": [], "fingerprint": "fp-1",
+    "sensitive": [
+        {"code": "sensitive_action", "toolkit": "github", "tool": "create_pull_request"},
+        {"code": "sensitive_action", "toolkit": "github", "tool": "delete_file"},
+        {"code": "personal_credential", "toolkit": "github", "tool": None},
+        {"code": "sensitive_action", "toolkit": "", "tool": "nameless"},
+    ],
+    "notices": [{"code": "sensitive_action", "toolkit": "jira", "tool": "delete_issue", "may_apply": True}],
+}
+
+
+def test_a_run_parked_before_the_start_logs_the_listed_tools_and_the_fingerprint(runs, session, sent):
+    schedule = _schedule(runs, session)
+    run = _run(runs, session, schedule)
+
+    assert runs.park_before_start(1, run.id, REVIEW) is True
+
+    (event,) = _events(session, run)
+    assert (run.status, schedule.last_run_status) == ("waiting_for_approval", "waiting_for_approval")
+    assert event["need"] == "tools" and event["fingerprint"] == "fp-1"
+    assert event["text"] == (
+        "Paused for approval before the first tool call: github · create_pull_request, github · delete_file")
+    assert event["tools"] == [{"toolkit": "github", "tool": "create_pull_request"},
+                              {"toolkit": "github", "tool": "delete_file"}]
+    assert event["may_ask"] == [{"toolkit": "jira", "tool": "delete_issue"}]
+    assert event["wait_hours"] == runs.approval_wait_hours()
+    assert [notice[1] for notice in sent.notices] == ["schedule_approval_needed"]
+
+
+MIXED_TOOLKIT_TOOLS = [("Artifact", "create_file"), ("Artifact", "delete_file"), ("ADO", "list_indexes")]
+
+
+@pytest.mark.parametrize("count", [1, 3], ids=["one tool", "three tools of two toolkits"])
+def test_a_run_parked_before_the_start_names_every_tool_with_its_toolkit(runs, session, sent, count):
+    run = _run(runs, session, _schedule(runs, session))
+    chosen = MIXED_TOOLKIT_TOOLS[:count]
+    review = {**REVIEW, "notices": [], "sensitive": [
+        {"code": "sensitive_action", "toolkit": toolkit, "tool": tool} for toolkit, tool in chosen]}
+
+    assert runs.park_before_start(1, run.id, review) is True
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval before the first tool call: " + ", ".join(
+        f"{toolkit} · {tool}" for toolkit, tool in chosen)
+    assert event["tools"] == [{"toolkit": toolkit, "tool": tool} for toolkit, tool in chosen]
+    assert event.get("may_ask") is None
+
+
+def test_a_run_parked_before_the_start_names_a_repeated_pair_once(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    item = {"code": "sensitive_action", "toolkit": "Artifact", "tool": "create_file"}
+    review = {**REVIEW, "notices": [], "sensitive": [item, dict(item)]}
+
+    assert runs.park_before_start(1, run.id, review) is True
+
+    (event,) = _events(session, run)
+    assert event["tools"] == [{"toolkit": "Artifact", "tool": "create_file"}]
+    assert event["text"] == "Paused for approval before the first tool call: Artifact · create_file"
+
+
+def test_the_owner_rejects_a_run_parked_before_the_start_and_it_fails(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session, created_by=12))
+    runs.park_before_start(1, run.id, REVIEW)
+
+    runs.apply_schedule_decision(1, run.id, runs.check_schedule_decision(1, run.id, 12, ["reject"]))
+
+    assert run.status == "failed"
+    assert [event["kind"] for event in _events(session, run)] == ["paused", "decision", "finished"]
+
+
+def test_a_review_without_a_listed_tool_does_not_park_the_run(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    review = {**REVIEW, "sensitive": [REVIEW["sensitive"][2], REVIEW["sensitive"][3]]}
+
+    assert runs.park_before_start(1, run.id, review) is False
+
+    assert (run.status, _events(session, run)) == ("running", [])
+
+
+def test_a_run_that_is_not_running_is_not_parked_before_the_start(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session), status="failed")
+
+    assert runs.park_before_start(1, run.id, REVIEW) is False
+
+    assert _events(session, run) == [] and sent.notices == []
+
+
+def test_the_owner_approves_a_run_parked_before_the_start_and_it_runs_again(runs, session, sent):
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule)
+    runs.park_before_start(1, run.id, REVIEW)
+
+    runs.apply_schedule_decision(1, run.id, runs.check_schedule_decision(1, run.id, 12, ["approve"]))
+
+    assert (run.status, run.resumed_at is not None) == ("running", True)
+    assert [event["kind"] for event in _events(session, run)] == ["paused", "decision"]
+
+
+def test_an_admin_cannot_approve_a_run_parked_before_the_start(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session, created_by=12))
+    runs.park_before_start(1, run.id, REVIEW)
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, 99, ["approve"])
+    assert run.status == "waiting_for_approval"
 
 
 def test_cr_el7011_a_human_step_pause_logs_only_the_failed_end(runs, session, sent):

@@ -41,6 +41,8 @@ def starter(ns):
             "finish_schedule_run": lambda *args, **kwargs: writes.calls.append(("finish", *args)),
             "run_failure_reason": lambda error: f"The run failed: {error}",
             "count_refusal": lambda *args: writes.streak.append(("refused", *args)),   # #7254: own tests
+            "park_before_start": lambda *args: False,
+            "listed_tools": lambda review: [],
             "end_refusal_streak": lambda *args: writes.streak.append(("end", *args)),
             "record_run_events": lambda *args, **kwargs: None,
             "run_event": lambda *args, **kwargs: {}},

@@ -29,6 +29,8 @@ from .schedule_runs import (
     end_refusal_streak,
     fail_schedule_run,
     finish_schedule_run,
+    listed_tools,
+    park_before_start,
     record_run_events,
     run_event,
     run_failure_reason,
@@ -75,7 +77,14 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(run_row, 'trigger', 'cron'),
-            resumed=getattr(run_row, 'resumed_at', None) is not None)
+            resumed=getattr(run_row, 'resumed_at', None) is not None,
+            pre_start_pause=_pre_start_pause(run_row))
+
+
+def _pre_start_pause(run_row) -> dict | None:
+    """The newest `paused` event of the run that asked for the tool approval before the first call, else None."""
+    return next((event for event in reversed(getattr(run_row, 'events', None) or [])
+                 if event.get('kind') == 'paused' and event.get('need') == 'tools'), None)
 
 
 def _load_test_run(session, run_row) -> SimpleNamespace | None:
@@ -101,7 +110,7 @@ def _load_test_run(session, run_row) -> SimpleNamespace | None:
             approval_confirmed_by=None, credential_toolkits=credential_toolkit_refs(version)),
         version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
         entity_name=agent.name, prompt=form.get('prompt') or '', variables=list(form.get('variables') or []),
-        trigger=run_row.trigger, resumed=run_row.resumed_at is not None)
+        trigger=run_row.trigger, resumed=run_row.resumed_at is not None, pre_start_pause=_pre_start_pause(run_row))
 
 
 def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
@@ -179,35 +188,39 @@ def _runtime_tool_name(name) -> str:
     return reduced
 
 
-def _confirmed_pairs(review: dict):
+def _confirmed_pairs(review: dict, exact: bool = False):
     """The confirmed (toolkit, tool) pairs a run may approve; a personal credential is (toolkit, '*'). False when none: an empty scan is no consent.
 
     An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks. An item that
     comes from the global list may be spelled differently from the runtime name, which the SDK compares exactly.
     It is approved by its normalized name; only when the toolkit has no unconfirmed `may_apply` tool it is
     also approved as (toolkit, '*'), because (toolkit, '*') would let that unconfirmed tool run unasked.
+
+    `exact` is the owner's approval of one run: only the listed tools, each by its own name, never a wildcard.
+    A listed tool whose runtime spelling differs then pauses at the call, as any tool outside the list does.
     """
     unconfirmed = {item.get('toolkit') for item in review.get('notices', []) if item.get('may_apply')}
     pairs = []
     for item in review['sensitive']:
         toolkit = item.get('toolkit')
-        if not toolkit:
+        if not toolkit or (exact and item.get('code') != 'sensitive_action'):
             continue
         if not item.get('from_list'):
             pairs.append((toolkit, item.get('tool') or '*'))
             continue
         if item.get('tool'):
             pairs.append((toolkit, _runtime_tool_name(item['tool'])))
-        if toolkit not in unconfirmed:
+        if toolkit not in unconfirmed and not exact:
             pairs.append((toolkit, '*'))
     return list(dict.fromkeys(pairs)) or False
 
 
-def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
+def _risk_check(review: dict, rule: str, auto_approve: bool, by_owner: bool = False) -> tuple[str, dict]:
     """The risk outcome of the run for the run log and its `risk_check` event (owner CR 2026-10-21).
 
     `blocked` (a blocking finding), `needs_approval` (listed sensitive tools, or "Run without asking" turned
-    back to "Pause and ask me"), `unknown` (a tool could not be checked) or `ok`.
+    back to "Pause and ask me"), `unknown` (a tool could not be checked) or `ok`. `by_owner`: the owner approved the
+    listed tools for this run before it started.
     """
     from .schedule_risk import scan_complete
     if review['blocking']:
@@ -217,7 +230,9 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     if any(item.get('code') == 'sensitive_action' for item in review['sensitive']):
         tools = ', '.join(f"{item.get('toolkit')} · {item.get('tool') or '*'}" for item in review['sensitive'])
         text = f'Risk check: needs approval for {tools}'
-        if auto_approve:
+        if by_owner:
+            text += '; approved by the owner for this run'
+        elif auto_approve:
             text += '; Run without asking is on'
         elif rule == 'run_without_asking':
             text += '; Run without asking does not hold, so the run pauses and asks'
@@ -260,7 +275,14 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
     review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule)
     auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
     approved = _confirmed_pairs(review) if auto_approve else False
-    outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved))
+    pre_start_pause = getattr(loaded, 'pre_start_pause', None) if getattr(loaded, 'resumed', False) else None
+    # The owner approved the listed tools for this run: only while the review still has the fingerprint they saw
+    by_owner = bool(not approved and not review['blocking'] and pre_start_pause
+                    and pre_start_pause.get('fingerprint') == review['fingerprint'])
+    if by_owner:
+        approved = _confirmed_pairs(review, exact=True)
+        by_owner = bool(approved)
+    outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved), by_owner)
     record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
     if review['blocking']:  # a scheduled run cannot sign in or answer a person
         reasons = '; '.join(item['message'] for item in review['blocking'])
@@ -270,6 +292,17 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         else:
             block_schedule_run(project_id, run_id, reasons, 'error')
         return
+    # Until the owner approved the listed tools for this run (same fingerprint), the run waits before the first
+    # tool call. A restart after a missing credential has no tools pause yet, so it waits once and then runs
+    if outcome == 'needs_approval' and not approved:
+        try:
+            # False with listed tools: the run is not running any more, so no chat and no agent turn for it
+            if park_before_start(project_id, run_id, review) or listed_tools(review):
+                return
+        except Exception:  # noqa: BLE001 -- a run left running would block the schedule
+            log.exception('Schedule %s run %s: cannot pause the run for the tool approval', schedule_id, run_id)
+            fail_schedule_run(project_id, run_id, START_FAILED)
+            return
     source = loaded.schedule.entity_type
     if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)

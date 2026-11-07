@@ -297,6 +297,8 @@ def test_cr_el7011_the_run_detail_documents_summary_events_and_polling(spec):
     assert {event['kind'] for event in example['events']} == {
         'started', 'account', 'risk_check', 'agent_started', 'tool_call', 'paused', 'decision', 'finished'}
     assert all({'at', 'kind', 'text', 'level'} <= set(event) for event in example['events'])
+    before_start = [event for event in example['events'] if event.get('need') == 'tools']
+    assert len(before_start) == 1 and {'tools', 'may_ask', 'fingerprint', 'wait_hours'} <= set(before_start[0])
     assert 'every 2 s' in operation['description'] and '`schedules.details`' in operation['description']
     assert {'403', '404'} <= set(operation['responses'])
     runs_row = _operations(spec)[('get', f'{ITEM}/runs')]['responses']['200']['content']['application/json']
