@@ -40,6 +40,8 @@ from ..models.pd.sio import (
 )
 from ..utils.continue_message import continue_message
 from ..utils.conversation_access import can_join_room, room_access_facts
+from ..utils.run_snapshot import snapshot_frames, streaming_groups
+from ..utils.running_conversations import close_never_started_runs, sync_ended_runs
 from ..utils.participant_utils import get_entity_details, get_or_create_one
 from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_shadow_key
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
@@ -64,6 +66,30 @@ def _can_access_canvas(project_id: int, canvas_uuid, user_id: int) -> bool:
             return True
         facts = room_access_facts(session, row.id, row.is_private, row.author_id, user_id)
     return can_join_room(project_id, user_id, **facts)
+
+
+def _send_run_snapshots(module, sid: str, project_id: int, conversation_id: int, conversation_uuid) -> None:
+    """Hand a client that joins mid-run the answer text streamed while it was away (EL-7385).
+
+    Rows whose run never started are ended first: nothing else would ever end them, and the client
+    would show their spinner forever.
+    """
+    try:
+        with db.get_session(project_id) as session:
+            ended = close_never_started_runs(session, conversation_id)
+            if ended:
+                log.warning(
+                    "Ended %d never-started run(s) in conversation %s", len(ended), conversation_uuid,
+                )
+                sync_ended_runs(module.context.sio, session, project_id, conversation_uuid, ended)
+            running = streaming_groups(session, conversation_id)
+        if not running:
+            return
+        client = module.get_redis_client()
+        for frame in snapshot_frames(client, conversation_uuid, running):
+            module.context.sio.emit(event=SioEvents.chat_predict.value, data=frame, to=sid)
+    except Exception as e:  # pylint: disable=W0703 -- the next save or chunk catches the client up
+        log.warning("Run snapshot not sent to sid %s for conversation %s: %s", sid, conversation_uuid, e)
 
 
 class SIO:
@@ -120,6 +146,8 @@ class SIO:
             log.warning("Sid %s denied room of conversation %s in project %s", sid, conv_id, parsed.project_id)
             return
         self.context.sio.enter_room(sid, get_chat_room(conversation_uuid))
+        # Joined first, read second: a chunk landing in between is in both and the client dedups it
+        _send_run_snapshots(self, sid, parsed.project_id, conversation.id, conversation_uuid)
 
     @web.sio(SioEvents.test_toolkit_enter_room)
     def test_toolkit_enter_room(self, sid: str, data: dict) -> None:

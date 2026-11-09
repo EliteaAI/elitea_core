@@ -8,3 +8,4 @@ werkzeug>=2.0
 flask>=2.0
 requests>=2.28.0
 mcp>=1.28.1,<2.0.0
+fakeredis[lua]>=2.20.0

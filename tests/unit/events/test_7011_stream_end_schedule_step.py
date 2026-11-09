@@ -2,6 +2,9 @@
 
 Contract under test: events/message_stream.py. Every sibling import is faked; the schedule writers record
 their calls, so the test pins when the step runs, with which arguments, and that other chats skip it.
+
+The EL-7385 cases at the end use the same harness: the run status each event announces to the chat
+lists, and the live-text snapshot dropped when the run ends.
 """
 import sys
 import types
@@ -65,6 +68,7 @@ class Session:
 class World:
     def __init__(self, meta):
         self.events = []
+        self.run = []
         self.open_sessions, self.open_at_step = 0, []
         self.msg_group = types.SimpleNamespace(
             id=1, meta={}, message_items=[], reply_to_id=None, is_streaming=True,
@@ -72,6 +76,7 @@ class World:
         )
 
     fail_step = False
+    stopped = False
 
     def finish(self, *args, author_id=None):
         self.open_at_step.append(self.open_sessions)
@@ -119,6 +124,15 @@ def make_world(monkeypatch):
                 "finish_schedule_run": world.finish, "pause_schedule_run": world.pause,
                 "CHILD_PAUSE_REASON": CHILD_PAUSE_REASON,
                 "run_failure_reason": lambda error: f"short({error})"},
+            # EL-7385 run state: recorded apart from world.events so the schedule-step orderings stay exact
+            "utils.run_snapshot": {"drop_snapshot": lambda _client, message_id: world.run.append(("drop", message_id))},
+            "utils.run_status": {
+                "RunStatus": types.SimpleNamespace(
+                    running="running", waiting="waiting", finished="finished", failed="failed", stopped="stopped"),
+                "build_notice": lambda _session, project_id, _group, status: (project_id, status),
+                # Like the real one: a None notice sends nothing
+                "send_notice": lambda _sio, notice: notice is not None and world.run.append(("notice", notice)),
+            },
         }
         for dotted, names in stubs.items():
             name = "plugins.elitea_core." + dotted
@@ -139,7 +153,10 @@ def make_world(monkeypatch):
         monkeypatch.setattr(events, "flag_modified", none)
         sio = types.SimpleNamespace(emit=lambda **kw: world.events.append(("emit", kw["event"])))
         handler = types.SimpleNamespace(
-            context=types.SimpleNamespace(sio=sio), is_chat_run_stopped=lambda _id: False)
+            context=types.SimpleNamespace(sio=sio), is_chat_run_stopped=lambda _id: world.stopped,
+            get_redis_client=lambda: None)
+        world.task_id = lambda: events.Event.applications_predict_task_id(handler, None, "task", {
+            "task_id": "t-1", "project_id": PROJECT_ID, "message_group_id": "m-1"})
         world.end = lambda metadata: events.Event.chat_message_stream_end(handler, None, "end", {
             "message_id": "m-1", "content": "the answer",
             "response_metadata": {"chat_project_id": PROJECT_ID, "project_id": PROJECT_ID, **metadata}})
@@ -259,3 +276,58 @@ def test_stream_pause_closes_its_session_before_the_schedule_writer_opens_anothe
     world = make_world(dict(SCHEDULE_META))
     world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
     assert world.open_at_step == [0]
+
+
+# --- EL-7385: run status for the chat lists, live-text snapshot cleanup ---
+
+def test_7385_stream_end_announces_finished_and_drops_the_snapshot_after_the_commit(make_world):
+    world = make_world({})
+    world.end({})
+    assert world.run == [("drop", "m-1"), ("notice", (PROJECT_ID, "finished"))]
+    assert world.msg_group.is_streaming is False
+
+
+def test_7385_stream_end_with_an_error_announces_failed(make_world):
+    world = make_world({})
+    world.end({"is_error": True, "error": "x"})
+    assert world.run[-1] == ("notice", (PROJECT_ID, "failed"))
+
+
+def test_7385_a_late_end_after_stop_announces_nothing(make_world):
+    # Stop already announced "stopped" and owns the terminal state
+    world = make_world({})
+    world.stopped = True
+    world.end({})
+    assert world.run == []
+
+
+def test_7385_a_pause_that_hands_the_turn_to_the_user_is_waiting(make_world):
+    world = make_world({})
+    world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
+    assert world.run == [("notice", (PROJECT_ID, "waiting"))]
+
+
+def test_7385_a_child_pause_keeps_the_run_running(make_world):
+    world = make_world({})
+    world.pause_event({"hitl_interrupt": {"resume_strategy": "aggregate_child"}})
+    assert world.run == [("notice", (PROJECT_ID, "running"))]
+
+
+def test_7385_a_pause_keeps_the_snapshot_for_the_resume(make_world):
+    world = make_world({})
+    world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
+    assert ("drop", "m-1") not in world.run
+
+
+def test_7385_task_start_of_a_streaming_group_announces_running(make_world):
+    world = make_world({})
+    world.task_id()
+    assert world.msg_group.task_id == "t-1"
+    assert world.run == [("notice", (PROJECT_ID, "running"))]
+
+
+def test_7385_task_id_for_a_group_that_already_ended_announces_nothing(make_world):
+    world = make_world({})
+    world.msg_group.is_streaming = False
+    world.task_id()
+    assert world.run == []

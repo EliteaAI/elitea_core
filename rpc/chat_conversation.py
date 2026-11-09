@@ -16,6 +16,7 @@ from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
+from ..utils.running_conversations import running_conversation_ids
 from ..utils.conversation_utils import (
     get_conversation_details,
     calculate_conversation_durations_batch,
@@ -591,6 +592,7 @@ class RPC:
             )
 
             schedule_runs = _schedule_runs(session, conversations)
+            running_ids = running_conversation_ids(session, conv_ids)
             chat_runs = chat_skill_runs(
                 session,
                 [c.id for c in conversations if 'single_participant' not in (c.meta or {})],
@@ -607,6 +609,7 @@ class RPC:
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
                     "schedule_run": schedule_runs.get(conv.id),
+                    "has_running_task": conv.id in running_ids,
                     **chat_runs.get(conv.id, {}),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))

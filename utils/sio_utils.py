@@ -30,6 +30,9 @@ class SioEvents(StrEnum):
     chat_message_delete = 'chat_message_delete'
     chat_message_delete_all = 'chat_message_delete_all'
     chat_message_sync = 'chat_message_sync'
+    # Run state of a chat for its users' chat lists, sent to their user rooms (EL-7385)
+    chat_run_status = 'chat_run_status'
+    chat_conversation_name_updated = 'chat_conversation_name_updated'
     notifications_notify = 'notifications_notify'
     schedule_run_finished = 'schedule_run_finished'
     # chat_conversation_create = 'chat_conversation_create'
@@ -165,6 +168,11 @@ def get_chat_room(room_uuid: str, **kwargs):
         event_name=SioEvents.chat_predict.value,
         room_id=str(room_uuid)
     )
+
+
+def get_user_room(user_id: int | str) -> str:
+    """The room every authenticated socket of a user joins on connect (notifications plugin)."""
+    return get_event_room(event_name='notifications', room_id=str(user_id))
 
 
 def get_eval_run_room(run_id: int | str, **kwargs):

@@ -22,7 +22,8 @@ _STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{SIO_PKG}.models.conversa
             f'{SIO_PKG}.models.pd.predict', f'{SIO_PKG}.utils.continue_message',
             f'{SIO_PKG}.utils.participant_utils', f'{SIO_PKG}.utils.canvas_utils',
             f'{SIO_PKG}.utils.chat_constants', f'{SIO_PKG}.utils.conversation_access',
-            f'{SIO_PKG}.utils.mcp_client')
+            f'{SIO_PKG}.utils.mcp_client', f'{SIO_PKG}.utils.run_snapshot',
+            f'{SIO_PKG}.utils.running_conversations')
 
 # Loaded for real, in dependency order.
 _REAL = (

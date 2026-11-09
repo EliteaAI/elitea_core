@@ -35,6 +35,8 @@ from ..utils.chat_history import (
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..utils.run_snapshot import drop_snapshot
+from ..utils.run_status import RunStatus, build_notice, send_notice
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError, emit_refusal
@@ -1711,7 +1713,7 @@ class RPC:
                         raise
 
                     self.finalize_timed_out_response(
-                        session, response_msg, result, await_task_timeout
+                        session, response_msg, result, await_task_timeout, project_id=parsed.project_id,
                     )
 
                     if return_message_ids:
@@ -2682,7 +2684,7 @@ class RPC:
 
                 )
                 self.finalize_timed_out_response(
-                    session, response_msg, result, await_task_timeout
+                    session, response_msg, result, await_task_timeout, project_id=parsed.project_id,
                 )
                 return result
             except Exception as e:
@@ -2700,7 +2702,7 @@ class RPC:
                 )
 
     @web.method()
-    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout):
+    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout, project_id=None):
         """Close out a response message group whose task was cancelled on blocking timeout.
 
         Mirrors the stop button (api/v2/task.py) minus the salvage/delete branches: the
@@ -2738,6 +2740,17 @@ class RPC:
             data=serialize(MessageGroupDetail.model_validate(response_msg)),
             room=get_chat_room(response_msg.conversation.uuid),
         )
+        self._end_chat_run(session, project_id, response_msg, RunStatus.stopped)
+
+    @web.method()
+    def _end_chat_run(self, session, project_id, msg_group, status) -> None:
+        """Forget the live text of a run that ended outside the stream-end path and tell its users' lists (EL-7385)."""
+        message_id = str(msg_group.uuid)
+        try:
+            drop_snapshot(self.get_redis_client(), message_id)
+        except Exception as e:  # pylint: disable=W0703 -- the TTL removes it anyway
+            log.warning('Run snapshot of message %s not dropped: %s', message_id, e)
+        send_notice(self.context.sio, build_notice(session, project_id, msg_group, status))
 
     @web.method()
     def _refuse_schedule_decision(self, sid, parsed, denied: dict) -> dict:
@@ -3158,6 +3171,8 @@ class RPC:
 
             msg_group_deleted = False
             room = get_chat_room(msg_group.conversation.uuid)
+            # Read now: the delete branch below removes the row (EL-7385)
+            run_notice = build_notice(session, project_id, msg_group, RunStatus.stopped)
 
             # Handle empty message case: salvage thinking text or delete
             if not msg_group.message_items:
@@ -3222,4 +3237,9 @@ class RPC:
                     room=room,
                 )
 
-            return {"success": True}
+        try:
+            drop_snapshot(self.get_redis_client(), str(message_group_uuid))
+        except Exception as e:  # pylint: disable=W0703 -- the TTL removes it anyway
+            log.warning('Run snapshot of message %s not dropped: %s', message_group_uuid, e)
+        send_notice(self.context.sio, run_notice)
+        return {"success": True}
