@@ -575,6 +575,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "ensure_toolkit_index_schedule_columns", self.ensure_toolkit_index_schedule_columns,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding,
                 group="R-2.0.8",
             )
@@ -1507,6 +1511,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "ensure_webhook_trigger_columns", self.ensure_webhook_trigger_columns
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "ensure_toolkit_index_schedule_columns", self.ensure_toolkit_index_schedule_columns
             )
             this.for_module("admin").module.unregister_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding

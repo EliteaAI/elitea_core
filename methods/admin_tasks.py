@@ -621,6 +621,34 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "failed_projects": failed, "dry_run": values["dry_run"]}
 
     @web.method()
+    def ensure_toolkit_index_schedule_columns(self, *args, **kwargs):
+        """Admin task: let entity_schedules hold toolkit index schedules (R-2.0.9). Idempotent.
+
+        Makes application_id nullable, adds toolkit_id and index_name, widens the entity_type check and adds the
+        target check and the one-schedule-per-index unique index. Run it before the release code reads schedules.
+
+        Param: "project_id=<all|N>[;dry_run]"; a dry run lists the projects still missing the shape.
+        """
+        from ..utils.toolkit_index_schedule_ddl import (  # pylint: disable=C0415
+            apply_toolkit_index_schedule_columns, toolkit_index_pending_project_ids,
+        )
+        task = "ensure_toolkit_index_schedule_columns"
+        values, error = _parse_project_param(task, kwargs.get("param", "") or "", "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            pending = set(toolkit_index_pending_project_ids())
+            project_ids = _target_project_ids(self.context.rpc_manager, f"project_id={values['project_id']}")
+        except Exception:  # pylint: disable=W0703
+            log.exception("%s: failed to list projects", task)
+            return {"migrated": 0, "error": "failed to list projects"}
+        targets = sorted(pid for pid in project_ids if pid in pending)
+        migrated, failed = apply_toolkit_index_schedule_columns(targets, dry_run=values["dry_run"])
+        log.info("%s%s: migrated=%s failed=%s", "[DRY RUN] " if values["dry_run"] else "", task, migrated, failed)
+        return {"migrated": len(migrated), "projects": migrated, "failed": len(failed),
+                "failed_projects": failed, "dry_run": values["dry_run"]}
+
+    @web.method()
     def migrate_schedule_test_runs(self, *args, **kwargs):
         """Admin task: add the Test Run columns and indexes to entity_schedule_runs in each project schema (R-2.0.8).
 
