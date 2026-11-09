@@ -189,7 +189,8 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
         if reason is None and run_id not in _CHECKED_RUNS:
             reason = check_owner_credentials(project_id, schedule)
             # Only a missing credential can wait for the owner; a lost token or a broken version cannot
-            waits_for_owner = credential_wait(reason)
+            # A broken entity fails a webhook run; its body is not kept, so an approval could not restart it (#7454)
+            waits_for_owner = credential_wait(reason) and getattr(schedule, 'trigger_kind', None) != 'webhook'
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
         reason = PRERUN_FAILED

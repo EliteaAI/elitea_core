@@ -69,7 +69,7 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             _record(project_id, row.id, 'duplicate', now)
             return {'duplicate': True}, 200
         try:
-            answer, outcome = self._admit_and_start(project_id, row, body, now)
+            answer, outcome = self._admit_and_start(project_id, row, body, now, delivery)
         except Exception:
             door.release_delivery(redis, row.uuid, delivery)  # a 500 must leave the retry runnable
             raise
@@ -78,7 +78,7 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         return answer
 
     @staticmethod
-    def _admit_and_start(project_id: int, row, body: bytes, now):
+    def _admit_and_start(project_id: int, row, body: bytes, now, delivery=None):
         refusal = check_principal(row) or check_owner_access(project_id, row.created_by)
         if refusal == ACCESS_CHECK_UNAVAILABLE:
             return _busy('access_check_unavailable'), 'unavailable'
@@ -91,7 +91,7 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 session.rollback()
                 return _busy('run_in_progress'), 'busy'
             session.commit()
-        if not start_schedule_run(row.entity_type, project_id, row.id, run_id, payload=body):
+        if not start_schedule_run(row.entity_type, project_id, row.id, run_id, payload=body, delivery=delivery):
             with db.get_session(project_id) as session:
                 fail_run(session, run_id, START_FAILED)
                 door.record_delivery(session, row.id, 'start_failed', now)

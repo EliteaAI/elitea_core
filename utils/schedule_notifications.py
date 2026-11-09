@@ -19,6 +19,11 @@ MESSAGES = {
     Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
     Types.schedule_owner_changed: 'The owner of schedule "{link}" changed{reason}',
 }
+# A webhook row says "Webhook" (#7454); the texts are otherwise the same
+WEBHOOK_MESSAGES = {
+    event: text.replace('Schedule "', 'Webhook "').replace('schedule "', 'webhook "')
+    for event, text in MESSAGES.items()
+}
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
 _NAME_BRACKETS = str.maketrans('[]', '［］')
@@ -60,10 +65,12 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         return False
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
+        trigger_kind = getattr(schedule, 'trigger_kind', None) or 'cron'
+        messages = WEBHOOK_MESSAGES if trigger_kind == 'webhook' else MESSAGES
         # Only the expired notice names the window
         hours = _approval_hours(run) if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
-            'message': MESSAGES[event_type].format(
+            'message': messages[event_type].format(
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
@@ -71,6 +78,7 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
+            'trigger_kind': trigger_kind,  # the bell links a webhook to the Webhooks page (#7456)
             'run_id': run.id if run else None,
             'conversation_id': run.conversation_id if run else None,
         }

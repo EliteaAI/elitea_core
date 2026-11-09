@@ -234,3 +234,15 @@ def test_a_test_run_with_no_schedule_only_fails_its_run_when_the_owner_lost_acce
 
     assert (result.ok, result.reason) == (False, "owner lost access")
     assert recorder.effects() == ["principal", "access", "fail"]
+
+
+def test_7454_a_webhook_with_a_broken_credential_fails_at_once_with_the_reason(apply):
+    # The delivery body is never kept, so a parked webhook run could only fail after the approval
+    recorder = Recorder(credentials="credential 9 not found", parks=True)
+    webhook = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4,
+                              trigger_kind="webhook")
+    result = apply(recorder, schedule=webhook)
+    assert (result.ok, result.reason) == (False, "credential 9 not found")
+    assert "park" not in recorder.effects()
+    assert recorder.calls[-2:] == [("fail", 34, RUN_ID, "credential 9 not found"),
+                                   ("notify", OWNER, "schedule_run_failed", RUN_ID, "credential 9 not found")]

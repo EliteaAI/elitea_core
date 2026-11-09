@@ -101,8 +101,9 @@ def door(env, monkeypatch):
     dispatch = types.ModuleType(f'{PACKAGE}.utils.schedule_dispatch')
     dispatch.START_FAILED = 'the run could not start'
 
-    def start(entity_type, project_id, schedule_id, run_id, owner_request=None, payload=None):
+    def start(entity_type, project_id, schedule_id, run_id, owner_request=None, payload=None, delivery=None):
         env.started.append((schedule_id, run_id, payload))
+        env.deliveries = getattr(env, 'deliveries', []) + [delivery]
         return env.start_ok
     dispatch.start_schedule_run = start
     monkeypatch.setitem(sys.modules, dispatch.__name__, dispatch)
@@ -170,11 +171,13 @@ def _runs(env):
 
 def test_7453_signed_github_delivery_starts_a_webhook_run_with_the_body_in_memory(door):
     schedule_id, row_uuid = _webhook(door)
-    status, data, _ = _post(door, row_uuid, _github(BODY))
+    headers = _github(BODY)
+    status, data, _ = _post(door, row_uuid, headers)
     assert status == 202
     (run,) = _runs(door)
     assert data == {'run_id': run.id} and run.trigger == 'webhook' and run.status == 'running'
     assert door.started == [(schedule_id, run.id, BODY)]
+    assert door.deliveries == [headers['X-GitHub-Delivery']]   # the run log names it (#7454)
     row = door.row(schedule_id)
     assert row.last_delivery_outcome == 'accepted' and row.last_delivery_at is not None
 
