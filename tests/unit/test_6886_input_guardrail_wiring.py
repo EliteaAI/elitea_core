@@ -82,7 +82,7 @@ def test_webhook_history_preview_is_redacted_before_truncation():
     # The preview moved into the shared webhook helper (#7454); both webhook paths use it
     source = _source('utils/webhook_input.py')
 
-    assert source.index('redacted_input(body_json)') < source.index('[:PREVIEW_LIMIT]')
+    assert source.index('redacted_input(body_json[:REDACT_WINDOW])') < source.index('[:PREVIEW_LIMIT]')
     assert 'webhook_payload_preview(payload_str)' in _source('rpc/pipeline_webhook.py')
 
 

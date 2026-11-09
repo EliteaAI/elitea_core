@@ -39,7 +39,8 @@ GOVERNANCE_REFUSED = 'governance_refused'
 PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the cause and resume it.'
 # A webhook that cannot start shares the same streak (#7454)
 PRERUN_REFUSED = 'prerun_refused'
-PAUSED_AFTER_PRERUN = '{count} runs in a row could not start ({reason}). Fix it and resume.'
+# The streak is shared with governance refusals, so the text names both causes
+PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (last: {reason}). Fix it and resume.'
 
 
 class ScheduleDecisionForbidden(Exception):

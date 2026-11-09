@@ -35,6 +35,11 @@ class MissingCredential(str):
     toolkit: str | None = None
 
 
+def is_webhook(schedule) -> bool:
+    # A Test Run's namespace has no trigger_kind; it is never a webhook
+    return getattr(schedule, 'trigger_kind', None) == 'webhook'
+
+
 def credential_wait(reason: str | None) -> bool:
     """True when the reason is a missing credential, which the owner can fix; a lost token or a broken version is not."""
     return reason not in (None, NO_TOKEN, VERSION_NOT_EXPANDED)
@@ -192,7 +197,7 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
             reason = check_owner_credentials(project_id, schedule)
             # Only a missing credential can wait for the owner; a lost token or a broken version cannot
             # A broken entity fails a webhook run; its body is not kept, so an approval could not restart it (#7454)
-            waits_for_owner = credential_wait(reason) and getattr(schedule, 'trigger_kind', None) != 'webhook'
+            waits_for_owner = credential_wait(reason) and not is_webhook(schedule)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
         reason = PRERUN_FAILED
@@ -212,7 +217,7 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     run = SimpleNamespace(id=run_id, reason=reason, conversation_id=None)
     notify_schedule_event(project_id, owner_id, event, schedule, run)  # logs its own failure, never raises
     # A webhook fires on every delivery: a lasting failure switches it off at the third in a row (#7454)
-    if getattr(schedule, 'trigger_kind', None) == 'webhook' and reason not in UNCOUNTED_PRERUN:
+    if is_webhook(schedule) and reason not in UNCOUNTED_PRERUN:
         from .schedule_runs import PAUSED_AFTER_PRERUN, PRERUN_REFUSED, count_refusal
         count_refusal(project_id, schedule, run_id, reason, disabled_reason=PRERUN_REFUSED, text=PAUSED_AFTER_PRERUN)
     return PreRunResult(False, None, reason)

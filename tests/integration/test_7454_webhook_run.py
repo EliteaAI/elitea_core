@@ -122,7 +122,7 @@ def test_three_deliveries_with_a_deleted_credential_switch_the_webhook_off_with_
     assert hook.world.predictions == []
     paused = [notice for notice in hook.world.notices if notice[1] == "schedule_disabled"]
     assert paused == [(OWNER, "schedule_disabled",
-                       "3 runs in a row could not start (credential 9 not found). Fix it and resume.")]
+                       "3 runs in a row could not start or were refused (last: credential 9 not found). Fix it and resume.")]
 
 
 def test_an_admitted_delivery_ends_the_pre_run_streak(hook):

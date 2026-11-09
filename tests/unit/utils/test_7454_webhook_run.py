@@ -63,7 +63,7 @@ def _deliver(world, body=b'{"action": "opened"}', delivery="gh-1"):
     (b'\xff{"a"', {"raw_payload": '�{"a"'}),   # not UTF-8: kept readable, never a crash
 ])
 def test_a_body_is_parsed_or_wrapped_as_raw_payload(webhook_input, payload, parsed):
-    assert webhook_input.parse_body(payload) == parsed
+    assert webhook_input.parse_body(payload) == json.dumps(parsed, indent=2)
 
 
 @pytest.mark.parametrize("entity_type, prompt, expected", [
@@ -73,7 +73,7 @@ def test_a_body_is_parsed_or_wrapped_as_raw_payload(webhook_input, payload, pars
     ("agent", "Review it", 'Review it\n\n```json\n{\n  "a": 1\n}\n```'),
 ])
 def test_the_input_per_entity_type(webhook_input, entity_type, prompt, expected):
-    assert webhook_input.shape_input(entity_type, prompt, {"a": 1}) == expected
+    assert webhook_input.shape_input(entity_type, prompt, json.dumps({"a": 1}, indent=2)) == expected
 
 
 def test_the_preview_is_redacted_before_it_is_cut_to_500(webhook_input):
@@ -155,9 +155,7 @@ def test_a_cron_run_keeps_its_schedule_path(world):
 @pytest.mark.parametrize("depth", [3000, 50000])
 def test_a_too_deeply_nested_body_is_kept_as_raw_payload(webhook_input, depth):
     payload = ("[" * depth + "]" * depth).encode()
-    body = webhook_input.parse_body(payload)
-    assert body == {"raw_payload": payload.decode()}
-    webhook_input.shape_input("pipeline", "", body)   # and it writes back without an error
+    assert json.loads(webhook_input.parse_body(payload)) == {"raw_payload": payload.decode()}
 
 
 def test_a_deeply_nested_delivery_runs_with_the_raw_body(world):
@@ -171,3 +169,11 @@ def test_a_body_the_run_cannot_shape_fails_the_run_with_a_reason(world, monkeypa
     _deliver(world)
     assert "create" not in world.names() and "predict" not in world.names()
     assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, world.module.BODY_UNREADABLE)
+
+
+def test_only_a_bounded_window_is_redacted_for_the_preview(webhook_input, monkeypatch):
+    # A 512 KB body must not run the guardrail over the whole indented text just to keep 500 characters
+    seen = []
+    monkeypatch.setattr(webhook_input, "redacted_input", lambda text: seen.append(len(text)) or text)
+    preview = webhook_input.payload_preview("x" * 1_000_000)
+    assert seen == [webhook_input.REDACT_WINDOW] and preview == "x" * 500 + "..."

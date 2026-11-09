@@ -8,21 +8,17 @@ from .sio_utils import SioEvents, get_event_room
 DEFAULT_APPROVAL_HOURS = 24
 
 # One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
-# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
+# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty.
+# {Noun}/{noun} is "Schedule" or "Webhook" by the row's trigger kind (#7454)
 MESSAGES = {
-    Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
-    Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
-    Types.schedule_approval_needed: 'Schedule "{link}" waits for your approval',
-    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in {hours} hours and the run stopped',
-    Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
-    Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
-    Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
-    Types.schedule_owner_changed: 'The owner of schedule "{link}" changed{reason}',
-}
-# A webhook row says "Webhook" (#7454); the texts are otherwise the same
-WEBHOOK_MESSAGES = {
-    event: text.replace('Schedule "', 'Webhook "').replace('schedule "', 'webhook "')
-    for event, text in MESSAGES.items()
+    Types.schedule_run_failed: '{Noun} "{link}" failed{reason}',
+    Types.schedule_run_succeeded: '{Noun} "{link}" ran successfully',
+    Types.schedule_approval_needed: '{Noun} "{link}" waits for your approval',
+    Types.schedule_approval_expired: '{Noun} "{link}" was not approved in {hours} hours and the run stopped',
+    Types.schedule_expired: '{Noun} "{link}" reached its stop date and is switched off',
+    Types.schedule_disabled: '{Noun} "{link}" was switched off{reason}',
+    Types.schedule_edited_by_admin: 'An admin {action} your {noun} "{link}"',
+    Types.schedule_owner_changed: 'The owner of {noun} "{link}" changed{reason}',
 }
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
@@ -66,11 +62,12 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
         trigger_kind = getattr(schedule, 'trigger_kind', None) or 'cron'
-        messages = WEBHOOK_MESSAGES if trigger_kind == 'webhook' else MESSAGES
+        noun = 'webhook' if trigger_kind == 'webhook' else 'schedule'
         # Only the expired notice names the window
         hours = _approval_hours(run) if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
-            'message': messages[event_type].format(
+            'message': MESSAGES[event_type].format(
+                Noun=noun.capitalize(), noun=noun,
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),

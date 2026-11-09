@@ -244,9 +244,10 @@ def _started_event(loaded, trigger: str, delivery: str | None) -> dict:
 def _webhook_input(loaded, payload: bytes) -> tuple[str, str]:
     """The run input and the redacted trigger message of a delivery."""
     from .webhook_input import parse_body, shape_input, trigger_message  # late: the guardrail loads its detectors
-    body = parse_body(payload)
+    body_json = parse_body(payload)  # serialized once, for the input and the preview
     prompt = fill_placeholders(loaded.prompt, loaded.variables)
-    return shape_input(loaded.schedule.entity_type, prompt, body), trigger_message(loaded.schedule.webhook_type, body)
+    return (shape_input(loaded.schedule.entity_type, prompt, body_json),
+            trigger_message(loaded.schedule.webhook_type, body_json))
 
 
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None,
