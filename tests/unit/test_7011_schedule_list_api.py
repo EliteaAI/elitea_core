@@ -18,7 +18,7 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = "schedulespkg_7011_list"
 PREFIX = "models.applications.schedules."
 ROW_KEYS = {
-    "id", "name", "description", "entity_type", "run_mode", "application_id", "entity_name",
+    "id", "name", "description", "entity_type", "run_mode", "application_id", "toolkit_id", "index_name", "entity_name",
     "version_id", "version_name", "cron", "timezone", "enabled", "disabled_reason", "next_run",
     "last_run", "last_run_status", "last_run_reason", "last_conversation_id", "expires_at",
     "owner", "allowed_actions", "trigger_kind", "webhook_type", "webhook_url",
