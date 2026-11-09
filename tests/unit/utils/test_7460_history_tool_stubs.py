@@ -142,13 +142,13 @@ class TestBuildToolStubMessages:
         assert len(msgs) == cap + 1
         assert '+4 more tool calls' in msgs[-1]['content']
 
-    def test_count_only_placeholders_from_the_sql_cap(self, stubs):
-        # The loader fetches only the first MAX_CALLS_PER_TURN rows in full and pads the rest as {'id': None}
+    def test_omitted_count_from_the_sql_cap(self, stubs):
+        # The loader fetches only the first MAX_CALLS_PER_TURN rows and passes the rest as a count,
+        # so a 5000-call turn costs the same Python work as a 10-call one
         cap = stubs.MAX_CALLS_PER_TURN
-        steps = [_step(i) for i in range(cap)] + [{'id': None}] * 3
-        msgs = stubs.build_tool_stub_messages(steps)
+        msgs = stubs.build_tool_stub_messages([_step(i) for i in range(cap)], omitted=4990)
         assert len(msgs[0]['tool_calls']) == cap
-        assert '+3 more tool calls' in msgs[-1]['content']
+        assert '+4990 more tool calls' in msgs[-1]['content']
 
 
 class TestSelectStubGroupIds:

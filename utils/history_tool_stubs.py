@@ -48,13 +48,13 @@ def _result_text(step: dict) -> str:
     return 'no result recorded (the call did not finish)' if 'finished_at' in step and not step['finished_at'] else 'ok'
 
 
-def build_tool_stub_messages(steps: Iterable[dict]) -> List[dict]:
-    """One assistant tool_calls message, then a tool message per call; [] when there are no steps."""
+def build_tool_stub_messages(steps: Iterable[dict], omitted: int = 0) -> List[dict]:
+    """One assistant tool_calls message, then a tool message per call; ``omitted`` counts calls not loaded."""
     steps = list(steps)
     if not steps:
         return []
-    kept = [s for s in steps if s.get('id') is not None][:MAX_CALLS_PER_TURN]
-    omitted = len(steps) - len(kept)
+    kept = steps[:MAX_CALLS_PER_TURN]
+    omitted = max(0, omitted) + len(steps) - len(kept)
     calls, results = [], []
     for step in kept:
         call_id = f"{STUB_ID_PREFIX}{step['id']}"

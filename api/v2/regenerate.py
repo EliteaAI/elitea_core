@@ -14,6 +14,7 @@ from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items, \
     resolve_attachment_llm_settings
 from ...utils.chat_history import generate_payload_chat_history
+from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.exceptions import InputGuardrailBlockedError
@@ -140,7 +141,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             regenerates_pipeline = (
                 (regenerate_payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
             )
-            regenerate_payload['chat_history'], _ = generate_payload_chat_history(
+            regenerate_payload['chat_history'], history_group_ids = generate_payload_chat_history(
                 session, regenerate_payload, chat_history_groups, summaries,
                 is_pipeline=regenerates_pipeline, config=this.descriptor.config,
             )
@@ -193,6 +194,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # on reply_msg. The meta writer keeps keys a run does not report, so a stale block
             # card would survive a successful retry on reload (#6886).
             fresh_meta.pop('input_guardrail', None)
+            # The stream writer maps a summarization boundary through this, as on predict/continue
+            if get_context_manager_feature_flag(regenerate_payload['project_id']):
+                fresh_meta['chat_history_group_ids'] = history_group_ids
+            else:
+                fresh_meta.pop('chat_history_group_ids', None)
             msg_group.meta = fresh_meta
             # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
             session.query(MessageTraceStep).filter(

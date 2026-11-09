@@ -268,6 +268,8 @@ def load_history_tool_stubs(session, message_groups: List[ConversationMessageGro
     )
     if not group_ids:
         return {}
+    # Optional lookup: a failure (e.g. statement timeout) must not abort the caller's transaction
+    savepoint = session.begin_nested()
     try:
         rank = func.row_number().over(
             partition_by=MessageTraceStep.message_group_id,
@@ -293,15 +295,16 @@ def load_history_tool_stubs(session, message_groups: List[ConversationMessageGro
         ).order_by(ranked.c.message_group_id, ranked.c.rank).all()
         totals = dict(session.query(ranked.c.message_group_id, func.count()).group_by(
             ranked.c.message_group_id).all())
+        savepoint.commit()
     except Exception as e:
+        savepoint.rollback()
         log.warning('history tool stubs: trace step lookup failed, replaying text only: %s', e)
         return {}
     per_group: Dict[int, List[dict]] = {}
     for row in rows:
         per_group.setdefault(row.message_group_id, []).append(row._asdict())
-    for gid, steps in per_group.items():
-        steps.extend({'id': None} for _ in range(totals.get(gid, len(steps)) - len(steps)))
-    return {gid: build_tool_stub_messages(steps) for gid, steps in per_group.items()}
+    return {gid: build_tool_stub_messages(steps, omitted=totals.get(gid, len(steps)) - len(steps))
+            for gid, steps in per_group.items()}
 
 
 def generate_payload_chat_history(
