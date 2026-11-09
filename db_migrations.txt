@@ -587,3 +587,16 @@ Run admin task create_skill_file_tables with param: project_id=all
 # on-demand and dry runs:
 Run admin task sweep_skill_files with param: project_id=all;dry_run
 Run admin task sweep_skill_files with param: project_id=all
+
+# R-2.0.9 — eval_dataset agent_id index: migrate_eval_dataset_columns used to create eval_dataset_agent_id_idx, a second
+# copy of create_all's ix_tenant_eval_dataset_agent_id on every schema it ran on. It now creates only the
+# create_all name, and renames the old index (or drops it when both exist). Re-run once on upgrade.
+# A project_id that is not "all" or a number is now refused instead of scanning every project; the same holds for
+# migrate_eval_case_usage_columns, migrate_eval_suite_columns and migrate_eval_dimension_columns.
+# A schema that had agent_id without its FK can hold datasets whose agent was deleted, which the FK cannot be added
+# over (the project used to fail with ForeignKeyViolation). The task now deletes them first, as the FK's ON DELETE
+# CASCADE would have: their cases go with them and suites using them get no dataset. The dry run lists them per
+# project (orphaned_datasets) and changes nothing; run it first to see what would be deleted.
+# Idempotent: safe to run multiple times.
+Run admin task migrate_eval_dataset_columns with param: project_id=all;dry_run
+Run admin task migrate_eval_dataset_columns with param: project_id=all
