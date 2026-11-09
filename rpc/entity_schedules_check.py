@@ -32,29 +32,37 @@ MIGRATION_RETRY_SECONDS = 3600
 _tick_lock = threading.Lock()
 # lean: in-process flag, so each replica re-checks once an hour; share it through the database if that cost matters
 _legacy_idle_until = 0.0
+# lean: in-process, like the pipeline flag; the index step re-checks once an hour on each replica
+_legacy_index_idle_until = 0.0
 # lean: in-process; a project that held or failed a version is not migrated again for an hour
 _migration_retry_at: dict[int, float] = {}
+# lean: in-process; a project whose index schedules were held or failed is not migrated again for an hour
+_index_migration_retry_at: dict[int, float] = {}
 # lean: in-process counter; each replica rotates on its own, which is enough to stop one project starving
 _tick_counter = 0
 LEGACY_LOCK = text("SELECT pg_try_advisory_lock(:key)")
 LEGACY_UNLOCK = text("SELECT pg_advisory_unlock(:key)")
 
 
-def _migrate_legacy_triggers(project_id: int) -> bool:
+def _migrate_legacy_triggers(project_id: int, migrate=None, retry_at: dict | None = None) -> bool:
     """Move the legacy schedule triggers of one project into schedule rows; True when it found none and none failed.
 
     A version that fails to move, is held back by a schedule limit or waits for a retry keeps its trigger,
     so the legacy check below still fires it. A project with such a version is retried once an hour.
+    `migrate` and `retry_at` default to the pipeline migration and its retry map; the index step passes its own.
     """
-    # Imported at call time, as in _dispatch_project
-    from ..utils.legacy_schedule_migration import migrate_project
-    if time.monotonic() < _migration_retry_at.get(project_id, 0.0):
+    if migrate is None:
+        # Imported at call time, as in _dispatch_project
+        from ..utils.legacy_schedule_migration import migrate_project as migrate
+    if retry_at is None:
+        retry_at = _migration_retry_at
+    if time.monotonic() < retry_at.get(project_id, 0.0):
         return False
     try:
-        report = migrate_project(project_id, dry_run=False, enforce_limits=True)
+        report = migrate(project_id, dry_run=False, enforce_limits=True)
     except Exception as exc:  # noqa: BLE001 -- one bad project must not stop the step
         log.warning("entity_schedules_check: legacy migration failed: project_id=%s exc=%r", project_id, exc)
-        _migration_retry_at[project_id] = time.monotonic() + MIGRATION_RETRY_SECONDS
+        retry_at[project_id] = time.monotonic() + MIGRATION_RETRY_SECONDS
         return False
     if report["errors"]:
         log.warning("entity_schedules_check: versions kept their legacy trigger: project_id=%s errors=%s",
@@ -63,7 +71,7 @@ def _migrate_legacy_triggers(project_id: int) -> bool:
         log.warning("entity_schedules_check: versions kept their legacy trigger over a schedule limit: "
                     "project_id=%s versions=%s", project_id, report["held"])
     if report["errors"] or report.get("held"):
-        _migration_retry_at[project_id] = time.monotonic() + MIGRATION_RETRY_SECONDS
+        retry_at[project_id] = time.monotonic() + MIGRATION_RETRY_SECONDS
     return report["found"] == 0
 
 
@@ -115,6 +123,27 @@ def _run_legacy_step(project_ids: list[int], yield_to_hub, settings: dict) -> No
             _legacy_idle_until = time.monotonic() + LEGACY_RECHECK_SECONDS
     finally:
         _check_pipeline_scheduling_lock.release()
+
+
+def _run_legacy_index_step(project_ids: list[int], yield_to_hub, settings: dict) -> None:
+    """Move the legacy index schedules of each project into schedule rows, once in a while.
+
+    A schedule the migration cannot move (a failed lookup, a limit) is retried after `MIGRATION_RETRY_SECONDS`.
+    After a pass that finds nothing the step sleeps for `LEGACY_RECHECK_SECONDS`; `legacy_index_step_enabled`
+    false stops it.
+    """
+    global _legacy_index_idle_until  # pylint: disable=W0603
+    if not settings.get("legacy_index_step_enabled", True) or time.monotonic() < _legacy_index_idle_until:
+        return
+    # Imported at call time: the tick loads without the migration's model graph
+    from ..utils.legacy_index_schedule_migration import migrate_index_project
+    empty_pass = True
+    for project_id in project_ids:
+        yield_to_hub()
+        end_ambient_transaction()
+        empty_pass &= _migrate_legacy_triggers(project_id, migrate_index_project, _index_migration_retry_at)
+    if empty_pass:
+        _legacy_index_idle_until = time.monotonic() + LEGACY_RECHECK_SECONDS
 
 
 def _database_now(project_id: int) -> datetime:
@@ -257,10 +286,9 @@ def _run_tick(self) -> None:
         return
     settings = this.module.descriptor.config.get("scheduler", {}).get("schedules", {})
     cap = settings.get("dispatch_cap", DEFAULT_DISPATCH_CAP)
-    # Only types with a starter are claimed; agent rows wait while their flag is off
-    entity_types = [
-        kind for kind in RUN_STARTERS if kind != "agent" or settings.get("agent_scheduling_enabled", True)
-    ]
+    # Only types with a starter are claimed; rows of a type wait while its flag is off
+    flags = {"agent": "agent_scheduling_enabled", "toolkit_index": "toolkit_index_scheduling_enabled"}
+    entity_types = [kind for kind in RUN_STARTERS if kind not in flags or settings.get(flags[kind], True)]
     tick_started, dispatched = time.monotonic(), 0
     yield_to_hub = make_yield_to_hub(self.context.web_runtime)
     try:
@@ -293,6 +321,10 @@ def _run_tick(self) -> None:
         _run_legacy_step(project_ids, yield_to_hub, settings)  # last, after every schedule step
     except Exception as exc:  # noqa: BLE001 -- a failed legacy step ends this tick quietly
         log.exception("entity_schedules_check: legacy step stopped: exc=%r", exc)
+    try:
+        _run_legacy_index_step(project_ids, yield_to_hub, settings)
+    except Exception as exc:  # noqa: BLE001 -- a failed index step must not end the tick with an error
+        log.exception("entity_schedules_check: legacy index step stopped: exc=%r", exc)
     log.info("entity_schedules_check: started=%s duration=%.3fs", dispatched, time.monotonic() - tick_started)
 
 
@@ -334,6 +366,26 @@ class RPC:
         report = restore_project_triggers(int(project_id))
         log.info("schedules_restore_legacy_triggers: project_id=%s restored=%s errors=%s without_original_trigger=%s",
                  project_id, len(report["restored"]), len(report["errors"]), report["without_original_trigger"])
+        return report
+
+    @web.rpc("schedules_restore_legacy_index_schedules")
+    def schedules_restore_legacy_index_schedules(self, project_id: int, **kwargs):  # pylint: disable=W0613
+        """Operator revert of the index migration: put each migrated schedule back under its toolkit key.
+
+        Refused while `legacy_index_step_enabled` is on, because the next tick would migrate it again.
+        Returns the project report of `restore_index_schedules`, or an error text.
+        """
+        from ..utils.legacy_index_schedule_migration import index_restore_refusal, restore_index_schedules
+        settings = this.module.descriptor.config.get("scheduler", {}).get("schedules", {})
+        # The step is on when the key is absent, so the refusal must see the default too
+        step_on = settings.get("legacy_index_step_enabled", True)
+        refusal = index_restore_refusal({**settings, "legacy_index_step_enabled": step_on})
+        if refusal:
+            return {"error": refusal}
+        report = restore_index_schedules(int(project_id))
+        log.info("schedules_restore_legacy_index_schedules: project_id=%s restored=%s errors=%s "
+                 "without_original_trigger=%s", project_id, len(report["restored"]), len(report["errors"]),
+                 report["without_original_trigger"])
         return report
 
     # The old name stays: scheduler rows stored before the generic tick still call it. A second method,

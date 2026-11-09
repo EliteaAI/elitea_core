@@ -38,16 +38,23 @@ def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_reque
         run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request), payload=payload, delivery=delivery)
 
 
+def _start_index_run(project_id: int, schedule_id: int | None, run_id: int, owner_request=None) -> None:
+    # Imported here, as in _start_owner_run: the starter map loads without the database layer
+    from .schedule_index_starter import run_index_schedule
+    run_index_schedule(project_id, schedule_id, run_id, owner_request)
+
+
 def _extra(owner_request) -> tuple:
     """The owner's run request as an extra argument, or none: a cron firing (and every run with governance off) is
     started with exactly the arguments it had before #7254."""
     return () if owner_request is None else (owner_request,)
 
 
-# entity type -> starter(project_id, schedule_id, run_id); one starter runs both types
+# entity type -> starter(project_id, schedule_id, run_id); one starter runs agents and pipelines, one runs index schedules
 RUN_STARTERS: dict[str, Callable[[int, int, int], None]] = {
     'agent': _start_owner_run,
     'pipeline': _start_owner_run,
+    'toolkit_index': _start_index_run,
 }
 
 
