@@ -52,6 +52,7 @@ def build(models_path):
         'merge_disclosable_skills': lambda own, chat: [*own, *chat],
         'dedupe_internal_mcp_tools': lambda tools: None,
         'inject_stored_logins': lambda *a, **k: None,
+        'skill_scratch_for_run': lambda project_id, conversation_uuid, user_id: {},
         'resolve_internal_mcp_tools': lambda *a: None,
         'log': NS(warning=lambda *a, **k: None, debug=lambda *a, **k: None, info=lambda *a, **k: None),
     }

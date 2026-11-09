@@ -99,6 +99,7 @@ _module(
     strip_skill_bodies=lambda skills: [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []],
 )
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
+_module('utils.skill_scratch', skill_scratch_for_run=lambda _project_id, _conversation_uuid, _user_id: {})
 _module(
     'utils.internal_tools',
     resolve_internal_mcp_tools=lambda *_args: None,
@@ -113,7 +114,7 @@ for short_name in (
     'models.pd', 'models.pd.chat', 'models.pd.tool', 'models.pd.utils',
     'models.pd.version', 'utils', 'utils.application_tools',
     'utils.internal_tools', 'utils.llm_settings',
-    'utils.next_input_suggestion_utils', 'utils.skill_utils', 'utils.skill_mentions',
+    'utils.next_input_suggestion_utils', 'utils.skill_utils', 'utils.skill_mentions', 'utils.skill_scratch',
 ):
     sys.modules[f'plugins.elitea_core.{short_name}'] = sys.modules[short_name]
 predict_utils = importlib.import_module('plugins.elitea_core.utils.predict_utils')

@@ -17,6 +17,7 @@ from .llm_settings import normalize_runtime_max_tokens
 from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates, strip_skill_bodies
+from .skill_scratch import skill_scratch_for_run
 from .skill_utils import SkillInvocationLimitError, consume_message_skills, resolve_runtime_skills
 from .stored_oauth_tokens import inject_stored_oauth_tokens
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
@@ -512,6 +513,9 @@ def generate_predict_payload(
         'is_regenerate': getattr(parsed, 'is_regenerate', False),
         'meta': parsed.meta,
         'conversation_id': getattr(parsed, 'conversation_id', None) or parsed.stream_id,  # For planning toolkit scoping (fallback to stream_id)
+        'skill_scratch': skill_scratch_for_run(
+            parsed.project_id, getattr(parsed, 'conversation_id', None) or parsed.stream_id, user_id,
+        ),
         'persona': getattr(parsed, 'persona', 'generic'),  # Default persona for chat
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
