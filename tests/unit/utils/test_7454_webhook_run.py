@@ -149,3 +149,25 @@ def test_a_cron_run_keeps_its_schedule_path(world):
     assert created["trigger_type"] == "scheduled" and "webhook_type" not in created["extra_meta"]
     assert world.prepared[0]["trigger_kind"] == "cron"
     assert "delivery" not in world.events[0]["text"]
+
+
+# A signed body may be hostile: nesting json.loads rejects, or accepts but json.dumps cannot write back
+@pytest.mark.parametrize("depth", [3000, 50000])
+def test_a_too_deeply_nested_body_is_kept_as_raw_payload(webhook_input, depth):
+    payload = ("[" * depth + "]" * depth).encode()
+    body = webhook_input.parse_body(payload)
+    assert body == {"raw_payload": payload.decode()}
+    webhook_input.shape_input("pipeline", "", body)   # and it writes back without an error
+
+
+def test_a_deeply_nested_delivery_runs_with_the_raw_body(world):
+    _deliver(world, body=b"[" * 3000 + b"]" * 3000)
+    fenced = world.call("predict")[1]["user_input"].split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+    assert json.loads(fenced) == {"raw_payload": "[" * 3000 + "]" * 3000}
+
+
+def test_a_body_the_run_cannot_shape_fails_the_run_with_a_reason(world, monkeypatch):
+    monkeypatch.setattr(world.module, "_webhook_input", lambda *args: (_ for _ in ()).throw(KeyError("name")))
+    _deliver(world)
+    assert "create" not in world.names() and "predict" not in world.names()
+    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, world.module.BODY_UNREADABLE)

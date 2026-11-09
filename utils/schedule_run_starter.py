@@ -41,6 +41,7 @@ PREDICT_FAILED = 'the run call failed'
 ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
 BUDGET_CLOSED = 'the {} budget is used up'
 BODY_GONE = 'the webhook body is not kept after a pause; send the delivery again'
+BODY_UNREADABLE = 'the webhook body could not be read'
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
 
@@ -295,7 +296,12 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         fail_schedule_run(project_id, run_id, BODY_GONE)
         return
     if webhook:
-        user_input, message = _webhook_input(loaded, payload)
+        try:
+            user_input, message = _webhook_input(loaded, payload)
+        except Exception:  # noqa: BLE001 -- a body the run cannot read must end it with a reason, not a bare error
+            log.exception('Webhook %s run %s: cannot shape the delivery body', schedule_id, run_id)
+            fail_schedule_run(project_id, run_id, BODY_UNREADABLE)
+            return
     elif source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:

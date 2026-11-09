@@ -7,11 +7,13 @@ PREVIEW_LIMIT = 500
 
 
 def parse_body(payload: bytes):
-    """The JSON body, or `{"raw_payload": text}` when it is not JSON."""
+    """The JSON body, or `{"raw_payload": text}` when it is not JSON or too deeply nested to write back."""
     text = (payload or b'').decode('utf-8', errors='replace')
     try:
-        return json.loads(text)
-    except ValueError:
+        body = json.loads(text)
+        json.dumps(body, indent=2)  # the indented (pure Python) writer overflows on nesting json.loads accepts
+        return body
+    except (ValueError, RecursionError):
         return {'raw_payload': text}
 
 

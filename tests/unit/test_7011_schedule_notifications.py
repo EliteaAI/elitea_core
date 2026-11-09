@@ -351,6 +351,13 @@ class TestEL7011R4SocketEvent:
 WEBHOOK = types.SimpleNamespace(id=8, name='On push', trigger_kind='webhook')
 
 
+def test_7454_every_message_has_a_webhook_text_that_names_no_schedule(notifications):
+    # Derived from MESSAGES by replace: a new or reworded template that the replace misses fails here
+    assert set(notifications.WEBHOOK_MESSAGES) == set(notifications.MESSAGES)
+    for event_type, text in notifications.WEBHOOK_MESSAGES.items():
+        assert 'chedule' not in text and 'ebhook "{link}"' in text, event_type
+
+
 @pytest.mark.parametrize('event_type', ALWAYS_SENT)
 def test_7454_a_webhook_row_gets_the_webhook_text_of_every_notice(notifications, recorder, event_type):
     notifications.notify_schedule_event(12, 42, event_type, WEBHOOK, run=RUN)
