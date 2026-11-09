@@ -68,6 +68,8 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
 def _webhook_actions(row, scope: ScheduleScope, is_owner: bool, granted: set[str]) -> list[str]:
     """Plan-b §4.2: only the owner edits; an admin pauses, deletes, rotates and changes the owner, all audited."""
     actions = []
+    if is_owner and "run" in granted and row.version_id is not None:  # a sample-body run (#7455)
+        actions.append("run")
     if "update" in granted:
         if is_owner:
             actions.append("edit")
@@ -89,3 +91,12 @@ def row_webhook_url(project_id: int, row) -> str | None:
     if getattr(row, "trigger_kind", "cron") != "webhook":
         return None
     return f"/api/v2/elitea_core/hooks/prompt_lib/{int(project_id)}/{row.uuid}"
+
+
+def webhook_signing(row) -> dict:
+    """`signed` and `recommended` of a webhook row for the "Run without asking" warning; None on cron rows."""
+    if getattr(row, "trigger_kind", "cron") != "webhook":
+        return {"signed": None, "recommended": None}
+    signed = row.webhook_type == "github" or (row.webhook_type == "gitlab"
+                                               and row.gitlab_auth_method == "signing_token")
+    return {"signed": signed, "recommended": signed}

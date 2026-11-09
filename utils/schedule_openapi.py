@@ -95,7 +95,7 @@ DETAILS_EXAMPLE = {
     "created_by": 20, "owner": {"id": 20, "name": "Ann Smith"}, "updated_by": 20,
     "next_run": "2026-10-22T07:00:00+00:00", "last_run": None, "last_run_status": None, "disabled_reason": None,
     "approval_rule": "pause_and_ask", "allowed_actions": ["run", "edit", "pause", "delete"],
-    "run_without_asking_allowed": False,
+    "run_without_asking_allowed": False, "needs_reconfirm": False, "signed": None, "recommended": None,
 }
 SAVED_EXAMPLE = {**DETAILS_EXAMPLE, "warnings": []}
 LIST_EXAMPLE = {"total": 1, "run_without_asking_allowed": False, "rows": [{
@@ -394,9 +394,11 @@ OPERATIONS = {
         "name": "Run a schedule now",
         "summary": "Run a schedule now",
         "description": _text(
-            "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time.",
+            "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time. "
+            "A webhook runs only as `test` with a sample `payload` (at most 512 KB, not stored), through the "
+            "delivery path.",
             "the owner with `schedules.run`; an admin sees the schedule but cannot run it",
-            "400 an invalid trigger; 403 no permission or not the owner; 404 not found; "
+            "400 an invalid trigger or payload; 403 no permission or not the owner; 404 not found; "
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,

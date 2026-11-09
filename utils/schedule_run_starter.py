@@ -229,13 +229,22 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
 
+def _webhook_row(schedule) -> bool:
+    return getattr(schedule, 'trigger_kind', None) == 'webhook'  # a Test Run form has no trigger_kind
+
+
 def _started_event(loaded, trigger: str, delivery: str | None) -> dict:
     """The first run log line; a webhook run also names its type and delivery id."""
     label = 'Test run' if trigger == 'test' else 'Run'
-    if trigger != 'webhook':
+    sample = trigger == 'test' and _webhook_row(loaded.schedule)
+    if trigger != 'webhook' and not sample:
         return run_event('started', f'{label} started · trigger: {trigger} · version {loaded.version.name}',
                          trigger=trigger, version_id=loaded.version.id)
     webhook_type = loaded.schedule.webhook_type
+    if sample:  # the owner's sample body (#7455)
+        return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
+                                    f"Sample body by the owner · version {loaded.version.name}",
+                         trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, sample=True)
     return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
                                 f"delivery {delivery or 'none'} · version {loaded.version.name}",
                      trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, delivery_id=delivery)
@@ -265,7 +274,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         fail_schedule_run(project_id, run_id, NOT_FOUND)
         return
     trigger = getattr(loaded, 'trigger', 'cron')
-    webhook = trigger == 'webhook'
+    # a sample-body test run of a webhook row runs exactly as a delivery (#7455)
+    webhook = trigger == 'webhook' or (trigger == 'test' and _webhook_row(loaded.schedule))
     if not getattr(loaded, 'resumed', False):  # an approved parked run starts again; its log already has the first line
         record_run_events(project_id, run_id, _started_event(loaded, trigger, delivery), version_id=loaded.version.id)
     check = run_prerun_check(project_id, loaded.schedule, run_id)
@@ -307,7 +317,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    manual = trigger in ('manual', 'test')  # Run now and Test run are the owner's own runs
+    manual = trigger in ('manual', 'test') and not webhook  # Run now and Test run are the owner's own runs
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.WEBHOOK if webhook else TriggerType.SCHEDULED
     extra_meta = {'schedule_id': loaded.schedule.id, 'schedule_run_id': run_id, 'execution_type': trigger_type}
     if webhook:

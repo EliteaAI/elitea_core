@@ -177,3 +177,40 @@ def test_only_a_bounded_window_is_redacted_for_the_preview(webhook_input, monkey
     monkeypatch.setattr(webhook_input, "redacted_input", lambda text: seen.append(len(text)) or text)
     preview = webhook_input.payload_preview("x" * 1_000_000)
     assert seen == [webhook_input.REDACT_WINDOW] and preview == "x" * 500 + "..."
+
+
+# --- #7455: the owner's sample body runs exactly as a delivery ---------------------------------------
+
+def _sample(world, body=b'{"action": "opened"}'):
+    world.module._load = _with_trigger(world.module._load, "test")
+    world.module.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID, payload=body)
+
+
+def test_a_sample_run_is_a_webhook_run_with_webhook_governance(world):
+    _sample(world)
+    created, predicted = world.call("create")[1], world.call("predict")[1]
+    assert created["conversation_name"] == "Webhook run: Daily report"
+    assert created["trigger_type"] == "webhook" and created["extra_meta"]["webhook_type"] == "github"
+    assert predicted["trigger_source"] == "webhook"   # analytics count it as automated
+    assert predicted["user_input"].endswith('```json\n{\n  "action": "opened"\n}\n```')
+    assert world.prepared[0]["trigger_kind"] == "webhook"   # not the owner's own Run now ticket
+
+
+def test_a_sample_run_log_says_sample_body_by_the_owner(world):
+    _sample(world)
+    started = world.events[0]
+    assert "Sample body by the owner" in started["text"] and "delivery" not in started["text"]
+    assert (started["trigger"], started["sample"]) == ("test", True)
+
+
+def test_an_admitted_sample_run_ends_the_refusal_streak_as_a_delivery_does(world):
+    _sample(world)
+    assert "streak_end" in world.names()
+
+
+def test_a_cron_test_run_keeps_the_owner_run_path(world):
+    world.schedule.trigger_kind = "cron"
+    world.module._load = _with_trigger(world.module._load, "test")
+    world.module.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID)
+    assert world.call("create")[1]["conversation_name"] == "Manual run: Daily report"
+    assert world.prepared == [] and "streak_end" not in world.names()

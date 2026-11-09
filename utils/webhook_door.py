@@ -115,9 +115,9 @@ def release_delivery(redis, row_uuid, delivery: str | None) -> None:
         log.warning('Webhook %s delivery %s: cannot release the dedup claim', row_uuid, delivery)
 
 
-def admit_webhook_run(session, row_id: int) -> int | None:
-    """Insert the webhook run row; the caps of #7400 go here."""
-    return insert_run(session, row_id, 'webhook')
+def admit_webhook_run(session, row_id: int, trigger: str = 'webhook') -> int | None:
+    """Insert the webhook run row (`test` for the owner's sample body); the caps of #7400 go here."""
+    return insert_run(session, row_id, trigger)
 
 
 def record_delivery(session, row_id: int, outcome: str, now: datetime) -> None:
