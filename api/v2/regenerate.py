@@ -3,7 +3,7 @@ from uuid import uuid4
 from sqlalchemy.orm import joinedload
 from pydantic import ValidationError
 
-from tools import api_tools, auth, db, config as c, serialize, register_openapi
+from tools import api_tools, auth, db, config as c, serialize, register_openapi, this
 
 from ...models.message_group import ConversationMessageGroup
 from ...models.message_trace_step import MessageTraceStep
@@ -13,7 +13,7 @@ from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items, \
     resolve_attachment_llm_settings
-from ...utils.chat_history import generate_chat_history
+from ...utils.chat_history import generate_payload_chat_history
 from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.exceptions import InputGuardrailBlockedError
@@ -140,10 +140,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             regenerates_pipeline = (
                 (regenerate_payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
             )
-            regenerate_payload['chat_history'] = generate_chat_history(
-                message_groups=chat_history_groups, summaries=summaries,
-                include_context=not regenerates_pipeline,
-                routing_projection=regenerate_payload.get('_routing_projection'),
+            regenerate_payload['chat_history'], _ = generate_payload_chat_history(
+                session, regenerate_payload, chat_history_groups, summaries,
+                is_pipeline=regenerates_pipeline, config=this.descriptor.config,
             )
             if not preserve_instructions:
                 regenerate_payload['instructions'] = None
