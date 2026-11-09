@@ -73,14 +73,43 @@ def _agent_webhooks(session):
     ).all()
 
 
+def _index_schedule_rows(session):
+    """``(toolkit_id, index name, schedule key, enabled, created_by)`` of the Schedules module rows of toolkit indexes.
+
+    The key is the owner's user id, the value the cron admission passes (`rpc/entity_schedules_check.py` tick) when it
+    looks for the owner's toolkit mandate. A schema without the toolkit index columns has no such rows.
+    """
+    from ..models.entity_schedule import EntitySchedule  # pylint: disable=C0415
+    try:
+        with session.begin_nested():
+            rows = session.execute(
+                select(EntitySchedule.toolkit_id, EntitySchedule.index_name, EntitySchedule.enabled,
+                       EntitySchedule.created_by)
+                .where(EntitySchedule.entity_type == "toolkit_index", EntitySchedule.toolkit_id.isnot(None))
+                .order_by(EntitySchedule.toolkit_id, EntitySchedule.index_name)
+            ).all()
+    except DBAPIError:
+        log.warning("trigger report: toolkit index schedule rows are not readable yet; legacy schedules only")
+        return []
+    return [(toolkit_id, index_name, str(created_by), bool(enabled), created_by)
+            for toolkit_id, index_name, enabled, created_by in rows]
+
+
 def _index_schedules(session):
-    """``(toolkit_id, index name, schedule key, enabled, created_by)``; the schedule body is not passed on."""
+    """The index schedules, rows first and then the legacy ones in the toolkit settings.
+
+    A legacy entry of an index that has a row is not listed: the row is the schedule the runner uses, and the
+    migration may leave the old key behind when it holds an index back.
+    """
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
-    found = []
+    found = _index_schedule_rows(session)
+    with_row = {(toolkit_id, index_name) for toolkit_id, index_name, *_ in found}
     for toolkit_id, indexes_meta in session.execute(
             select(EliteATool.id, EliteATool.meta['indexes_meta']).where(EliteATool.meta['indexes_meta'].isnot(None))
             .order_by(EliteATool.id)):
         for index_name, entry in sorted((indexes_meta or {}).items()):
+            if (toolkit_id, index_name) in with_row:
+                continue
             schedules = entry.get('schedules') if isinstance(entry, dict) else None
             for key, body in sorted((schedules or {}).items(), key=lambda item: str(item[0])):
                 body = body if isinstance(body, dict) else {}

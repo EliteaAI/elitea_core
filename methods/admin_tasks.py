@@ -2513,6 +2513,81 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return report
 
     @web.method()
+    def migrate_legacy_index_schedules(self, *args, **kwargs):
+        """Admin task: move legacy index schedules (toolkit `indexes_meta`) to schedule rows.
+
+        A dry run by default: only dry_run=false writes. Idempotent: a moved key is gone from the toolkit JSON.
+        A project that fails is reported under errors and the next project runs.
+
+        Param format:
+            "project_id=<all|N>[;dry_run=false]"
+        """
+        # Imported here: the module needs the running plugin (database, owner checks)
+        from ..utils.legacy_index_schedule_migration import migrate_index_project
+        from ..utils.legacy_schedule_migration import parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            project_ids = resolve_target_project_ids(spec)
+        except ValueError as exc:
+            log.error("migrate_legacy_index_schedules: %s", exc)
+            return {"error": str(exc)}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("%sStarting migrate_legacy_index_schedules (projects=%s)", prefix, len(project_ids))
+        report = {"dry_run": dry_run, "projects": [], "errors": []}
+        for project_id in project_ids:
+            try:
+                report["projects"].append(migrate_index_project(project_id, dry_run))
+            except Exception:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("migrate_legacy_index_schedules: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": "the project could not be migrated; see the log"})
+        # Counts only: the full report goes back to the caller
+        counts = [
+            (p.get("project_id"), p.get("found", 0), p.get("migrated_enabled", 0),
+             len(p.get("migrated_paused", [])), len(p.get("held", [])), len(p.get("errors", [])))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting migrate_legacy_index_schedules — (project, found, enabled, paused, held, errors)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
+        return report
+
+    @web.method()
+    def restore_legacy_index_schedules(self, *args, **kwargs):
+        """Admin task: write the moved index schedules back to the toolkit JSON and delete their rows.
+
+        Refused while `legacy_index_step_enabled` is on (the next tick would move them again). One project at a
+        time. `dry_run=false` is required to write; this task has no dry-run report, so a dry run only checks
+        the refusal and the project.
+
+        Param format:
+            "project_id=<N>[;dry_run=false]"
+        """
+        from ..utils.legacy_index_schedule_migration import index_restore_refusal, restore_index_schedules
+        from ..utils.legacy_schedule_migration import parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            if spec[0] != "single":
+                raise ValueError("project_id=<N> is required: a restore runs for one project")
+        except ValueError as exc:
+            log.error("restore_legacy_index_schedules: %s", exc)
+            return {"error": str(exc)}
+        refusal = index_restore_refusal(self.descriptor.config.get("scheduler", {}).get("schedules", {}))
+        if refusal:
+            log.error("restore_legacy_index_schedules: %s", refusal)
+            return {"error": refusal}
+        if dry_run:
+            return {"dry_run": True, "project_id": spec[1]}
+        report = restore_index_schedules(spec[1])
+        log.info("Exiting restore_legacy_index_schedules — project=%s restored=%s errors=%s",
+                 spec[1], len(report["restored"]), len(report["errors"]))
+        return {"dry_run": False, **report}
+
+    @web.method()
     def backfill_legacy_trace_steps(self, *args, **kwargs):
         """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
 
