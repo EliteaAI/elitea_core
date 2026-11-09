@@ -322,6 +322,22 @@ def readiness(module, project_id, kind, entity_id, user_id) -> Readiness:
     return result
 
 
+def _toolkit_items(result, session, project_id, tool_id, user_id, subject_ref, permissions):
+    """The credential items of one toolkit; ``EntityNotFound`` when the toolkit is gone."""
+    from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
+    tool = session.query(EliteATool).filter(EliteATool.id == tool_id).first()
+    if tool is None:
+        raise EntityNotFound()
+    uses, configurations = _uses(session, project_id, None, user_id, [(None, tool)])
+    ctx = CredentialDecisionContext(
+        binding_project_id=project_id, agent_binding_ref=NO_BINDING, subject_ref=subject_ref or NO_SUBJECT,
+        policy_revision="", now=_now(), expires_at=_now(), can_use=user_may_use_credentials(user_id, project_id),
+        subject_kind="user_delegation", subject_user_id=user_id, profile=PROFILE_DEVELOPMENT)
+    _credential_items(result, ctx, uses, configurations, {str(tool.id): tool.name or tool.type},
+                      binding_requestable=False, may_request=REQUEST_PERMISSION in permissions, subject_for="you")
+    return result
+
+
 def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: disable=R0912,R0914
     from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
     subject_ref = _person(user_id)
@@ -334,20 +350,7 @@ def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: d
         result.add("permission:credentials.use", "permission", "Use of credentials in this project", "not_permitted")
     with db.get_session(project_id) as session:
         if kind == "toolkit":
-            from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
-            tool = session.query(EliteATool).filter(EliteATool.id == entity_id).first()
-            if tool is None:
-                raise EntityNotFound()
-            rows = [(None, tool)]
-            uses, configurations = _uses(session, project_id, None, user_id, rows)
-            ctx = CredentialDecisionContext(
-                binding_project_id=project_id, agent_binding_ref=NO_BINDING, subject_ref=subject_ref or NO_SUBJECT,
-                policy_revision="", now=_now(), expires_at=_now(), can_use=user_may_use_credentials(user_id, project_id),
-                subject_kind="user_delegation", subject_user_id=user_id, profile=PROFILE_DEVELOPMENT)
-            _credential_items(result, ctx, uses, configurations, {str(tool.id): tool.name or tool.type},
-                              binding_requestable=False, may_request=REQUEST_PERMISSION in permissions,
-                              subject_for="you")
-            return result
+            return _toolkit_items(result, session, project_id, entity_id, user_id, subject_ref, permissions)
         if kind == "schedule":
             from ..models.entity_schedule import EntitySchedule  # pylint: disable=C0415
             schedule = session.get(EntitySchedule, entity_id)
@@ -356,6 +359,11 @@ def _collect(result, module, project_id, kind, entity_id, user_id):  # pylint: d
             version_id, owner_id = schedule.version_id, schedule.created_by
             if owner_id != user_id and "models.applications.schedules.admin" not in permissions:
                 raise EntityNotFound()   # a schedule is its owner's (and the project's schedule admins')
+            if schedule.entity_type == "toolkit_index":
+                # an index schedule runs the saved settings of its toolkit: no version, no mandate, only the
+                # credentials of that toolkit
+                return _toolkit_items(result, session, project_id, schedule.toolkit_id, user_id, subject_ref,
+                                      permissions)
         else:
             version_id, owner_id = entity_id, None
         version = session.execute(

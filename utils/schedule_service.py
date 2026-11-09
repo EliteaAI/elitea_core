@@ -1,21 +1,24 @@
 """Create, update and delete of an entity schedule: owner, scope, audit and run input rules (EL-7011)."""
+import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
 from opentelemetry import trace as otel_trace
 from pylon.core.tools import log
-from sqlalchemy import select, update
+from sqlalchemy import inspect, select, text, update
+from sqlalchemy.exc import IntegrityError
 
-from ..models.all import Application, ApplicationVersion
+from ..models.all import Application, ApplicationVersion, EliteATool
 from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule
 from ..models.enums.all import AgentTypes, NotificationEventTypes
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
+from ..models.pd.index import _cron_gaps
 from .folder_access import entity_access_error
 from .schedule_access import ScheduleScope
 from .schedule_notifications import notify_schedule_event
-from .schedule_timing import check_enabled_cap, compute_next_run, end_of_day
+from .schedule_timing import check_enabled_cap, compute_next_run, end_of_day, min_interval_minutes_for
 
 # The placeholder rule of the UI form (contextResolver); anything else in braces is template syntax
 PLACEHOLDER = re.compile(r'{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}')
@@ -28,6 +31,12 @@ CRON_ONLY_FIELDS = {'cron', 'timezone', 'expires_at'}
 CONFIRMED_EVENT = 'schedule_run_without_asking_confirmed'
 OWNER_CHANGED = 'owner_changed'
 INVALID_INPUT = 'invalid_input'
+TOOLKIT_INDEX = 'toolkit_index'
+TOOLKIT_INDEX_UNIQUE = 'uq_entity_schedules_toolkit_index'
+INDEX_SCHEDULED = 'This index already has a schedule'
+INDEX_UNAVAILABLE = 'The index could not be checked; try again'
+# A Toolkit Index run starts from the saved index settings: no version, input or approval of its own
+INDEX_REFUSED_FIELDS = ('application_id', 'version_id', 'run_mode', 'prompt', 'risk_ack')
 
 
 def refusal(code: str, text: str, status: int = 400, **extra) -> tuple[dict, int]:
@@ -71,7 +80,7 @@ def check_run_input(entity_type: str, run_mode: str | None, prompt: str | None, 
     """Check the run mode, prompt and variables of one schedule against the field rules.
 
     Args:
-        entity_type: `agent` or `pipeline`.
+        entity_type: `agent`, `pipeline` or `toolkit_index` (which takes no run input at all).
         run_mode: Null for an agent; `entry_point` or `prompt` for a pipeline.
         prompt: The prompt text, or null.
         variables: `{name, value}` dicts.
@@ -79,6 +88,13 @@ def check_run_input(entity_type: str, run_mode: str | None, prompt: str | None, 
     Raises:
         ScheduleError: A 400 that names the broken field.
     """
+    if entity_type == TOOLKIT_INDEX:
+        for field, value in (('run_mode', run_mode), ('prompt', prompt)):
+            if value is not None:
+                raise _field_error(field, f'A Toolkit Index schedule takes no {field}')
+        if variables:
+            raise _field_error('variables', 'A Toolkit Index schedule takes no variables')
+        return
     has_prompt = bool(prompt and prompt.strip())
     if entity_type == 'agent':
         if run_mode is not None:
@@ -110,8 +126,17 @@ def _check_variables(prompt: str, variables: list[dict]) -> None:
         )
 
 
-def check_entity(session, project_id: int, entity_type: str, application_id: int, version_id: int) -> None:
-    """Raise unless the version belongs to the project entity, fits `entity_type` and the folder allows a write."""
+def check_entity(session, project_id: int, entity_type: str, application_id: int | None, version_id: int | None,
+                 toolkit_id: int | None = None, index_name: str | None = None) -> None:
+    """Raise unless the target exists, fits `entity_type` and the folder allows a write.
+
+    An agent or pipeline is the version of an application; a `toolkit_index` is an index of a toolkit that
+    has no schedule yet, in `entity_schedules` or in the legacy `indexes_meta` of the toolkit.
+    """
+    if entity_type == TOOLKIT_INDEX:
+        return check_toolkit_index(session, project_id, toolkit_id, index_name)
+    if application_id is None or version_id is None:
+        raise _field_error('application_id' if application_id is None else 'version_id', 'Field required')
     if session.get(Application, application_id) is None:
         raise _field_error('application_id', 'The agent or pipeline is not in this project')
     version = session.get(ApplicationVersion, version_id)
@@ -126,17 +151,117 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
         raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
 
 
+def read_index_configuration(project_id: int, toolkit, index_name: str) -> dict | None:
+    """The saved settings of one index of the toolkit, read from the toolkit's own vector store; None when the
+    store has no such index. Read-only: no schema or table is created for a store that has none yet.
+
+    Raises:
+        Exception: When the connection string cannot be resolved or the store cannot be read.
+    """
+    # Late: the vector store helpers and the RPC tools load only for a Toolkit Index save
+    from tools import rpc_tools
+
+    from .application_tools import _get_pgvector_engine
+    from .orphaned_index_schedules import pgvector_settings
+
+    schema = str(toolkit.id)
+    expanded = rpc_tools.RpcMixin().rpc.timeout(5).configurations_expand(
+        project_id=project_id, settings=pgvector_settings(toolkit.settings),
+        user_id=toolkit.author_id, unsecret=True,
+    )
+    connection_string = (expanded.get('pgvector_configuration') or {}).get('connection_string')
+    if not connection_string:
+        raise ValueError('the toolkit has no pgvector connection string')
+    engine = _get_pgvector_engine(connection_string)
+    if not inspect(engine).has_table('langchain_pg_embedding', schema=schema):
+        return None
+    with engine.connect() as conn:
+        found = conn.execute(text(
+            f"SELECT cmetadata ->> 'index_configuration' AS configuration "  # nosec B608 - the schema is a toolkit id
+            f'FROM "{schema}".langchain_pg_embedding '
+            f"WHERE cmetadata ->> 'type' = 'index_meta' AND cmetadata ->> 'collection' = :name LIMIT 1"
+        ), {'name': index_name}).first()
+    if found is None:
+        return None
+    configuration = found.configuration
+    if isinstance(configuration, str):
+        try:
+            configuration = json.loads(configuration)
+        except ValueError:
+            configuration = None
+    return configuration if isinstance(configuration, dict) else {}
+
+
+def check_toolkit_index(session, project_id: int, toolkit_id: int | None, index_name: str | None) -> None:
+    """Raise unless the index can get a schedule.
+
+    Order: the toolkit exists and the caller may write its folder (a hidden toolkit answers 404 before the
+    index is looked at), the index exists and has saved settings, and nothing schedules the index yet.
+    """
+    if toolkit_id is None or not index_name:
+        raise _field_error('toolkit_id' if toolkit_id is None else 'index_name', 'Field required')
+    toolkit = session.get(EliteATool, toolkit_id)
+    if toolkit is None:
+        raise _field_error('toolkit_id', 'The toolkit is not in this project')
+    from .folder_access import TOOLKIT_ENTITY_TYPES  # late: only an index schedule needs the toolkit folder types
+    access_error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True)
+    if access_error:
+        body, status = access_error
+        raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
+    try:
+        configuration = read_index_configuration(project_id, toolkit, index_name)
+    except Exception as e:  # noqa: BLE001 -- an unreachable store is a retry for the caller, not a verdict
+        log.error('Toolkit %s index check failed: %s', toolkit_id, type(e).__name__)
+        raise ScheduleError('index_unavailable', INDEX_UNAVAILABLE, 503)
+    if configuration is None:
+        raise _field_error('index_name', 'The index is not in this toolkit')
+    if not configuration:
+        raise _field_error('index_name', 'This index has no saved settings. Run it once first.')
+    legacy = ((toolkit.meta or {}).get('indexes_meta') or {}).get(index_name)
+    has_row = session.scalar(select(EntitySchedule.id).where(
+        EntitySchedule.toolkit_id == toolkit_id, EntitySchedule.index_name == index_name).limit(1)) is not None
+    if has_row or (isinstance(legacy, dict) and legacy.get('schedules')):
+        raise ScheduleError('index_scheduled', INDEX_SCHEDULED, 409)
+
+
+def check_index_interval(cron: str | None) -> None:
+    """Raise a 400 on `cron` when two runs of a Toolkit Index fall closer than its own floor."""
+    floor = min_interval_minutes_for(TOOLKIT_INDEX)
+    if cron is not None and min(_cron_gaps(cron)) < timedelta(minutes=floor):
+        raise _field_error('cron', f'Runs must be at least {floor} minutes apart')
+
+
+def check_index_body(body: ScheduleCreate) -> None:
+    """Refuse what a Toolkit Index save cannot hold: a version, run input, a risk review or its own approval rule."""
+    for field in INDEX_REFUSED_FIELDS:
+        if getattr(body, field) is not None:
+            raise _field_error(field, f'A Toolkit Index schedule takes no {field}')
+    if body.variables:
+        raise _field_error('variables', 'A Toolkit Index schedule takes no variables')
+    if body.approval_rule != 'pause_and_ask':
+        raise _field_error('approval_rule', 'A Toolkit Index schedule has no tool to approve')
+    if body.trigger_kind != 'cron':
+        raise _field_error('trigger_kind', 'A Toolkit Index schedule runs on a cron')
+    check_index_interval(body.cron)
+
+
 def check_schedule_body(session, project_id: int, body: ScheduleCreate) -> None:
     """The required-field rules of a Save and of a Test Run, in one place.
 
-    The body model already needs name, entity, version, cron and time zone. This adds what a model cannot
+    The body model already needs name, entity, cron and time zone. This adds what a model cannot
     state: the entity and version exist and fit, and the starting input (prompt, run mode, variables) fits
     the entity type.
 
     Raises:
-        ScheduleError: A 400, 403 or 404 refusal that names the broken field.
+        ScheduleError: A 400, 403, 404 or 409 refusal that names the broken field.
     """
-    check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+    if body.entity_type == TOOLKIT_INDEX:
+        check_index_body(body)
+    elif body.toolkit_id is not None or body.index_name is not None:
+        raise _field_error('toolkit_id' if body.toolkit_id is not None else 'index_name',
+                           'Only a Toolkit Index schedule takes a toolkit and an index')
+    check_entity(session, project_id, body.entity_type, body.application_id, body.version_id,
+                 body.toolkit_id, body.index_name)
     check_run_input(body.entity_type, body.run_mode, body.prompt, [v.model_dump() for v in body.variables])
 
 
@@ -242,7 +367,10 @@ def create_schedule(
     if key is not None:
         row.uuid = key
     _apply_confirmation(row, confirmed, scope.user_id)
-    session.add(row)
+    if body.entity_type == TOOLKIT_INDEX:
+        _insert_index_row(session, row)
+    else:
+        session.add(row)
     if not cron_row:
         _store_first_secret(session, project_id, row, body.signing_secret_value)
     try:
@@ -257,6 +385,30 @@ def create_schedule(
     if not cron_row:
         audit_schedule_event(project_id, row, scope.user_id, 'webhook_created', row.webhook_type)
     return row
+
+
+def _insert_index_row(session, row: EntitySchedule) -> None:
+    """Add a Toolkit Index row in a savepoint: a second save of the same index loses the race and gets a 409.
+
+    The check before the insert reads the rows, but two saves can both pass it; the partial unique index decides.
+    """
+    from .schedule_test_runs import UNIQUE_VIOLATION, error_code  # late: that module imports the body models
+    try:
+        with session.begin_nested():
+            session.add(row)
+    except IntegrityError as e:
+        if error_code(e) == UNIQUE_VIOLATION and _is_index_conflict(e):
+            raise ScheduleError('index_scheduled', INDEX_SCHEDULED, 409) from e
+        raise
+
+
+def _is_index_conflict(error: IntegrityError) -> bool:
+    """True when the unique violation is the one of `(toolkit_id, index_name)`, not of another unique key."""
+    orig = getattr(error, 'orig', None)
+    constraint = getattr(getattr(orig, 'diag', None), 'constraint_name', None)
+    if constraint:
+        return constraint == TOOLKIT_INDEX_UNIQUE
+    return 'toolkit_id' in str(orig)  # SQLite (the unit tests) names the columns, not the index
 
 
 def _store_first_secret(session, project_id: int, row: EntitySchedule, signing_value: str | None) -> None:
@@ -285,6 +437,24 @@ def update_changes(body: ScheduleUpdate) -> dict:
     }
 
 
+def _check_index_changes(row: EntitySchedule, body: ScheduleUpdate, changes: dict) -> None:
+    """Refuse an edit a Toolkit Index row cannot hold, before any check that reads its missing application.
+
+    A version or an approval rule the form sends back unchanged is dropped, so a form that sends the whole body
+    still saves. The toolkit and the index are not edit fields of the body at all.
+    """
+    if changes.get('version_id') is not None:
+        raise _field_error('version_id', 'A Toolkit Index schedule takes no version_id')
+    if body.risk_ack is not None:
+        raise _field_error('risk_ack', 'A Toolkit Index schedule takes no risk_ack')
+    if changes.get('approval_rule', row.approval_rule) != row.approval_rule:
+        raise _field_error('approval_rule', 'A Toolkit Index schedule has no tool to approve')
+    changes.pop('version_id', None)
+    changes.pop('approval_rule', None)
+    if changes.get('cron') is not None:
+        check_index_interval(changes['cron'])
+
+
 def update_schedule(
         session, project_id: int, row: EntitySchedule, body: ScheduleUpdate, scope: ScheduleScope,
         confirmed: dict | None = None,
@@ -305,8 +475,12 @@ def update_schedule(
     set_cron_fields = sorted(k for k in CRON_ONLY_FIELDS & changes.keys() if changes[k] is not None)
     if not cron_row and set_cron_fields:
         raise _field_error(set_cron_fields[0], 'A webhook has no cron, time zone or stop date')
+    is_index = row.entity_type == TOOLKIT_INDEX
+    if is_index:
+        _check_index_changes(row, body, changes)
     resuming = changes.get('enabled') is True and not row.enabled
-    if resuming and changes.get('version_id', row.version_id) is None:
+    # A Toolkit Index runs the saved index settings and has no version to choose
+    if resuming and not is_index and changes.get('version_id', row.version_id) is None:
         raise _field_error('version_id', 'Choose a version before you resume this schedule')
     if 'version_id' in changes:
         check_entity(session, project_id, row.entity_type, row.application_id, changes['version_id'])

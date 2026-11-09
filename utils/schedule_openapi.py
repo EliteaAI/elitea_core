@@ -8,7 +8,7 @@ from typing import get_args
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck, WebhookSecretAction
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
-from ..models.pd.schedule_list import MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
+from ..models.pd.schedule_list import INDEX_NAME_MAX, MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
@@ -40,10 +40,12 @@ LIST_QUERY_PARAMS = [
     {"name": "owner_ids", "in": "query", "schema": {"type": "array", "items": {"type": "integer"}},
      "description": "Only schedules of these owners, repeated or comma-separated; schedules admin only"},
     {"name": "entity_id", "in": "query", "schema": {"type": "integer"},
-     "description": "Only schedules of this agent or pipeline"},
+     "description": "Only schedules of this agent or pipeline; with `entity_type=toolkit_index`, of this toolkit"},
+    {"name": "index_name", "in": "query", "schema": {"type": "string", "maxLength": INDEX_NAME_MAX},
+     "description": "Only the schedule of this index name (Toolkit Index schedules)"},
     {"name": "version_id", "in": "query", "schema": {"type": "integer"},
      "description": "Only schedules that run this version"},
-    {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule or entity name"},
+    {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule, entity, toolkit or index name"},
     {"name": "trigger_kind", "in": "query", "schema": {"type": "string", "enum": ["cron", "webhook"], "default": "cron"},
      "description": "Row kind; the default lists schedules only"},
     {"name": "webhook_type", "in": "query", "schema": {"type": "string", "enum": ["github", "gitlab", "custom"]},
@@ -170,7 +172,8 @@ CHECK_EXAMPLE = {
 }
 SAVE_CONFLICTS = (
     ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed` (the body has the findings and "
-     "the `fingerprint`), or the project limit of active schedules"), {
+     "the `fingerprint`), `index_scheduled` (this toolkit index already has a schedule), or the project limit "
+     "of active schedules"), {
         "code": "risk_confirmation_required",
         "error": "Review the sensitive tools, then save again with `risk_ack` and this fingerprint",
         "blocking": [], "sensitive": [SENSITIVE_FINDING], "notices": [], "fingerprint": FINGERPRINT,
@@ -284,7 +287,9 @@ OPERATIONS = {
         "name": "Create a schedule",
         "summary": "Create a schedule",
         "description": _text(
-            "Create a schedule for an agent or a pipeline version. The caller becomes the owner; "
+            "Create a schedule for an agent or a pipeline version, or for a toolkit index (`entity_type=toolkit_index` "
+            "with `toolkit_id` and `index_name`; it has no version, prompt or risk review, and runs the saved index "
+            "settings; its cron has a longer minimum interval). The caller becomes the owner; "
             "the body never sets the owner. The answer has the findings of the risk review as `warnings`. "
             + RISK_REVIEW_TEXT,
             "a project member with `schedules.create`",

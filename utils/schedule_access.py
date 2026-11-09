@@ -54,7 +54,7 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
     if getattr(row, "trigger_kind", "cron") == "webhook":
         return _webhook_actions(row, scope, is_owner, granted)
     actions = []
-    if is_owner and "run" in granted and row.version_id is not None:
+    if is_owner and "run" in granted and _can_start(row):
         actions.append("run")
     if "update" in granted:
         actions += ["edit", "pause" if row.enabled else "resume"]
@@ -63,6 +63,13 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
     if scope.is_admin:
         actions.append("change_owner")
     return actions
+
+
+def _can_start(row) -> bool:
+    """True when the row names what a run starts: a version, or for a Toolkit Index the toolkit and its index."""
+    if getattr(row, "entity_type", None) == "toolkit_index":
+        return row.toolkit_id is not None and row.index_name is not None
+    return row.version_id is not None
 
 
 def _webhook_actions(row, scope: ScheduleScope, is_owner: bool, granted: set[str]) -> list[str]:

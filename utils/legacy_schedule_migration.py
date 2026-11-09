@@ -12,7 +12,7 @@ from .schedule_prerun import (
     DISABLED_OWNER_LOST_ACCESS,
     check_owner_access,
 )
-from .schedule_timing import compute_next_run, schedule_limits
+from .schedule_timing import compute_next_run, min_interval_minutes_for, schedule_limits
 
 DISABLED_INVALID_CRON = 'invalid_cron'
 PARAMS_FORMAT = 'project_id= is required. Format: project_id=<all|N>[;dry_run=false]'
@@ -46,9 +46,9 @@ def parse_task_params(raw: str) -> tuple[tuple, bool]:
     return spec, _parse_bool(params.get('dry_run', 'true'), 'dry_run')
 
 
-def below_minimum(cron: str) -> bool:
-    """True when the cron fires closer than the schedule minimum interval (reported, never blocking)."""
-    return min(_cron_gaps(cron)) < timedelta(minutes=schedule_limits().min_interval_minutes)
+def below_minimum(cron: str, entity_type: str | None = None) -> bool:
+    """True when the cron fires closer than the minimum interval of `entity_type` (reported, never blocking)."""
+    return min(_cron_gaps(cron)) < timedelta(minutes=min_interval_minutes_for(entity_type))
 
 
 def _last_run(value) -> datetime | None:
@@ -247,10 +247,12 @@ def _migrate_versions(session, project_id: int, dry_run: bool, enforce_limits: b
     return report
 
 
-def migrate_project(project_id: int, dry_run: bool, enforce_limits: bool = False) -> dict:
+def migrate_project(project_id: int, dry_run: bool, enforce_limits: bool = False, body=None) -> dict:
     """Move every legacy schedule trigger of one project while holding its advisory lock; the project report.
 
-    A dry run writes nothing. The lock wait is bounded; a timeout or a failure is raised. The lock is
+    `body(session, project_id, dry_run, enforce_limits)` does the work under the lock; the default moves the
+    legacy pipeline triggers. Another migration passes its own body and shares the lock, the connection and
+    the lock timeout. A dry run writes nothing. The lock wait is bounded; a timeout or a failure is raised. The lock is
     released when the project ends or fails; a failed release is logged and closes the connection.
     """
     # Imported here, as above: tools.db and the claim helpers need the running plugin
@@ -258,6 +260,7 @@ def migrate_project(project_id: int, dry_run: bool, enforce_limits: bool = False
 
     from .schedule_claim import legacy_lock_key
 
+    body = body or _migrate_versions
     key = {'key': legacy_lock_key(project_id)}
     # A session lock is freed only by the connection that took it; autocommit keeps no transaction open
     with db.engine.connect().execution_options(isolation_level='AUTOCOMMIT') as connection:
@@ -268,7 +271,7 @@ def migrate_project(project_id: int, dry_run: bool, enforce_limits: bool = False
             connection.execute(LOCK_WAIT_RESET)
         try:
             with db.get_session(project_id) as session:
-                return _migrate_versions(session, project_id, dry_run, enforce_limits)
+                return body(session, project_id, dry_run, enforce_limits)
         finally:
             _unlock_project(connection, key, project_id)
 

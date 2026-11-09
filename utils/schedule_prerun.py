@@ -10,6 +10,8 @@ from tools import rpc_tools
 AUTH_TIMEOUT = 3  # seconds; a check never hangs the starter thread
 PRINCIPAL_MISMATCH = 'principal does not match the owner'
 OWNER_LOST_ACCESS = 'owner lost access'
+# Saving an index schedule changes the index settings, so a run needs the same permission as the index editor
+INDEX_EDIT_PERMISSION = 'models.applications.index_meta.edit'
 ACCESS_CHECK_UNAVAILABLE = 'access check unavailable'
 DISABLED_OWNER_LOST_ACCESS = 'owner_lost_access'
 NO_TOKEN = 'no token for the owner'
@@ -91,16 +93,26 @@ def check_owner_rights(project_id: int, owner_id: int, entity_type: str | None =
 
     OWNER_LOST_ACCESS when a permission or the folder access is missing; ACCESS_CHECK_UNAVAILABLE when a
     check fails. No entity skips the folder check. The pre-run step and the owner change share this.
+    A Toolkit Index schedule (`entity_type='toolkit_index'`, `entity_id` the toolkit id) also needs the index
+    edit permission and write access to the toolkit folder.
     """
     # Late: the permission table pulls in the auth tools, the folder check the social RPCs
     from .folder_access import entity_access_error
     from .schedule_access import SCHEDULE_PERMISSIONS
+    is_index = entity_type == 'toolkit_index'
     try:
         permissions = rpc_tools.RpcMixin().rpc.timeout(AUTH_TIMEOUT).auth_get_project_user_permissions(
             project_id, owner_id)
         if not all(SCHEDULE_PERMISSIONS[verb] in permissions for verb in verbs):
             return OWNER_LOST_ACCESS
-        if entity_id is not None and entity_access_error(project_id, entity_type, entity_id, user_id=owner_id):
+        if is_index:
+            from .folder_access import TOOLKIT_ENTITY_TYPES  # late: only an index schedule needs the toolkit folder types
+            if INDEX_EDIT_PERMISSION not in permissions:
+                return OWNER_LOST_ACCESS
+            if entity_id is None or entity_access_error(
+                    project_id, TOOLKIT_ENTITY_TYPES, entity_id, write=True, user_id=owner_id):
+                return OWNER_LOST_ACCESS
+        elif entity_id is not None and entity_access_error(project_id, entity_type, entity_id, user_id=owner_id):
             return OWNER_LOST_ACCESS
     except Exception:  # noqa: BLE001 -- a timeout or an RPC error must not read as "no rights"
         log.exception('User %s of project %s: the schedule rights check failed', owner_id, project_id)
@@ -189,11 +201,14 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     owner_id = schedule.created_by
     waits_for_owner = False
     try:
+        is_index = schedule.entity_type == 'toolkit_index'
+        target_id = schedule.toolkit_id if is_index else schedule.application_id
         reason = (check_principal(schedule)
                   or check_owner_access(project_id, owner_id)
-                  or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id))
-        # A mark in _CHECKED_RUNS means the owner's approval just ran the credential check
-        if reason is None and run_id not in _CHECKED_RUNS:
+                  or check_owner_rights(project_id, owner_id, schedule.entity_type, target_id))
+        # A mark in _CHECKED_RUNS means the owner's approval just ran the credential check.
+        # An index run has no version to expand; the index worker reads the saved settings itself.
+        if reason is None and not is_index and run_id not in _CHECKED_RUNS:
             reason = check_owner_credentials(project_id, schedule)
             # Only a missing credential can wait for the owner; a lost token or a broken version cannot
             # A broken entity fails a webhook run; its body is not kept, so an approval could not restart it (#7454)

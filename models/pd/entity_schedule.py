@@ -55,6 +55,8 @@ class ScheduleTiming(BaseModel):
         return v
 
 
+MAX_ID = 2**31 - 1  # the database integer range; schedule_list holds the same bound, this module loads without it
+DbId = Annotated[int, Field(ge=1, le=MAX_ID)]
 NAME_MAX = 256
 DESCRIPTION_MAX = 2304  # the entity_schedules.description column width
 RunMode = Literal['entry_point', 'prompt']
@@ -92,9 +94,16 @@ class RiskAck(BaseModel):
 
 
 # The scheduled entity and version, the same in the risk check and the create body
-EntityType = Annotated[Literal['agent', 'pipeline'], Field(description='Kind of the scheduled entity', examples=['agent'])]
+# A Toolkit Index has no version and no risk review, so the risk check keeps the narrower type
+RiskEntityType = Annotated[Literal['agent', 'pipeline'], Field(description='Kind of the scheduled entity',
+                                                              examples=['agent'])]
+EntityType = Annotated[Literal['agent', 'pipeline', 'toolkit_index'],
+                       Field(description='Kind of the scheduled entity', examples=['agent'])]
 ApplicationId = Annotated[int, Field(description='Id of the agent or pipeline', examples=[12])]
 VersionId = Annotated[int, Field(description=VERSION_TEXT, examples=[34])]
+INDEX_NAME_MAX = 256  # the entity_schedules.index_name column width
+TOOLKIT_ID_TEXT = 'Id of the toolkit whose index runs; Toolkit Index rows only'
+INDEX_NAME_TEXT = 'Name of the index of that toolkit; Toolkit Index rows only'
 
 
 class ScheduleRiskCheck(BaseModel):
@@ -102,7 +111,7 @@ class ScheduleRiskCheck(BaseModel):
     model_config = ConfigDict(json_schema_extra={'examples': [
         {'entity_type': 'agent', 'application_id': 12, 'version_id': 34}]})
 
-    entity_type: EntityType
+    entity_type: RiskEntityType
     application_id: ApplicationId
     version_id: VersionId
     schedule_id: int | None = Field(
@@ -131,8 +140,12 @@ class ScheduleCreate(ScheduleTiming):
     description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
                                     examples=[DESCRIPTION_EXAMPLE])
     entity_type: EntityType
-    application_id: ApplicationId
-    version_id: VersionId
+    application_id: DbId | None = Field(None, validate_default=True, description='Id of the agent or pipeline',
+                                       examples=[12])
+    version_id: VersionId | None = Field(None, validate_default=True, description=VERSION_TEXT, examples=[34])
+    toolkit_id: DbId | None = Field(None, validate_default=True, description=TOOLKIT_ID_TEXT, examples=[7])
+    index_name: str | None = Field(None, validate_default=True, min_length=1, max_length=INDEX_NAME_MAX,
+                                   description=INDEX_NAME_TEXT, examples=['docs'])
     run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT, examples=['prompt'])
     prompt: str | None = Field(None, description=PROMPT_TEXT, examples=[PROMPT_EXAMPLE])
     variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
@@ -160,6 +173,16 @@ class ScheduleCreate(ScheduleTiming):
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
         return v if v is None else ScheduleTiming.validate_timezone(v)
+
+    @field_validator('application_id', 'version_id', 'toolkit_id', 'index_name')
+    @classmethod
+    def need_target_field(cls, v, info: ValidationInfo):
+        """A target field is required for the kinds that use it. Other kinds that send it are refused by the service."""
+        entity_type = info.data.get('entity_type')  # None when the type is missing or failed its own check
+        needed = ('toolkit_id', 'index_name') if entity_type == 'toolkit_index' else ('application_id', 'version_id')
+        if v is None and info.field_name in needed:
+            raise ValueError('Field required')
+        return v
 
     @model_validator(mode='after')
     def check_trigger_fields(self):
@@ -238,7 +261,9 @@ class ScheduleDetails(BaseModel):
     name: str
     description: str | None
     entity_type: str
-    application_id: int
+    application_id: DbId | None
+    toolkit_id: DbId | None = None
+    index_name: str | None = None
     version_id: int | None
     run_mode: str | None
     prompt: str | None
