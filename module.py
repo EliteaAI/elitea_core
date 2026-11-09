@@ -535,7 +535,7 @@ class Module(module.ModuleModel):
                 self.migrate_eval_platform_dimension_columns, group="R-2.0.6",
             )
             this.for_module("admin").module.register_admin_task(
-                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.6",
+                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_dimension_columns", self.migrate_eval_dimension_columns, group="R-2.0.6",
