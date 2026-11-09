@@ -229,6 +229,27 @@ def exclude_image_base64_content_from_chat_history(
     return result
 
 
+def capped_tool_inputs(column):
+    """tool_inputs with every value cut in SQL, so a multi-MB create_file body never leaves Postgres."""
+    from sqlalchemy import func, case, select, cast, text, Text
+    from sqlalchemy.dialects.postgresql import JSONB
+    from .history_tool_stubs import MAX_ARG_CHARS, MAX_ARG_KEYS
+
+    empty = text("'{}'::jsonb")
+    obj = case((func.jsonb_typeof(column) == 'object', column), else_=empty)
+    kv = func.jsonb_each(obj).table_valued('key', 'value').render_derived(name='kv')
+    value_text = case(
+        (func.jsonb_typeof(kv.c.value) == 'string', kv.c.value.op('#>>')(text("'{}'::text[]"))),
+        else_=cast(kv.c.value, Text),
+    )
+    short = case(
+        (func.jsonb_typeof(kv.c.value).in_(['number', 'boolean', 'null']), kv.c.value),
+        else_=func.to_jsonb(func.left(value_text, MAX_ARG_CHARS + 1)),
+    )
+    limited = select(kv.c.key, short.label('v')).limit(MAX_ARG_KEYS).subquery()
+    return select(func.coalesce(func.jsonb_object_agg(limited.c.key, limited.c.v), empty)).scalar_subquery()
+
+
 def load_history_tool_stubs(session, message_groups: List[ConversationMessageGroup], config: dict,
                             has_tools: bool) -> Dict[int, List[dict]]:
     """Stub messages for the last N assistant groups' top-level tool calls; {} when off or the agent has no tools."""
@@ -248,27 +269,38 @@ def load_history_tool_stubs(session, message_groups: List[ConversationMessageGro
     if not group_ids:
         return {}
     try:
-        rows = session.query(
-            MessageTraceStep.id, MessageTraceStep.message_group_id, MessageTraceStep.tool_name,
-            MessageTraceStep.tool_inputs, MessageTraceStep.is_error,
-            func.left(MessageTraceStep.tool_output, MAX_RESULT_CHARS + 1).label('tool_output'),
+        rank = func.row_number().over(
+            partition_by=MessageTraceStep.message_group_id,
+            order_by=(MessageTraceStep.started_at, MessageTraceStep.id),
+        ).label('rank')
+        ranked = session.query(
+            MessageTraceStep.id, MessageTraceStep.message_group_id, rank,
         ).filter(
             MessageTraceStep.message_group_id.in_(group_ids),
             MessageTraceStep.kind == 'tool_call',
             # Sub-agent internals belong to the child agent, not this conversation's tool loop
             MessageTraceStep.parent_agent_name.is_(None),
             MessageTraceStep.parent_agent_call_id.is_(None),
-        ).order_by(MessageTraceStep.message_group_id, MessageTraceStep.started_at, MessageTraceStep.id).all()
+        ).subquery()
+        # Full columns only for the kept calls; the rest are just counted for the "+K omitted" note
+        rows = session.query(
+            MessageTraceStep.id, MessageTraceStep.message_group_id, MessageTraceStep.tool_name,
+            capped_tool_inputs(MessageTraceStep.tool_inputs).label('tool_inputs'),
+            MessageTraceStep.is_error, MessageTraceStep.finished_at,
+            func.left(MessageTraceStep.tool_output, MAX_RESULT_CHARS + 1).label('tool_output'),
+        ).join(ranked, ranked.c.id == MessageTraceStep.id).filter(
+            ranked.c.rank <= MAX_CALLS_PER_TURN,
+        ).order_by(ranked.c.message_group_id, ranked.c.rank).all()
+        totals = dict(session.query(ranked.c.message_group_id, func.count()).group_by(
+            ranked.c.message_group_id).all())
     except Exception as e:
         log.warning('history tool stubs: trace step lookup failed, replaying text only: %s', e)
         return {}
     per_group: Dict[int, List[dict]] = {}
     for row in rows:
-        steps = per_group.setdefault(row.message_group_id, [])
-        if len(steps) <= MAX_CALLS_PER_TURN:
-            steps.append(row._asdict())
-        else:
-            steps.append({'id': row.id})  # counted only, for the "+K omitted" note
+        per_group.setdefault(row.message_group_id, []).append(row._asdict())
+    for gid, steps in per_group.items():
+        steps.extend({'id': None} for _ in range(totals.get(gid, len(steps)) - len(steps)))
     return {gid: build_tool_stub_messages(steps) for gid, steps in per_group.items()}
 
 

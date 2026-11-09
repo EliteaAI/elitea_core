@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List
 
 STUB_ID_PREFIX = 'hist_'
 MAX_ARG_CHARS = 200
+MAX_ARG_KEYS = 20
 MAX_RESULT_CHARS = 200
 MAX_CALLS_PER_TURN = 10
 TRUNCATED = '…[truncated]'
@@ -41,7 +42,10 @@ def _result_text(step: dict) -> str:
     output = (step.get('tool_output') or '').strip()
     if step.get('is_error'):
         return 'error: ' + _short(output or 'tool call failed', MAX_RESULT_CHARS)
-    return _short(output, MAX_RESULT_CHARS) if output else 'ok'
+    if output:
+        return _short(output, MAX_RESULT_CHARS)
+    # An interrupted call has no output and no finish time; don't replay it as a success
+    return 'no result recorded (the call did not finish)' if 'finished_at' in step and not step['finished_at'] else 'ok'
 
 
 def build_tool_stub_messages(steps: Iterable[dict]) -> List[dict]:
@@ -49,7 +53,8 @@ def build_tool_stub_messages(steps: Iterable[dict]) -> List[dict]:
     steps = list(steps)
     if not steps:
         return []
-    kept, omitted = steps[:MAX_CALLS_PER_TURN], len(steps) - MAX_CALLS_PER_TURN
+    kept = [s for s in steps if s.get('id') is not None][:MAX_CALLS_PER_TURN]
+    omitted = len(steps) - len(kept)
     calls, results = [], []
     for step in kept:
         call_id = f"{STUB_ID_PREFIX}{step['id']}"

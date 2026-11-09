@@ -121,6 +121,15 @@ class TestBuildToolStubMessages:
     def test_empty_output_reads_ok(self, stubs):
         assert stubs.build_tool_stub_messages([_step(1, output='')])[1]['content'] == 'ok'
 
+    def test_unfinished_call_is_not_replayed_as_success(self, stubs):
+        # Interrupted/timed-out calls leave no output and no finish time; 'ok' would be the false success #7460 is about
+        step = {**_step(1, output=None), 'finished_at': None}
+        assert 'did not finish' in stubs.build_tool_stub_messages([step])[1]['content']
+
+    def test_finished_call_without_output_reads_ok(self, stubs):
+        step = {**_step(1, output=None), 'finished_at': '2026-11-06T10:00:00Z'}
+        assert stubs.build_tool_stub_messages([step])[1]['content'] == 'ok'
+
     def test_several_calls_share_one_assistant_message(self, stubs):
         msgs = stubs.build_tool_stub_messages([_step(1), _step(2, name='list_files')])
         assert [c['id'] for c in msgs[0]['tool_calls']] == ['hist_1', 'hist_2']
@@ -132,6 +141,14 @@ class TestBuildToolStubMessages:
         assert len(msgs[0]['tool_calls']) == cap
         assert len(msgs) == cap + 1
         assert '+4 more tool calls' in msgs[-1]['content']
+
+    def test_count_only_placeholders_from_the_sql_cap(self, stubs):
+        # The loader fetches only the first MAX_CALLS_PER_TURN rows in full and pads the rest as {'id': None}
+        cap = stubs.MAX_CALLS_PER_TURN
+        steps = [_step(i) for i in range(cap)] + [{'id': None}] * 3
+        msgs = stubs.build_tool_stub_messages(steps)
+        assert len(msgs[0]['tool_calls']) == cap
+        assert '+3 more tool calls' in msgs[-1]['content']
 
 
 class TestSelectStubGroupIds:
