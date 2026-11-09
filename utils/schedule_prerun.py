@@ -15,6 +15,8 @@ DISABLED_OWNER_LOST_ACCESS = 'owner_lost_access'
 NO_TOKEN = 'no token for the owner'
 VERSION_NOT_EXPANDED = 'version could not be expanded for the owner'
 PRERUN_FAILED = 'the pre-run check failed'
+# Outages neither count nor end a streak; a lost owner switches the row off at once
+UNCOUNTED_PRERUN = frozenset({ACCESS_CHECK_UNAVAILABLE, PRERUN_FAILED, OWNER_LOST_ACCESS})
 # Error types of application_tools.expand_toolkit_settings
 CREDENTIAL_REASONS = {
     'private_credential_not_found': 'private credential {} not found',
@@ -209,4 +211,8 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
         event = Types.schedule_disabled
     run = SimpleNamespace(id=run_id, reason=reason, conversation_id=None)
     notify_schedule_event(project_id, owner_id, event, schedule, run)  # logs its own failure, never raises
+    # A webhook fires on every delivery: a lasting failure switches it off at the third in a row (#7454)
+    if getattr(schedule, 'trigger_kind', None) == 'webhook' and reason not in UNCOUNTED_PRERUN:
+        from .schedule_runs import PAUSED_AFTER_PRERUN, PRERUN_REFUSED, count_refusal
+        count_refusal(project_id, schedule, run_id, reason, disabled_reason=PRERUN_REFUSED, text=PAUSED_AFTER_PRERUN)
     return PreRunResult(False, None, reason)

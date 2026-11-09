@@ -34,7 +34,7 @@ def hook(world, monkeypatch):  # noqa: F811 -- the fixture extends the imported 
         redacted_input=lambda text: text.replace("SECRET", "[REDACTED]")))
     load("utils/webhook_input.py", fresh=True)
     starter = sys.modules[f"{PKG}.utils.schedule_run_starter"]
-    state = types.SimpleNamespace(governed=False, answers=[], prepared=[])
+    state = types.SimpleNamespace(governed=False, answers=[], prepared=[], credential=None)
     mandate = types.ModuleType(f"{PKG}.utils.mandate_admission")
     mandate.prepare_schedule_run = lambda **kwargs: (
         state.prepared.append(kwargs), {"unattended": True} if state.governed else {})[1]
@@ -43,8 +43,12 @@ def hook(world, monkeypatch):  # noqa: F811 -- the fixture extends the imported 
     monkeypatch.setattr(starter, "execute_pipeline_via_predict_sio", lambda **kwargs: (
         real_predict(**kwargs), state.answers.pop(0) if state.answers else {"task_id": "task-1"})[1])
     monkeypatch.setattr(starter, "finish_trigger_run_refused", lambda *_args: None)
-    monkeypatch.setattr(starter, "run_prerun_check", lambda _project, schedule, _run: types.SimpleNamespace(
-        ok=True, owner_id=schedule.created_by))
+    prerun = sys.modules[f"{PKG}.utils.schedule_prerun"]
+    real_prerun = starter.run_prerun_check
+    monkeypatch.setattr(starter, "run_prerun_check", lambda project, schedule, run: (
+        real_prerun(project, schedule, run) if state.credential else
+        types.SimpleNamespace(ok=True, owner_id=schedule.created_by)))
+    monkeypatch.setattr(prerun, "check_owner_credentials", lambda _project, _schedule: state.credential)
     with world.edit_schedule() as row:
         row.trigger_kind, row.webhook_type, row.cron, row.timezone, row.next_run = "webhook", "github", None, None, None
     world.set_run_status("success")
@@ -104,3 +108,29 @@ def test_three_refused_deliveries_in_a_row_pause_the_webhook(hook):
         hook.deliver(REFUSED, governed=True)
     row = hook.world.schedule()
     assert (row.enabled, row.disabled_reason) == (False, "governance_refused")
+
+
+# A credential the entity points at was deleted: every delivery fails before predict, the third switches it off
+def test_three_deliveries_with_a_deleted_credential_switch_the_webhook_off_with_one_notice(hook):
+    hook.state.credential = "credential 9 not found"
+    runs = [hook.deliver() for _ in range(3)]
+    for run_id in runs:
+        run = _run(hook.world, run_id)
+        assert (run.status, run.reason, run.conversation_id) == ("failed", "credential 9 not found", None)
+    row = hook.world.schedule()
+    assert (row.enabled, row.disabled_reason) == (False, "prerun_refused")   # the door answers 409 webhook_disabled
+    assert hook.world.predictions == []
+    paused = [notice for notice in hook.world.notices if notice[1] == "schedule_disabled"]
+    assert paused == [(OWNER, "schedule_disabled",
+                       "3 runs in a row could not start (credential 9 not found). Fix it and resume.")]
+
+
+def test_an_admitted_delivery_ends_the_pre_run_streak(hook):
+    schedules = sys.modules[f"{PKG}.models.entity_schedule"]
+    hook.state.credential = "credential 9 not found"
+    hook.deliver(), hook.deliver()
+    hook.state.credential = None
+    hook.deliver()
+    with sys.modules["tools"].db.get_session(PROJECT_ID) as session:
+        streak = session.execute(sys.modules["sqlalchemy"].select(schedules.REFUSAL_STREAK)).scalar()
+    assert streak == 0 and hook.world.schedule().enabled

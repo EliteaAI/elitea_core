@@ -367,5 +367,5 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
             # and Test run are the owner's own runs
             if not manual:
                 count_refusal(project_id, loaded.schedule, run_id, reason, result.get('code'))
-        elif governance and not manual:  # a cron firing admitted under governance ends a streak (off writes nothing)
+        elif (governance or webhook) and not manual:  # an admitted start ends a streak; a webhook counts pre-run failures too
             end_refusal_streak(project_id, schedule_id)
