@@ -1000,7 +1000,10 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             # Get instructions: conversation instructions + user's default instructions from profile
             base_instructions = str(msg_group.conversation.instructions or '')
             user_default_instructions = msg_group.conversation.meta.get('default_instructions', '')
-            if user_default_instructions and base_instructions:
+            # New chats are seeded with the persona prompt in conversation.instructions; don't append it twice (#7468)
+            if user_default_instructions and user_default_instructions.strip() in base_instructions:
+                result['instructions'] = base_instructions
+            elif user_default_instructions and base_instructions:
                 result['instructions'] = f"{base_instructions}\n\n{user_default_instructions}"
             elif user_default_instructions:
                 result['instructions'] = user_default_instructions
