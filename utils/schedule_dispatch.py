@@ -28,13 +28,14 @@ def _slot_pool() -> threading.BoundedSemaphore:
         return _slots
 
 
-def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None, payload=None) -> None:
+def _start_owner_run(project_id: int, schedule_id: int, run_id: int, owner_request=None, payload=None,
+                     delivery=None) -> None:
     # Imported here, so the wrapper is needed: the starter map loads without the database layer
     from .schedule_run_starter import run_owner_schedule
     if payload is None:  # cron and Run now keep their exact pre-#7453 arguments
         run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request))
     else:
-        run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request), payload=payload)
+        run_owner_schedule(project_id, schedule_id, run_id, *_extra(owner_request), payload=payload, delivery=delivery)
 
 
 def _extra(owner_request) -> tuple:
@@ -76,11 +77,11 @@ def _run_starter(starter: Callable[..., None], project_id: int, schedule_id: int
 
 
 def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_id: int,
-                       owner_request=None, payload: bytes | None = None) -> bool:
+                       owner_request=None, payload: bytes | None = None, delivery: str | None = None) -> bool:
     """Start the run in a daemon thread and return at once; False when the type has no starter or no thread starts.
 
     ``owner_request``: the admission request of the owner's Run now or Test run (#7254), built by the run endpoint; it
-    stays in this process. ``payload``: a webhook delivery body, kept in memory only (#7453)."""
+    stays in this process. ``payload``: a webhook delivery body, kept in memory only (#7453); ``delivery``: its id."""
     starter = RUN_STARTERS.get(entity_type)
     if starter is None:
         return False
@@ -89,7 +90,7 @@ def start_schedule_run(entity_type: str, project_id: int, schedule_id: int, run_
         return False
     try:
         # A payload is passed only when present, so cron and Run now threads keep their exact arguments
-        extra = {} if payload is None else {'kwargs': {'payload': payload}}
+        extra = {} if payload is None else {'kwargs': {'payload': payload, 'delivery': delivery}}
         threading.Thread(target=_run_starter, args=(starter, project_id, schedule_id, run_id, *_extra(owner_request)),
                          daemon=True, **extra).start()
     except RuntimeError:  # no thread left in the process; the tick closes the run

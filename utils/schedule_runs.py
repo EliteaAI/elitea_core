@@ -37,6 +37,10 @@ OUTAGE_REFUSALS = frozenset({
 })
 GOVERNANCE_REFUSED = 'governance_refused'
 PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the cause and resume it.'
+# A webhook that cannot start shares the same streak (#7454)
+PRERUN_REFUSED = 'prerun_refused'
+# The streak is shared with governance refusals, so the text names both causes
+PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (last: {reason}). Fix it and resume.'
 
 
 class ScheduleDecisionForbidden(Exception):
@@ -124,7 +128,8 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
         session.commit()
 
 
-def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None) -> None:
+def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None,
+                  disabled_reason: str = GOVERNANCE_REFUSED, text: str = PAUSED_AFTER_REFUSALS) -> None:
     """One more governance refusal of a run of `schedule` (#7254), Run now and Test run included. The
     `REFUSAL_PAUSE_AFTER`-th in a row pauses a schedule that is on (`governance_refused`) in the same transaction
     and tells the owner once. An outage `code` (`OUTAGE_REFUSALS`) is not counted and leaves the streak as it is.
@@ -145,7 +150,7 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
                 update(EntitySchedule).where(EntitySchedule.id == schedule.id)
                 .values({REFUSAL_STREAK: streak,
                          EntitySchedule.enabled: case((pause, False), else_=EntitySchedule.enabled),
-                         EntitySchedule.disabled_reason: case((pause, GOVERNANCE_REFUSED),
+                         EntitySchedule.disabled_reason: case((pause, disabled_reason),
                                                               else_=EntitySchedule.disabled_reason)})
                 .returning(REFUSAL_STREAK, EntitySchedule.enabled, EntitySchedule.disabled_reason)
             ).one_or_none()
@@ -153,13 +158,13 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
         # the streak reaches REFUSAL_PAUSE_AFTER once until it ends (an admitted start or a resume sets it to 0), so at
         # exactly that count an off schedule with this reason was paused by this statement
         paused = row is not None and row[0] == REFUSAL_PAUSE_AFTER and row[1] is False \
-            and row[2] == GOVERNANCE_REFUSED
+            and row[2] == disabled_reason
     except Exception:  # noqa: BLE001 -- the run is already refused and ended; only the streak is lost
         log.exception('Schedule %s: cannot count the governance refusal of run %s', schedule.id, run_id)
         return
     if paused:
-        text = PAUSED_AFTER_REFUSALS.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
-        run = SimpleNamespace(id=run_id, reason=text, conversation_id=None)
+        notice = text.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
+        run = SimpleNamespace(id=run_id, reason=notice, conversation_id=None)
         notify_schedule_event(project_id, schedule.created_by, Types.schedule_disabled, schedule, run)
 
 
