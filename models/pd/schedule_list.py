@@ -10,7 +10,7 @@ DbId = Annotated[int, Field(ge=1, le=MAX_DB_ID)]
 EntityType = Literal['agent', 'pipeline']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
 RunTrigger = Literal['cron', 'manual', 'test', 'webhook']
-SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled']
+SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled', 'last_delivery_at']
 SortOrder = Literal['asc', 'desc']
 
 

@@ -265,3 +265,15 @@ def test_7011_r5_1_sort_by_a_column_in_both_directions(env, sort_by, sort_order,
     _add(env, name="none")
     _add(env, name="early", next_run=DAY)
     assert _names(_list(env, OWNER, sort_by=sort_by, sort_order=sort_order)) == expected
+
+
+# #7454 follow-up: the Webhooks page lists the most recent delivery first; a webhook never delivered goes last
+@pytest.mark.parametrize("sort_order, expected", [
+    ("desc", ["recent", "older", "never"]),
+    ("asc", ["older", "recent", "never"]),
+])
+def test_sort_by_last_delivery_keeps_never_delivered_last(env, sort_order, expected):
+    _add(env, name="older", last_delivery_at=DAY)
+    _add(env, name="never")
+    _add(env, name="recent", last_delivery_at=DAY + datetime.timedelta(hours=5))
+    assert _names(_list(env, OWNER, sort_by="last_delivery_at", sort_order=sort_order)) == expected

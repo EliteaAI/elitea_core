@@ -8,6 +8,7 @@ from ..models.entity_schedule import EntityScheduleRun as Run
 SORT_COLUMNS = {
     "name": S.name, "entity_name": Application.name, "entity_type": S.entity_type,
     "next_run": S.next_run, "last_run": S.last_run, "enabled": S.enabled,
+    "last_delivery_at": S.last_delivery_at,  # webhooks; cron rows have none and sort last
 }
 
 
