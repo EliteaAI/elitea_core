@@ -88,7 +88,8 @@ def schema_module(isolated_sys_modules, monkeypatch):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, "pylon.core.tools", types.SimpleNamespace(log=types.SimpleNamespace()))
     monkeypatch.setitem(sys.modules, "tools", types.SimpleNamespace(db=None))
-    spec = importlib.util.spec_from_file_location("toolkit_index_ddl_schema", os.path.join(PLUGIN_ROOT, "utils", "toolkit_index_schedule_ddl.py"))
+    spec = importlib.util.spec_from_file_location(
+        "toolkit_index_ddl_schema", os.path.join(PLUGIN_ROOT, "utils", "toolkit_index_schedule_ddl.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

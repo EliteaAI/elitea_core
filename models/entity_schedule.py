@@ -39,7 +39,9 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     """
     __tablename__ = 'entity_schedules'
     __table_args__ = (
-        CheckConstraint("entity_type IN ('agent', 'pipeline', 'toolkit_index')", name='ck_entity_schedules_entity_type'),
+        CheckConstraint(
+            "entity_type IN ('agent', 'pipeline', 'toolkit_index')", name='ck_entity_schedules_entity_type'
+        ),
         CheckConstraint(
             "(entity_type <> 'toolkit_index' AND application_id IS NOT NULL AND toolkit_id IS NULL"
             " AND index_name IS NULL)"
