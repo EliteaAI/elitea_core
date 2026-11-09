@@ -1,12 +1,15 @@
 """Request and response of the Build with AI schedule draft endpoint (EL-7011, US-21)."""
 import json
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, constr, field_validator
 
 
 PROMPT_MAX_LENGTH = 4000
+DB_INT_MAX = 2**31 - 1  # the database integer range; this module loads without entity_schedule, which holds MAX_ID
+INDEX_NAME_MAX = 256  # the entity_schedules.index_name column width
+DbId = Annotated[int, Field(ge=1, le=DB_INT_MAX)]
 VARIABLES_MAX_COUNT = 50
 VARIABLES_MAX_SIZE = 8000  # characters of the JSON text
 
@@ -17,14 +20,25 @@ class LockedEntity(BaseModel):
     application_id: int = Field(description="Id of the agent or pipeline", examples=[12])
 
 
+class LockedIndex(BaseModel):
+    """The toolkit index the form was opened from."""
+    entity_type: Literal['toolkit_index'] = Field(description="Kind of the entity", examples=["toolkit_index"])
+    toolkit_id: DbId = Field(description="Id of the toolkit", examples=[7])
+    index_name: str = Field(min_length=1, max_length=INDEX_NAME_MAX, description="Name of the index",
+                            examples=["docs"])
+
+
 class CurrentForm(BaseModel):
     """Current form values; a known key with the wrong type fails, other keys pass through."""
     model_config = ConfigDict(extra='allow')
 
     name: str | None = Field(None, description='Schedule name', examples=['Daily report'])
     description: str | None = Field(None, description='Schedule description', examples=['Sends the daily report'])
-    entity_type: str | None = Field(None, description='Entity type: agent or pipeline', examples=['agent'])
+    entity_type: str | None = Field(None, description='Entity type: agent, pipeline or toolkit_index', examples=['agent'])
     application_id: StrictInt | None = Field(None, description='Id of the agent or pipeline', examples=[12])
+    toolkit_id: StrictInt | None = Field(None, description='Id of the toolkit of a Toolkit Index', examples=[7])
+    index_name: str | None = Field(None, max_length=INDEX_NAME_MAX, description='Name of the index of a Toolkit Index',
+                                   examples=['docs'])
     version_id: StrictInt | None = Field(None, description='Id of the entity version', examples=[34])
     run_mode: str | None = Field(None, description='How the entity runs', examples=['conversation'])
     prompt: str | None = Field(None, max_length=PROMPT_MAX_LENGTH, description='Prompt sent on each run', examples=['Summarize yesterday'])
@@ -34,7 +48,7 @@ class CurrentForm(BaseModel):
     expires_at: str | None = Field(None, description='Last day of the schedule, as a date', examples=['2026-12-31'])
     approval_rule: str | None = Field(None, description='Approval rule for risky steps', examples=['ask'])
 
-    @field_validator('application_id', 'version_id', mode='before')
+    @field_validator('application_id', 'toolkit_id', 'version_id', mode='before')
     @classmethod
     def empty_entity_is_unset(cls, value):
         # EL-7313: the form's empty value for an unchosen entity or version is '', not null
@@ -58,18 +72,21 @@ class GenerateScheduleDraftRequest(BaseModel):
         description="The user's description of the schedule", examples=["Run the report agent every weekday at 9"])
     current: CurrentForm = Field(default_factory=CurrentForm, description="Current form values; empty for a new schedule",
                           examples=[{"name": "Daily report", "cron": "0 9 * * 1-5"}])
-    locked_entity: LockedEntity | None = Field(
+    locked_entity: LockedEntity | LockedIndex | None = Field(
         default=None, description="Entity the form is fixed to; the draft keeps it",
-        examples=[{"entity_type": "agent", "application_id": 12}])
+        examples=[{"entity_type": "agent", "application_id": 12},
+                  {"entity_type": "toolkit_index", "toolkit_id": 7, "index_name": "docs"}])
     timezone: str | None = Field(default=None, description="The browser time zone", examples=["Europe/Warsaw"])
 
 
 class ScheduleDraft(BaseModel):
-    """The twelve form fields; an unusable field is null (variables: empty list)."""
+    """The form fields; an unusable field is null (variables: empty list)."""
     name: str | None = None
     description: str | None = None
     entity_type: str | None = None
     application_id: int | None = None
+    toolkit_id: DbId | None = None
+    index_name: str | None = None
     version_id: int | None = None
     run_mode: str | None = None
     prompt: str | None = None
