@@ -23,6 +23,19 @@ class ChatHistory(BaseModel):
     role: str
     content: str | list
     additional_kwargs: Optional[Dict[str, Any]] = {}
+    # Replayed tool-call stubs (#7460); omitted from dumps when unset so plain turns stay unchanged
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+
+    def model_dump(self, **kwargs):
+        data = super().model_dump(**kwargs)
+        for key in ('tool_calls', 'tool_call_id'):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+    def dict(self, **kwargs):
+        return self.model_dump(**kwargs)
 
 
 ChatHistoryMessage = ChatHistory

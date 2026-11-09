@@ -654,6 +654,31 @@
         "minimum": 1
       }
     },
+    "history_tool_stubs_enabled": {
+      "type": "boolean",
+      "title": "Replay Tool Calls in Chat History",
+      "description": "Replay the tool calls of the last N assistant turns in chat history as short tool call and result records (arguments and results truncated). Stops models from claiming an action succeeded without calling the tool. When off, only the final reply text is replayed.",
+      "path": "chat_history.tool_call_stubs.enabled",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
+    "history_tool_stubs_last_n": {
+      "type": "integer",
+      "title": "Replayed Tool Calls: Last N Turns",
+      "description": "How many of the most recent assistant turns get their tool calls replayed. Allowed range: 1–20.",
+      "path": "chat_history.tool_call_stubs.last_n",
+      "section": "runtime",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 20,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20
+      }
+    },
     "cancel_on_timeout": {
       "type": "boolean",
       "title": "Cancel Task On Timeout",

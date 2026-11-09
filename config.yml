@@ -20,6 +20,12 @@ max_published_versions_per_agent: 3
 # Stop the worker when a blocking predict exceeds await_task_timeout
 cancel_on_timeout: true
 
+chat_history:
+  # Replay recent turns' tool calls as compact tool_call/tool_result stubs so models don't fake tool success (#7460)
+  tool_call_stubs:
+    enabled: true
+    last_n: 3
+
 # Bounds for expanding sub-agents before a predict; what is cut off is fetched by the runtime
 predict:
   subagent_prefetch:
