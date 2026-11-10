@@ -8,6 +8,7 @@ Run via:
 """
 import sys
 import types
+import uuid
 from datetime import UTC, datetime
 from unittest import mock
 
@@ -27,6 +28,10 @@ AGENT_KEYS = [
 TOOLKIT_ID = 7
 TOOLKIT_NAME = 'Docs toolkit'
 INDEX_SCHEDULED = 'This index already has a schedule'
+
+
+def schedule_key(number):
+    return str(uuid.UUID(int=number))
 
 
 def index_item(**overrides):
@@ -189,7 +194,7 @@ def test_import_creates_a_paused_index_schedule_owned_by_the_admin_with_the_tool
 
 
 def test_import_keeps_the_key_of_a_new_index_schedule(env):
-    key = '0b5f4f6e-8e59-4b0e-9f3a-5f1c2f0f9a11'
+    key = schedule_key(11)
     report = env.import_items(index_item(key=key), schema_version=2)
     assert len(report['created']) == 1
     assert [str(row.uuid) for row in env.index_rows()] == [key]
@@ -253,15 +258,15 @@ def test_import_does_not_look_up_a_toolkit_name_as_an_agent_name(env):
 
 def test_import_fails_an_item_for_an_index_that_already_has_a_schedule_under_another_key(env):
     env.seed_index()
-    report = env.import_items(index_item(key='0b5f4f6e-8e59-4b0e-9f3a-5f1c2f0f9a22'), schema_version=2)
+    report = env.import_items(index_item(key=schedule_key(22)), schema_version=2)
     assert report['failed'] == [{'name': 'Docs refresh', 'reason': INDEX_SCHEDULED}]
     assert len(env.index_rows()) == 1
 
 
 def test_import_creates_one_schedule_for_two_new_items_of_the_same_index(env):
     report = env.import_items(
-        index_item(key='0b5f4f6e-8e59-4b0e-9f3a-5f1c2f0f9a31'),
-        index_item(key='0b5f4f6e-8e59-4b0e-9f3a-5f1c2f0f9a32', name='Second'),
+        index_item(key=schedule_key(31)),
+        index_item(key=schedule_key(32), name='Second'),
         schema_version=2,
     )
     assert len(report['created']) == 1
