@@ -57,6 +57,7 @@ from ..utils.create_utils import create_application, create_version
 from ..utils.webhook_secrets import application_webhook_uuids, drop_secrets_of
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
+from ..utils.conversation_starters_utils import import_starters_errors
 from ..utils.skill_utils import (
     detach_skills_for_entity_versions, delete_skill, SkillNotFoundError, SkillPublishedError,
 )
@@ -1226,6 +1227,11 @@ class RPC:
 
                 payload['project_id'] = project_id
                 payload['user_id'] = author_id
+
+                starters_errors = import_starters_errors(payload.get('name', ''), versions)
+                if starters_errors:
+                    errors.extend(starters_errors)
+                    return '', errors
 
                 application_data = ApplicationImportModel.model_validate(payload)
             except ValidationError as e:

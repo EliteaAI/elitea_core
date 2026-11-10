@@ -33,6 +33,7 @@ from ..utils.attachments import (
 )
 from ..utils.token_limit_continuation import trim_continuation_overlap
 from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
+from ..utils.error_text import provider_error_answer
 from ..utils.schedule_runs import CHILD_PAUSE_REASON, finish_schedule_run, pause_schedule_run, run_failure_reason
 from ..utils.run_snapshot import drop_snapshot
 from ..utils.run_status import RunStatus, build_notice, send_notice
@@ -316,11 +317,14 @@ class Event:
                 if run_id:
                     metadata = payload['response_metadata']
                     is_error = metadata.get('is_error')
+                    error = metadata.get('error')
+                    if not is_error and (answer_error := provider_error_answer(content)):
+                        is_error, error = True, answer_error
                     reason = None
                     if is_error:
-                        # BUG-37: the run keeps one short sentence; the full error stays in the server log
-                        log.warning('chat_message_stream_end: schedule run %s failed: %s', run_id, metadata.get('error'))
-                        reason = run_failure_reason(metadata.get('error'))
+                        # the run keeps one short sentence; the full error stays in the server log
+                        log.warning('chat_message_stream_end: schedule run %s failed: %s', run_id, error)
+                        reason = run_failure_reason(error)
                     schedule_end = (run_id, 'failed' if is_error else 'success', reason, msg_group.conversation.id,
                                     msg_group.conversation.author_id)
         if run_notice is not None:
