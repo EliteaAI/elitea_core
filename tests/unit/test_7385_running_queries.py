@@ -1,11 +1,12 @@
-"""EL-7385 B1/B3: the two queries that find running chats, run on SQLite over stand-in models.
+"""EL-7385: the queries that find running chats, run on SQLite over stand-in models.
 
-Contract under test: utils/running_conversations.py (the list spinner field, the end of rows whose run
-never started) and run_snapshot.streaming_groups (which groups chat_enter_room catches a client up on).
-The stand-in table has the real column names, so the compiled SQL is what production runs.
+Contract under test: utils/running_conversations.py (the list spinner field, and the admin cleanup of rows
+whose run never started). The stand-in table has the real column names, so the compiled SQL is what
+production runs.
 """
 import sys
 import types
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import pytest
@@ -32,102 +33,161 @@ class ConversationMessageGroup(Base):
 
 NOW = datetime.utcnow()
 OLD = NOW - timedelta(hours=2)
+ANCIENT = NOW - timedelta(days=30)
 
 
 @pytest.fixture
-def modules(monkeypatch, isolated_sys_modules):
-    # Earlier suites leave sqlalchemy stand-ins behind; the helper lazily imports sqlalchemy.orm
+def running(monkeypatch, isolated_sys_modules):
+    # Earlier suites leave sqlalchemy stand-ins behind
     identity.fresh_sqlalchemy()
-    for name in ("plugins.elitea_core.models",):
-        package = types.ModuleType(name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, name, package)
+    package = types.ModuleType("plugins.elitea_core.models")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models", package)
     model_module = types.ModuleType("plugins.elitea_core.models.message_group")
     model_module.ConversationMessageGroup = ConversationMessageGroup
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.message_group", model_module)
-    load("utils/chat_constants.py", fresh=True)
-    return load("utils/running_conversations.py", fresh=True), load("utils/run_snapshot.py", fresh=True)
+    return load("utils/running_conversations.py", fresh=True)
+
+
+ROWS = [
+    # conversation 1: answered, then a second question still generating
+    dict(id=1, uuid="q1", conversation_id=1), dict(id=2, uuid="a1", conversation_id=1, reply_to_id=1),
+    dict(id=3, uuid="q2", conversation_id=1),
+    dict(id=4, uuid="a2", conversation_id=1, reply_to_id=3, is_streaming=True, task_id="t-1"),
+    # conversation 2: finished
+    dict(id=5, uuid="q3", conversation_id=2), dict(id=6, uuid="a3", conversation_id=2, reply_to_id=5),
+    # conversation 3: two runs at once (two participants answering)
+    dict(id=7, uuid="q4", conversation_id=3),
+    dict(id=8, uuid="a4", conversation_id=3, reply_to_id=7, is_streaming=True, task_id="t-2"),
+    # just sent: no task id yet, still starting
+    dict(id=9, uuid="a5", conversation_id=3, reply_to_id=7, is_streaming=True, created_at=NOW),
+    # conversation 4: a send that broke before its task started, two hours ago
+    dict(id=10, uuid="q6", conversation_id=4),
+    dict(id=11, uuid="a6", conversation_id=4, reply_to_id=10, is_streaming=True),
+    # conversation 5: the same, a month ago
+    dict(id=12, uuid="q7", conversation_id=5),
+    dict(id=13, uuid="a7", conversation_id=5, reply_to_id=12, is_streaming=True, created_at=ANCIENT),
+]
 
 
 @pytest.fixture
-def session():
+def engine():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine) as s:
-        rows = [
-            # conversation 1: answered, then a second question still generating
-            dict(id=1, uuid="q1", conversation_id=1), dict(id=2, uuid="a1", conversation_id=1, reply_to_id=1),
-            dict(id=3, uuid="q2", conversation_id=1),
-            dict(id=4, uuid="a2", conversation_id=1, reply_to_id=3, is_streaming=True, task_id="t-1"),
-            # conversation 2: finished
-            dict(id=5, uuid="q3", conversation_id=2), dict(id=6, uuid="a3", conversation_id=2, reply_to_id=5),
-            # conversation 3: two runs at once (two participants answering)
-            dict(id=7, uuid="q4", conversation_id=3),
-            dict(id=8, uuid="a4", conversation_id=3, reply_to_id=7, is_streaming=True, task_id="t-2"),
-            # just sent: no task id yet, still starting
-            dict(id=9, uuid="a5", conversation_id=3, reply_to_id=7, is_streaming=True, created_at=NOW),
-            # conversation 4: a send that broke before its task started, months ago
-            dict(id=10, uuid="q6", conversation_id=4),
-            dict(id=11, uuid="a6", conversation_id=4, reply_to_id=10, is_streaming=True),
-        ]
         s.add_all(ConversationMessageGroup(**{
             "is_streaming": False, "reply_to_id": None, "task_id": None, "created_at": OLD, **r,
-        }) for r in rows)
+        }) for r in ROWS)
         s.commit()
+    return engine
+
+
+@pytest.fixture
+def session(engine):
+    with Session(engine) as s:
         yield s
+
+
+def streaming(session, row_id):
+    return session.get(ConversationMessageGroup, row_id).is_streaming
 
 
 class TestRunningConversationIds:
     @staticmethod
-    def test_only_conversations_with_a_streaming_group(modules, session):
-        running, _ = modules
-        assert running.running_conversation_ids(session, [1, 2, 3, 4, 99]) == {1, 3}
+    def test_only_conversations_with_a_streaming_group(running, session):
+        assert running.running_conversation_ids(session, [1, 2, 3, 4, 5, 99]) == {1, 3}
 
     @staticmethod
-    def test_only_the_listed_page_is_looked_at(modules, session):
-        running, _ = modules
+    def test_only_the_listed_page_is_looked_at(running, session):
         assert running.running_conversation_ids(session, [2, 3]) == {3}
 
     @staticmethod
     @pytest.mark.parametrize("ids", [[], None, [None]])
-    def test_an_empty_page_runs_no_query(modules, ids):
-        running, _ = modules
-
+    def test_an_empty_page_runs_no_query(running, ids):
         class NoQuery:
             def query(self, *_):
                 raise AssertionError("queried")
 
         assert running.running_conversation_ids(NoQuery(), ids) == set()
 
-
-class TestNeverStarted:
     @staticmethod
-    def test_a_run_that_never_started_is_not_running(modules, session):
-        running, snapshot = modules
-        assert running.running_conversation_ids(session, [4]) == set()
-        assert snapshot.streaming_groups(session, 4) == []
+    def test_a_run_that_never_started_is_not_running(running, session):
+        assert running.running_conversation_ids(session, [4, 5]) == set()
 
+
+class TestCloseNeverStarted:
     @staticmethod
-    def test_it_is_ended_and_live_runs_are_left_alone(modules, session):
-        running, _ = modules
+    def test_one_conversation_and_live_runs_are_left_alone(running, session):
         ended = running.close_never_started_runs(session, 4)
         assert [row.uuid for row in ended] == ["a6"]
-        assert session.get(ConversationMessageGroup, 11).is_streaming is False
+        assert streaming(session, 11) is False
         # A run with a task, and one still inside its start grace, keep streaming
         assert running.close_never_started_runs(session, 3) == []
         assert running.close_never_started_runs(session, 1) == []
-        assert session.get(ConversationMessageGroup, 9).is_streaming is True
-        assert session.get(ConversationMessageGroup, 4).is_streaming is True
-
-
-class TestStreamingGroups:
-    @staticmethod
-    def test_streaming_answers_with_their_question(modules, session):
-        _, snapshot = modules
-        assert snapshot.streaming_groups(session, 1) == [("a2", "q2")]
-        assert sorted(snapshot.streaming_groups(session, 3)) == [("a4", "q4"), ("a5", "q4")]
+        assert streaming(session, 9) is True and streaming(session, 4) is True
 
     @staticmethod
-    def test_a_finished_conversation_has_none(modules, session):
-        _, snapshot = modules
-        assert snapshot.streaming_groups(session, 2) == []
+    def test_the_whole_project_without_a_conversation(running, session):
+        ended = running.close_never_started_runs(session)
+        assert sorted(row.uuid for row in ended) == ["a6", "a7"]
+        assert streaming(session, 9) is True and streaming(session, 8) is True
+
+    @staticmethod
+    def test_a_longer_grace_spares_younger_rows(running, session):
+        ended = running.close_never_started_runs(session, None, timedelta(hours=24))
+        assert [row.uuid for row in ended] == ["a7"]
+        assert streaming(session, 11) is True
+
+    @staticmethod
+    def test_count_matches_what_close_would_end(running, session):
+        assert running.count_never_started_runs(session) == 2
+        assert running.count_never_started_runs(session, timedelta(hours=24)) == 1
+        # Counting writes nothing
+        assert streaming(session, 11) is True and streaming(session, 13) is True
+
+
+class TestCleanupHours:
+    @staticmethod
+    @pytest.mark.parametrize("param, hours", [
+        (None, 24), ("", 24), ("project_id=all", 24),
+        ("project_id=all;older_than_hours=48", 48), (" older_than_hours = 6 ;dry_run=false", 6),
+    ])
+    def test_hours_from_the_param(running, param, hours):
+        assert running.cleanup_hours(param) == hours
+
+    @staticmethod
+    @pytest.mark.parametrize("param", ["older_than_hours=0", "older_than_hours=-1", "older_than_hours=x"])
+    def test_a_bad_value_is_refused(running, param):
+        assert running.cleanup_hours(param) is None
+
+
+class TestCleanupRun:
+    @staticmethod
+    def sessions(engine, fail_for=()):
+        @contextmanager
+        def get_session(pid):
+            if pid in fail_for:
+                raise RuntimeError("schema missing")
+            with Session(engine) as s:
+                yield s
+        return get_session
+
+    def test_a_dry_run_counts_and_writes_nothing(self, running, engine, session):
+        result = running.run_never_started_cleanup(self.sessions(engine), [1], 24, dry_run=True)
+        assert result == {
+            "closed": 1, "projects": {1: 1}, "failed": 0, "failed_projects": [],
+            "older_than_hours": 24, "dry_run": True,
+        }
+        assert streaming(session, 13) is True
+
+    def test_a_real_run_ends_the_rows_past_the_grace(self, running, engine, session):
+        result = running.run_never_started_cleanup(self.sessions(engine), [1], 1, dry_run=False)
+        assert result["closed"] == 2 and result["dry_run"] is False
+        session.expire_all()
+        assert streaming(session, 11) is False and streaming(session, 13) is False
+        assert streaming(session, 9) is True
+
+    def test_a_failing_project_does_not_stop_the_others(self, running, engine):
+        result = running.run_never_started_cleanup(self.sessions(engine, fail_for={7}), [7, 1], 24, dry_run=True)
+        assert result["failed_projects"] == [{"project_id": 7}]
+        assert result["projects"] == {1: 1}

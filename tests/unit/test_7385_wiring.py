@@ -2,13 +2,14 @@
 
 Each assertion pins a detail that silently breaks the feature when it regresses:
 
-* chat_enter_room sends the catch-up only after the join succeeded, to the joining sid only, and never
-  before the access check (a denied user must not get a private chat's text);
-* every response shape of the sidebar list sets has_running_task (a missed shape shows no spinner);
-* the stop / timeout paths, which end a run outside chat_message_stream_end, drop the snapshot and
-  announce "stopped"; Stop reads the audience before its delete branch removes the row;
-* stream_response keeps the text before the empty-room return, the very case it exists for;
-* the chat name also reaches the author's own room.
+* chat_enter_room stays read-only: it joins the room and writes nothing (two tabs join at once);
+* stream_response does no per-chunk work for a live-text catch-up (dropped after review);
+* every response shape of the sidebar list sets has_running_task (a missed shape shows no spinner),
+  and the partial index it reads is declared;
+* the stop / timeout paths, which end a run outside chat_message_stream_end, announce "stopped";
+  Stop reads the audience before its delete branch removes the row;
+* the chat name also reaches the author's own room;
+* rows whose run never started are ended by an admin task, registered and unregistered.
 """
 import pathlib
 
@@ -27,18 +28,18 @@ def _between(text, start, end):
 
 class TestEnterRoom:
     @staticmethod
-    def test_catch_up_runs_after_the_access_check_and_the_join(source):
+    def test_room_entry_is_read_only(source):
         handler = _between(source("sio/all.py"), "def enter_room(", "@web.sio(SioEvents.test_toolkit_enter_room)")
-        check = handler.index("if not can_join_room(")
-        join = handler.index("self.context.sio.enter_room(sid, get_chat_room(conversation_uuid))")
-        catch_up = handler.index("_send_run_snapshots(self, sid, parsed.project_id, conversation.id, conversation_uuid)")
-        assert check < join < catch_up
+        assert handler.index("if not can_join_room(") < handler.index(
+            "self.context.sio.enter_room(sid, get_chat_room(conversation_uuid))")
+        for write in ("commit(", "close_never_started_runs", "emit("):
+            assert write not in handler
 
     @staticmethod
-    def test_catch_up_goes_to_the_joining_sid_only(source):
-        sender = _between(source("sio/all.py"), "def _send_run_snapshots(", "class SIO:")
-        assert "to=sid" in sender
-        assert "room=" not in sender
+    def test_no_live_text_catch_up(source):
+        assert "run_snapshot" not in source("sio/all.py")
+        stream = _between(source("methods/stream.py"), "def stream_response(", "def process_index_data_status_event(")
+        assert "snapshot" not in stream
 
 
 class TestListField:
@@ -58,14 +59,20 @@ class TestListField:
         assert '"has_running_task": conv.id in running_ids,' in rpc
         assert "has_running_task: bool = False" in source("models/pd/conversation.py")
 
+    @staticmethod
+    def test_the_list_query_has_its_partial_index(source):
+        model = source("models/message_group.py")
+        assert "Index('ix_chat_message_group_streaming', 'conversation_id', postgresql_where=text('is_streaming'))" in model
+        assert ("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chat_message_group_streaming ON {pid}.chat_message_group "
+                "(conversation_id) WHERE is_streaming;") in source("db_migrations.txt")
+
 
 class TestRunEnds:
     @staticmethod
-    def test_stop_drops_the_snapshot_and_announces_stopped(source):
+    def test_stop_announces_stopped(source):
         stop = _between(source("rpc/chat_all.py"), "def chat_stop_task(", 'return {"success": True}')
         read = stop.index("run_notice = build_notice(session, project_id, msg_group, RunStatus.stopped)")
         assert read < stop.index("session.delete(msg_group)")
-        assert "drop_snapshot(self.get_redis_client(), str(message_group_uuid))" in stop
         assert "send_notice(self.context.sio, run_notice)" in stop
         # Announced after the session closes, so no emit runs under the row lock
         assert stop.index("send_notice(") > stop.index("session.commit()")
@@ -77,24 +84,13 @@ class TestRunEnds:
         assert "self._end_chat_run(session, project_id, response_msg, RunStatus.stopped)" in timeout
         assert chat_all.count("project_id=parsed.project_id,\n") >= 2
         end = _between(chat_all, "def _end_chat_run(", "def _refuse_schedule_decision(")
-        assert "drop_snapshot(" in end and "send_notice(" in end
+        assert "send_notice(" in end
 
     @staticmethod
     def test_end_helper_is_on_the_module(source):
         # Pylon puts only @web.method / proxy-named @web.rpc methods on the Module that `self` is
         chat_all = source("rpc/chat_all.py")
         assert "    @web.method()\n    def _end_chat_run(" in chat_all
-
-
-class TestStreamResponse:
-    @staticmethod
-    def test_text_is_kept_before_the_empty_room_return(source):
-        stream = _between(source("methods/stream.py"), "def stream_response(", "def _keep_run_snapshot(")
-        assert stream.index("self._keep_run_snapshot(payload)") < stream.index("get_participants('/', room)")
-
-    @staticmethod
-    def test_keep_helper_is_on_the_module(source):
-        assert "    @web.method()\n    def _keep_run_snapshot(" in source("methods/stream.py")
 
 
 class TestNaming:
@@ -118,7 +114,8 @@ class TestNeverStartedRuns:
         assert "'applications_predict_task_id'" in agent
 
     @staticmethod
-    def test_room_entry_ends_never_started_runs_before_the_catch_up(source):
-        sender = _between(source("sio/all.py"), "def _send_run_snapshots(", "class SIO:")
-        assert sender.index("close_never_started_runs(session, conversation_id)") < sender.index(
-            "streaming_groups(session, conversation_id)")
+    def test_cleanup_is_an_admin_task(source):
+        assert "    @web.method()\n    def close_never_started_chat_runs(" in source("methods/admin_tasks.py")
+        module = source("module.py")
+        assert '"close_never_started_chat_runs", self.close_never_started_chat_runs,\n                group="R-2.0.9",' in module
+        assert module.count('"close_never_started_chat_runs", self.close_never_started_chat_runs') == 2

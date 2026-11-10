@@ -26,7 +26,6 @@ from ..sio.all import get_event_room, SioEvents
 from ..utils.application_tools import handle_index_data_failure, ensure_index_data_has_task_id, \
     clean_up_schedule_in_toolkit
 from ..utils.parallel_hitl import decision_ack_key
-from ..utils.run_snapshot import append_chunk, drop_runs, finished_run_ids
 
 
 class Method:
@@ -118,10 +117,6 @@ class Method:
                 content=payload.get('content', {}),
             )
 
-        # Before the empty-room check: the text must be kept exactly when nobody is watching (EL-7385)
-        if sio_event == SioEvents.chat_predict.value:
-            self._keep_run_snapshot(payload)
-
         room = get_event_room(sio_event, stream_id)
         force_emit = payload.get('type') in {
             "mcp_authorization_required", "parallel_hitl_decision_ack",
@@ -136,31 +131,6 @@ class Method:
             data=payload,
             room=room,
         )
-
-    @web.method()
-    def _keep_run_snapshot(self, payload):
-        """Keep the live text of a chat answer for clients that join mid-run; never blocks the emit."""
-        frame_type = payload.get('type')
-        if frame_type not in ('agent_llm_chunk', 'agent_llm_end'):
-            return
-        message_id = payload.get('message_id')
-        if not message_id:
-            return
-        try:
-            client = self.get_redis_client()
-            if frame_type == 'agent_llm_chunk':
-                seq = append_chunk(client, message_id, payload)
-                if seq is not None:
-                    # The client skips a live chunk already covered by the snapshot it applied
-                    response_metadata = payload.get('response_metadata')
-                    if not isinstance(response_metadata, dict):
-                        response_metadata = {}
-                        payload['response_metadata'] = response_metadata
-                    response_metadata['snapshot_seq'] = seq
-            else:
-                drop_runs(client, message_id, finished_run_ids(payload))
-        except Exception as e:  # pylint: disable=W0703
-            log.warning('Run snapshot not updated for message %s: %s', message_id, e)
 
     @web.method()
     def process_index_data_status_event(self, response_metadata):

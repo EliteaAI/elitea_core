@@ -35,7 +35,6 @@ from ..utils.token_limit_continuation import trim_continuation_overlap
 from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
 from ..utils.error_text import provider_error_answer
 from ..utils.schedule_runs import CHILD_PAUSE_REASON, finish_schedule_run, pause_schedule_run, run_failure_reason
-from ..utils.run_snapshot import drop_snapshot
 from ..utils.run_status import RunStatus, build_notice, send_notice
 
 from ..utils.sio_utils import SioEvents
@@ -44,14 +43,6 @@ from ..utils.sio_utils import SioEvents
 def _schedule_run_id(conversation):
     """The schedule run a conversation belongs to (EL-7011); None for every other chat."""
     return (conversation.meta or {}).get('schedule_run_id') if conversation else None
-
-
-def _drop_run_snapshot(module, message_id) -> None:
-    """The run's text is persisted now; the live copy only served clients that joined mid-run (EL-7385)."""
-    try:
-        drop_snapshot(module.get_redis_client(), message_id)
-    except Exception as e:  # pylint: disable=W0703 -- the TTL removes it anyway
-        log.warning('Run snapshot of message %s not dropped: %s', message_id, e)
 
 
 class Event:
@@ -327,9 +318,7 @@ class Event:
                         reason = run_failure_reason(error)
                     schedule_end = (run_id, 'failed' if is_error else 'success', reason, msg_group.conversation.id,
                                     msg_group.conversation.author_id)
-        if run_notice is not None:
-            _drop_run_snapshot(self, payload['message_id'])
-            send_notice(self.context.sio, run_notice)
+        send_notice(self.context.sio, run_notice)
         if schedule_end:
             try:
                 finish_schedule_run(chat_project_id, *schedule_end[:4], author_id=schedule_end[4])

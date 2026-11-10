@@ -2,6 +2,14 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.9 — Keep chat runs going when switching chats (EL-7385)
+# Run for every existing project schema {pid} (e.g. p_1, p_2, …). New projects get the index via create_all().
+# The chat list reads has_running_task on every load; the partial index holds only the few streaming rows.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chat_message_group_streaming ON {pid}.chat_message_group (conversation_id) WHERE is_streaming;
+# End the response rows left "streaming" by sends that broke before their run started (dry run first):
+Run admin task close_never_started_chat_runs with param: project_id=all
+Run admin task close_never_started_chat_runs with param: project_id=all;dry_run=false
+
 # R-2.0.8 — Schedules (EL-7011)
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
 # New projects get the tables via create_all() on project creation.
