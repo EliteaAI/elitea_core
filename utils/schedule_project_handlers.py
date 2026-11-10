@@ -219,14 +219,15 @@ class ScheduleProjectHandlers:
         Who may call: a schedules admin (`schedules.admin`) only.
         Errors: 400 an unknown key or a value that is not true or false, with `field`; 403; 503 the store fails.
         """
-        from .schedule_settings import (ScheduleProjectSettings, is_run_without_asking_allowed, save_schedule_settings,
-                                        saved_webhook_cap)
+        from .schedule_settings import ScheduleProjectSettings, read_saved_settings, save_schedule_settings
         body = request.get_json(silent=True)
-        # Each control saves only its own key, so a save of one never resets the other
-        if isinstance(body, dict) and "webhook_max_concurrent_runs" not in body:
-            body = {**body, "webhook_max_concurrent_runs": saved_webhook_cap(project_id)}
-        elif isinstance(body, dict) and "allow_run_without_asking" not in body:
-            body = {**body, "allow_run_without_asking": is_run_without_asking_allowed(project_id)}
+        # Each control saves only its own key: the others come from one read, and a failed read writes nothing
+        if isinstance(body, dict) and body and set(body) < set(ScheduleProjectSettings.model_fields):
+            try:
+                body = {**read_saved_settings(project_id), **body}
+            except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the configurations store failed
+                log.exception("Project %s: the schedule settings could not be read before a save", project_id)
+                return SETTINGS_UNAVAILABLE, 503
         try:
             settings = ScheduleProjectSettings.model_validate(body)
         except ValidationError as e:

@@ -72,6 +72,14 @@ def _read_settings(project_id: int) -> ScheduleProjectSettings | None:
     return None if config is None else ScheduleProjectSettings.model_validate(config["data"])
 
 
+def read_saved_settings(project_id: int) -> dict:
+    """The stored keys of the project's record, {} when never saved; a store error propagates."""
+    config = _rpc().configurations_get_first_filtered_project(
+        project_id=project_id, filter_fields={"type": SETTINGS_TYPE, "elitea_title": SETTINGS_TYPE},
+    )
+    return dict(config["data"]) if config is not None else {}
+
+
 def saved_webhook_cap(project_id: int) -> int | None:
     """The project's own per-webhook value for the settings form; None when unset or the store fails."""
     try:

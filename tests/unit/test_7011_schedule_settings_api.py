@@ -61,6 +61,16 @@ class Harness:
     def saved_cap(self, project_id):
         return self.caps.get(project_id)
 
+    def read_saved(self, project_id):
+        if self.read_error:
+            raise RuntimeError('configurations down')
+        stored = {}
+        if project_id in self.saved:
+            stored['allow_run_without_asking'] = self.saved[project_id]
+        if self.caps.get(project_id) is not None:
+            stored['webhook_max_concurrent_runs'] = self.caps[project_id]
+        return stored
+
 
 def _package(name):
     module = types.ModuleType(name)
@@ -105,6 +115,7 @@ def harness(isolated_sys_modules):
     settings.is_run_without_asking_allowed = harness.is_allowed
     settings.save_schedule_settings = harness.save
     settings.saved_webhook_cap = harness.saved_cap
+    settings.read_saved_settings = harness.read_saved
     sys.modules[settings.__name__] = settings
     timing = types.ModuleType(f'{PACKAGE}.utils.schedule_timing')
     timing.webhook_limits = lambda: types.SimpleNamespace(per_webhook=3, per_webhook_limit=20, per_project=10, waiting=10)
@@ -232,3 +243,20 @@ def test_put_with_only_the_cap_keeps_the_saved_approval_switch(harness):
     assert _call(harness, 'put', {'webhook_max_concurrent_runs': 2}) == (
         {'allow_run_without_asking': True, 'webhook_max_concurrent_runs': 2}, 200)
     assert harness.saved == {PROJECT_ID: True}
+
+
+# --- review: a key left out comes from one read; a failed read writes nothing
+
+@pytest.mark.parametrize('body', [{'webhook_max_concurrent_runs': 2}, {'allow_run_without_asking': True}])
+def test_a_partial_save_after_a_failed_read_is_503_and_writes_nothing(harness, body):
+    harness.saved[PROJECT_ID], harness.caps[PROJECT_ID] = False, 4
+    harness.read_error = True
+    response, status = _call(harness, 'put', body)
+    assert status == 503 and response['code'] == 'settings_unavailable'
+    assert (harness.saved[PROJECT_ID], harness.caps[PROJECT_ID]) == (False, 4)  # neither key was reset
+
+
+def test_a_save_with_both_keys_needs_no_read(harness):
+    harness.read_error = True  # the whole record is in the body
+    body = {'allow_run_without_asking': True, 'webhook_max_concurrent_runs': 3}
+    assert _call(harness, 'put', body) == (body, 200)
