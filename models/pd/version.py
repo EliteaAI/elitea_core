@@ -18,6 +18,7 @@ from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTa
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
 from ...utils.trigger_write_rule import strip_trigger_secrets
+from ...utils.conversation_starters_utils import ABSOLUTE_MAX_CONVERSATION_STARTERS
 
 # todo: switch to rpc call
 from ...utils.authors import get_authors_data
@@ -40,18 +41,17 @@ def agent_root_pipeline_validator(values: dict):
     return values
 
 
-MAX_CONVERSATION_STARTERS = 4
-
-
 def conversation_starters_validator(value):
+    # Structural checks and the absolute cap only. The admin limit depends on what the version
+    # already holds, so authoring writes enforce it where the saved row is known.
     if value is None:
         return None
     if not isinstance(value, list):
         raise ValueError('conversation_starters must be a list')
 
-    if len(value) > MAX_CONVERSATION_STARTERS:
+    if len(value) > ABSOLUTE_MAX_CONVERSATION_STARTERS:
         raise ValueError(
-            f'conversation_starters cannot exceed {MAX_CONVERSATION_STARTERS} items, got {len(value)}'
+            f'conversation_starters cannot exceed {ABSOLUTE_MAX_CONVERSATION_STARTERS} items, got {len(value)}'
         )
 
     validated = []

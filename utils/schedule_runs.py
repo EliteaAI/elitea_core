@@ -8,8 +8,10 @@ from tools import db
 
 from ..models.entity_schedule import ACTIVE_STATUSES, REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
-from .schedule_claim import TEXT_LIMIT, append_run_events, fail_run, finished_event, run_event
-from .schedule_timing import at_least_one
+from .schedule_claim import (
+    RUN_TRIGGERS, TEXT_LIMIT, append_run_events, fail_run, finished_event, lock_project_runs, run_event,
+)
+from .schedule_timing import DEFAULT_WEBHOOK_MAX_WAITING, WEBHOOK_LIMIT_CEILING, at_least_one
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
@@ -25,6 +27,7 @@ NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succe
 DEFAULT_APPROVAL_WAIT_HOURS = 24
 MAX_APPROVAL_WAIT_HOURS = 720
 REJECT_REASON = 'rejected by the owner'
+TOO_MANY_WAITING = 'too many runs waiting for approval'
 SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not ask the owner"
 # The owner's answer on a sign-in pause: `authorize` goes on, `skip` ends the run
 SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
@@ -40,6 +43,10 @@ OUTAGE_REFUSALS = frozenset({
 })
 GOVERNANCE_REFUSED = 'governance_refused'
 PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the cause and resume it.'
+# A webhook that cannot start shares the same streak (#7454)
+PRERUN_REFUSED = 'prerun_refused'
+# The streak is shared with governance refusals, so the text names both causes
+PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (last: {reason}). Fix it and resume.'
 
 
 class ScheduleDecisionForbidden(Exception):
@@ -59,6 +66,13 @@ def approval_wait_hours() -> int:
     from tools import this  # late: the writers load without the plugin handle
     section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
     return at_least_one(section, 'approval_wait_hours', DEFAULT_APPROVAL_WAIT_HOURS, MAX_APPROVAL_WAIT_HOURS)
+
+
+def webhook_waiting_limit() -> int:
+    """The waiting bound of one webhook (#7400), read like `approval_wait_hours`."""
+    from tools import this  # late: the writers load without the plugin handle
+    section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
+    return at_least_one(section, 'webhook_max_waiting_runs', DEFAULT_WEBHOOK_MAX_WAITING, WEBHOOK_LIMIT_CEILING)
 
 
 def has_waiting_runs(project_id: int) -> bool:
@@ -122,12 +136,13 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
         session.execute(
             update(EntitySchedule)
             .where(EntitySchedule.id == schedule_id)
-            .values(enabled=False, disabled_reason=reason)
+            .values(enabled=False, disabled_reason=reason, next_run=None)
         )
         session.commit()
 
 
-def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None) -> None:
+def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None,
+                  disabled_reason: str = GOVERNANCE_REFUSED, text: str = PAUSED_AFTER_REFUSALS) -> None:
     """One more governance refusal of a run of `schedule` (#7254), Run now and Test run included. The
     `REFUSAL_PAUSE_AFTER`-th in a row pauses a schedule that is on (`governance_refused`) in the same transaction
     and tells the owner once. An outage `code` (`OUTAGE_REFUSALS`) is not counted and leaves the streak as it is.
@@ -148,21 +163,22 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
                 update(EntitySchedule).where(EntitySchedule.id == schedule.id)
                 .values({REFUSAL_STREAK: streak,
                          EntitySchedule.enabled: case((pause, False), else_=EntitySchedule.enabled),
-                         EntitySchedule.disabled_reason: case((pause, GOVERNANCE_REFUSED),
-                                                              else_=EntitySchedule.disabled_reason)})
+                         EntitySchedule.disabled_reason: case((pause, disabled_reason),
+                                                              else_=EntitySchedule.disabled_reason),
+                         EntitySchedule.next_run: case((pause, None), else_=EntitySchedule.next_run)})
                 .returning(REFUSAL_STREAK, EntitySchedule.enabled, EntitySchedule.disabled_reason)
             ).one_or_none()
             session.commit()
         # the streak reaches REFUSAL_PAUSE_AFTER once until it ends (an admitted start or a resume sets it to 0), so at
         # exactly that count an off schedule with this reason was paused by this statement
         paused = row is not None and row[0] == REFUSAL_PAUSE_AFTER and row[1] is False \
-            and row[2] == GOVERNANCE_REFUSED
+            and row[2] == disabled_reason
     except Exception:  # noqa: BLE001 -- the run is already refused and ended; only the streak is lost
         log.exception('Schedule %s: cannot count the governance refusal of run %s', schedule.id, run_id)
         return
     if paused:
-        text = PAUSED_AFTER_REFUSALS.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
-        run = SimpleNamespace(id=run_id, reason=text, conversation_id=None)
+        notice = text.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
+        run = SimpleNamespace(id=run_id, reason=notice, conversation_id=None)
         notify_schedule_event(project_id, schedule.created_by, Types.schedule_disabled, schedule, run)
 
 
@@ -273,6 +289,10 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
     """The work of `_park_run` on a session the caller opened."""
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
+    if _over_waiting_cap(project_id, session, run_id):
+        session.rollback()
+        finish_schedule_run(project_id, run_id, 'failed', TOO_MANY_WAITING)  # the failed notice tells the owner
+        return False
     hours = approval_wait_hours()
     paused = session.execute(
         update(EntityScheduleRun)
@@ -297,6 +317,20 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
     except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it
         log.exception('Schedule run %s: cannot send the approval notice', run_id)
     return True
+
+
+def _over_waiting_cap(project_id: int, session, run_id: int) -> bool:
+    """True when a webhook run would pass the waiting bound of its row (#7400); the project lock holds until the commit."""
+    run = session.get(EntityScheduleRun, run_id)
+    if run is None or run.schedule_id is None or run.trigger not in RUN_TRIGGERS:
+        return False
+    schedule = session.get(EntitySchedule, run.schedule_id)
+    if schedule is None or schedule.trigger_kind != 'webhook':  # cron schedules are never bounded here
+        return False
+    lock_project_runs(session, project_id)
+    waiting = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(
+        EntityScheduleRun.schedule_id == run.schedule_id, EntityScheduleRun.status == 'waiting_for_approval'))
+    return waiting >= webhook_waiting_limit()
 
 
 def park_for_credentials(project_id: int, run_id: int, reason: str, toolkit: str | None = None,

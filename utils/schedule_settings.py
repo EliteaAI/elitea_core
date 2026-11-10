@@ -3,7 +3,7 @@
 One `schedule_settings` record per project in the configurations plugin, section `project_settings`,
 beside the other Settings > Project General values. The Schedules API reads and writes it.
 """
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from pylon.core.tools import log
 
 SETTINGS_TYPE = "schedule_settings"
@@ -23,6 +23,12 @@ class ScheduleProjectSettings(BaseModel):
         description='True lets schedules use the "Run without asking" approval rule: their runs approve '
                     'sensitive actions by themselves. False makes those runs pause and ask.',
         examples=[True],
+    )
+    # The platform maximum is checked by the settings PUT: this model loads without the plugin config
+    webhook_max_concurrent_runs: StrictInt | None = Field(
+        None, ge=1, description='Running runs one webhook of the project may have at the same time; '
+                                'null uses the platform default. At most the platform maximum.',
+        examples=[2],
     )
 
 
@@ -58,6 +64,43 @@ def _request_cache() -> dict | None:
     return g.setdefault("schedule_run_without_asking", {}) if has_request_context() else None
 
 
+def _read_settings(project_id: int) -> ScheduleProjectSettings | None:
+    """The saved record of the project, None when never saved; a store error propagates."""
+    config = _rpc().configurations_get_first_filtered_project(
+        project_id=project_id, filter_fields={"type": SETTINGS_TYPE, "elitea_title": SETTINGS_TYPE},
+    )
+    return None if config is None else ScheduleProjectSettings.model_validate(config["data"])
+
+
+def read_saved_settings(project_id: int) -> dict:
+    """The stored keys of the project's record, {} when never saved; a store error propagates."""
+    config = _rpc().configurations_get_first_filtered_project(
+        project_id=project_id, filter_fields={"type": SETTINGS_TYPE, "elitea_title": SETTINGS_TYPE},
+    )
+    return dict(config["data"]) if config is not None else {}
+
+
+def saved_webhook_cap(project_id: int) -> int | None:
+    """The project's own per-webhook value for the settings form; None when unset or the store fails."""
+    try:
+        settings = _read_settings(project_id)
+    except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the form then shows the platform default
+        log.exception("Could not read the %s of project %s", SETTINGS_TYPE, project_id)
+        return None
+    return settings.webhook_max_concurrent_runs if settings is not None else None
+
+
+def project_webhook_cap(project_id: int, limits) -> int:
+    """The running-run cap of one webhook of the project: its lower value, else the platform default; never over the maximum."""
+    try:
+        settings = _read_settings(project_id)
+    except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the platform default still bounds the runs
+        log.exception("Could not read the %s of project %s", SETTINGS_TYPE, project_id)
+        return limits.per_webhook
+    value = settings.webhook_max_concurrent_runs if settings is not None else None
+    return min(value or limits.per_webhook, limits.per_webhook_limit)
+
+
 def is_run_without_asking_allowed(project_id: int) -> bool:
     """True when the project allows the "Run without asking" rule; false when never saved.
 
@@ -68,10 +111,8 @@ def is_run_without_asking_allowed(project_id: int) -> bool:
     if cache is not None and project_id in cache:
         return cache[project_id]
     try:
-        config = _rpc().configurations_get_first_filtered_project(
-            project_id=project_id, filter_fields={"type": SETTINGS_TYPE, "elitea_title": SETTINGS_TYPE},
-        )
-        allowed = config is not None and ScheduleProjectSettings.model_validate(config["data"]).allow_run_without_asking
+        settings = _read_settings(project_id)
+        allowed = settings is not None and settings.allow_run_without_asking
     except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the rule stays off when the store fails
         log.exception("Could not read the %s of project %s", SETTINGS_TYPE, project_id)
         return False
@@ -87,7 +128,7 @@ def _owned(call, **kwargs):
 
 def save_schedule_settings(project_id: int, settings: ScheduleProjectSettings) -> dict:
     """Create or replace the project's record and answer the saved values; a store error propagates."""
-    data = settings.model_dump()
+    data = settings.model_dump(exclude_none=True)  # an unset webhook cap is left out, not stored as null
     rpc = _rpc()
     config, created = _owned(rpc.configurations_create_if_not_exists, payload={
         "project_id": project_id, "elitea_title": SETTINGS_TYPE, "label": "Schedules",

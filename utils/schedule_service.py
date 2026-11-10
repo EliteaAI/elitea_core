@@ -237,7 +237,7 @@ def create_schedule(
         created_by=scope.user_id,
         updated_by=scope.user_id,
         principal={'kind': 'delegation', 'ref': scope.user_id},
-        next_run=compute_next_run(body.cron, body.timezone, datetime.now(UTC)) if cron_row else None,
+        next_run=compute_next_run(body.cron, body.timezone, datetime.now(UTC)) if cron_row and body.enabled else None,
     )
     if key is not None:
         row.uuid = key
@@ -332,7 +332,8 @@ def update_schedule(
     row.updated_by = scope.user_id
     _apply_confirmation(row, confirmed, scope.user_id)
     if cron_row and NEXT_RUN_FIELDS & changes.keys():
-        row.next_run = compute_next_run(cron, timezone, datetime.now(UTC))
+        # A paused schedule has no next run; a resume sets it again from the cron and time zone
+        row.next_run = compute_next_run(cron, timezone, datetime.now(UTC)) if row.enabled else None
     admin_change = _is_admin_change(row, scope)
     if admin_change:
         mark_audit_span(row)

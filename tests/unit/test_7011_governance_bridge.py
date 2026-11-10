@@ -98,18 +98,21 @@ def run(ns, env, starter, monkeypatch):
     starter.writes.calls.clear()
     starter.writes.streak.clear()
 
-    def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None, owner_request=None):
+    def go(entity_type="pipeline", trigger="cron", owner=OWNER, version=None, owner_request=None, payload=None):
         version = version or FakeVersion()
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
                 id=SCHEDULE_ID, name="Daily", principal={"kind": "delegation", "ref": owner}, created_by=owner,
                 entity_type=entity_type, run_mode=None, application_id=version.application_id,
                 version_id=version.id, approval_rule="pause_and_ask", approval_fingerprint=None,
-                approval_confirmed_by=None),
+                approval_confirmed_by=None, trigger_kind="webhook" if trigger == "webhook" else "cron",
+                webhook_type="github" if trigger == "webhook" else None),
             version=types.SimpleNamespace(id=version.id, application_id=version.application_id, name="v1"),
             entity_name="Report", prompt="go", variables=[], trigger=trigger)
         monkeypatch.setattr(starter, "_load", lambda *args: loaded)
-        starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID, *(() if owner_request is None else (owner_request,)))
+        extra = {} if payload is None else {"payload": payload, "delivery": "d-1"}
+        starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID, *(() if owner_request is None else (owner_request,)),
+                                   **extra)
         return starter.writes.calls
     return go
 
@@ -535,3 +538,40 @@ def test_the_legacy_cron_step_still_prepares_its_trigger_run_and_runs_as_a_syste
 @pytest.mark.parametrize("relative", ["api/v2/webhook.py", "methods/predict.py", "rpc/pipeline_webhook.py"])
 def test_the_webhook_paths_do_not_use_the_unattended_flag(relative):
     assert "unattended" not in source_of(relative)
+
+
+# --- webhook deliveries (#7454) -----------------------------------------------------------------------
+# A delivery runs through the same starter, admitted as the webhook entry point under its own trigger ref
+
+WEBHOOK_REF = f"webhook:entity:{SCHEDULE_ID}"
+
+
+def test_7454_enforce_a_delivery_is_admitted_on_the_mandate_with_entry_point_webhook(ns, env, agent, run):
+    arm(ns, env)
+    writes = run(trigger="webhook", payload=b'{"a": 1}')
+    [predict] = ns.state.predicts
+    assert isinstance(predict["mandate_ticket"], str) and predict["unattended"] is True
+    [row] = contexts(env, ns)
+    assert (row.entry_point, row.caller["ref"], row.subject["ref"]) == ("webhook", WEBHOOK_REF,
+                                                                         f"mandate:{agent.mandate}")
+    assert writes == []
+
+
+def test_7454_enforce_a_schedule_only_mandate_refuses_a_delivery(ns, env, agent, run, starter):
+    arm(ns, env)
+    set_mandate(env, ns, agent.mandate, allowed_operations=["run:schedule"])
+    writes = run(trigger="webhook", payload=b"{}")
+    message = ns.adm.MESSAGES["DENIED_OPERATION"]
+    assert writes == [("finish", PROJECT_ID, RUN_ID, "failed", f"The run failed: {message}")]
+    assert env.denied[-1]["caller_ref"] == WEBHOOK_REF
+    # a refused delivery counts toward the streak like a cron firing
+    assert [entry[0] for entry in starter.writes.streak] == ["refused"]
+
+
+@pytest.mark.parametrize("operations, code", [(["run:schedule"], "DENIED_OPERATION"), (["run:webhook"], None)])
+def test_7454_audit_only_checks_the_webhook_operation(ns, env, agent, run, operations, code):
+    arm(ns, env, governed=False, audit=True)
+    set_mandate(env, ns, agent.mandate, allowed_operations=operations)
+    run(trigger="webhook", payload=b"{}")
+    expected = [] if code is None else [(code, True, WEBHOOK_REF)]
+    assert [(row["reason_code"], row["would_deny"], row["caller_ref"]) for row in env.denied] == expected

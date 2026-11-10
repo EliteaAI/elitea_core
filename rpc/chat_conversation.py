@@ -16,6 +16,7 @@ from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
+from ..utils.running_conversations import running_conversation_ids
 from ..utils.conversation_utils import (
     get_conversation_details,
     calculate_conversation_durations_batch,
@@ -27,6 +28,8 @@ from ..utils.skill_run_history import chat_skill_runs, openable_skill_chat_ids, 
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import merge_meta_expression, set_context_strategy
 from ..utils.chat_usage import strip_server_owned_meta
+from ..utils.internal_tools import get_default_attachment_bucket
+from ..utils.skill_scratch import index_conversation_scratch, remove_conversation_scratch, remove_indexed_scratch
 from ..utils.context_window import new_chat_window_mode
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.model_defaults import creation_llm_settings, chat_request_default
@@ -589,6 +592,7 @@ class RPC:
             )
 
             schedule_runs = _schedule_runs(session, conversations)
+            running_ids = running_conversation_ids(session, conv_ids)
             chat_runs = chat_skill_runs(
                 session,
                 [c.id for c in conversations if 'single_participant' not in (c.meta or {})],
@@ -605,6 +609,7 @@ class RPC:
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
                     "schedule_run": schedule_runs.get(conv.id),
+                    "has_running_task": conv.id in running_ids,
                     **chat_runs.get(conv.id, {}),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
@@ -705,6 +710,10 @@ class RPC:
                 mc.remove_bucket(bucket_name)
             except Exception:
                 pass
+            try:
+                remove_conversation_scratch(project_id, str(conversation.uuid))
+            except Exception:  # noqa: BLE001 -- a storage hiccup must not keep the conversation
+                log.warning('delete_conversation_rpc: scratch of %s not removed', conversation.uuid, exc_info=True)
 
             session.delete(conversation)
             session.commit()
@@ -731,10 +740,18 @@ class RPC:
         deleted, failed, remaining = 0, 0, 0
         folder_ids = set()
         mc = None
+        scratch_index = None
+        scratch_bucket = None
         try:
             mc = MinioClient.from_project_id(project_id)
         except Exception:
             log.exception("delete_conversations_rpc: no storage client for project %s", project_id)
+        if mc is not None:
+            try:
+                scratch_bucket = get_default_attachment_bucket(project_id)
+                scratch_index = index_conversation_scratch(mc, scratch_bucket)
+            except Exception:  # noqa: BLE001 -- the nightly sweep removes what a failed listing leaves behind
+                log.warning("delete_conversations_rpc: scratch of project %s not listed", project_id, exc_info=True)
 
         with db.get_session(project_id) as session:
             for index, conversation_id in enumerate(conversation_ids):
@@ -754,6 +771,11 @@ class RPC:
                             mc.remove_bucket(f'conversation_{conversation.uuid}')
                         except Exception:
                             pass
+                    if scratch_index is not None:
+                        try:
+                            remove_indexed_scratch(mc, scratch_bucket, scratch_index, str(conversation.uuid))
+                        except Exception:  # noqa: BLE001 -- a storage hiccup must not keep the conversation
+                            log.warning('delete_conversations_rpc: scratch of %s not removed', conversation.uuid, exc_info=True)
                     session.delete(conversation)
                     session.commit()
                     deleted += 1

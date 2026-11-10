@@ -101,8 +101,9 @@ def door(env, monkeypatch):
     dispatch = types.ModuleType(f'{PACKAGE}.utils.schedule_dispatch')
     dispatch.START_FAILED = 'the run could not start'
 
-    def start(entity_type, project_id, schedule_id, run_id, owner_request=None, payload=None):
+    def start(entity_type, project_id, schedule_id, run_id, owner_request=None, payload=None, delivery=None):
         env.started.append((schedule_id, run_id, payload))
+        env.deliveries = getattr(env, 'deliveries', []) + [delivery]
         return env.start_ok
     dispatch.start_schedule_run = start
     monkeypatch.setitem(sys.modules, dispatch.__name__, dispatch)
@@ -126,11 +127,26 @@ def door(env, monkeypatch):
     monkeypatch.setitem(sys.modules, helpers.__name__, helpers)
     load('utils/pipeline_trigger.py', 'utils.pipeline_trigger')
     load('utils/schedule_claim.py', 'utils.schedule_claim')
+    _limits(env, monkeypatch)
     env.door = load('utils/webhook_door.py', 'utils.webhook_door')
     sys.modules[f'{PACKAGE}.utils'].webhook_door = env.door
     env.door._last_reject_log = 0.0
     env.hooks = load('api/v2/hooks.py', 'api.v2.hooks')
     return env
+
+
+def _limits(env, monkeypatch):
+    """The caps of #7400 as plain values the tests flip; defaults high enough that the #7453 cases never hit them."""
+    env.limits = types.SimpleNamespace(per_webhook=100, per_webhook_limit=100, per_project=100, waiting=10)
+    env.project_cap = None  # None: the platform default
+    timing = types.ModuleType(f'{PACKAGE}.utils.schedule_timing')
+    timing.webhook_limits = lambda: env.limits
+    timing.at_least_one = lambda section, key, default, ceiling: default
+    monkeypatch.setitem(sys.modules, timing.__name__, timing)
+    settings = types.ModuleType(f'{PACKAGE}.utils.schedule_settings')
+    settings.project_webhook_cap = lambda project_id, limits: min(env.project_cap or limits.per_webhook,
+                                                                   limits.per_webhook_limit)
+    monkeypatch.setitem(sys.modules, settings.__name__, settings)
 
 
 def _webhook(env, webhook_type='github', **fields):
@@ -170,11 +186,13 @@ def _runs(env):
 
 def test_7453_signed_github_delivery_starts_a_webhook_run_with_the_body_in_memory(door):
     schedule_id, row_uuid = _webhook(door)
-    status, data, _ = _post(door, row_uuid, _github(BODY))
+    headers = _github(BODY)
+    status, data, _ = _post(door, row_uuid, headers)
     assert status == 202
     (run,) = _runs(door)
     assert data == {'run_id': run.id} and run.trigger == 'webhook' and run.status == 'running'
     assert door.started == [(schedule_id, run.id, BODY)]
+    assert door.deliveries == [headers['X-GitHub-Delivery']]   # the run log names it (#7454)
     row = door.row(schedule_id)
     assert row.last_delivery_outcome == 'accepted' and row.last_delivery_at is not None
 
@@ -333,7 +351,7 @@ def test_7453_an_exception_during_admission_releases_the_claim(door):
     _, row_uuid = _webhook(door)
     headers = _github(BODY)
 
-    def broken(session, row_id):
+    def broken(session, project_id, row_id):
         raise RuntimeError('database is down')
     admit = door.door.admit_webhook_run
     door.door.admit_webhook_run = broken

@@ -4,6 +4,7 @@ from pathlib import Path
 from flask import request
 from tools import config as c, api_tools, auth
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.project_settings_access import require_project_settings_admin
 
 FLASK_ROUTE_URL: str = "elitea_core.project_icon"
 MAX_FILE_SIZE_KB: int = 512
@@ -39,6 +40,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     )
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def post(self, project_id: int, **kwargs):
         if "file" not in request.files:
             return {"error": "No file in request.files"}, 400
@@ -77,6 +79,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     )
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def delete(self, project_id: int, icon_name: str = None, **kwargs):
         if not icon_name:
             return {"error": "Invalid icon name"}, 400

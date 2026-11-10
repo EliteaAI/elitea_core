@@ -8,16 +8,17 @@ from .sio_utils import SioEvents, get_event_room
 DEFAULT_APPROVAL_HOURS = 24
 
 # One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
-# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
+# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty.
+# {Noun}/{noun} is "Schedule" or "Webhook" by the row's trigger kind (#7454)
 MESSAGES = {
-    Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
-    Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
-    Types.schedule_approval_needed: 'Schedule "{link}" waits for your approval',
-    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in {hours} hours and the run stopped',
-    Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
-    Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
-    Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
-    Types.schedule_owner_changed: 'The owner of schedule "{link}" changed{reason}',
+    Types.schedule_run_failed: '{Noun} "{link}" failed{reason}',
+    Types.schedule_run_succeeded: '{Noun} "{link}" ran successfully',
+    Types.schedule_approval_needed: '{Noun} "{link}" waits for your approval',
+    Types.schedule_approval_expired: '{Noun} "{link}" was not approved in {hours} hours and the run stopped',
+    Types.schedule_expired: '{Noun} "{link}" reached its stop date and is switched off',
+    Types.schedule_disabled: '{Noun} "{link}" was switched off{reason}',
+    Types.schedule_edited_by_admin: 'An admin {action} your {noun} "{link}"',
+    Types.schedule_owner_changed: 'The owner of {noun} "{link}" changed{reason}',
 }
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
@@ -60,10 +61,13 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         return False
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
+        trigger_kind = getattr(schedule, 'trigger_kind', None) or 'cron'
+        noun = 'webhook' if trigger_kind == 'webhook' else 'schedule'
         # Only the expired notice names the window
         hours = _approval_hours(run) if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
             'message': MESSAGES[event_type].format(
+                Noun=noun.capitalize(), noun=noun,
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
@@ -71,6 +75,7 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
+            'trigger_kind': trigger_kind,  # the bell links a webhook to the Webhooks page (#7456)
             'run_id': run.id if run else None,
             'conversation_id': run.conversation_id if run else None,
         }

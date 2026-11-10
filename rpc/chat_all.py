@@ -29,11 +29,13 @@ from ..models.pd.llm import merge_llm_selection_override
 from ..models.pd.predict import SioPredictModel, SioContinuePredictModel, ToolkitToolCallPayload
 from ..utils.chat_history import (
     generate_chat_history,
+    generate_payload_chat_history,
     generate_user_input
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..utils.run_status import RunStatus, build_notice, send_notice
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError, emit_refusal
@@ -1016,7 +1018,10 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             # Get instructions: conversation instructions + user's default instructions from profile
             base_instructions = str(msg_group.conversation.instructions or '')
             user_default_instructions = msg_group.conversation.meta.get('default_instructions', '')
-            if user_default_instructions and base_instructions:
+            # New chats are seeded with the persona prompt in conversation.instructions; don't append it twice (#7468)
+            if user_default_instructions and user_default_instructions.strip() in base_instructions:
+                result['instructions'] = base_instructions
+            elif user_default_instructions and base_instructions:
                 result['instructions'] = f"{base_instructions}\n\n{user_default_instructions}"
             elif user_default_instructions:
                 result['instructions'] = user_default_instructions
@@ -1666,10 +1671,9 @@ class RPC:
                     if not preserve_instructions:
                         payload['instructions'] = None
 
-                    payload['chat_history'] = generate_chat_history(
-                        message_groups=chat_history_groups, summaries=summaries,
-                        include_context=not is_pipeline,
-                        routing_projection=payload.get('_routing_projection'),
+                    payload['chat_history'], history_group_ids = generate_payload_chat_history(
+                        session, payload, chat_history_groups, summaries,
+                        is_pipeline=is_pipeline, config=this.descriptor.config,
                     )
                     payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                     log.debug('chat payload["chat_history"] has %d messages', len(payload["chat_history"]))
@@ -1684,7 +1688,7 @@ class RPC:
                         }
                     }
                     if context_management_enabled:
-                        context_meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
+                        context_meta['chat_history_group_ids'] = history_group_ids
                     execution_generation = str(uuid4())
                     context_meta = begin_execution_generation(
                         context_meta if context_management_enabled else {},
@@ -1725,7 +1729,7 @@ class RPC:
                         raise
 
                     self.finalize_timed_out_response(
-                        session, response_msg, result, await_task_timeout
+                        session, response_msg, result, await_task_timeout, project_id=parsed.project_id,
                     )
 
                     if return_message_ids:
@@ -2660,10 +2664,9 @@ class RPC:
                 continues_pipeline = (
                     (payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
                 )
-                payload['chat_history'] = generate_chat_history(
-                    message_groups=chat_history_groups, summaries=summaries,
-                    include_context=not continues_pipeline,
-                    routing_projection=payload.get('_routing_projection'),
+                payload['chat_history'], history_group_ids = generate_payload_chat_history(
+                    session, payload, chat_history_groups, summaries,
+                    is_pipeline=continues_pipeline, config=this.descriptor.config,
                 )
                 payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                 if is_token_limit_continuation_request:
@@ -2673,7 +2676,7 @@ class RPC:
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:
-                    response_msg.meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
+                    response_msg.meta['chat_history_group_ids'] = history_group_ids
                     flag_modified(response_msg, 'meta')
                     session.add(response_msg)
                     session.commit()
@@ -2697,7 +2700,7 @@ class RPC:
                     **_approve_all_kwargs(session, conversation, rpc_func),
                 )
                 self.finalize_timed_out_response(
-                    session, response_msg, result, await_task_timeout
+                    session, response_msg, result, await_task_timeout, project_id=parsed.project_id,
                 )
                 return result
             except Exception as e:
@@ -2715,7 +2718,7 @@ class RPC:
                 )
 
     @web.method()
-    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout):
+    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout, project_id=None):
         """Close out a response message group whose task was cancelled on blocking timeout.
 
         Mirrors the stop button (api/v2/task.py) minus the salvage/delete branches: the
@@ -2753,6 +2756,12 @@ class RPC:
             data=serialize(MessageGroupDetail.model_validate(response_msg)),
             room=get_chat_room(response_msg.conversation.uuid),
         )
+        self._end_chat_run(session, project_id, response_msg, RunStatus.stopped)
+
+    @web.method()
+    def _end_chat_run(self, session, project_id, msg_group, status) -> None:
+        """Tell its users' lists a run ended outside the stream-end path (EL-7385)."""
+        send_notice(self.context.sio, build_notice(session, project_id, msg_group, status))
 
     @web.method()
     def _refuse_schedule_decision(self, sid, parsed, denied: dict) -> dict:
@@ -3173,6 +3182,8 @@ class RPC:
 
             msg_group_deleted = False
             room = get_chat_room(msg_group.conversation.uuid)
+            # Read now: the delete branch below removes the row (EL-7385)
+            run_notice = build_notice(session, project_id, msg_group, RunStatus.stopped)
 
             # Handle empty message case: salvage thinking text or delete
             if not msg_group.message_items:
@@ -3237,4 +3248,5 @@ class RPC:
                     room=room,
                 )
 
-            return {"success": True}
+        send_notice(self.context.sio, run_notice)
+        return {"success": True}

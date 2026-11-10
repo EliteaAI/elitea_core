@@ -1,9 +1,12 @@
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator, ValidationInfo
 
 from .predict_llm import LLMSettingsRequest
 
 MAX_SUGGESTED_SKILLS = 5
+# Mirrors utils.conversation_starters_utils; kept local so this model imports without the runtime.
+# The API always passes the live limit through the validation context.
+DEFAULT_MAX_CONVERSATION_STARTERS = 4
 
 
 class GenerateApplicationDraftRequest(BaseModel):
@@ -110,16 +113,13 @@ class GenerateApplicationDraftResponse(BaseModel):
 
     @field_validator("conversation_starters", mode="before")
     @classmethod
-    def limit_conversation_starters(cls, v):
+    def limit_conversation_starters(cls, v, info: ValidationInfo):
         if v is None:
             return v
         v = [s.strip() for s in v if s and s.strip()]
-        if len(v) > 4:
-            raise ValueError(
-                f'conversation_starters cannot exceed 4 items, got {len(v)}'
-            )
-        v = [s[:768] for s in v]
-        return v
+        # The caller passes the admin limit; extra suggestions are dropped rather than failing the draft.
+        limit = (info.context or {}).get('max_conversation_starters', DEFAULT_MAX_CONVERSATION_STARTERS)
+        return [s[:768] for s in v[:limit]]
 
     suggested_toolkits: List[ToolkitSuggestion] = Field(
         default_factory=list,

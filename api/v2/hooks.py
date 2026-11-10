@@ -20,6 +20,11 @@ def _busy(code: str):
     return {'code': code}, 503, {'Retry-After': str(door.RETRY_AFTER_SECONDS)}
 
 
+def _capped(capped):
+    return ({'code': capped.code, 'running': capped.running, 'cap': capped.cap}, 429,
+            {'Retry-After': str(door.RETRY_AFTER_SECONDS)})
+
+
 def _record(project_id: int, row_id: int, outcome: str, now) -> None:
     with db.get_session(project_id) as session:
         door.record_delivery(session, row_id, outcome, now)
@@ -69,7 +74,7 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             _record(project_id, row.id, 'duplicate', now)
             return {'duplicate': True}, 200
         try:
-            answer, outcome = self._admit_and_start(project_id, row, body, now)
+            answer, outcome = self._admit_and_start(project_id, row, body, now, delivery)
         except Exception:
             door.release_delivery(redis, row.uuid, delivery)  # a 500 must leave the retry runnable
             raise
@@ -78,7 +83,7 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         return answer
 
     @staticmethod
-    def _admit_and_start(project_id: int, row, body: bytes, now):
+    def _admit_and_start(project_id: int, row, body: bytes, now, delivery=None):
         refusal = check_principal(row) or check_owner_access(project_id, row.created_by)
         if refusal == ACCESS_CHECK_UNAVAILABLE:
             return _busy('access_check_unavailable'), 'unavailable'
@@ -86,12 +91,17 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             _record(project_id, row.id, 'refused', now)
             return ({'code': REFUSAL_CODES.get(refusal, 'refused')}, 403), 'refused'
         with db.get_session(project_id) as session:
-            run_id = door.admit_webhook_run(session, row.id)
+            run_id = door.admit_webhook_run(session, project_id, row.id)
+            if isinstance(run_id, door.Capped):
+                door.record_capped(session, row.id, now)  # still under the project lock: one row a minute
+                door.record_delivery(session, row.id, 'capped', now)
+                session.commit()
+                return _capped(run_id), 'capped'
             if run_id is None:
                 session.rollback()
                 return _busy('run_in_progress'), 'busy'
             session.commit()
-        if not start_schedule_run(row.entity_type, project_id, row.id, run_id, payload=body):
+        if not start_schedule_run(row.entity_type, project_id, row.id, run_id, payload=body, delivery=delivery):
             with db.get_session(project_id) as session:
                 fail_run(session, run_id, START_FAILED)
                 door.record_delivery(session, row.id, 'start_failed', now)

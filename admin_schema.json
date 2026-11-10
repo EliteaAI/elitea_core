@@ -548,6 +548,22 @@
       "requires_restart": false,
       "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
     },
+    "max_conversation_starters": {
+      "type": "integer",
+      "title": "Max Chat Starters per Version",
+      "description": "Maximum number of chat starters an agent or pipeline version can have. Starters are shown to users as one-click prompts in chat. Lowering the limit never removes existing starters: versions above the new limit keep them but can't add more. Allowed range: 1–10.",
+      "path": "conversation_starters_guardrail.max_per_version",
+      "section": "guardrails",
+      "default": 4,
+      "minimum": 1,
+      "maximum": 10,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+      }
+    },
     "enhance_agent_fixes_enabled": {
       "type": "boolean",
       "title": "Allow Agent Instruction Fixes",
@@ -652,6 +668,31 @@
       "value_schema": {
         "type": "number",
         "minimum": 1
+      }
+    },
+    "history_tool_stubs_enabled": {
+      "type": "boolean",
+      "title": "Replay Tool Calls in Chat History",
+      "description": "Replay the tool calls of the last N assistant turns in chat history as short tool call and result records (arguments and results truncated). Stops models from claiming an action succeeded without calling the tool. When off, only the final reply text is replayed.",
+      "path": "chat_history.tool_call_stubs.enabled",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
+    "history_tool_stubs_last_n": {
+      "type": "integer",
+      "title": "Replayed Tool Calls: Last N Turns",
+      "description": "How many of the most recent assistant turns get their tool calls replayed. Allowed range: 1–20.",
+      "path": "chat_history.tool_call_stubs.last_n",
+      "section": "runtime",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 20,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20
       }
     },
     "cancel_on_timeout": {
@@ -891,6 +932,70 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 720
+      }
+    },
+    "schedules_webhook_max_concurrent_runs": {
+      "type": "integer",
+      "title": "Webhook Max Running Runs",
+      "description": "Running runs one webhook may have at the same time; a delivery over it gets 429 with Retry-After. A project admin may set a lower value. Kept at most the limit below. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_concurrent_runs",
+      "section": "runtime",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_max_concurrent_runs_limit": {
+      "type": "integer",
+      "title": "Webhook Max Running Runs Limit",
+      "description": "Highest per-webhook running-run cap a project admin may set in the project settings. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_concurrent_runs_limit",
+      "section": "runtime",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_project_max_concurrent_runs": {
+      "type": "integer",
+      "title": "Webhook Project Max Running Runs",
+      "description": "Running webhook runs one project may have at the same time, over all its webhooks. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_project_max_concurrent_runs",
+      "section": "runtime",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_max_waiting_runs": {
+      "type": "integer",
+      "title": "Webhook Max Waiting Runs",
+      "description": "Runs of one webhook that may wait for approval of a sensitive tool at the same time; the next pause fails its run. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_waiting_runs",
+      "section": "runtime",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
       }
     },
     "schedules_legacy_step_enabled": {

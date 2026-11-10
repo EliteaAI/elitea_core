@@ -83,3 +83,22 @@ def test_el_7011_r2_3_r2_4_trigger_is_case_sensitive(model):
     with pytest.raises(ValidationError) as excinfo:
         model.ScheduleRunRequest(trigger="TEST")
     assert _error_fields(excinfo) == {"trigger"}
+
+
+# #7455: a webhook row is tried with a sample body of at most 512 KB, counted in UTF-8 bytes
+def test_7455_payload_up_to_512_kb_is_accepted(model):
+    assert model.ScheduleRunRequest(trigger="test", payload="x" * 512 * 1024).payload.startswith("x")
+
+
+def test_7455_payload_over_512_kb_is_refused(model):
+    with pytest.raises(ValidationError):
+        model.ScheduleRunRequest(trigger="test", payload="x" * (512 * 1024 + 1))
+
+
+def test_7455_payload_size_counts_bytes_not_characters(model):
+    with pytest.raises(ValidationError):   # 2 bytes each: 256K + 1 characters is over the cap
+        model.ScheduleRunRequest(trigger="test", payload="é" * (256 * 1024 + 1))
+
+
+def test_7455_payload_is_optional(model):
+    assert model.ScheduleRunRequest(trigger="manual").payload is None

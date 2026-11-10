@@ -535,7 +535,7 @@ class Module(module.ModuleModel):
                 self.migrate_eval_platform_dimension_columns, group="R-2.0.6",
             )
             this.for_module("admin").module.register_admin_task(
-                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.6",
+                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_dimension_columns", self.migrate_eval_dimension_columns, group="R-2.0.6",
@@ -609,6 +609,14 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_schedule_test_runs", self.migrate_schedule_test_runs,
                 group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "close_stuck_chat_runs", self.close_stuck_chat_runs,
+                group="R-2.0.9",
             )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
@@ -1524,6 +1532,12 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_schedule_test_runs", self.migrate_schedule_test_runs
             )
+            this.for_module("admin").module.unregister_admin_task(
+                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "close_stuck_chat_runs", self.close_stuck_chat_runs
+            )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
 
@@ -1597,6 +1611,13 @@ class Module(module.ModuleModel):
                     'rpc_kwargs': {},
                     'name': 'skill_files_sweep',
                     'cron': '0 3 * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': 'applications_sweep_skill_scratch',
+                    'rpc_kwargs': {'idle_days': 30},
+                    'name': 'skill_scratch_sweep',
+                    'cron': '0 4 * * *',
                     'active': True,
                 },
                 {

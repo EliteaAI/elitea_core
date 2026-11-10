@@ -147,6 +147,11 @@ def schedule_trigger_ref(schedule_id) -> str:
     return f"schedule:entity:{schedule_id}"
 
 
+def webhook_trigger_ref(schedule_id) -> str:
+    """The trigger of one owner webhook (#7454), as admission and the audit trail name it."""
+    return f"webhook:entity:{schedule_id}"
+
+
 def test_run_trigger_ref(run_id) -> str:
     """The trigger of one Test Run, as the audit trail names it; a Test Run has no schedule."""
     return f"schedule:test:{run_id}"
@@ -226,7 +231,7 @@ def toolkit_mandate_request(*, project_id, toolkit_id, mandate, trigger_ref) -> 
         toolkit_id=toolkit_id)
 
 
-def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
+def prepare_schedule_run(*, project_id, version, schedule_id, owner_id, trigger_kind="cron") -> dict:
     """For one run of an owner schedule (#7011, agent or pipeline): the extra arguments of its ``predict_sio`` call.
 
     Off: ``{}``, nothing is read. Enforce or audit only: the run is ``unattended``, so the request ``predict_sio``
@@ -237,23 +242,26 @@ def prepare_schedule_run(*, project_id, version, schedule_id, owner_id) -> dict:
     stops a run.
     """
     module = this.module
+    webhook = trigger_kind == "webhook"  # a webhook delivery (#7454) is admitted as the webhook entry point
+    kind, entry_point = ("pipeline_webhook", "webhook") if webhook else ("pipeline_schedule", "schedule")
+    trigger_ref = webhook_trigger_ref(schedule_id) if webhook else schedule_trigger_ref(schedule_id)
     if is_governed(module):
         mandate = _covering_mandate(project_id, version, owner_id)
         if mandate is None:
             return {"unattended": True}
-        principal = principal_of("pipeline_schedule", mandate)
+        principal = principal_of(kind, mandate)
         request = mandate_admission_request(
-            project_id=project_id, version_row=version, principal=principal, entry_point="schedule",
-            trigger_ref=schedule_trigger_ref(schedule_id))
+            project_id=project_id, version_row=version, principal=principal, entry_point=entry_point,
+            trigger_ref=trigger_ref)
         return {"unattended": True, "mandate_ticket": mint_trigger_admission(module, request)}
     if not is_auditing(module):
         return {}
     try:
-        code = audit_only_refusal(_covering_mandate(project_id, version, owner_id))
+        code = audit_only_refusal(_covering_mandate(project_id, version, owner_id), operation=OPERATION_OF[kind])
         if code is not None:
             from .admission import record_schedule_would_deny  # pylint: disable=C0415  # audit only needs the writer
             record_schedule_would_deny(module, code, project_id=project_id, application_id=version.application_id,
-                                       trigger_ref=schedule_trigger_ref(schedule_id))
+                                       trigger_ref=trigger_ref)
     except Exception as exc:  # pylint: disable=W0703
         log.error("schedule %s: the audit-only evaluation failed (%s)", schedule_id, type(exc).__name__)
     return {"unattended": True}

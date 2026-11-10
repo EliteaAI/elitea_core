@@ -128,6 +128,18 @@ def test_graph_credential_gets_token_under_the_key_the_toolkit_reads(svc):
     assert call["scope"] == "offline_access Mail.Read"
 
 
+def test_ms_graph_credential_stored_login_uses_its_free_scopes(svc):
+    config = {**outlook_tool()["settings"]["outlook_configuration"], "configuration_uuid": "uuid-g",
+              "scopes": ["Files.Read.All", "Sites.Read.All"]}
+    payload = {"tools": [{"type": "ms_graph", "settings": {"ms_graph_configuration": config}}], "mcp_tokens": {}}
+    refresh = Refresh()
+
+    assert inject(svc, payload, FakeRedis(), refresh) == 1
+
+    assert payload["mcp_tokens"] == {f"uuid-g:{AUTHORITY}": {"access_token": "at-1"}}
+    assert refresh.calls[0]["scope"] == "offline_access Files.Read.All Sites.Read.All"
+
+
 def test_dataverse_credential_uses_its_tenant_and_org_scope(svc):
     payload, refresh = {"tools": [dataverse_tool()]}, Refresh()
 
