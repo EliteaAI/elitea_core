@@ -992,14 +992,16 @@ class RPC:
             )
             raise PoolSaturationError(pool="agents", retry_after=5)
 
+        # The row's task id, whoever started the run: Stop needs it, and a streaming row without one
+        # past a short grace is a run that never started (EL-7385), same as predict_sio
+        if sio_event == SioEvents.chat_predict.value:
+            self.context.event_manager.fire_event('applications_predict_task_id', {
+                "task_id": task_id,
+                "project_id": parsed.project_id,
+                "message_group_id": parsed.message_id,
+            })
         # Send SIO events only for SIO calls
         if sid:
-            if sio_event == SioEvents.chat_predict.value:
-                self.context.event_manager.fire_event('applications_predict_task_id', {
-                    "task_id": task_id,
-                    "project_id": parsed.project_id,
-                    "message_group_id": parsed.message_id,
-                })
             self.stream_response(sio_event, {
                 "type": "start_task",
                 "stream_id": parsed.stream_id,

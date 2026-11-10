@@ -19,6 +19,7 @@ from pylon.core.tools import log, web
 from tools import db
 
 from ..models.conversation import Conversation
+from ..utils.sio_utils import SioEvents, get_user_room
 
 
 class Method:
@@ -147,17 +148,26 @@ class Method:
                     conversation.name = generated_name
                     session.commit()
 
+                    name_update = {
+                        'conversation_id': conversation_id,
+                        'conversation_uuid': conversation_uuid,
+                        'name': generated_name,
+                        'type': 'conversation_name_update'
+                    }
                     # Emit conversation name update to the room
                     self.context.sio.emit(
-                        event='chat_conversation_name_updated',
-                        data={
-                            'conversation_id': conversation_id,
-                            'conversation_uuid': conversation_uuid,
-                            'name': generated_name,
-                            'type': 'conversation_name_update'
-                        },
+                        event=SioEvents.chat_conversation_name_updated.value,
+                        data=name_update,
                         room=room,
                     )
+                    # The author may have left the chat while it was being created, and so
+                    # its room; their list still shows "New Chat" without this (EL-7385)
+                    if conversation.author_id:
+                        self.context.sio.emit(
+                            event=SioEvents.chat_conversation_name_updated.value,
+                            data={**name_update, 'project_id': project_id},
+                            room=get_user_room(conversation.author_id),
+                        )
 
                     log.debug(f"Successfully updated conversation {conversation_id} name")
                         
