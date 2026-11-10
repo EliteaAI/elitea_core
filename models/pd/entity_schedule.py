@@ -112,6 +112,24 @@ class ScheduleRiskCheck(BaseModel):
         None, description='The rule to check under. With `pause_and_ask`, a missing credential or a personal '
         'sign-in is a notice, not a block. Without it, an edit uses the rule of the stored schedule',
         examples=['pause_and_ask'])
+    trigger_kind: TriggerKind | None = Field(
+        None, description='The trigger to check for. A `webhook` never waits for a sign-in, so those findings block '
+        'under both rules. Without it, an edit uses the kind of the stored schedule', examples=['webhook'])
+
+
+class ScheduleConnectionsCheck(BaseModel):
+    """The body of the Connections check (#7401): can each toolkit of the version run with no person signed in."""
+    model_config = ConfigDict(json_schema_extra={'examples': [
+        {'entity_type': 'agent', 'application_id': 12, 'version_id': 34, 'trigger_kind': 'webhook'}]})
+
+    entity_type: EntityType
+    application_id: ApplicationId
+    version_id: VersionId
+    trigger_kind: TriggerKind = Field('cron', description='A `webhook` blocks on any row that is not ok',
+                                      examples=['webhook'])
+    schedule_id: int | None = Field(
+        None, description='The trigger the check is for: its owner checks, and its credential references are saved',
+        examples=[7])
 
 
 class ScheduleVariable(BaseModel):

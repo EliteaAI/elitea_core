@@ -42,6 +42,7 @@ ROUTES = {
     ("get", "settings"): "_get_settings",
     ("put", "settings"): "_save_settings",
     ("post", "check"): "_check_risks",
+    ("post", "connections"): "_check_connections",
     ("post", "test_run"): "_test_run",
     ("get", "test_run"): "_test_runs",
     ("get", TEST_RUN): "_test_run_detail",

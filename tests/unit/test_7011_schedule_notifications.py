@@ -371,3 +371,26 @@ def test_7454_the_meta_names_the_trigger_kind(notifications, recorder):
 
     assert [fired[1]['meta']['trigger_kind'] for fired in recorder.fired] == ['webhook', 'cron']
     assert recorder.fired[0][1]['meta']['message'] == 'Webhook "[On push]()" failed: credential not found'
+
+
+class Test7401CredentialExpired:
+    """One notice names the credential and who can fix it: its owner, or a project admin for a team one."""
+
+    WEBHOOK = types.SimpleNamespace(id=7, name='On push', trigger_kind='webhook')
+
+    @pytest.mark.parametrize('private, fix', [
+        (True, 'Sign in again on the credential'), (False, 'Ask a project admin to sign in again')])
+    def test_7401_the_notice_names_the_credential_and_who_fixes_it(self, notifications, recorder, private, fix):
+        notifications.notify_schedule_event(12, 42, 'schedule_credential_expired', self.WEBHOOK,
+                                            extra={'credential': 'team_outlook', 'private': private, 'more': 0, 'schedule_ids': [7]})
+
+        meta = recorder.fired[0][1]['meta']
+        assert meta['message'] == (f'The saved login of "team_outlook" stopped working: webhook "[On push]()" '
+                                   f'switched off. {fix}, then re-enable it.')
+        assert (meta['schedule_ids'], meta['credential'], meta['trigger_kind']) == ([7], 'team_outlook', 'webhook')
+
+    def test_7401_more_triggers_are_counted_in_the_one_notice(self, notifications, recorder):
+        notifications.notify_schedule_event(12, 42, 'schedule_credential_expired', self.WEBHOOK,
+                                            extra={'credential': 'crm', 'private': True, 'more': 2, 'schedule_ids': [7, 8, 9]})
+
+        assert '"[On push]()" and 2 more switched off' in recorder.fired[0][1]['meta']['message']
