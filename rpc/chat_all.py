@@ -181,8 +181,9 @@ def _sends_more_than_a_decision(parsed) -> bool:
     The sign-in `authorize` is refused by the decision check, as it is the actor's own sign-in.
     """
     items = [*(parsed.hitl_decisions or []), *(getattr(parsed, 'mcp_auth_decisions', None) or [])]
+    # Only a string is an action word: a list or dict action is unhashable and is refused as invalid (400) later
     words = {parsed.hitl_action, getattr(parsed, 'mcp_auth_action', None),
-             *(item.get('action') for item in items if isinstance(item, dict))}
+             *(item['action'] for item in items if isinstance(item, dict) and isinstance(item.get('action'), str))}
     user_input = getattr(parsed, 'user_input', None)
     unlisted = [name for name in getattr(parsed, 'model_fields_set', ())
                 if name not in _DECISION_FIELDS and _filled(getattr(parsed, name, None))]

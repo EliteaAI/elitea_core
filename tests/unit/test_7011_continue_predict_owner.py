@@ -482,6 +482,22 @@ def test_the_action_word_of_a_sign_in_answer_is_no_text():
     assert calls[0][-1]['has_text'] is False
 
 
+@pytest.mark.parametrize('values', [
+    {'hitl_decisions': [{'action': ['x']}]},
+    {'hitl_decisions': [{'action': {'a': 1}}]},
+    {'hitl_resume': False, 'mcp_auth_resume': True, 'hitl_action': None, 'mcp_auth_action': 'skip',
+     'mcp_auth_decisions': [{'action': ['x']}]},
+    {'hitl_resume': False, 'mcp_auth_resume': True, 'hitl_action': None, 'mcp_auth_action': 'skip',
+     'mcp_auth_decisions': [{'action': {'a': 1}}]},
+], ids=['list action', 'dict action', 'sign-in list action', 'sign-in dict action'])
+def test_an_unhashable_action_is_passed_on_to_the_action_check_instead_of_failing(values):
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(**values), OWNER)
+
+    assert calls[0][-1]['has_text'] is False
+
+
 def _model_fields(class_name):
     """The field names of a pydantic class in models/pd/predict.py, read from the source."""
     tree = ast.parse((PLUGIN_ROOT / 'models' / 'pd' / 'predict.py').read_text())
