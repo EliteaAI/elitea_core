@@ -12,7 +12,7 @@ from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items, \
-    resolve_attachment_llm_settings
+    resolve_attachment_llm_settings, _chat_trigger_kwargs
 from ...utils.chat_history import generate_payload_chat_history
 from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...models.enums.all import ChatHistoryRole, AgentTypes
@@ -240,6 +240,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         **pop_chat_skills(regenerate_payload),
                         start_event_content=start_event_content,
                         chat_project_id=project_id,
+                        **_chat_trigger_kwargs(rpc_func),
                         **skill_rpc_kwargs,
                     )
                 except InputGuardrailBlockedError as e:

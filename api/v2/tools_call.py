@@ -39,6 +39,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             tools_call_result = context.sio.call(SioEvents.mcp_tools_call, body.model_dump(), to=server.sio_sid, timeout=server.timeout_tools_call)
             return tools_call_result, 200
         #
+        failed_server = self.module.get_failed_server_private_and_current(project_id, body.server, real_user_id)
+        if failed_server:
+            return {"error": f"Mcp Server '{body.server}' failed on the local MCP client: {failed_server.message}"}, 400
+        #
         return {"error": f"Mcp Server '{body.server}' is currently not connected to either private or current project."}, 400
 
 

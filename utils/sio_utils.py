@@ -41,7 +41,6 @@ class SioEvents(StrEnum):
     mcp_connect = 'mcp_connect'
     mcp_tools_call = 'mcp_tools_call'
     mcp_notification = 'mcp_notification'
-    mcp_tools_list = 'mcp_tools_list'
     mcp_ping = 'mcp_ping'
     mcp_status = 'mcp_status'
 

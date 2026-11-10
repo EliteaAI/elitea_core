@@ -22,6 +22,7 @@ class FakeEntitySchedule(declarative_base()):
     id = sa.Column(sa.Integer, primary_key=True)
     enabled = sa.Column(sa.Boolean)
     disabled_reason = sa.Column(sa.String)
+    next_run = sa.Column(sa.DateTime)
 
 
 class FakeSession:
@@ -117,6 +118,7 @@ def test_7011_r3_1_expired_row_is_disabled_with_reason_expired(world):
     world.rows = [_row(1, PAST)]
     world.tick()
     assert [(u["enabled"], u["disabled_reason"], u["id_1"]) for u in world.updates] == [(False, "expired", 1)]
+    assert [u["next_run"] for u in world.updates] == [None]
 
 
 def test_7011_r3_2_expired_row_starts_no_run_and_sends_one_notice_to_the_owner(world):

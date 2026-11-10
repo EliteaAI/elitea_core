@@ -59,6 +59,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         return result
 
+    @web.method()
+    def get_failed_server_private_and_current(self, project_id: int, server_name: str, user_id: int = None,
+                                              personal_project_id=None):
+        """The failure a local client reported for a server that is not online in the private or current project."""
+        if personal_project_id is None:
+            personal_project_id = context.rpc_manager.call.projects_get_personal_project_id(user_id)
+        return (self.servers_storage.get_failed_server(personal_project_id, server_name)
+                or self.servers_storage.get_failed_server(project_id, server_name))
+
 
 def _mcp_server_to_toolkit(mcp_server):
     """Convert MCP server to toolkit format"""

@@ -281,7 +281,7 @@ def test_the_registry_counter_moves_on_every_provider_and_server_change():
         "methods/providers.py", "utils/mcp_servers_storage.py", "methods/toolkits.py")}
     assert source["methods/providers.py"].count("schema_registry_version.bump()") == 2
     assert source["methods/toolkits.py"].count("schema_registry_version.bump()") == 2
-    assert source["utils/mcp_servers_storage.py"].count("schema_registry_version.bump()") == 4
+    assert source["utils/mcp_servers_storage.py"].count("schema_registry_version.bump()") == 3
     assert "schema_registry_version.bump()" in (PLUGIN_ROOT / "module.py").read_text()
 
 
