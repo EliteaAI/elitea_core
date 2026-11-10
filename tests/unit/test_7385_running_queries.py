@@ -122,16 +122,6 @@ class TestRunningConversationIds:
         assert running.running_conversation_ids(session, [6]) == set()
 
 
-class TestQueryShape:
-    @staticmethod
-    def test_streaming_is_compared_with_equals_so_the_partial_index_is_used(running):
-        # Postgres matches `is_streaming = true`, not `is_streaming IS true`, to `WHERE is_streaming`
-        for clause in (running.is_live_run(), running.is_stuck_run(timedelta(hours=1))):
-            sql = str(clause.compile(compile_kwargs={"literal_binds": True}))
-            assert "is_streaming = true" in sql.lower() or "is_streaming = 1" in sql.lower(), sql
-            assert " is true" not in sql.lower() and "is 1" not in sql.lower(), sql
-
-
 class TestCloseStuck:
     @staticmethod
     def test_old_rows_end_with_a_task_id_or_without(running, session):

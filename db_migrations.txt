@@ -3,9 +3,6 @@
 # When release tags are moved - comment with release version will be added
 
 # R-2.0.9 — Keep chat runs going when switching chats (EL-7385)
-# Run for every existing project schema {pid} (e.g. p_1, p_2, …). New projects get the index via create_all().
-# The chat list reads has_running_task on every load; the partial index holds only the few streaming rows.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chat_message_group_streaming ON {pid}.chat_message_group (conversation_id) WHERE is_streaming;
 # End the response rows left "streaming" for over a day: sends that broke before their run started, and runs whose
 # task died without a stream end (dry run first):
 Run admin task close_stuck_chat_runs with param: project_id=all

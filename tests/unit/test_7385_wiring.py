@@ -4,8 +4,7 @@ Each assertion pins a detail that silently breaks the feature when it regresses:
 
 * chat_enter_room stays read-only: it joins the room and writes nothing (two tabs join at once);
 * stream_response does no per-chunk work for a live-text catch-up (dropped after review);
-* every response shape of the sidebar list sets has_running_task (a missed shape shows no spinner),
-  and the partial index it reads is declared;
+* every response shape of the sidebar list sets has_running_task (a missed shape shows no spinner);
 * the stop / timeout paths, which end a run outside chat_message_stream_end, announce "stopped";
   Stop reads the audience before its delete branch removes the row;
 * the chat name also reaches the author's own room;
@@ -58,13 +57,6 @@ class TestListField:
         assert "running_ids = running_conversation_ids(session, conv_ids)" in rpc
         assert '"has_running_task": conv.id in running_ids,' in rpc
         assert "has_running_task: bool = False" in source("models/pd/conversation.py")
-
-    @staticmethod
-    def test_the_list_query_has_its_partial_index(source):
-        model = source("models/message_group.py")
-        assert "Index('ix_chat_message_group_streaming', 'conversation_id', postgresql_where=text('is_streaming'))" in model
-        assert ("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chat_message_group_streaming ON {pid}.chat_message_group "
-                "(conversation_id) WHERE is_streaming;") in source("db_migrations.txt")
 
 
 class TestRunEnds:

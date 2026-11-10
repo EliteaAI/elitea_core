@@ -5,7 +5,7 @@ from typing import List
 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, DateTime, func, ForeignKey, Boolean, UUID, String, Index, text
+from sqlalchemy import Integer, DateTime, func, ForeignKey, Boolean, UUID, String
 
 from . import db, config as c, CONVERSATION_MESSAGE_GROUP_TABLE_NAME
 from .conversation import Conversation
@@ -16,8 +16,6 @@ from .participants import Participant
 class ConversationMessageGroup(db.Base):
     __tablename__ = CONVERSATION_MESSAGE_GROUP_TABLE_NAME
     __table_args__ = (
-        # has_running_task on every chat list load (EL-7385); only the few streaming rows are indexed
-        Index('ix_chat_message_group_streaming', 'conversation_id', postgresql_where=text('is_streaming')),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

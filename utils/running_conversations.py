@@ -23,7 +23,6 @@ def _utc_now():
 
 
 def _is_streaming():
-    # `= true`, not `IS true`: Postgres matches only this form to the partial index `WHERE is_streaming`
     return ConversationMessageGroup.is_streaming == True  # noqa: E712  pylint: disable=C0121
 
 
