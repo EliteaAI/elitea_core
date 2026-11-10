@@ -7,7 +7,7 @@ from ..models.pd.message import MessageGroupDetail
 
 from tools import db, context, serialize
 
-from ..rpc.chat_all import CHAT_PREDICT_MAPPER
+from ..rpc.chat_all import CHAT_PREDICT_MAPPER, _chat_trigger_kwargs
 
 
 SKILL_CONTINUE_UNSUPPORTED_ERROR = 'Skill answers are continued through the chat, not this event'
@@ -47,7 +47,8 @@ def continue_message(sid: str, payload: dict):
                     'participant_id': msg_group.author_participant_id,
                     'question_id': payload['question_id'],
                 },
-                chat_project_id=project_id
+                chat_project_id=project_id,
+                **_chat_trigger_kwargs(rpc_func),
             )
             session.refresh(msg_group)
             return serialize(MessageGroupDetail.model_validate(msg_group)), 200
