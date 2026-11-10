@@ -67,7 +67,8 @@ def continue_message(isolated_sys_modules):
     _stub(f'{PACKAGE}.utils.sio_utils', SioEvents=SimpleNamespace(chat_predict=SimpleNamespace(value='chat_predict')))
     _stub(f'{PACKAGE}.models.message_group', ConversationMessageGroup=SimpleNamespace(reply_to=None, uuid=None))
     _stub(f'{PACKAGE}.models.pd.message', MessageGroupDetail=SimpleNamespace(model_validate=lambda x: x))
-    _stub(f'{PACKAGE}.rpc.chat_all', CHAT_PREDICT_MAPPER={'skill': 'applications_predict_sio'})
+    _stub(f'{PACKAGE}.rpc.chat_all', CHAT_PREDICT_MAPPER={'skill': 'applications_predict_sio'},
+          _chat_trigger_kwargs=lambda rpc_func: {})
     _stub('sqlalchemy.orm', joinedload=lambda *a: None)
     spec = importlib.util.spec_from_file_location(f'{PACKAGE}.models.enums.all', PLUGIN_ROOT / 'models/enums/all.py')
     enums = importlib.util.module_from_spec(spec)
