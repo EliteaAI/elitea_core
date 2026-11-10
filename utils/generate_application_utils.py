@@ -357,9 +357,12 @@ def build_system_prompt(
     agents: list,
     pipelines: list,
     skills: list,
+    max_conversation_starters: int,
 ) -> str:
+    # str.format ignores unused kwargs, so prompts seeded before the placeholder still render
     return template.format(
-        **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills)
+        max_conversation_starters=max_conversation_starters,
+        **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills),
     )
 
 
@@ -468,9 +471,11 @@ def build_edit_system_prompt(
     agents: list,
     pipelines: list,
     skills: list,
+    max_conversation_starters: int,
 ) -> str:
     return template.format(
         current_config=json.dumps(current_config, indent=2),
+        max_conversation_starters=max_conversation_starters,
         **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills),
     )
 

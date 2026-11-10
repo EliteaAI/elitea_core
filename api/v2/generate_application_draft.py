@@ -128,7 +128,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not template:
                 return {"error": "Service prompt 'edit_application_draft' is not configured"}, 500
             system_prompt = build_edit_system_prompt(
-                template, project_id, current_config, toolkits, mcp, agents, pipelines, skills
+                template, project_id, current_config, toolkits, mcp, agents, pipelines, skills,
+                max_conversation_starters=max_starters,
             )
             log.debug("generate_application_draft: edit system_prompt length=%d", len(system_prompt))
         else:
@@ -142,7 +143,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             template = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
             if not template:
                 return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
-            system_prompt = build_system_prompt(template, project_id, toolkits, mcp, agents, pipelines, skills)
+            system_prompt = build_system_prompt(
+                template, project_id, toolkits, mcp, agents, pipelines, skills,
+                max_conversation_starters=max_starters,
+            )
 
         try:
             result = self.module.predict_sio_llm(
