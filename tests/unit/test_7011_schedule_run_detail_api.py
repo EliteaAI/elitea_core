@@ -21,6 +21,7 @@ from test_7011_schedule_crud_api import (
     ADMIN_ID,
     NOT_FOUND,
     OTHER_ID,
+    OWNER_ID,
     PACKAGE,
     PERMISSION_PREFIX,
     PROJECT_ID,
@@ -45,12 +46,13 @@ DETAIL_FIELDS = (FIELDS - {'tokens', 'cost_usd'}) | {  # the detail has the figu
 @pytest.fixture
 def reads(monkeypatch):
     """The read helpers the handler imports late; `usage` is what the usage store answers."""
-    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], tool_events=[TOOL])
+    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], outputs=[], tool_events=[TOOL])
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
     module.version_label = lambda session, version_id: {10: 'v3'}.get(version_id)
 
-    def tool_call_events(session, conversation_id):
+    def tool_call_events(session, conversation_id, with_output=True):
         state.conversations.append(conversation_id)
+        state.outputs.append(with_output)
         return state.tool_events if conversation_id else []
 
     module.tool_call_events = tool_call_events
@@ -95,6 +97,27 @@ def test_cr_el7011_the_detail_has_the_run_version_account_risk_summary_and_event
     # The stored events and the tool calls of the conversation, in time order
     assert [event['kind'] for event in body['events']] == ['started', 'tool_call', 'finished']
     assert reads.conversations == [901]
+
+
+@pytest.mark.parametrize('trigger, requested_by, viewer, shown', [
+    ('manual', ADMIN_ID, ADMIN_ID, True),    # the starter sees the tool results
+    ('test', ADMIN_ID, ADMIN_ID, True),
+    ('manual', ADMIN_ID, OWNER_ID, False),   # the owner does not see the results of an admin's run
+    ('test', ADMIN_ID, OWNER_ID, False),
+    ('cron', None, OWNER_ID, True),          # a scheduled run is the owner's
+    ('manual', OWNER_ID, OWNER_ID, True),
+])
+def test_the_tool_results_of_a_manual_or_test_run_go_only_to_its_starter(
+        harness, reads, trigger, requested_by, viewer, shown):
+    schedule_id = harness.seed()
+    run_id = seed_run(harness, schedule_id, trigger=trigger, requested_by=requested_by)
+    if viewer == ADMIN_ID:
+        harness.request_as(ADMIN_ID, ADMIN)
+
+    body, status = call_run(harness, 'get', schedule_id, run_id)
+
+    assert status == 200
+    assert (reads.outputs, len(body['events'])) == ([shown], 3)
 
 
 def test_cr_el7011_the_merged_events_stay_at_the_event_limit_and_keep_the_last(harness, reads):

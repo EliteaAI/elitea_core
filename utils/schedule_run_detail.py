@@ -51,9 +51,12 @@ def _toolkit(attrs) -> str | None:
     return None
 
 
-def _tool_event(row) -> dict:
-    """One tool call line: toolkit, tool, the start of its result on one line, and its duration."""
-    output = (row.output or '').strip()
+def _tool_event(row, with_output: bool = True) -> dict:
+    """One tool call line: toolkit, tool, the start of its result on one line, and its duration.
+
+    Without `with_output` the line keeps the toolkit, the tool and the duration, and no part of the result.
+    """
+    output = (row.output or '').strip() if with_output else ''
     summary = (output[:RESULT_LIMIT] + TRUNCATED if len(output) > RESULT_LIMIT else output) or None
     preview = ' '.join(output[:PREVIEW_LIMIT * 2].split())[:PREVIEW_LIMIT]
     duration_ms = (round((row.finished_at - row.started_at).total_seconds() * 1000)
@@ -70,8 +73,11 @@ def _tool_event(row) -> dict:
     return {key: value for key, value in event.items() if value is not None or key == 'at'}
 
 
-def tool_call_events(session, conversation_id: int | None) -> list[dict]:
-    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`."""
+def tool_call_events(session, conversation_id: int | None, with_output: bool = True) -> list[dict]:
+    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`.
+
+    `with_output=False` drops the result of each call (`summary` and the preview in `text`).
+    """
     if conversation_id is None:
         return []
     rows = session.execute(
@@ -86,7 +92,7 @@ def tool_call_events(session, conversation_id: int | None) -> list[dict]:
         .order_by(MessageTraceStep.started_at, MessageTraceStep.id)
         .limit(EVENT_LIMIT)
     ).all()
-    return [_tool_event(row) for row in rows]
+    return [_tool_event(row, with_output) for row in rows]
 
 
 def usage_summary(session, project_id: int, run) -> tuple[int | None, float | None]:

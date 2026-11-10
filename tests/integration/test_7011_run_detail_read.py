@@ -150,6 +150,16 @@ def test_cr_el7011_tool_calls_of_the_run_conversation_become_log_events_in_time_
     assert second["text"] == "Tool call: create_issue (1200 ms): 403 Forbidden"
 
 
+def test_tool_calls_without_output_keep_the_toolkit_the_tool_and_the_duration_only(detail):
+    detail.tool(5, attrs={"metadata": {"toolkit_name": "github"}}, tool_output="secret result " * 20)
+
+    (event,) = detail.module.tool_call_events(detail.session, CONVERSATION_ID, with_output=False)
+
+    assert event["text"] == "Tool call: github · list_issues (1200 ms)"
+    assert (event["toolkit"], event["tool"], event["duration_ms"], "summary" in event) == (
+        "github", "list_issues", 1200, False)
+
+
 def test_cr_el7011_a_huge_tool_result_is_cut_at_the_upper_bound_with_a_marker(detail):
     limit = detail.module.RESULT_LIMIT
     detail.tool(1, tool_output="x" * (limit + 500))

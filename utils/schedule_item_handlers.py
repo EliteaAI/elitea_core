@@ -230,13 +230,22 @@ def _run_filters(query: RunFilters) -> list:
     return where
 
 
-def _run_detail_body(session, project_id: int, run, approval_rule: str | None):
-    """The `(body, status)` of one run, with the approval rule of its schedule or of its Test Run form."""
+def _hides_tool_output(run, viewer_id: int) -> bool:
+    """True when a Run now or Test run was started by another user than the viewer: the tool results are the starter's."""
+    return run.trigger in ('manual', 'test') and run.requested_by is not None and run.requested_by != viewer_id
+
+
+def _run_detail_body(session, project_id: int, run, approval_rule: str | None, viewer_id: int):
+    """The `(body, status)` of one run, with the approval rule of its schedule or of its Test Run form.
+
+    The tool results (`summary` and the preview of a `tool_call` event) go only to the user who started a manual or test run.
+    """
     # Late: only the detail routes read the conversation and the usage store
     from .schedule_run_detail import tool_call_events, usage_summary, version_label
     row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
     tokens, cost_usd = usage_summary(session, project_id, run)
-    events = [public_event(e) for e in merge_events(run.events, tool_call_events(session, run.conversation_id))]
+    tool_events = tool_call_events(session, run.conversation_id, with_output=not _hides_tool_output(run, viewer_id))
+    events = [public_event(e) for e in merge_events(run.events, tool_events)]
     return {
         **row,
         "version_label": version_label(session, run.version_id),
@@ -878,7 +887,7 @@ class ScheduleItemHandlers:
                 rule = form_of_test_run(session, run_id).get("approval_rule")
             except TestRunUnavailable:
                 return TEST_RUN_UNAVAILABLE
-            return _run_detail_body(session, project_id, run, rule)
+            return _run_detail_body(session, project_id, run, rule, scope.user_id)
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _runs(self, project_id: int, schedule_id: int):
@@ -910,6 +919,7 @@ class ScheduleItemHandlers:
 
         The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
         A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
+        A manual or test run started by another user carries no tool result, only toolkit, tool and duration.
         Tokens and cost are null while the usage store has no row for the conversation.
         Who may call: the owner with `schedules.details`, or a schedules admin.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
@@ -924,7 +934,7 @@ class ScheduleItemHandlers:
                 EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule.id))
             if run is None:
                 return RUN_NOT_FOUND
-            return _run_detail_body(session, project_id, run, schedule.approval_rule)
+            return _run_detail_body(session, project_id, run, schedule.approval_rule, scope.user_id)
 
     @auth.decorators.check_api(schedule_check_spec("admin"))
     def _change_owner(self, project_id: int, schedule_id: int):

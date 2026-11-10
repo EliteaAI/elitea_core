@@ -376,7 +376,7 @@ def reads(monkeypatch):
     module.conversation_uuids = lambda session, ids: {i: f'uuid-{i}' for i in ids if i is not None}
     module.usage_summaries = lambda project_id, rows: {row.id: (10, 0.5) for row in rows}
     module.version_label = lambda session, version_id: 'v3'
-    module.tool_call_events = lambda session, conversation_id: []
+    module.tool_call_events = lambda session, conversation_id, with_output=True: []
     module.usage_summary = lambda session, project_id, run: (10, 0.5)
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
