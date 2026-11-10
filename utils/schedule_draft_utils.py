@@ -3,6 +3,7 @@ import json
 from datetime import date
 
 from pydantic import ValidationError
+from pylon.core.tools import log
 
 from ..models.pd.entity_schedule import ScheduleTiming
 from ..models.pd.generate_schedule_draft import ScheduleDraft
@@ -43,11 +44,37 @@ def schedule_roster(project_id: int, user_id: int) -> list[dict]:
     ]
 
 
+def _vector_index_names(project_id: int, toolkit_ids: list[int]) -> dict[int, list[str]]:
+    """The index names the vector store holds for each toolkit: the source of the index picker.
+
+    A toolkit whose store cannot be read is left out, so its names come from the settings key alone.
+    """
+    # Imported here: the vector store helpers load only when an index roster is asked for.
+    from ..models.indexer import EmbeddingStore  # pylint: disable=C0415
+    from .application_tools import get_session_for_schema  # pylint: disable=C0415
+    from .vectorstore import get_pgvector_connection_string  # pylint: disable=C0415
+
+    connection_string = get_pgvector_connection_string(project_id)
+    if not connection_string:
+        return {}
+    names = {}
+    for toolkit_id in toolkit_ids:
+        try:
+            with get_session_for_schema(connection_string, str(toolkit_id)) as session:
+                rows = session.query(EmbeddingStore.cmetadata['collection'].astext).filter(
+                    EmbeddingStore.cmetadata['type'].astext == 'index_meta').all()
+            names[toolkit_id] = [name for (name,) in rows if name]
+        except Exception as error:  # noqa: BLE001 -- one unreadable store must not empty the whole roster
+            log.warning('Index names of toolkit %s read from the settings only: %s', toolkit_id, type(error).__name__)
+    return names
+
+
 def schedule_index_roster(project_id: int, user_id: int) -> list[dict]:
     """One row per index of a toolkit the user may open: `toolkit_id`, `toolkit_name`, `index_name`, `scheduled`.
 
-    Only toolkits whose vector store holds an index count, as the picker lists them (`has_indexes`). An index
-    counts as scheduled when a schedule row or the old settings key already holds a schedule for it.
+    Only toolkits whose vector store holds an index count, as the picker lists them (`has_indexes`). The names are
+    the ones the picker shows (the vector store), plus any name the settings key `indexes_meta` still holds. An
+    index counts as scheduled when a schedule row or the old settings key already holds a schedule for it.
     """
     # Imported here: the ORM tables and the vector store helpers are not needed by callers that only check fields.
     from tools import db  # pylint: disable=E0401,C0415
@@ -69,9 +96,12 @@ def schedule_index_roster(project_id: int, user_id: int) -> list[dict]:
             EliteATool.id.in_(toolkit_ids)).order_by(EliteATool.name, EliteATool.id).all()
         rows = set(session.query(EntitySchedule.toolkit_id, EntitySchedule.index_name).filter(
             EntitySchedule.toolkit_id.in_(toolkit_ids)).all())
+    stored = _vector_index_names(project_id, toolkit_ids)
     roster = []
     for toolkit_id, toolkit_name, meta in toolkits:
-        for index_name, entry in sorted(((meta or {}).get('indexes_meta') or {}).items()):
+        legacy_meta = (meta or {}).get('indexes_meta') or {}
+        for index_name in sorted(set(stored.get(toolkit_id, ())) | set(legacy_meta)):
+            entry = legacy_meta.get(index_name)
             legacy = isinstance(entry, dict) and bool(entry.get('schedules'))
             roster.append({'toolkit_id': toolkit_id, 'toolkit_name': toolkit_name, 'index_name': index_name,
                            'scheduled': legacy or (toolkit_id, index_name) in rows})

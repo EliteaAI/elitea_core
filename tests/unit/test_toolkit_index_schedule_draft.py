@@ -57,12 +57,18 @@ def is_run_without_asking_allowed(project_id):
     raise AssertionError('replaced by the autospec')
 
 
+def vector_index_names(project_id, toolkit_ids):
+    raise AssertionError('replaced by the autospec')
+
+
 class DraftEnv:
     """The loaded modules and the records of the stubbed neighbours."""
 
-    def add_toolkit(self, toolkit_id, name, indexes=(), legacy_scheduled=()):
+    def add_toolkit(self, toolkit_id, name, indexes=(), legacy_scheduled=(), in_meta=True):
+        """The vector store holds every index; the settings key `indexes_meta` holds them only when `in_meta`."""
         meta = {'indexes_meta': {index: ({'schedules': {'x': {}}} if index in legacy_scheduled else {})
-                                 for index in indexes}}
+                                 for index in indexes}} if in_meta else {}
+        self.stored[toolkit_id] = list(indexes)
         with self.session_factory() as session:
             session.add(self.EliteATool(id=toolkit_id, name=name, meta=meta))
             session.commit()
@@ -81,7 +87,7 @@ class DraftEnv:
 @pytest.fixture
 def env(monkeypatch):
     env = DraftEnv()
-    env.hidden, env.with_indexes, env.blocked, env.config = set(), set(), set(), {}
+    env.hidden, env.with_indexes, env.blocked, env.config, env.stored = set(), set(), set(), {}, {}
     with sandbox(monkeypatch, env) as (Base, engine):
         sqlite_db.install_trace_span(types.SimpleNamespace(set_attribute=lambda key, value: None))
         env.EliteATool = sys.modules[f'{PACKAGE}.models.all'].EliteATool
@@ -124,6 +130,10 @@ def env(monkeypatch):
         load_plugin_module('utils/schedule_service.py', 'utils.schedule_service')  # the one interval floor rule
         env.models = load_plugin_module('models/pd/generate_schedule_draft.py', 'models.pd.generate_schedule_draft')
         env.module = load_plugin_module('utils/schedule_draft_utils.py', 'utils.schedule_draft_utils')
+        env.vector_names = mock.create_autospec(
+            vector_index_names, side_effect=lambda project_id, toolkit_ids: {
+                toolkit_id: env.stored[toolkit_id] for toolkit_id in toolkit_ids if toolkit_id in env.stored})
+        monkeypatch.setattr(env.module, '_vector_index_names', env.vector_names)  # no live vector store
         yield env
 
 
@@ -188,6 +198,41 @@ def test_roster_lists_every_index_of_a_toolkit_with_indexes_in_name_order_and_ma
         index_row(8, 'Code toolkit', 'old', scheduled=True), index_row(8, 'Code toolkit', 'src'),
         index_row(7, 'Docs toolkit', 'docs'), index_row(7, 'Docs toolkit', 'wiki', scheduled=True),
     ]
+
+
+def test_roster_takes_the_index_names_from_the_vector_store_when_the_settings_key_is_empty(env):
+    env.add_toolkit(7, 'Docs toolkit', ['docs', 'wiki'], in_meta=False)
+    env.with_indexes = {7}
+    env.schedule_index(7, 'wiki')
+    assert env.module.schedule_index_roster(PROJECT, OWNER_ID) == [
+        index_row(7, 'Docs toolkit', 'docs'), index_row(7, 'Docs toolkit', 'wiki', scheduled=True)]
+    env.vector_names.assert_called_once_with(PROJECT, [7])
+
+
+def test_roster_keeps_a_name_of_the_settings_key_when_the_vector_store_cannot_be_read(env):
+    env.add_toolkit(7, 'Docs toolkit', ['docs'])
+    env.with_indexes = {7}
+    del env.stored[7]
+    assert env.module.schedule_index_roster(PROJECT, OWNER_ID) == [index_row(7, 'Docs toolkit', 'docs')]
+
+
+def test_a_draft_naming_a_scheduled_index_of_an_empty_settings_key_warns_and_returns_no_ids(env):
+    env.add_toolkit(7, 'Docs toolkit', ['docs'], in_meta=False)
+    env.with_indexes = {7}
+    env.schedule_index(7, 'docs')
+    roster = env.module.schedule_index_roster(PROJECT, OWNER_ID)
+    draft, warnings = env.validate({**INDEX_DRAFT, 'index_name': 'docs'}, index_roster=roster)
+    assert warnings == [{'field': 'index_name', 'reason': INDEX_SCHEDULED}]
+    assert (draft.toolkit_id, draft.index_name) == (None, None)
+
+
+def test_a_draft_naming_an_unscheduled_index_of_an_empty_settings_key_resolves_to_the_toolkit(env):
+    env.add_toolkit(7, 'Docs toolkit', ['docs'], in_meta=False)
+    env.with_indexes = {7}
+    roster = env.module.schedule_index_roster(PROJECT, OWNER_ID)
+    draft, warnings = env.validate({**INDEX_DRAFT, 'index_name': 'docs'}, index_roster=roster)
+    assert (draft.toolkit_id, draft.index_name) == (7, 'docs')
+    assert warnings == []
 
 
 def test_roster_never_lists_a_toolkit_in_a_folder_the_user_cannot_open(env):
