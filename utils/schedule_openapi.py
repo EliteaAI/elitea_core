@@ -404,12 +404,15 @@ OPERATIONS = {
             "delivery path.",
             "the owner with `schedules.run`; an admin sees the schedule but cannot run it",
             "400 an invalid trigger or payload; 403 no permission or not the owner; 404 not found; "
-            "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
+            "409 the version is deleted, or a run is active (`run_active`); `active_run_id` is the id of the "
+            "active run, or null when that run belongs to another user or is an index run that has no run row; "
+            "500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,
         "responses": _responses(202, "The run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: "No permission, or not the owner", 404: None,
-            409: ("The version is deleted, or a run is active", {
+            409: ("The version is deleted, or a run is active. `active_run_id` is null when the active run "
+                  "belongs to another user or is an index run", {
                 "error": "A run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start"}),
     },
@@ -425,14 +428,16 @@ OPERATIONS = {
             "run and its chat are deleted.",
             "a project member with `schedules.run`",
             "400 an invalid field (the Save rules) or `approval_rule_not_allowed`; 403 no permission; "
-            "404 the agent or pipeline is not visible; 409 `run_active` (`active_run_id`); "
+            "404 the agent or pipeline is not visible; 409 `run_active`: `active_run_id` is the id of the "
+            "active run, or null when that run belongs to another user or is an index run that has no run row; "
             "500 `run_start_failed`; 503 `test_run_unavailable` (the admin task `migrate_schedule_test_runs` "
             "did not run)"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleCreate,
         "responses": _responses(202, "The test run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: None, 404: None,
-            409: ("A test run of this agent or pipeline is active", {
+            409: ("A test run of this agent or pipeline is active. `active_run_id` is null when the active run "
+                  "belongs to another user or is an index run", {
                 "error": "A test run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start", 503: TEST_RUN_UNAVAILABLE_TEXT}),
     },
