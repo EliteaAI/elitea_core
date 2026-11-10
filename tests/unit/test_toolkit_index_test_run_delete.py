@@ -1,10 +1,12 @@
 """Deleting an index or a toolkit removes the index schedule row and the Test runs of the index (SQLite, real models)."""
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
 from fixtures.helpers import load_module_with_stubs
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from unit import test_toolkit_index_schedule_service as service_env
 
 PACKAGE, PLUGIN_ROOT, env = service_env.PACKAGE, service_env.PLUGIN_ROOT, service_env.env
@@ -78,3 +80,27 @@ def test_removing_a_toolkit_deletes_the_test_runs_of_all_its_indexes(tools_env):
         tools_env.module._delete_index_test_runs(session, 3)  # noqa: SLF001
         session.commit()
     assert run_index_labels(tools_env) == ["docs4"]
+
+
+def raise_db_error(error_class, sqlstate):
+    def execute(*args, **kwargs):
+        raise error_class("DELETE", {}, SimpleNamespace(pgcode=sqlstate))
+    return execute
+
+
+def test_a_lock_timeout_while_deleting_test_runs_reaches_the_caller(tools_env, monkeypatch):
+    with tools_env.session_factory() as session:
+        monkeypatch.setattr(session, "execute", raise_db_error(OperationalError, "55P03"))
+        with pytest.raises(OperationalError):
+            tools_env.module._delete_index_test_runs(session, 3)  # noqa: SLF001
+
+
+def test_a_missing_test_run_column_only_logs_and_keeps_the_delete_going(tools_env, monkeypatch):
+    add_test_run(tools_env, 3, "docs")
+    log = MagicMock()
+    monkeypatch.setattr(tools_env.module, "log", log)
+    with tools_env.session_factory() as session:
+        monkeypatch.setattr(session, "execute", raise_db_error(ProgrammingError, "42703"))
+        tools_env.module._delete_index_test_runs(session, 3)  # noqa: SLF001
+    log.warning.assert_called_once()
+    assert run_index_labels(tools_env) == ["docs3"]

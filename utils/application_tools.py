@@ -591,7 +591,11 @@ def _delete_index_test_runs(session, toolkit_id: int, index_name: str | None = N
     try:
         with session.begin_nested():
             session.execute(delete(EntityScheduleRun.__table__).where(*conditions))
-    except (ProgrammingError, OperationalError):
+    except (ProgrammingError, OperationalError) as error:
+        # Only a missing column or a missing NOT NULL column is an old schema. Any other error (a lock timeout)
+        # must stop the delete, or the toolkit goes and its Test runs stay behind.
+        if error_sqlstate(error) not in ('23502', '42703'):
+            raise
         # Not the helpers of schedule_test_runs: importing them from here starts an import cycle
         log.warning("Test runs of toolkit %s not deleted: the schema has no Test run columns yet", toolkit_id)
 
