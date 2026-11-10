@@ -184,3 +184,14 @@ def test_run_without_asking_never_holds_for_a_form_even_with_the_project_setting
     assert auto_approve is False
     outcome, _ = starter._risk_check(review, schedule.approval_rule, auto_approve)
     assert outcome == "needs_approval"
+
+
+@pytest.mark.parametrize("run_created_by, expected", [(OWNER, True), (OWNER + 1, False)])
+def test_run_without_asking_holds_for_the_owner_but_never_for_an_admin_who_acts_as_themselves(
+        starter, monkeypatch, run_created_by, expected):
+    schedule = types.SimpleNamespace(approval_rule="run_without_asking", approval_fingerprint="fp-1",
+                                     approval_confirmed_by=OWNER, created_by=run_created_by)
+    monkeypatch.setattr(starter, "_setting_allows_auto_approve", lambda project_id: True)
+    review = {**clean_review(), "sensitive": [SENSITIVE]}
+
+    assert starter._may_auto_approve(34, schedule, review) is expected

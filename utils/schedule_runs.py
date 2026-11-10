@@ -438,10 +438,13 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     answers or notes, because the tools run with their identity; then `ScheduleRunNotWaiting` when the run is not
     waiting. None when a
     fan-out child decides a run that an earlier decision of the same pause resumed: nothing to change. With
-    `sign_in`, the actions are the sign-in answers (`authorize`, `skip`) and map to approve and reject.
+    `sign_in`, the actions are the sign-in answers (`authorize`, `skip`) and map to approve and reject. Only the
+    user the run acts as may `authorize`: the sign-in is theirs, so another user gets `ScheduleEditForbidden`
+    and may only `skip` (which rejects the run).
     With `recheck_actor`, an approve by another user is refused while the user the run acts as lost project
     access, `schedules.run` or the folder of the agent: the chat resumes the run at once, with no pre-run check.
     """
+    authorizes = sign_in and 'authorize' in actions  # read before the mapping turns it into an approve
     if sign_in:  # an unknown answer stays in the list, so the check below refuses it
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
     with db.get_session(project_id) as session:
@@ -457,7 +460,8 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         raise ScheduleDecisionForbidden(run_id)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
-    if caller_id != actor_id and (has_text or not all(action in OTHER_USER_ACTIONS for action in actions)):
+    only_decides = all(action in OTHER_USER_ACTIONS for action in actions)
+    if caller_id != actor_id and (has_text or authorizes or not only_decides):
         raise ScheduleEditForbidden(run_id)
     if fan_out and status == 'running' and resumed_at is not None:
         return None

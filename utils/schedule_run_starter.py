@@ -175,6 +175,8 @@ def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
     from .schedule_risk import scan_complete
     if schedule.approval_rule != 'run_without_asking' or not scan_complete(review):
         return False
+    # The owner's confirmation does not cover another account's credentials: a run that acts as an admin
+    # (created_by is the caller) never matches it, so it always pauses before a sensitive action.
     if review['sensitive'] and (review['fingerprint'] != schedule.approval_fingerprint
                                 or schedule.approval_confirmed_by != schedule.created_by):
         return False

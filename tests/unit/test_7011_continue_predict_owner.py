@@ -22,7 +22,8 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER, CONVERSATION_ID = 7, 9, 12, 55
 HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision',
-           '_carries_text'}
+           '_DECISION_FIELDS', '_DECISION_ITEM_KEYS', '_filled', '_item_sends_more_than_a_decision',
+           '_sends_more_than_a_decision'}
 ACTOR = 31  # the user a schedule run acts as, when it is not the caller
 
 
@@ -424,3 +425,108 @@ def test_the_edit_refusal_answers_its_own_403_text():
     assert (denied['status'], denied['error']) == (
         403, 'Only the user this run acts as can edit or answer in its chat')
     assert rights_denied['error'] == 'Only the schedule owner or a project admin can approve or reject this run'
+
+
+def _unlisted_field(name='surprise'):
+    """A request whose model reports `name` as set, as a field added to the model later would be."""
+    return {'model_fields_set': {name}, name: 'x'}
+
+
+@pytest.mark.parametrize('values', [
+    {'hitl_decisions': [{'action': 'reject', 'user_feedback': 'text for the model'}]},
+    {'hitl_decisions': [{'action': 'reject', 'surprise': 'x'}]},
+    {'hitl_resume': False, 'mcp_auth_resume': True, 'hitl_action': None, 'mcp_auth_action': 'skip',
+     'mcp_auth_decisions': [{'action': 'skip', 'user_feedback': 'text'}]},
+    {'user_input': 'run this instead'},
+    {'user_input': 'reject'},   # the action word is allowed only when the request carries that action
+    {'llm_settings': {'model': 'other'}},
+    {'attachments_info': [{'filepath': 'a.txt'}]},
+    {'token_limit_continuation': True},
+    _unlisted_field(),
+], ids=['user_feedback item key', 'unknown item key', 'user_feedback sign-in key', 'custom user_input',
+        'action word of another action', 'llm_settings', 'attachments_info', 'token_limit_continuation',
+        'field the allowlist does not know'])
+def test_a_request_with_more_than_a_decision_counts_as_text(values):
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(**values), OWNER)
+
+    assert calls[0][-1]['has_text'] is True
+
+
+@pytest.mark.parametrize('values', [
+    {'user_input': 'approve'},   # the chat box sends the action word
+    {'user_input': ''},
+    {'hitl_decisions': [{'action': 'approve', 'interrupt_id': 'i', 'tool_call_id': 't', 'child_thread_id': 'c',
+                         'thread_id': 'th', 'value': ''}]},
+    {'thread_id': 'th', 'interaction_uuid': 'u', 'question_id': 'q', 'should_continue': False,
+     'mcp_tokens': {'https://mcp': {'access_token': 'x'}}, 'ignored_mcp_servers': ['https://other'],
+     'user_declined_mcp_servers': [{'server_url': 'https://other'}], 'llm_settings': None, 'attachments_info': []},
+    {'model_fields_set': {'project_id', 'hitl_action', 'mcp_tokens', 'surprise'}, 'surprise': None},
+], ids=['action word', 'empty user_input', 'decision with its ids', 'routing fields and browser state',
+        'unlisted field without a value'])
+def test_a_decision_with_its_routing_ids_is_no_text(values):
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(**values), OWNER)
+
+    assert calls[0][-1]['has_text'] is False
+
+
+def test_the_action_word_of_a_sign_in_answer_is_no_text():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(hitl_resume=False, hitl_action=None, mcp_auth_resume=True, mcp_auth_action='skip',
+                  user_input='skip'), OWNER)
+
+    assert calls[0][-1]['has_text'] is False
+
+
+def _model_fields(class_name):
+    """The field names of a pydantic class in models/pd/predict.py, read from the source."""
+    tree = ast.parse((PLUGIN_ROOT / 'models' / 'pd' / 'predict.py').read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == class_name)
+    return {item.target.id for item in node.body if isinstance(item, ast.AnnAssign)}
+
+
+def test_every_field_of_the_continue_request_is_decided_for_a_user_who_is_not_the_actor():
+    # A field is either allowed in `_DECISION_FIELDS` or refused by name in `_sends_more_than_a_decision`
+    refused = {'llm_settings', 'attachments_info', 'token_limit_continuation'}
+    nodes = [node for node in ast.parse(CHAT_ALL).body
+             if any(getattr(target, 'id', None) == '_DECISION_FIELDS' for target in getattr(node, 'targets', []))]
+    allowed = set(load_cut(nodes, {}, 'chat_all.py')['_DECISION_FIELDS'])
+
+    fields = _model_fields('SioContinuePredictModel')
+
+    assert fields <= allowed | refused
+    assert not refused & allowed
+    helper = CHAT_ALL[CHAT_ALL.index('def _sends_more_than_a_decision('):CHAT_ALL.index('def _drop_other_users_input(')]
+    assert all(f"'{name}'" in helper for name in refused)
+
+
+def _drop_helper():
+    nodes = [node for node in ast.parse(CHAT_ALL).body if getattr(node, 'name', None) == '_drop_other_users_input']
+    return load_cut(nodes, {}, 'chat_all.py')['_drop_other_users_input']
+
+
+def test_the_browser_credentials_and_input_of_a_non_actor_are_cleared():
+    parsed = types.SimpleNamespace(
+        mcp_tokens={'https://mcp': {'access_token': 'admin-token'}}, ignored_mcp_servers=['https://x'],
+        user_declined_mcp_servers=[{'server_url': 'https://y'}], user_input='approve', hitl_action='approve')
+
+    _drop_helper()(parsed)
+
+    assert (parsed.mcp_tokens, parsed.ignored_mcp_servers, parsed.user_declined_mcp_servers, parsed.user_input) == (
+        {}, [], None, None)
+    assert parsed.hitl_action == 'approve'
+
+
+def test_the_clear_runs_right_after_the_actor_is_known_and_before_any_token_use():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    body = body[:body.index('\n    def ', 1)]
+    resume_index = body.index("resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])")
+
+    assert ("        if schedule_decision is not None and resume_user_id != current_user['id']:\n"
+            "            _drop_other_users_input(parsed)") in body
+    assert resume_index < body.index('_drop_other_users_input(parsed)') < body.index('check_resume_input(')
+    assert body.index('_drop_other_users_input(parsed)') < body.index('self._continue_child_resume(')

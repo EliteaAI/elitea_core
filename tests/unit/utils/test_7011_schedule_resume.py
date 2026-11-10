@@ -377,12 +377,40 @@ def test_an_admin_who_lost_the_admin_permission_still_decides_their_own_run(runs
     assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"]) == "approve"
 
 
-def test_a_sign_in_answer_of_an_admin_maps_to_approve_and_reject(runs, session, sent):
+def test_a_non_actor_skip_of_a_sign_in_rejects_the_run(runs, session, sent):
     runs.permission_holders.add(ADMIN)
     _, run = _waiting_run(runs, session)
 
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["authorize"], sign_in=True) == "approve"
     assert runs.check_schedule_decision(1, run.id, ADMIN, ["skip"], sign_in=True) == "reject"
+
+
+@pytest.mark.parametrize("answers", [["authorize"], ["skip", "authorize"]])
+def test_a_non_actor_cannot_authorize_a_sign_in(runs, session, sent, answers):
+    runs.permission_holders.add(ADMIN)
+    _, run = _waiting_run(runs, session)
+
+    with pytest.raises(runs.ScheduleEditForbidden):
+        runs.check_schedule_decision(1, run.id, ADMIN, answers, sign_in=True)
+
+    session.refresh(run)
+    assert run.status == "waiting_for_approval"
+
+
+@pytest.mark.parametrize("caller, trigger, requested_by", [(OWNER, "cron", None), (ADMIN, "manual", ADMIN)])
+def test_the_actor_authorizes_their_own_sign_in(runs, session, sent, caller, trigger, requested_by):
+    _, run = _waiting_run(runs, session, trigger, requested_by)
+
+    assert runs.check_schedule_decision(1, run.id, caller, ["authorize"], sign_in=True) == "approve"
+    assert runs.check_schedule_decision(1, run.id, caller, ["skip"], sign_in=True) == "reject"
+
+
+def test_a_user_without_rights_gets_the_rights_refusal_for_a_sign_in_authorize(runs, session, sent):
+    _, run = _waiting_run(runs, session)
+
+    with pytest.raises(runs.ScheduleDecisionForbidden) as refused:
+        runs.check_schedule_decision(1, run.id, ADMIN, ["authorize"], sign_in=True)
+
+    assert type(refused.value) is runs.ScheduleDecisionForbidden
 
 
 def test_an_unknown_action_of_an_admin_is_invalid_not_forbidden(runs, session, sent):

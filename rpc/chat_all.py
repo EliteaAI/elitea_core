@@ -148,16 +148,66 @@ _SCHEDULE_REFUSALS = {
 _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field": "mcp_auth_action", "status": 400}
 
 
-def _carries_text(parsed) -> bool:
-    """True when the request sends text: a `hitl_value`, or a `value` in a decision or sign-in answer item.
+# What a user who is not the run's actor may send: one decision and the ids that route it, nothing else. A field of the
+# request that is not listed and has a value is refused, so a field added to the model later is decided on purpose.
+_DECISION_FIELDS = frozenset({
+    'project_id', 'conversation_uuid', 'message_id', 'thread_id', 'interaction_uuid', 'question_id',
+    'await_task_timeout', 'should_continue', 'hitl_resume', 'hitl_action', 'hitl_value', 'hitl_decisions',
+    'mcp_auth_resume', 'mcp_auth_action', 'mcp_auth_decisions', 'authorization_request_id', 'user_input',
+    # The browser always sends its own tokens and server lists; `_drop_other_users_input` clears them
+    'mcp_tokens', 'ignored_mcp_servers', 'user_declined_mcp_servers',
+})
+_DECISION_ITEM_KEYS = frozenset({'action', 'interrupt_id', 'tool_call_id', 'child_thread_id', 'thread_id', 'value'})
 
-    An empty string, None and an empty dict or list are no text: the schedule panel sends `value: ''` with an approve.
+
+def _filled(value) -> bool:
+    """False for None, an empty string, dict or list: the schedule panel sends `value: ''` with an approve."""
+    return value not in (None, '', {}, [])
+
+
+def _item_sends_more_than_a_decision(item) -> bool:
+    """True for a decision item with a key outside the allowed keys, or with a `value` that holds text.
+
+    A non-dict item has no action: the action check refuses it as invalid (400).
     """
-    def filled(value) -> bool:
-        return value not in (None, '', {}, [])
+    return isinstance(item, dict) and (not set(item) <= _DECISION_ITEM_KEYS or _filled(item.get('value')))
 
+
+def _sends_more_than_a_decision(parsed) -> bool:
+    """True when the request sends anything besides one decision and its routing ids.
+
+    Only the user the run acts as may send more: an edit, an answer, a note or a new input run with their identity.
+    The chat box sends the action word as `user_input`, so that one value passes (it is cleared before the resume).
+    The sign-in `authorize` is refused by the decision check, as it is the actor's own sign-in.
+    """
     items = [*(parsed.hitl_decisions or []), *(getattr(parsed, 'mcp_auth_decisions', None) or [])]
-    return filled(parsed.hitl_value) or any(isinstance(item, dict) and filled(item.get('value')) for item in items)
+    words = {parsed.hitl_action, getattr(parsed, 'mcp_auth_action', None),
+             *(item.get('action') for item in items if isinstance(item, dict))}
+    user_input = getattr(parsed, 'user_input', None)
+    unlisted = [name for name in getattr(parsed, 'model_fields_set', ())
+                if name not in _DECISION_FIELDS and _filled(getattr(parsed, name, None))]
+    return bool(
+        unlisted
+        or _filled(parsed.hitl_value)
+        or (_filled(user_input) and user_input not in words)
+        or _filled(getattr(parsed, 'llm_settings', None))
+        or _filled(getattr(parsed, 'attachments_info', None))
+        or getattr(parsed, 'token_limit_continuation', False)
+        or any(_item_sends_more_than_a_decision(item) for item in items)
+    )
+
+
+def _drop_other_users_input(parsed) -> None:
+    """Clear what the browser of a user who is not the run's actor carries into the actor's run.
+
+    The tokens and server lists are the browser's own credentials, and `user_input` is the action word the chat box
+    sends: the resumed run uses them under the actor's identity. The UI always sends them, so they are dropped here
+    instead of refused.
+    """
+    parsed.mcp_tokens = {}
+    parsed.ignored_mcp_servers = []
+    parsed.user_declined_mcp_servers = None
+    parsed.user_input = None
 
 
 def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
@@ -168,7 +218,8 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     the rights check passed. The caller is the user the run acts as, the schedule owner or a holder of
     `schedules.admin`; the run must be linked to this conversation. Every action field the worker reads is checked:
     each decision, the top-level `hitl_action` and the sign-in answers. Only the user the run acts as may send an
-    edit, an answer, a note or any text. Another user's approve also re-checks the rights of the user the run acts as.
+    edit, an answer, a note, a sign-in `authorize` or anything but a decision (`_sends_more_than_a_decision`).
+    Another user's approve also re-checks the rights of the user the run acts as.
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
@@ -199,7 +250,8 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     try:  # the run id in the meta is client-written: the run must be linked to this chat
         decision = check_schedule_decision(
             parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
-            conversation_id=conversation_id, recheck_actor=True, has_text=_carries_text(parsed))
+            conversation_id=conversation_id, recheck_actor=True,
+            has_text=_sends_more_than_a_decision(parsed))
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
@@ -2195,6 +2247,9 @@ class RPC:
                 return self._refuse_schedule_decision(sid, parsed, denied)
         # An admin decides, but the run resumes as the user it started as; the run log keeps who decided
         resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])
+        # Another user's decision carries none of their own tokens or text into the actor's run
+        if schedule_decision is not None and resume_user_id != current_user['id']:
+            _drop_other_users_input(parsed)
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
