@@ -123,6 +123,7 @@ def env(monkeypatch):
     yield env
     for key in set(sys.modules) - set(original):
         sys.modules.pop(key, None)
+    sys.modules.update(original)  # a module that was loaded before and got replaced comes back too
 
 
 def error_of(excinfo):
