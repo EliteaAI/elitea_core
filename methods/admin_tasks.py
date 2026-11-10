@@ -978,38 +978,30 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         ``eval_dataset_case``, on every project schema. Idempotent
         (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
 
+        Before adding the ``agent_id`` FK it deletes datasets whose agent no longer exists (left
+        behind on schemas that had the column but not the FK), as the FK's ``ON DELETE CASCADE``
+        would have. ``dry_run`` lists them per project and changes nothing.
+
         Param format (optional):
-            "project_id=<all|N>"
+            "project_id=<all|N>[;dry_run]"
         """
         from ..utils.eval_dataset_schema import apply_eval_dataset_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_dataset_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        values, error = _parse_project_param(
+            "migrate_eval_dataset_columns", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_dataset_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
 
-        migrated, failed = apply_eval_dataset_columns(project_ids)
-        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+        dry_run = values["dry_run"]
+        migrated, failed, orphans = apply_eval_dataset_columns(project_ids, dry_run=dry_run)
+        return {"dry_run": dry_run, "migrated": 0 if dry_run else len(migrated), "failed": len(failed),
+                "failed_projects": failed, "orphaned_datasets": orphans}
 
     @web.method()
     def migrate_eval_case_usage_columns(self, *args, **kwargs):
@@ -1025,27 +1017,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         from ..utils.eval_case_usage_schema import apply_eval_case_usage_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_case_usage_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        _, error = _parse_project_param("migrate_eval_case_usage_columns", param, "project_id=<all|N>")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_case_usage_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
@@ -1069,27 +1046,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         from ..utils.eval_suite_schema import apply_eval_suite_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_suite_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        _, error = _parse_project_param("migrate_eval_suite_columns", param, "project_id=<all|N>")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_suite_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
@@ -1113,27 +1075,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         from ..utils.eval_dimension_schema import apply_eval_dimension_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_dimension_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        _, error = _parse_project_param("migrate_eval_dimension_columns", param, "project_id=<all|N>")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_dimension_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}

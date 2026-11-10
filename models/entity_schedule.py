@@ -24,7 +24,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from . import config as c
 from . import db, db_tools
 
-ACTIVE_RUN_STATUSES = "status IN ('running', 'waiting_for_approval')"
+ACTIVE_STATUSES = ('running', 'waiting_for_approval')
+ACTIVE_RUN_STATUSES = 'status IN (' + ', '.join(f"'{status}'" for status in ACTIVE_STATUSES) + ')'
 # A webhook may have several active runs; its caps are counted in code (#7400)
 ONE_ACTIVE_RUN = f"{ACTIVE_RUN_STATUSES} AND trigger <> 'webhook'"
 
@@ -115,6 +116,9 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     signing_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_secret_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Time and outcome of the last authentic delivery (accepted, duplicate, ping, disabled, refused, start_failed)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_delivery_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # The old URL key of a migrated legacy webhook (#7402)
     legacy_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     legacy_application_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

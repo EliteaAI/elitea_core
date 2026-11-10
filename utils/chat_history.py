@@ -135,9 +135,13 @@ def generate_chat_history(
         summaries: List['dict'] = None,
         include_context: bool = True,
         routing_projection: Optional[dict] = None,
+        tool_stubs: Optional[Dict[int, List[dict]]] = None,
+        message_group_ids: Optional[List[int]] = None,
 ) -> List[dict]:
+    """``message_group_ids``, when given, is filled with the source group id of every emitted message."""
     chat_history = []
     routing_history = []
+    tool_stubs = tool_stubs or {}
 
     if summaries:
         chat_history.append(
@@ -151,9 +155,19 @@ def generate_chat_history(
             role, msg_group.message_items, include_context=include_context
         )
         if chat_history_item['content']:
+            # Stubs precede the turn's final text, mirroring the real tool loop order
+            group_id = getattr(msg_group, 'id', None)
+            for stub in tool_stubs.get(group_id, []) if tool_stubs else []:
+                chat_history.append(stub)
+                if message_group_ids is not None:
+                    message_group_ids.append(group_id)
+                if routing_projection is not None:
+                    routing_history.append({'role': stub['role']})
             chat_history.append(
                 chat_history_item
             )
+            if message_group_ids is not None:
+                message_group_ids.append(group_id)
             # Keep one routing row per emitted generation row, including an
             # empty projection of a context-only group. Never zip independently
             # filtered histories: that would associate another turn's task.
@@ -213,3 +227,103 @@ def exclude_image_base64_content_from_chat_history(
         result.append({**msg, 'content': filtered_content})
     
     return result
+
+
+def capped_tool_inputs(column):
+    """tool_inputs with every value cut in SQL, so a multi-MB create_file body never leaves Postgres."""
+    from sqlalchemy import func, case, select, cast, text, Text
+    from sqlalchemy.dialects.postgresql import JSONB
+    from .history_tool_stubs import MAX_ARG_CHARS, MAX_ARG_KEYS
+
+    empty = text("'{}'::jsonb")
+    obj = case((func.jsonb_typeof(column) == 'object', column), else_=empty)
+    kv = func.jsonb_each(obj).table_valued('key', 'value').render_derived(name='kv')
+    value_text = case(
+        (func.jsonb_typeof(kv.c.value) == 'string', kv.c.value.op('#>>')(text("'{}'::text[]"))),
+        else_=cast(kv.c.value, Text),
+    )
+    short = case(
+        (func.jsonb_typeof(kv.c.value).in_(['number', 'boolean', 'null']), kv.c.value),
+        else_=func.to_jsonb(func.left(value_text, MAX_ARG_CHARS + 1)),
+    )
+    limited = select(kv.c.key, short.label('v')).limit(MAX_ARG_KEYS).subquery()
+    return select(func.coalesce(func.jsonb_object_agg(limited.c.key, limited.c.v), empty)).scalar_subquery()
+
+
+def load_history_tool_stubs(session, message_groups: List[ConversationMessageGroup], config: dict,
+                            has_tools: bool) -> Dict[int, List[dict]]:
+    """Stub messages for the last N assistant groups' top-level tool calls; {} when off or the agent has no tools."""
+    from sqlalchemy import func
+    from ..models.message_trace_step import MessageTraceStep
+    from .history_tool_stubs import (
+        stub_settings, select_stub_group_ids, build_tool_stub_messages, MAX_CALLS_PER_TURN, MAX_RESULT_CHARS,
+    )
+
+    settings = stub_settings(config)
+    # Bedrock rejects toolUse/toolResult history when the request declares no tools
+    if not settings['enabled'] or not has_tools or not message_groups:
+        return {}
+    group_ids = select_stub_group_ids(
+        message_groups, lambda g: get_role(g) == ChatHistoryRole.assistant.value, settings['last_n'],
+    )
+    if not group_ids:
+        return {}
+    # Optional lookup: a failure (e.g. statement timeout) must not abort the caller's transaction
+    savepoint = session.begin_nested()
+    try:
+        rank = func.row_number().over(
+            partition_by=MessageTraceStep.message_group_id,
+            order_by=(MessageTraceStep.started_at, MessageTraceStep.id),
+        ).label('rank')
+        ranked = session.query(
+            MessageTraceStep.id, MessageTraceStep.message_group_id, rank,
+        ).filter(
+            MessageTraceStep.message_group_id.in_(group_ids),
+            MessageTraceStep.kind == 'tool_call',
+            # Sub-agent internals belong to the child agent, not this conversation's tool loop
+            MessageTraceStep.parent_agent_name.is_(None),
+            MessageTraceStep.parent_agent_call_id.is_(None),
+        ).subquery()
+        # Full columns only for the kept calls; the rest are just counted for the "+K omitted" note
+        rows = session.query(
+            MessageTraceStep.id, MessageTraceStep.message_group_id, MessageTraceStep.tool_name,
+            capped_tool_inputs(MessageTraceStep.tool_inputs).label('tool_inputs'),
+            MessageTraceStep.is_error, MessageTraceStep.finished_at,
+            func.left(MessageTraceStep.tool_output, MAX_RESULT_CHARS + 1).label('tool_output'),
+        ).join(ranked, ranked.c.id == MessageTraceStep.id).filter(
+            ranked.c.rank <= MAX_CALLS_PER_TURN,
+        ).order_by(ranked.c.message_group_id, ranked.c.rank).all()
+        totals = dict(session.query(ranked.c.message_group_id, func.count()).group_by(
+            ranked.c.message_group_id).all())
+        savepoint.commit()
+    except Exception as e:
+        savepoint.rollback()
+        log.warning('history tool stubs: trace step lookup failed, replaying text only: %s', e)
+        return {}
+    per_group: Dict[int, List[dict]] = {}
+    for row in rows:
+        per_group.setdefault(row.message_group_id, []).append(row._asdict())
+    return {gid: build_tool_stub_messages(steps, omitted=totals.get(gid, len(steps)) - len(steps))
+            for gid, steps in per_group.items()}
+
+
+def generate_payload_chat_history(
+        session, payload: dict, message_groups: List[ConversationMessageGroup], summaries: List['dict'] = None,
+        is_pipeline: bool = False, config: Optional[dict] = None,
+) -> tuple:
+    """History for a predict payload plus the per-message source group ids (summarization maps by message)."""
+    from .history_tool_stubs import payload_has_tools
+    tool_stubs = {} if is_pipeline else load_history_tool_stubs(
+        session, message_groups, config or {}, has_tools=payload_has_tools(payload),
+    )
+    message_group_ids: List[int] = []
+    chat_history = generate_chat_history(
+        message_groups=message_groups, summaries=summaries,
+        include_context=not is_pipeline,
+        routing_projection=payload.get('_routing_projection'),
+        tool_stubs=tool_stubs,
+        message_group_ids=message_group_ids,
+    )
+    if tool_stubs:
+        log.info('chat history: tool stubs added for %d group(s)', len(tool_stubs))
+    return chat_history, message_group_ids

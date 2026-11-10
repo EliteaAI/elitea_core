@@ -117,8 +117,8 @@ def test_el_7011_r5_2_pause_schedule_run_fails_the_run_that_waits_for_input(runs
     assert sent.notices == [(12, "schedule_run_failed", run.id)]
 
 
-def test_el_7011_r2_4_record_skipped_run_inserts_a_finished_run_and_copies_the_status(runs, session, sent):
-    schedule = _schedule(runs, session)
+def test_record_skipped_run_inserts_a_finished_run_and_keeps_the_active_status(runs, session, sent):
+    schedule = _schedule(runs, session, last_run_status="running")
     active = _run(runs, session, schedule)
 
     skipped_id = runs.record_skipped_run(session, schedule.id, "the previous run is still running")
@@ -129,9 +129,29 @@ def test_el_7011_r2_4_record_skipped_run_inserts_a_finished_run_and_copies_the_s
     assert (skipped.trigger, skipped.status, skipped.conversation_id) == ("cron", "skipped", None)
     assert skipped.reason == "the previous run is still running"
     assert skipped.finished_at is not None
-    assert schedule.last_run_status == "skipped"
+    assert schedule.last_run_status == "running"
     assert (active.status, active.reason, active.finished_at) == ("running", None, None)
     assert (sent.notices, sent.emitted) == ([], [])
+
+
+def test_record_skipped_run_keeps_waiting_for_approval_on_the_schedule(runs, session, sent):
+    schedule = _schedule(runs, session, last_run_status="waiting_for_approval")
+    _run(runs, session, schedule, status="waiting_for_approval")
+
+    runs.record_skipped_run(session, schedule.id, "the previous run is still running")
+
+    session.refresh(schedule)
+    assert schedule.last_run_status == "waiting_for_approval"
+
+
+def test_record_skipped_run_copies_skipped_when_no_run_is_active(runs, session, sent):
+    schedule = _schedule(runs, session, last_run_status="success")
+    _run(runs, session, schedule, status="success")
+
+    runs.record_skipped_run(session, schedule.id, "the previous run is still running")
+
+    session.refresh(schedule)
+    assert schedule.last_run_status == "skipped"
 
 
 def test_el_7011_r2_4_block_schedule_run_sets_blocked_and_copies_the_status(runs, session, sent):
@@ -345,3 +365,48 @@ def test_the_worker_sentence_goes_from_the_end_event_to_the_stored_run(runs, ses
     session.refresh(run)
     assert run.reason == f"The run failed: {WORKER_SENTENCE}"
     assert run.events[-1]["text"] == f"Run finished: failed ({run.reason})"
+
+
+@pytest.mark.parametrize(("answer", "status"), [
+    ("Error: Error code: 400 - {'error': {'message': 'bad'}}", 400),
+    ("  Error: Error code: 429 - rate limited", 429),
+])
+def test_provider_error_answer_names_the_rejected_request(answer, status):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == f"The model provider rejected the request (HTTP {status})."
+
+
+@pytest.mark.parametrize(("answer", "status"), [
+    ("Error: Error code: 503", 503),
+    ("Error: Error code: 500 - {'error': {}}", 500),
+])
+def test_provider_error_answer_names_a_provider_server_error(answer, status):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == f"The model provider failed to answer (HTTP {status})."
+
+
+@pytest.mark.parametrize(("answer", "reason"), [
+    ("Error: LLM stream stalled: no data received for 120s. The model provider stopped responding; please retry.",
+     "The model provider stopped responding."),
+    ("Error: LLM stream interrupted: the connection closed before the response finished; please retry.",
+     "The connection to the model provider closed before the answer finished."),
+])
+def test_provider_error_answer_names_a_stalled_or_cut_stream(answer, reason):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) == reason
+
+
+@pytest.mark.parametrize("answer", [
+    None, "", "All good", "Error: the file is missing", "Error: Error code: 200 - fine", "Error: Error code: 4000",
+    "Summary. Error: Error code: 400 - quoted", ["Error: Error code: 400"],
+    "The LLM stream stalled for a while", "Error: LLM stream stalledness",
+])
+def test_provider_error_answer_ignores_any_other_answer(answer):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    assert provider_error_answer(answer) is None
+
+
+def test_provider_error_answer_gives_a_plain_stored_reason(reasons):
+    from plugins.elitea_core.utils.error_text import provider_error_answer
+    reason = reasons.run_failure_reason(provider_error_answer("Error: Error code: 400 - {'error': {}}"))
+    assert reason == "The run failed: The model provider rejected the request (HTTP 400)."

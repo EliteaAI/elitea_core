@@ -535,7 +535,7 @@ class Module(module.ModuleModel):
                 self.migrate_eval_platform_dimension_columns, group="R-2.0.6",
             )
             this.for_module("admin").module.register_admin_task(
-                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.6",
+                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_dimension_columns", self.migrate_eval_dimension_columns, group="R-2.0.6",
@@ -1207,6 +1207,9 @@ class Module(module.ModuleModel):
             f"/api/v2/{this.module_name}/webhook/prompt_lib/[0-9]+/[0-9]+/(github|gitlab|custom)"
         log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
         auth.add_public_rule({"uri": self.webhook_api_url_re})
+        # Webhook trigger door (#7453): /api/v2/{module_name}/hooks/prompt_lib/{project_id}/{uuid}
+        self.hooks_api_url_re = f"/api/v2/{this.module_name}/hooks/prompt_lib/[0-9]+/[0-9a-fA-F-]{{36}}"
+        auth.add_public_rule({"uri": self.hooks_api_url_re})
 
         # Shared conversation view/unlock public URL registration (unauthenticated access)
         # URL pattern: /api/v2/{module_name}/shared_chat_view/prompt_lib/<token>
@@ -1601,6 +1604,13 @@ class Module(module.ModuleModel):
                     'rpc_kwargs': {},
                     'name': 'skill_files_sweep',
                     'cron': '0 3 * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': 'applications_sweep_skill_scratch',
+                    'rpc_kwargs': {'idle_days': 30},
+                    'name': 'skill_scratch_sweep',
+                    'cron': '0 4 * * *',
                     'active': True,
                 },
                 {

@@ -344,3 +344,30 @@ class TestEL7011R4SocketEvent:
         assert notifications.emit_schedule_run_finished(**FINISHED) is None
 
         assert any('sio down' in line for line in recorder.logged)
+
+
+# --- #7454: webhook rows say "Webhook" and carry their trigger kind -----------------------------------
+
+WEBHOOK = types.SimpleNamespace(id=8, name='On push', trigger_kind='webhook')
+
+
+def test_7454_every_message_names_the_row_by_its_noun_placeholder(notifications):
+    # A template that hard-codes "schedule" would show it on a webhook row; each must use {Noun} or {noun}
+    for event_type, text in notifications.MESSAGES.items():
+        assert 'chedule' not in text and ('{Noun}' in text or '{noun}' in text), event_type
+
+
+@pytest.mark.parametrize('event_type', ALWAYS_SENT)
+def test_7454_a_webhook_row_gets_the_webhook_text_of_every_notice(notifications, recorder, event_type):
+    notifications.notify_schedule_event(12, 42, event_type, WEBHOOK, run=RUN)
+
+    message = recorder.fired[0][1]['meta']['message']
+    assert 'chedule' not in message and 'ebhook "[On push]()"' in message
+
+
+def test_7454_the_meta_names_the_trigger_kind(notifications, recorder):
+    notifications.notify_schedule_event(12, 42, 'schedule_run_failed', WEBHOOK, run=RUN)
+    _send(notifications, 'schedule_run_failed', run=RUN)   # a row without the attribute is a cron schedule
+
+    assert [fired[1]['meta']['trigger_kind'] for fired in recorder.fired] == ['webhook', 'cron']
+    assert recorder.fired[0][1]['meta']['message'] == 'Webhook "[On push]()" failed: credential not found'

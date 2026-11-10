@@ -191,6 +191,45 @@ def test_chat_record_and_warn_are_left_to_checkpoint_b_to_audit(guardrail, actio
     assert guardrail.spans == []
 
 
+def test_chat_mixed_block_names_both_categories(guardrail):
+    # #7346: the key was the first category only, so the card showed "a credential"
+    _enable(guardrail, categories={'credentials': 'block', 'personal_data': 'block'})
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as caught:
+        guardrail.check_chat_input(f'token {FAKE_GITHUB_TOKEN} mail {FAKE_EMAIL}', 1, 7)
+
+    verdict = caught.value.verdict()
+    assert verdict['message_key'] == 'input_guardrail.blocked.credentials_and_personal_data'
+    assert 'a credential and personal data' in verdict['message']
+    _assert_no_value(FAKE_GITHUB_TOKEN, verdict)
+    _assert_no_value(FAKE_EMAIL, verdict)
+
+
+def test_warn_hit_beside_a_redact_hit_is_audited_once_across_a_and_b(guardrail):
+    # #7347: A audited every hit once the turn was redact; the warned text stays as typed, so B audited it again
+    _enable(guardrail, categories={'credentials': 'redact', 'personal_data': 'warn'})
+
+    text, _ = guardrail.check_chat_input(f'token {FAKE_GITHUB_TOKEN} mail {FAKE_EMAIL}', 1, 7)
+    assert [s['audit.guardrail.action'] for s in guardrail.spans] == ['input:credentials.github_token:redact']
+
+    guardrail.apply_input_guardrail(_call(text))
+
+    assert sorted(s['audit.guardrail.action'] for s in guardrail.spans) == [
+        'input:credentials.github_token:redact', 'input:personal_data.email:warn',
+    ]
+
+
+def test_mixed_block_still_audits_every_hit_at_a(guardrail):
+    _enable(guardrail, categories={'credentials': 'block', 'personal_data': 'warn'})
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError):
+        guardrail.check_chat_input(f'token {FAKE_GITHUB_TOKEN} mail {FAKE_EMAIL}', 1, 7)
+
+    assert sorted(s['audit.guardrail.action'] for s in guardrail.spans) == [
+        'input:credentials.github_token:block', 'input:personal_data.email:warn',
+    ]
+
+
 def test_chat_fail_closed_blocks_on_detector_error(guardrail, monkeypatch):
     _enable(guardrail, on_error='fail_closed')
     monkeypatch.setattr(guardrail, '_run', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')))
@@ -247,6 +286,22 @@ def test_resume_mirrored_input_takes_the_redacted_hitl_value(guardrail):
     guardrail.check_resume_input(parsed, 1, 7)
 
     assert parsed.user_input == parsed.hitl_value == 'use [REDACTED:credentials]'
+
+
+def test_resume_edit_sent_as_value_and_decision_is_audited_once(guardrail):
+    # #7347: a durable pipeline HITL edit carries the same text in hitl_value and hitl_decisions
+    _enable(guardrail, categories={'credentials': 'redact'})
+    edit = f'use {FAKE_GITHUB_TOKEN}'
+    parsed = types.SimpleNamespace(
+        user_input=None, hitl_value=edit, hitl_decisions=[{'interrupt_id': 'i1', 'action': 'edit', 'value': edit}],
+    )
+
+    verdict = guardrail.check_resume_input(parsed, 1, 7)
+
+    assert parsed.hitl_value == parsed.hitl_decisions[0]['value'] == 'use [REDACTED:credentials]'
+    assert [s['audit.tool.name'] for s in guardrail.spans] == ['hitl_edit']
+    assert verdict['detection_count'] == 1
+    _assert_no_value(FAKE_GITHUB_TOKEN, verdict, guardrail.spans)
 
 
 def test_resume_without_hitl_labels_the_input_current_turn(guardrail):

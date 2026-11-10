@@ -314,3 +314,9 @@ def test_7011_r1_3_rollback_preserves_schedules_and_runs(tables, session, parent
         models.EntityScheduleRun.schedule_id == schedule_id)).all()
     assert len(restored_runs) == 2
     assert {r.id for r in restored_runs} == {run1_id, run2_id}
+
+
+def test_active_run_statuses_sql_text_is_pinned(tables):
+    models = tables[0]
+    assert models.ACTIVE_RUN_STATUSES == "status IN ('running', 'waiting_for_approval')"
+    assert models.ONE_ACTIVE_RUN == "status IN ('running', 'waiting_for_approval') AND trigger <> 'webhook'"

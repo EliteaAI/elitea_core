@@ -40,6 +40,8 @@ START_FAILED = 'the run could not start'
 PREDICT_FAILED = 'the run call failed'
 ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
 BUDGET_CLOSED = 'the {} budget is used up'
+BODY_GONE = 'the webhook body is not kept after a pause; send the delivery again'
+BODY_UNREADABLE = 'the webhook body could not be read'
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
 
@@ -227,24 +229,55 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
 
-def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None) -> None:
+def _webhook_row(schedule) -> bool:
+    return getattr(schedule, 'trigger_kind', None) == 'webhook'  # a Test Run form has no trigger_kind
+
+
+def _started_event(loaded, trigger: str, delivery: str | None) -> dict:
+    """The first run log line; a webhook run also names its type and delivery id."""
+    label = 'Test run' if trigger == 'test' else 'Run'
+    sample = trigger == 'test' and _webhook_row(loaded.schedule)
+    if trigger != 'webhook' and not sample:
+        return run_event('started', f'{label} started · trigger: {trigger} · version {loaded.version.name}',
+                         trigger=trigger, version_id=loaded.version.id)
+    webhook_type = loaded.schedule.webhook_type
+    if sample:  # the owner's sample body (#7455)
+        return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
+                                    f"Sample body by the owner · version {loaded.version.name}",
+                         trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, sample=True)
+    return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
+                                f"delivery {delivery or 'none'} · version {loaded.version.name}",
+                     trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, delivery_id=delivery)
+
+
+def _webhook_input(loaded, payload: bytes) -> tuple[str, str]:
+    """The run input and the redacted trigger message of a delivery."""
+    from .webhook_input import parse_body, shape_input, trigger_message  # late: the guardrail loads its detectors
+    body_json = parse_body(payload)  # serialized once, for the input and the preview
+    prompt = fill_placeholders(loaded.prompt, loaded.variables)
+    return (shape_input(loaded.schedule.entity_type, prompt, body_json),
+            trigger_message(loaded.schedule.webhook_type, body_json))
+
+
+def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_request=None,
+                       payload: bytes | None = None, delivery: str | None = None) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
     closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
     Under governance (C-1009) a cron firing is admitted on its owner's mandate or refused; a refusal ends it at once.
     Run now and Test run (``owner_request``, built by the run endpoint) are the owner's own run: no mandate (#7254).
+    A webhook delivery (#7454) brings its body in ``payload`` (memory only) and its id in ``delivery``.
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
         fail_schedule_run(project_id, run_id, NOT_FOUND)
         return
     trigger = getattr(loaded, 'trigger', 'cron')
+    # a sample-body test run of a webhook row runs exactly as a delivery (#7455)
+    webhook = trigger == 'webhook' or (trigger == 'test' and _webhook_row(loaded.schedule))
     if not getattr(loaded, 'resumed', False):  # an approved parked run starts again; its log already has the first line
-        record_run_events(project_id, run_id, run_event(
-            'started', f"{'Test run' if trigger == 'test' else 'Run'} started · trigger: {trigger} · "
-                       f"version {loaded.version.name}", trigger=trigger, version_id=loaded.version.id,
-        ), version_id=loaded.version.id)
+        record_run_events(project_id, run_id, _started_event(loaded, trigger, delivery), version_id=loaded.version.id)
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return
@@ -270,19 +303,32 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
             block_schedule_run(project_id, run_id, reasons, 'error')
         return
     source = loaded.schedule.entity_type
-    if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
+    if webhook and payload is None:  # approved after a pre-run park: the body was never kept (#7454)
+        fail_schedule_run(project_id, run_id, BODY_GONE)
+        return
+    if webhook:
+        try:
+            user_input, message = _webhook_input(loaded, payload)
+        except Exception:  # noqa: BLE001 -- a body the run cannot read must end it with a reason, not a bare error
+            log.exception('Webhook %s run %s: cannot shape the delivery body', schedule_id, run_id)
+            fail_schedule_run(project_id, run_id, BODY_UNREADABLE)
+            return
+    elif source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    manual = trigger in ('manual', 'test')  # Run now and Test run are the owner's own runs
-    trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
+    manual = trigger in ('manual', 'test') and not webhook  # Run now and Test run are the owner's own runs
+    trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.WEBHOOK if webhook else TriggerType.SCHEDULED
+    extra_meta = {'schedule_id': loaded.schedule.id, 'schedule_run_id': run_id, 'execution_type': trigger_type}
+    if webhook:
+        extra_meta['webhook_type'] = loaded.schedule.webhook_type
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             trigger_type=trigger_type, trigger_message=message,
-            conversation_name=f"{'Manual' if manual else 'Scheduled'} run: {loaded.entity_name}",
-            extra_meta={'schedule_id': loaded.schedule.id, 'schedule_run_id': run_id, 'execution_type': trigger_type},
+            conversation_name=f"{'Manual' if manual else 'Webhook' if webhook else 'Scheduled'} run: {loaded.entity_name}",
+            extra_meta=extra_meta,
             source=source,
         )
         linked = _link_conversation(project_id, run_id, conversation_uuid)
@@ -306,7 +352,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         else:
             from .mandate_admission import prepare_schedule_run
             governance = prepare_schedule_run(project_id=project_id, version=loaded.version, schedule_id=schedule_id,
-                                              owner_id=check.owner_id)
+                                              owner_id=check.owner_id, trigger_kind='webhook' if webhook else 'cron')
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule; the text stays fixed
         log.exception('Schedule %s run %s: cannot prepare the governed run', schedule_id, run_id)
         finish_trigger_run_with_error(project_id, response_id, START_FAILED, source)
@@ -338,5 +384,5 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
             # and Test run are the owner's own runs
             if not manual:
                 count_refusal(project_id, loaded.schedule, run_id, reason, result.get('code'))
-        elif governance and not manual:  # a cron firing admitted under governance ends a streak (off writes nothing)
+        elif (governance or webhook) and not manual:  # an admitted start ends a streak; a webhook counts pre-run failures too
             end_refusal_streak(project_id, schedule_id)

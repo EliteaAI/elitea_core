@@ -11,10 +11,9 @@ from pylon.core.tools import log
 from sqlalchemy import delete, select
 from sqlalchemy.exc import DBAPIError
 
-from ..models.entity_schedule import RUN_APPLICATION_ID, RUN_FORM, EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, RUN_APPLICATION_ID, RUN_FORM, EntityScheduleRun
 from ..models.pd.entity_schedule import ScheduleCreate
 
-ACTIVE = ('running', 'waiting_for_approval')
 # Every click on Test adds a run, so the table would grow without end. The newest runs are the ones Run History
 # shows; an older run is no use to the owner.
 KEEP_TEST_RUNS = 50
@@ -87,7 +86,7 @@ def insert_test_run(session, user_id: int, body: ScheduleCreate) -> int | None:
 def active_test_run_id(session, user_id: int, application_id: int) -> int | None:
     with old_schema_guard():
         return session.scalar(select(EntityScheduleRun.id).where(
-            *test_run_scope(user_id, application_id), EntityScheduleRun.status.in_(ACTIVE)))
+            *test_run_scope(user_id, application_id), EntityScheduleRun.status.in_(ACTIVE_STATUSES)))
 
 
 def load_test_run(session, user_id: int, run_id: int, application_id: int | None = None) -> EntityScheduleRun | None:
@@ -113,7 +112,7 @@ def trim_test_runs(session, user_id: int, application_id: int) -> list[TrimmedCh
     old = (select(EntityScheduleRun.id).where(*scope)
            .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc()).offset(KEEP_TEST_RUNS))
     doomed = session.execute(select(EntityScheduleRun.id, EntityScheduleRun.conversation_id).where(
-        EntityScheduleRun.id.in_(old), EntityScheduleRun.status.not_in(ACTIVE))).all()
+        EntityScheduleRun.id.in_(old), EntityScheduleRun.status.not_in(ACTIVE_STATUSES))).all()
     if not doomed:
         return []
     session.execute(delete(EntityScheduleRun).where(EntityScheduleRun.id.in_([run_id for run_id, _ in doomed])))

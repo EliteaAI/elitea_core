@@ -19,6 +19,7 @@ from ...utils.mcp_versioning import (
     build_mcp_backup_version_name,
     instructions_sha256,
 )
+from ...utils.pipeline_validator import validate_pipeline_yaml
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -105,6 +106,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     replacement=patch_data.replacement,
                     replace_all=patch_data.replace_all,
                 )
+
+                # For pipeline versions, validate the patched YAML structurally
+                # before committing so the Builder cannot save invalid pipelines.
+                from ...models.enums.all import AgentTypes
+                if source_version.agent_type == AgentTypes.pipeline.value:
+                    validation_result = validate_pipeline_yaml(
+                        updated_instructions, project_id=project_id
+                    )
+                    if not validation_result.valid:
+                        return {
+                            "error": "Pipeline YAML is invalid",
+                            "validation_errors": [e.model_dump() for e in validation_result.errors],
+                        }, 422
+
                 update_data = ApplicationVersionUpdateModel.model_validate({
                     'id': version_id,
                     'application_id': application_id,

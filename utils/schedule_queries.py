@@ -8,6 +8,7 @@ from ..models.entity_schedule import EntityScheduleRun as Run
 SORT_COLUMNS = {
     "name": S.name, "entity_name": Application.name, "entity_type": S.entity_type,
     "next_run": S.next_run, "last_run": S.last_run, "enabled": S.enabled,
+    "last_delivery_at": S.last_delivery_at,  # webhooks; cron rows have none and sort last
 }
 
 
@@ -48,6 +49,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
             S.cron, S.timezone, S.enabled, S.disabled_reason, S.next_run, S.last_run, S.last_run_status,
             last_reason.label("last_run_reason"), S.last_conversation_id, S.expires_at, S.created_by,
             S.trigger_kind, S.webhook_type, S.gitlab_auth_method, S.uuid, S.previous_secret_until,
+            S.last_delivery_at, S.last_delivery_outcome,
         )
         .join(Application, Application.id == S.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == S.version_id)

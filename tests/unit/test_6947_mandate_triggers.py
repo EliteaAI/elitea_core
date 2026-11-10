@@ -141,6 +141,7 @@ def ns(tmp_path_factory):  # pylint: disable=R0914,R0915
 
     ns.execution = load("utils", "pipeline_execution", "utils")
     ns.scheduling = load("rpc", "pipeline_scheduling", "rpc")
+    load("utils", "webhook_input", "utils")   # the shared webhook preview (#7454), on the stubbed guardrail
     ns.webhook_rpc = load("rpc", "pipeline_webhook", "rpc")
     for module in (ns.execution, ns.scheduling, ns.webhook_rpc):
         setattr(module, "create_trigger_run_conversation", lambda **kwargs: (

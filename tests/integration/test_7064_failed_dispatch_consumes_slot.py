@@ -258,6 +258,7 @@ def test_webhook_dispatch_failure_closes_its_run(env, monkeypatch):
         'plugins.elitea_core.utils.input_guardrail': {'redacted_input': lambda text: text},
     }.items():
         monkeypatch.setitem(sys.modules, name, _module(name, **attrs))
+    _load(monkeypatch, 'plugins.elitea_core.utils.webhook_input', 'utils/webhook_input.py')   # the shared preview
     webhook = _load(monkeypatch, 'plugins.elitea_core.rpc.pipeline_webhook', 'rpc/pipeline_webhook.py')
     monkeypatch.setattr(webhook, 'create_trigger_run_conversation',
                         lambda **kwargs: ('conv-uuid', 55, 'webhook-response'))

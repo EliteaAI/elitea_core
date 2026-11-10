@@ -87,6 +87,14 @@ def get_public_project_id() -> int:
     return project_id_int
 
 
+def get_public_project_id_or_none() -> Optional[int]:
+    try:
+        return get_public_project_id()
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("Public project lookup failed: %s", e)
+        return None
+
+
 # def get_ai_integration_settings(uid: str, unsecret: bool = True) -> dict:
 #     integration = rpc_tools.RpcMixin().rpc.call.integrations_get_by_uid(
 #         uid,

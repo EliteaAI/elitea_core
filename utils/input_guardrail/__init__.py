@@ -383,14 +383,18 @@ def _run(
 ):
     """Inspect, audit and write redactions back. Returns (summary, action).
 
-    ``audit_on`` limits auditing to those actions; None audits every hit.
+    ``audit_on`` limits auditing to hits whose own action is one of those; None audits
+    every hit. A blocked turn audits every hit, as it goes no further.
     """
     segments = _segments(slots)
     result = inspect(segments, policy, not_inspected)
     result_summary = summary(result, policy)
     action = effective_action(result, policy)
-    if audit_on is None or action in audit_on:
-        emit_audit_spans(_audit_entries(result_summary), user_id=user_id, project_id=project_id, **(entity or {}))
+    entries = _audit_entries(result_summary)
+    if audit_on is not None and action != 'block':
+        # Per hit, not per turn: a warn hit beside a redact hit stays as typed, so B audits it (#7347)
+        entries = [e for e in entries if str(e.get('action', '')).rsplit(':', 1)[-1] in audit_on]
+    emit_audit_spans(entries, user_id=user_id, project_id=project_id, **(entity or {}))
     if action != 'block':
         for slot, segment in zip(slots, segments):
             new_text = result.redacted.get((segment.kind, segment.index))
@@ -451,15 +455,20 @@ def check_resume_input(
     or None. Raises InputGuardrailBlockedError on block.
     """
     verdict = None
+    # The same text can arrive twice (hitl_value and its decision): check and audit it once (#7347)
+    checked: Dict[Tuple[str, str], Any] = {}
 
     def check(value, kind):
         nonlocal verdict
         if not isinstance(value, str) or not value:
             return value
-        value, found = check_chat_input(value, project_id, user_id, kind=kind, entity=entity)
+        if (value, kind) in checked:
+            return checked[(value, kind)]
+        new_value, found = check_chat_input(value, project_id, user_id, kind=kind, entity=entity)
         if found:
             verdict = _merge(verdict, found)
-        return value
+        checked[(value, kind)] = new_value
+        return new_value
 
     def check_value(value):
         if isinstance(value, dict):
