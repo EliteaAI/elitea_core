@@ -701,7 +701,8 @@ def test_the_platform_settings_say_governance_is_enforced_only_while_it_is(ns, m
     for name, attrs in (("mcp_config", ("get_mcp_category_name", "is_mcp_exposure_enabled", "is_mcp_in_menu_enabled")),
                         ("midturn_injection_utils", ("get_midturn_injection_blocked", "get_midturn_injection_whitelist")),
                         ("skill_publish_utils", ("get_skill_publish_blocked", "get_skill_publish_whitelist")),
-                        ("skill_utils", ("get_max_instructions_length",))):
+                        ("skill_utils", ("get_max_instructions_length",)),
+                        ("conversation_starters_utils", ("get_max_conversation_starters",))):
         stub = types.ModuleType(f"{PKG}.utils.{name}")
         for attr in attrs:
             setattr(stub, attr, lambda *a, **k: [])

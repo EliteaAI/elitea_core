@@ -173,6 +173,7 @@ def pu():
             'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': noop,
         },
         'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': lambda meta: meta or {}},
+        'plugins.elitea_core.utils.conversation_starters_utils': {'get_max_conversation_starters': lambda: 4},
     }
     for modname, attrs in stubs.items():
         sys.modules[modname] = _module(modname, **attrs)

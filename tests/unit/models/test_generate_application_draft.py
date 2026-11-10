@@ -291,12 +291,18 @@ class TestLimitConversationStarters:
         })
         assert len(r.conversation_starters) == 4
 
-    def test_rejects_more_than_4(self, pd_module):
-        from pydantic import ValidationError
-        with pytest.raises(ValidationError):
-            _make_response(pd_module, {
-                "conversation_starters": ["a", "b", "c", "d", "e"]
-            })
+    def test_truncates_to_default_limit_without_context(self, pd_module):
+        r = _make_response(pd_module, {
+            "conversation_starters": ["a", "b", "c", "d", "e"]
+        })
+        assert r.conversation_starters == ["a", "b", "c", "d"]
+
+    def test_truncates_to_configured_limit(self, pd_module):
+        r = pd_module.GenerateApplicationDraftResponse.model_validate(
+            {**_valid_base(pd_module), "conversation_starters": list("abcdefgh")},
+            context={"max_conversation_starters": 6},
+        )
+        assert r.conversation_starters == list("abcdef")
 
     def test_strips_whitespace(self, pd_module):
         r = _make_response(pd_module, {

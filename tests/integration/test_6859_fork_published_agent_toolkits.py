@@ -239,6 +239,7 @@ def modules():
                                                     'SkillFileContentUnavailableError': Exception,
                                                     'SkillVersionExportUnavailableError': RuntimeError},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': noop},
+        'plugins.elitea_core.utils.conversation_starters_utils': {'get_max_conversation_starters': lambda: 4},
     }
     for name, attrs in stubs.items():
         install(name, _module(name, **attrs))

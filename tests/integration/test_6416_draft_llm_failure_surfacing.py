@@ -161,6 +161,9 @@ def _install_package(rpc_state):
     skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
     skill_utils.get_max_instructions_length = lambda: SKILL_INSTRUCTIONS_MAX_LENGTH
 
+    conversation_starters_utils = types.ModuleType(f'{PKG}.utils.conversation_starters_utils')
+    conversation_starters_utils.get_max_conversation_starters = lambda: 4
+
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
     service_prompt_utils.get_service_prompt = lambda key: SERVICE_PROMPTS.get(key, DEFAULT_PROMPT)
 
@@ -241,6 +244,7 @@ def _install_package(rpc_state):
         f'{PKG}.utils.constants': constants,
         f'{PKG}.utils.service_prompt_utils': service_prompt_utils,
         f'{PKG}.utils.skill_utils': skill_utils,
+        f'{PKG}.utils.conversation_starters_utils': conversation_starters_utils,
         f'{PKG}.utils.generate_application_utils': generate_application_utils,
         'flask': flask,
         'pylon': pylon,

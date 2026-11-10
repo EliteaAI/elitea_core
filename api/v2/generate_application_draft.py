@@ -28,6 +28,7 @@ from ...models.pd.generate_application_draft import (
     GenerateApplicationDraftResponse,
 )
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_starters_utils import get_max_conversation_starters
 from ...utils.draft_llm_utils import (
     DraftSettingsError,
     answer_was_cut_short,
@@ -192,7 +193,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         apply_offered_origins(parsed, project_id, agents, pipelines, skills)
 
         try:
-            draft = GenerateApplicationDraftResponse.model_validate(parsed)
+            draft = GenerateApplicationDraftResponse.model_validate(
+                parsed, context={'max_conversation_starters': get_max_conversation_starters()},
+            )
         except ValidationError as e:
             log.warning("generate_application_draft: validation failed: %s", e.errors())
             return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
