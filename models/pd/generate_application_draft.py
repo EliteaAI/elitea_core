@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, mode
 from .predict_llm import LLMSettingsRequest
 
 MAX_SUGGESTED_SKILLS = 5
+# Mirrors utils.conversation_starters_utils; kept local so this model imports without the runtime.
+# The API always passes the live limit through the validation context.
 DEFAULT_MAX_CONVERSATION_STARTERS = 4
 
 

@@ -28,15 +28,21 @@ def resolve_max_conversation_starters(config: Optional[dict]) -> int:
     if CONFIG_KEY not in section:
         return DEFAULT_MAX_CONVERSATION_STARTERS
     value = section.get(CONFIG_KEY)
-    # bool is an int subclass, so True would otherwise read as a limit of 1
-    if isinstance(value, bool) or not isinstance(value, int) \
-            or not 1 <= value <= ABSOLUTE_MAX_CONVERSATION_STARTERS:
+    # Coerced like the skill limits, so "6" from a YAML/env override still works. bool is an int
+    # subclass, so True would otherwise read as a limit of 1.
+    try:
+        if isinstance(value, bool) or isinstance(value, float):
+            raise ValueError
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = None
+    if limit is None or not 1 <= limit <= ABSOLUTE_MAX_CONVERSATION_STARTERS:
         log.warning(
             'Invalid %s.%s=%r, using the default %s',
             CONFIG_SECTION, CONFIG_KEY, value, DEFAULT_MAX_CONVERSATION_STARTERS,
         )
         return DEFAULT_MAX_CONVERSATION_STARTERS
-    return value
+    return limit
 
 
 def get_max_conversation_starters() -> int:

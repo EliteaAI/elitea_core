@@ -297,6 +297,10 @@ class TestLimitConversationStarters:
         })
         assert r.conversation_starters == ["a", "b", "c", "d"]
 
+    def test_local_default_matches_the_utils_module(self, pd_module):
+        source = (PLUGIN_ROOT / "utils/conversation_starters_utils.py").read_text()
+        assert f"DEFAULT_MAX_CONVERSATION_STARTERS = {pd_module.DEFAULT_MAX_CONVERSATION_STARTERS}\n" in source
+
     def test_truncates_to_configured_limit(self, pd_module):
         r = pd_module.GenerateApplicationDraftResponse.model_validate(
             {**_valid_base(pd_module), "conversation_starters": list("abcdefgh")},

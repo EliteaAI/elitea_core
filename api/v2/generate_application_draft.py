@@ -28,7 +28,10 @@ from ...models.pd.generate_application_draft import (
     GenerateApplicationDraftResponse,
 )
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.conversation_starters_utils import get_max_conversation_starters
+from ...utils.conversation_starters_utils import (
+    count_conversation_starters,
+    get_max_conversation_starters,
+)
 from ...utils.draft_llm_utils import (
     DraftSettingsError,
     answer_was_cut_short,
@@ -99,6 +102,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except DraftSettingsError as exc:
             return exc.body, exc.status
 
+        max_starters = get_max_conversation_starters()
         if req.is_edit_mode:
             # Edit mode: fetch existing application config, provide ALL available resources
             current_config = fetch_application_for_edit(
@@ -106,6 +110,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             if current_config is None:
                 return {"error": "Application or version not found"}, 404
+            # Same rule as saving: a version above the limit keeps its starters through an AI edit
+            max_starters = max(
+                max_starters, count_conversation_starters(current_config.get('conversation_starters')),
+            )
 
             log.debug("generate_application_draft: edit mode, current_config attached_toolkits=%s", current_config.get("attached_toolkits"))
 
@@ -194,7 +202,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         try:
             draft = GenerateApplicationDraftResponse.model_validate(
-                parsed, context={'max_conversation_starters': get_max_conversation_starters()},
+                parsed, context={'max_conversation_starters': max_starters},
             )
         except ValidationError as e:
             log.warning("generate_application_draft: validation failed: %s", e.errors())

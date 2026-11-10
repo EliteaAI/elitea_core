@@ -162,7 +162,8 @@ class ProjectAPI(api_tools.APIModeHandler):
                     include_input=False,
                 ), 400
             # "Save as new version" names its source; the copy may keep as many starters as the
-            # source had, so a version above the limit can still be branched.
+            # source had, so a version above the limit can still be branched. Any version of this
+            # application may be named, by design: write access is required and the cap of 10 holds.
             try:
                 enforce_conversation_starters_limit(
                     version_data.conversation_starters,

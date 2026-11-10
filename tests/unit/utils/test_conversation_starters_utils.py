@@ -44,11 +44,11 @@ class TestResolveLimit:
         assert mod.resolve_max_conversation_starters({}) == 4
         assert mod.resolve_max_conversation_starters({'conversation_starters_guardrail': {}}) == 4
 
-    @pytest.mark.parametrize('value', [1, 7, 10])
-    def test_valid_value_is_used(self, mod, value):
-        assert mod.resolve_max_conversation_starters(_config(value)) == value
+    @pytest.mark.parametrize('value, expected', [(1, 1), (7, 7), (10, 10), ('6', 6), (' 8 ', 8)])
+    def test_valid_value_is_used(self, mod, value, expected):
+        assert mod.resolve_max_conversation_starters(_config(value)) == expected
 
-    @pytest.mark.parametrize('value', ['abc', '7', True, 0, 11, -1, 4.5, None])
+    @pytest.mark.parametrize('value', ['abc', '4.5', '11', True, False, 0, 11, -1, 4.5, None, [5]])
     def test_invalid_value_falls_back_with_warning(self, mod, monkeypatch, value):
         warnings = []
         monkeypatch.setattr(mod.log, 'warning', lambda *a, **k: warnings.append(a))
