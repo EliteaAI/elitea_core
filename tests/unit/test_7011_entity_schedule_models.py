@@ -33,7 +33,7 @@ def entity_schedule_models(isolated_sys_modules):
         pass
 
     # Parent tables the foreign keys point at, so the DDL compiles.
-    for parent in ("applications", "application_versions"):
+    for parent in ("applications", "application_versions", "elitea_tools"):
         Table(parent, _Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
 
     # Stub tools package

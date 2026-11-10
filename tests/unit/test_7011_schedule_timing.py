@@ -66,7 +66,7 @@ def schedule_table(monkeypatch):
     class Base(DeclarativeBase):
         pass
 
-    for parent in ("applications", "application_versions"):
+    for parent in ("applications", "application_versions", "elitea_tools"):
         Table(parent, Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
     stubs = {
         "db": types.SimpleNamespace(Base=Base),
