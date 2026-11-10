@@ -275,3 +275,5 @@ class ScheduleDetails(BaseModel):
     gitlab_auth_method: str | None = None
     webhook_url: str | None = None
     previous_secret_until: datetime | None = None
+    last_delivery_at: datetime | None = None
+    last_delivery_outcome: str | None = None

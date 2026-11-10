@@ -6,7 +6,8 @@ from pylon.core.tools import log
 from sqlalchemy import and_, case, func, or_, select, update
 from tools import db
 
-from ..models.entity_schedule import REFUSAL_STREAK, RUN_APPLICATION_ID, RUN_FORM, EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import (
+    ACTIVE_STATUSES, REFUSAL_STREAK, RUN_APPLICATION_ID, RUN_FORM, EntitySchedule, EntityScheduleRun)
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 from .schedule_rights import may_run_or_decide
@@ -40,6 +41,10 @@ OUTAGE_REFUSALS = frozenset({
 })
 GOVERNANCE_REFUSED = 'governance_refused'
 PAUSED_AFTER_REFUSALS = '{count} runs in a row were refused ({reason}). Fix the cause and resume it.'
+# A webhook that cannot start shares the same streak (#7454)
+PRERUN_REFUSED = 'prerun_refused'
+# The streak is shared with governance refusals, so the text names both causes
+PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (last: {reason}). Fix it and resume.'
 
 
 class ScheduleDecisionForbidden(Exception):
@@ -131,7 +136,8 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
         session.commit()
 
 
-def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None) -> None:
+def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None,
+                  disabled_reason: str = GOVERNANCE_REFUSED, text: str = PAUSED_AFTER_REFUSALS) -> None:
     """One more governance refusal of a run of `schedule` (#7254), Run now and Test run included. The
     `REFUSAL_PAUSE_AFTER`-th in a row pauses a schedule that is on (`governance_refused`) in the same transaction
     and tells the owner once. An outage `code` (`OUTAGE_REFUSALS`) is not counted and leaves the streak as it is.
@@ -152,7 +158,7 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
                 update(EntitySchedule).where(EntitySchedule.id == schedule.id)
                 .values({REFUSAL_STREAK: streak,
                          EntitySchedule.enabled: case((pause, False), else_=EntitySchedule.enabled),
-                         EntitySchedule.disabled_reason: case((pause, GOVERNANCE_REFUSED),
+                         EntitySchedule.disabled_reason: case((pause, disabled_reason),
                                                               else_=EntitySchedule.disabled_reason)})
                 .returning(REFUSAL_STREAK, EntitySchedule.enabled, EntitySchedule.disabled_reason)
             ).one_or_none()
@@ -160,13 +166,13 @@ def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str
         # the streak reaches REFUSAL_PAUSE_AFTER once until it ends (an admitted start or a resume sets it to 0), so at
         # exactly that count an off schedule with this reason was paused by this statement
         paused = row is not None and row[0] == REFUSAL_PAUSE_AFTER and row[1] is False \
-            and row[2] == GOVERNANCE_REFUSED
+            and row[2] == disabled_reason
     except Exception:  # noqa: BLE001 -- the run is already refused and ended; only the streak is lost
         log.exception('Schedule %s: cannot count the governance refusal of run %s', schedule.id, run_id)
         return
     if paused:
-        text = PAUSED_AFTER_REFUSALS.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
-        run = SimpleNamespace(id=run_id, reason=text, conversation_id=None)
+        notice = text.format(count=REFUSAL_PAUSE_AFTER, reason=reason.rstrip('.'))  # one full stop
+        run = SimpleNamespace(id=run_id, reason=notice, conversation_id=None)
         notify_schedule_event(project_id, schedule.created_by, Types.schedule_disabled, schedule, run)
 
 
@@ -523,13 +529,23 @@ def _tell_owner_of_admin_decision(project_id: int, owner_id: int, schedule, run_
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
-    """Insert a finished `skipped` cron run without a conversation and copy the status; the run id."""
+    """Insert a finished `skipped` cron run without a conversation; the run id.
+
+    The status goes to the schedule only when no run is active. An active run still owns `last_run_status`, so the
+    list and its Running filter keep showing it until it ends.
+    """
     run = EntityScheduleRun(
         schedule_id=schedule_id, trigger='cron', status='skipped', reason=reason, finished_at=func.now(),
         events=[finished_event('skipped', reason)])
     session.add(run)
     session.flush()
-    session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='skipped'))
+    active_run = select(EntityScheduleRun.id).where(
+        EntityScheduleRun.schedule_id == schedule_id,
+        EntityScheduleRun.status.in_(ACTIVE_STATUSES),
+    ).exists()
+    session.execute(
+        update(EntitySchedule).where(EntitySchedule.id == schedule_id, ~active_run).values(last_run_status='skipped')
+    )
     return run.id
 
 

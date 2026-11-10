@@ -53,7 +53,8 @@ def builder(models_path):
                  'get_expansion_user_id': lambda project_id, user_id, is_system_user: user_id,
                  'expand_top_level_version': lambda parsed, user_id: None,
                  'attach_subagent_prefetch': lambda payload, project_id, user_id: None,
-                 'inject_stored_logins': lambda payload, project_id, user_id: None}
+                 'inject_stored_logins': lambda payload, project_id, user_id: None,
+                 'skill_scratch_for_run': lambda project_id, conversation_uuid, user_id: {}}
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
 
     def build(model_row, **settings):

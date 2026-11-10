@@ -33,6 +33,9 @@ class Recorder:
         self.named = (toolkit, credential)
         return self.parks
 
+    def count_refusal(self, project_id, schedule, run_id, reason, code=None, disabled_reason=None, text=None):
+        self.calls.append(("count", project_id, run_id, reason, disabled_reason))
+
     def disable_schedule(self, project_id, schedule_id, reason):
         self.calls.append(("disable", project_id, schedule_id, reason))
 
@@ -50,7 +53,8 @@ def apply(monkeypatch):
     def run(recorder, schedule=None):
         monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_runs", SimpleNamespace(
             fail_schedule_run=recorder.fail_schedule_run, disable_schedule=recorder.disable_schedule,
-            park_for_credentials=recorder.park_for_credentials))
+            park_for_credentials=recorder.park_for_credentials, count_refusal=recorder.count_refusal,
+            PRERUN_REFUSED="prerun_refused", PAUSED_AFTER_PRERUN="{count} {reason}"))
         monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_notifications", SimpleNamespace(
             notify_schedule_event=recorder.notify))
         monkeypatch.setitem(sys.modules, f"{PKG}.models.enums.all", SimpleNamespace(
@@ -261,3 +265,47 @@ def test_the_same_failure_of_an_owner_run_still_disables_the_schedule_and_tells_
     apply(recorder, schedule)
 
     assert recorder.effects() == ["principal", "access", "fail", "disable", "notify"]
+
+
+def test_7454_a_webhook_with_a_broken_credential_fails_at_once_with_the_reason(apply):
+    # The delivery body is never kept, so a parked webhook run could only fail after the approval
+    recorder = Recorder(credentials="credential 9 not found", parks=True)
+    webhook = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4,
+                              trigger_kind="webhook")
+    result = apply(recorder, schedule=webhook)
+    assert (result.ok, result.reason) == (False, "credential 9 not found")
+    assert "park" not in recorder.effects()
+    assert recorder.calls[-3:] == [("fail", 34, RUN_ID, "credential 9 not found"),
+                                   ("notify", OWNER, "schedule_run_failed", RUN_ID, "credential 9 not found"),
+                                   ("count", 34, RUN_ID, "credential 9 not found", "prerun_refused")]
+
+
+WEBHOOK = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4,
+                          trigger_kind="webhook")
+
+
+# A webhook counts each lasting pre-run failure toward its switch-off; outages and a lost owner do not count
+@pytest.mark.parametrize("answers, counted", [
+    ({"principal": "principal does not match the owner"}, True),
+    ({"credentials": "no token for the owner"}, True),
+    ({"credentials": "version could not be expanded for the owner"}, True),
+    ({"access": "access check unavailable"}, False),   # outage
+    ({"access": "owner lost access"}, False),          # switched off at once already
+])
+def test_7454_a_webhook_counts_lasting_pre_run_failures_only(apply, answers, counted):
+    recorder = Recorder(**answers)
+    apply(recorder, schedule=WEBHOOK)
+    assert ("count" in recorder.effects()) is counted
+
+
+def test_7454_an_unexpected_pre_run_error_is_an_outage_and_is_not_counted(apply):
+    recorder = Recorder()
+    recorder.step = lambda name: (lambda *args: (_ for _ in ()).throw(RuntimeError("db down")))
+    apply(recorder, schedule=WEBHOOK)
+    assert "count" not in recorder.effects()
+
+
+def test_7454_a_cron_schedule_never_counts_pre_run_failures(apply):
+    recorder = Recorder(credentials="credential 9 not found", parks=False)
+    apply(recorder)
+    assert "count" not in recorder.effects()

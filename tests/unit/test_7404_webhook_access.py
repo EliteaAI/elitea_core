@@ -23,9 +23,10 @@ def access(load):
     return load(FakeAuth())
 
 
-def test_7404_owner_gets_edit_pause_rotate_delete_and_no_run(access):
+# #7455: the owner may run a webhook with a sample body
+def test_7404_owner_gets_run_edit_pause_rotate_delete(access):
     actions = access.allowed_actions(_hook(), _scope(access, OWNER, *EDITOR_VERBS))
-    assert actions == ["edit", "pause", "rotate_secret", "delete"]
+    assert actions == ["run", "edit", "pause", "rotate_secret", "delete"]
 
 
 def test_7404_admin_on_another_owners_webhook_cannot_edit(access):

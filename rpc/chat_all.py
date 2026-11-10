@@ -29,6 +29,7 @@ from ..models.pd.llm import merge_llm_selection_override
 from ..models.pd.predict import SioPredictModel, SioContinuePredictModel, ToolkitToolCallPayload
 from ..utils.chat_history import (
     generate_chat_history,
+    generate_payload_chat_history,
     generate_user_input
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
@@ -1044,7 +1045,10 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             # Get instructions: conversation instructions + user's default instructions from profile
             base_instructions = str(msg_group.conversation.instructions or '')
             user_default_instructions = msg_group.conversation.meta.get('default_instructions', '')
-            if user_default_instructions and base_instructions:
+            # New chats are seeded with the persona prompt in conversation.instructions; don't append it twice (#7468)
+            if user_default_instructions and user_default_instructions.strip() in base_instructions:
+                result['instructions'] = base_instructions
+            elif user_default_instructions and base_instructions:
                 result['instructions'] = f"{base_instructions}\n\n{user_default_instructions}"
             elif user_default_instructions:
                 result['instructions'] = user_default_instructions
@@ -1694,10 +1698,9 @@ class RPC:
                     if not preserve_instructions:
                         payload['instructions'] = None
 
-                    payload['chat_history'] = generate_chat_history(
-                        message_groups=chat_history_groups, summaries=summaries,
-                        include_context=not is_pipeline,
-                        routing_projection=payload.get('_routing_projection'),
+                    payload['chat_history'], history_group_ids = generate_payload_chat_history(
+                        session, payload, chat_history_groups, summaries,
+                        is_pipeline=is_pipeline, config=this.descriptor.config,
                     )
                     payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                     log.debug('chat payload["chat_history"] has %d messages', len(payload["chat_history"]))
@@ -1712,7 +1715,7 @@ class RPC:
                         }
                     }
                     if context_management_enabled:
-                        context_meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
+                        context_meta['chat_history_group_ids'] = history_group_ids
                     execution_generation = str(uuid4())
                     context_meta = begin_execution_generation(
                         context_meta if context_management_enabled else {},
@@ -2690,10 +2693,9 @@ class RPC:
                 continues_pipeline = (
                     (payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
                 )
-                payload['chat_history'] = generate_chat_history(
-                    message_groups=chat_history_groups, summaries=summaries,
-                    include_context=not continues_pipeline,
-                    routing_projection=payload.get('_routing_projection'),
+                payload['chat_history'], history_group_ids = generate_payload_chat_history(
+                    session, payload, chat_history_groups, summaries,
+                    is_pipeline=continues_pipeline, config=this.descriptor.config,
                 )
                 payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                 if is_token_limit_continuation_request:
@@ -2703,7 +2705,7 @@ class RPC:
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:
-                    response_msg.meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
+                    response_msg.meta['chat_history_group_ids'] = history_group_ids
                     flag_modified(response_msg, 'meta')
                     session.add(response_msg)
                     session.commit()

@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from tools import auth, db
 
-from ..models.entity_schedule import EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
     ScheduleCreate,
@@ -31,6 +31,7 @@ from .schedule_access import (
     allowed_actions,
     row_webhook_url,
     schedule_check_spec,
+    webhook_signing,
     schedule_scope,
 )
 from .schedule_claim import fail_run, insert_run, merge_events
@@ -136,7 +137,7 @@ def _start_run(session, project_id: int, schedule_id: int, entity_type: str, app
         session.rollback()  # a draft written for this call must not stay half-saved
         active_id = session.scalar(select(EntityScheduleRun.id).where(
             EntityScheduleRun.schedule_id == schedule_id,
-            EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
+            EntityScheduleRun.status.in_(ACTIVE_STATUSES),
         ))
         return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
     session.commit()
@@ -145,6 +146,41 @@ def _start_run(session, project_id: int, schedule_id: int, entity_type: str, app
         session.commit()
         return refusal("run_start_failed", "The run could not start", 500)
     return {"run_id": run_id, "application_id": application_id}, 202
+
+
+def _sample_body_error(row, body):
+    """A webhook row runs only as `test` with a sample `payload`; a cron row takes no `payload` (#7455)."""
+    if row.trigger_kind != "webhook":
+        if body.payload is not None:
+            return refusal(INVALID_INPUT, "Only a webhook takes a sample payload", field="payload")
+        return None
+    if body.trigger != "test":
+        return refusal(INVALID_INPUT, "A webhook is run as a test with a sample payload", field="trigger")
+    if body.payload is None:
+        return refusal(INVALID_INPUT, "A webhook run needs a sample payload", field="payload")
+    return None
+
+
+def _start_sample_run(session, project_id: int, row, payload: str, requested_by: int):
+    """Run a webhook row with the caller's sample body through the delivery path; the body is never stored.
+
+    The run stores who asked, so a sample an admin sends acts as that admin, like Run now.
+    """
+    from .webhook_door import admit_webhook_run  # pylint: disable=C0415 -- late: only webhook rows reach it
+    schedule_id = row.id
+    run_id = admit_webhook_run(session, schedule_id, trigger="test", requested_by=requested_by)
+    if run_id is None:  # one sample at a time; deliveries are not limited by the active-run index
+        session.rollback()
+        active_id = session.scalar(select(EntityScheduleRun.id).where(
+            EntityScheduleRun.schedule_id == schedule_id, EntityScheduleRun.trigger == "test",
+            EntityScheduleRun.status.in_(ACTIVE_STATUSES)))
+        return refusal("run_active", "A sample run of this webhook is active", 409, active_run_id=active_id)
+    session.commit()
+    if not start_schedule_run(row.entity_type, project_id, schedule_id, run_id, payload=payload.encode("utf-8")):
+        fail_run(session, run_id, START_FAILED)
+        session.commit()
+        return refusal("run_start_failed", "The run could not start", 500)
+    return {"run_id": run_id, "application_id": row.application_id}, 202
 
 
 def _runs_page(session, where: list, query: RunsQuery) -> tuple[dict, list]:
@@ -322,13 +358,31 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
         from .schedule_risk import scan_schedule
         review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
     warnings = review["blocking"] + review["sensitive"] + review["notices"]
-    return {**_read_answer(row, scope, project_id), "warnings": warnings, "governance_notice": notice}
+    return {**_read_answer(row, scope, project_id, review), "warnings": warnings, "governance_notice": notice}
 
 
-def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
+def _needs_reconfirm(row, project_id: int, review: dict | None) -> bool | None:
+    """True when "Run without asking" would not hold on the next run (as `_may_auto_approve`); None if unscanned."""
+    if row.approval_rule != RUN_WITHOUT_ASKING:
+        return False
+    try:
+        if review is None:
+            from .schedule_risk import scan_schedule  # pylint: disable=C0415 -- late: the scan expands toolkits
+            review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
+    except Exception:  # noqa: BLE001 -- a failed scan must not break the read
+        log.exception("Schedule %s: cannot scan for needs_reconfirm", row.id)
+        return None
+    if not review["sensitive"]:
+        return False
+    return review["fingerprint"] != row.approval_fingerprint or row.approval_confirmed_by != row.created_by
+
+
+def _read_answer(row, scope: ScheduleScope, project_id: int, review: dict | None = None) -> dict:
+    """One row as detail, edit and save answer it; only here `needs_reconfirm` is scanned, never per list row."""
     from .schedule_settings import is_run_without_asking_allowed
     return {**_details(row, scope), "webhook_url": row_webhook_url(project_id, row),
-            "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
+            "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id)),
+            "needs_reconfirm": _needs_reconfirm(row, project_id, review), **webhook_signing(row)}
 
 
 def _credential_check(project_id: int, owner) -> str:
@@ -630,8 +684,10 @@ class ScheduleItemHandlers:
     def _run(self, project_id: int, schedule_id: int):
         """Start a run now (`manual`) or a test run (`test`) of a schedule.
 
+        A webhook runs only as `test` with a sample `payload`, through the delivery path (#7455).
+
         Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`. The run acts as the caller.
-        Errors: 400 invalid trigger; 403; 404 not found, or a schedule outside the caller's scope; 409 deleted version or an active run
+        Errors: 400 invalid trigger or payload; 403; 404 not found, or a schedule outside the caller's scope; 409 deleted version or an active run
         (the body has `active_run_id`); 500 the run could not start.
         """
         body, error = _parse_body(ScheduleRunRequest)
@@ -647,6 +703,14 @@ class ScheduleItemHandlers:
                 return refusal("not_owner", "Only the owner of this schedule or a project admin can run it", 403)
             if row.version_id is None:
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
+            sample_error = _sample_body_error(row, body)
+            if sample_error:
+                return sample_error
+            if row.trigger_kind == "webhook":
+                sampled = _start_sample_run(session, project_id, row, body.payload, scope.user_id)
+                if sampled[1] == 202 and row.created_by != scope.user_id:  # the run acts as the admin: tell the owner
+                    notify_owner(project_id, row.created_by, row, action='started a run of')
+                return sampled
             entity_type = row.entity_type
             try:   # the caller's own run (#7254), from this signed-in request; None when off. Built before the run row
                 from .mandate_admission import owner_run_request, schedule_trigger_ref  # pylint: disable=C0415

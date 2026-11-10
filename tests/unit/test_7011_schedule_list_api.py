@@ -22,7 +22,7 @@ ROW_KEYS = {
     "version_id", "version_name", "cron", "timezone", "enabled", "disabled_reason", "next_run",
     "last_run", "last_run_status", "last_run_reason", "last_conversation_id", "expires_at",
     "owner", "allowed_actions", "trigger_kind", "webhook_type", "webhook_url",
-    "previous_secret_until", "gitlab_auth_method",
+    "previous_secret_until", "gitlab_auth_method", "last_delivery_at", "last_delivery_outcome",
 }
 
 
@@ -279,6 +279,14 @@ def test_r3_4_el7011_wrong_filter_type_gives_400_with_name(env, name, value):
     body, status = call(env, **{name: value})
     assert status == 400 and name in str(body)
     assert env.query_calls == []
+
+
+# The Running status filter reaches the query as typed
+def test_status_running_reaches_the_query_filters(env):
+    env.grant(9, "list", "admin")
+    env.rows = [make_row(1, 5)]
+    ok(env, status="running")
+    assert env.query_calls[0]["filters"].status == "running"
 
 
 # R4.1 (TC-US05-14)

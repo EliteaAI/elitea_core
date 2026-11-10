@@ -117,8 +117,8 @@ def test_el_7011_r5_2_pause_schedule_run_fails_the_run_that_waits_for_input(runs
     assert sent.notices == [(12, "schedule_run_failed", run.id)]
 
 
-def test_el_7011_r2_4_record_skipped_run_inserts_a_finished_run_and_copies_the_status(runs, session, sent):
-    schedule = _schedule(runs, session)
+def test_record_skipped_run_inserts_a_finished_run_and_keeps_the_active_status(runs, session, sent):
+    schedule = _schedule(runs, session, last_run_status="running")
     active = _run(runs, session, schedule)
 
     skipped_id = runs.record_skipped_run(session, schedule.id, "the previous run is still running")
@@ -129,9 +129,29 @@ def test_el_7011_r2_4_record_skipped_run_inserts_a_finished_run_and_copies_the_s
     assert (skipped.trigger, skipped.status, skipped.conversation_id) == ("cron", "skipped", None)
     assert skipped.reason == "the previous run is still running"
     assert skipped.finished_at is not None
-    assert schedule.last_run_status == "skipped"
+    assert schedule.last_run_status == "running"
     assert (active.status, active.reason, active.finished_at) == ("running", None, None)
     assert (sent.notices, sent.emitted) == ([], [])
+
+
+def test_record_skipped_run_keeps_waiting_for_approval_on_the_schedule(runs, session, sent):
+    schedule = _schedule(runs, session, last_run_status="waiting_for_approval")
+    _run(runs, session, schedule, status="waiting_for_approval")
+
+    runs.record_skipped_run(session, schedule.id, "the previous run is still running")
+
+    session.refresh(schedule)
+    assert schedule.last_run_status == "waiting_for_approval"
+
+
+def test_record_skipped_run_copies_skipped_when_no_run_is_active(runs, session, sent):
+    schedule = _schedule(runs, session, last_run_status="success")
+    _run(runs, session, schedule, status="success")
+
+    runs.record_skipped_run(session, schedule.id, "the previous run is still running")
+
+    session.refresh(schedule)
+    assert schedule.last_run_status == "skipped"
 
 
 def test_el_7011_r2_4_block_schedule_run_sets_blocked_and_copies_the_status(runs, session, sent):

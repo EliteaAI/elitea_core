@@ -170,6 +170,28 @@ def test_7011_r3_1_filters_match_each_given_value(env):
     assert _names(_list(env, enabled=True, entity_id=2)) == []
 
 
+# The Running filter matches the schedules that still have an active run
+def test_running_filter_lists_the_schedules_with_an_active_run(env):
+    _add(env, name="busy", last_run_status="running")
+    _add(env, name="idle", last_run_status="success")
+    assert _names(_list(env, status="running")) == ["busy"]
+
+
+# A schedule whose last run ended is not listed under Running
+@pytest.mark.parametrize("ended", ["success", "failed", "blocked", "skipped"])
+def test_running_filter_leaves_out_a_schedule_whose_last_run_ended(env, ended):
+    _add(env, name="busy", last_run_status="running")
+    _add(env, name="ended", last_run_status=ended)
+    assert _names(_list(env, status="running")) == ["busy"]
+    assert _names(_list(env, status=ended)) == ["ended"]
+
+
+# A schedule that never ran has no status, so no status filter lists it
+def test_running_filter_leaves_out_a_schedule_that_never_ran(env):
+    _add(env, name="new")
+    assert _names(_list(env, status="running")) == []
+
+
 # R3.2: an admin narrows to the given owners
 def test_7011_r3_2_admin_owner_ids(env):
     _add(env, name="a", created_by=7)
@@ -243,3 +265,15 @@ def test_7011_r5_1_sort_by_a_column_in_both_directions(env, sort_by, sort_order,
     _add(env, name="none")
     _add(env, name="early", next_run=DAY)
     assert _names(_list(env, OWNER, sort_by=sort_by, sort_order=sort_order)) == expected
+
+
+# #7454 follow-up: the Webhooks page lists the most recent delivery first; a webhook never delivered goes last
+@pytest.mark.parametrize("sort_order, expected", [
+    ("desc", ["recent", "older", "never"]),
+    ("asc", ["older", "recent", "never"]),
+])
+def test_sort_by_last_delivery_keeps_never_delivered_last(env, sort_order, expected):
+    _add(env, name="older", last_delivery_at=DAY)
+    _add(env, name="never")
+    _add(env, name="recent", last_delivery_at=DAY + datetime.timedelta(hours=5))
+    assert _names(_list(env, OWNER, sort_by="last_delivery_at", sort_order=sort_order)) == expected

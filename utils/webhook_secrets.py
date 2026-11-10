@@ -35,7 +35,7 @@ def is_signing_row(row) -> bool:
     return row.webhook_type == 'gitlab' and row.gitlab_auth_method == 'signing_token'
 
 
-def _current_key(row) -> str:
+def current_key(row) -> str:
     return signing_key(row.uuid) if is_signing_row(row) else secret_key(row.uuid)
 
 
@@ -66,7 +66,7 @@ def _write_hidden(session, project_id: int, changes: dict, client=None, before=N
 def store_row_secret(session, project_id: int, row, value: str | None = None) -> str:
     """Write the first secret of a new row and set its ref; `value` is the pasted GitLab signing token."""
     value = value or new_secret()
-    key = _current_key(row)
+    key = current_key(row)
     _write_hidden(session, project_id, {key: value})
     if is_signing_row(row):
         row.signing_secret_ref = _ref(key)
@@ -83,7 +83,7 @@ def rotate_row_secret(session, project_id: int, row, now: datetime, value: str |
                       updated_by: int | None = None) -> str:
     """Write a new secret and keep the current one valid for 24 h; commits, or restores the store on failure."""
     value = value or new_secret()
-    key = _current_key(row)
+    key = current_key(row)
     client, stored = _locked_store(session, project_id)
     session.refresh(row)  # under the lock: a rotation that committed meanwhile is seen
     row.updated_by = updated_by if updated_by is not None else row.updated_by
@@ -135,7 +135,7 @@ def regenerate_row_secret(session, project_id: int, row, value: str | None = Non
     session.refresh(row)
     row.updated_by = updated_by if updated_by is not None else row.updated_by
     row.previous_secret_ref = row.previous_secret_until = None
-    _commit_or_restore(session, project_id, client, stored, {_current_key(row): value, prev_key(row.uuid): None})
+    _commit_or_restore(session, project_id, client, stored, {current_key(row): value, prev_key(row.uuid): None})
     return value
 
 
