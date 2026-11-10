@@ -33,7 +33,7 @@ _tick_lock = threading.Lock()
 # lean: in-process flag, so each replica re-checks once an hour; share it through the database if that cost matters
 _legacy_idle_until = 0.0
 # lean: in-process, like the pipeline flag; the index step re-checks once an hour on each replica
-_legacy_index_idle_until = 0.0
+_legacy_index_idle = {"until": 0.0}
 # lean: in-process; a project that held or failed a version is not migrated again for an hour
 _migration_retry_at: dict[int, float] = {}
 # lean: in-process; a project whose index schedules were held or failed is not migrated again for an hour
@@ -132,8 +132,7 @@ def _run_legacy_index_step(project_ids: list[int], yield_to_hub, settings: dict)
     After a pass that finds nothing the step sleeps for `LEGACY_RECHECK_SECONDS`; `legacy_index_step_enabled`
     false stops it.
     """
-    global _legacy_index_idle_until  # pylint: disable=W0603
-    if not settings.get("legacy_index_step_enabled", True) or time.monotonic() < _legacy_index_idle_until:
+    if not settings.get("legacy_index_step_enabled", True) or time.monotonic() < _legacy_index_idle["until"]:
         return
     # Imported at call time: the tick loads without the migration's model graph
     from ..utils.legacy_index_schedule_migration import migrate_index_project
@@ -143,7 +142,7 @@ def _run_legacy_index_step(project_ids: list[int], yield_to_hub, settings: dict)
         end_ambient_transaction()
         empty_pass &= _migrate_legacy_triggers(project_id, migrate_index_project, _index_migration_retry_at)
     if empty_pass:
-        _legacy_index_idle_until = time.monotonic() + LEGACY_RECHECK_SECONDS
+        _legacy_index_idle["until"] = time.monotonic() + LEGACY_RECHECK_SECONDS
 
 
 def _database_now(project_id: int) -> datetime:

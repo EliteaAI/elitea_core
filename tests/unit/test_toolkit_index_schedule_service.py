@@ -359,10 +359,26 @@ def test_delete_of_an_index_row_is_refused_without_the_index_edit_permission(env
         assert session.get(env.EntitySchedule, schedule_id) is not None
 
 
-def test_check_entity_lets_an_admin_through_without_the_index_edit_permission(env):
+def test_check_entity_refuses_an_admin_without_the_index_edit_permission(env):
     env.permissions = {env.access.SCHEDULE_PERMISSIONS['admin']}
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.check()
+    assert error_of(excinfo)[:2] == ('read_only', 403)
+    assert env.folder_calls == [(['toolkit', 'mcp'], 3, True)]  # the folder answers first
+
+
+def test_create_refuses_an_admin_without_the_index_edit_permission_and_stores_nothing(env):
+    env.permissions = {env.access.SCHEDULE_PERMISSIONS['admin']}
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.create()
+    assert error_of(excinfo)[:2] == ('read_only', 403)
+    with env.session_factory() as session:
+        assert session.query(env.EntitySchedule).count() == 0
+
+
+def test_check_entity_passes_an_admin_who_holds_the_index_edit_permission(env):
+    env.permissions = {env.access.SCHEDULE_PERMISSIONS['admin'], INDEX_EDIT}
     assert env.check() is None
-    assert env.folder_calls == [(['toolkit', 'mcp'], 3, True)]  # the folder write still counts
 
 
 def test_resume_of_an_index_row_needs_no_version(env):

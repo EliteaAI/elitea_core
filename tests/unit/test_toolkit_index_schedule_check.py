@@ -195,7 +195,7 @@ def test_a_check_without_the_toolkit_or_the_index_is_400(harness, env, missing):
 
 def test_a_check_of_an_edit_answers_confirmed_false_and_checks_as_the_owner(harness, env):
     schedule_id = env.seed_index_schedule(created_by=OWNER_ID)
-    harness.request_as(OTHER_ID, ADMIN)
+    harness.request_as(OTHER_ID, set(ADMIN) | {'models.applications.index_meta.edit'})  # an admin needs the index grant too
     body, status = env.check(schedule_id=schedule_id)
     assert status == 200
     assert body['confirmed'] is False

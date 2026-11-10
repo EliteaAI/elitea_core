@@ -47,7 +47,7 @@ class IndexWorld:
         monkeypatch.setattr(tick, 'select_due_schedules', select_due)
         monkeypatch.setattr(tick, 'RUN_STARTERS', {'agent': print, 'pipeline': print, 'toolkit_index': print})
         monkeypatch.setattr(tick, 'time', types.SimpleNamespace(monotonic=lambda: self.now[0]))
-        monkeypatch.setattr(tick, '_legacy_index_idle_until', 0.0)
+        monkeypatch.setitem(tick._legacy_index_idle, 'until', 0.0)
 
     def wait(self, seconds):
         self.now[0] += seconds
@@ -84,7 +84,7 @@ def test_the_index_step_does_not_touch_the_pipeline_migration(world, index):
 
 def test_an_empty_pass_puts_the_index_step_to_sleep_for_an_hour(world, index):
     world.tick()
-    assert world.module._legacy_index_idle_until == index.now[0] + world.module.LEGACY_RECHECK_SECONDS
+    assert world.module._legacy_index_idle['until'] == index.now[0] + world.module.LEGACY_RECHECK_SECONDS
     index.migrated.clear()
     index.wait(world.module.LEGACY_RECHECK_SECONDS - 1)
     world.tick()

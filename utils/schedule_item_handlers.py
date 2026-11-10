@@ -624,8 +624,13 @@ def _index_busy(session, project_id: int, user_id: int, toolkit_id: int, index_n
     The unique index of an active Test Run keys on the agent, which an index run does not have, so the toolkit row
     is locked first: a second caller waits for the commit of the first and then sees its run. The answer names the
     run only when the caller owns it: another user's Test Run id stays out of the body.
+
+    The index row lives in the vector store and its read can be slow, so it is read before the lock: the lock holds
+    only the active-run queries.
     """
-    toolkit = session.scalars(select(EliteATool).where(EliteATool.id == toolkit_id).with_for_update()).one_or_none()
+    toolkit = session.get(EliteATool, toolkit_id)
+    live = toolkit is not None and _index_row_is_live(project_id, toolkit, index_name)
+    session.scalars(select(EliteATool.id).where(EliteATool.id == toolkit_id).with_for_update()).one_or_none()
     shown_id = None
     try:
         with session.begin_nested():  # a missing Test Run column must not abort the outer transaction
@@ -637,7 +642,7 @@ def _index_busy(session, project_id: int, user_id: int, toolkit_id: int, index_n
     if active_id is None and schedule_id is not None:
         active_id = shown_id = session.scalar(select(EntityScheduleRun.id).where(
             EntityScheduleRun.schedule_id == schedule_id, EntityScheduleRun.status.in_(ACTIVE_STATUSES)).limit(1))
-    if active_id is not None or (toolkit is not None and _index_row_is_live(project_id, toolkit, index_name)):
+    if active_id is not None or live:
         return refusal("run_active", INDEX_RUN_ACTIVE_TEXT, 409, active_run_id=shown_id)
     return None
 

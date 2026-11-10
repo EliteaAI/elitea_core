@@ -252,6 +252,27 @@ def test_the_toolkit_row_is_locked_before_the_busy_read(harness, index):
     assert 'elitea_tools' in str(locked[0])
 
 
+def test_the_index_row_is_read_before_the_toolkit_row_is_locked(harness, index, monkeypatch):
+    """A slow vector store read must not run while the toolkit row is locked."""
+    statements = []
+    factory = harness.session_factory
+
+    def recording_session():
+        session = factory()
+        scalars = session.scalars
+        session.scalars = lambda statement, *args, **kwargs: (
+            statements.append(statement) or scalars(statement, *args, **kwargs))
+        return session
+
+    locks_at_read = []
+    harness.session_factory = recording_session
+    monkeypatch.setattr(harness.module, '_index_row_is_live', lambda project_id, toolkit, name: (
+        locks_at_read.append(len([s for s in statements if s._for_update_arg is not None])) or False))
+    assert index.run()[1] == 202
+    assert locks_at_read == [0]
+    assert len([s for s in statements if s._for_update_arg is not None]) == 1
+
+
 class TestIndexRowLiveness:
     """`_index_row_is_live` reads the index row like the starter and fails open."""
 

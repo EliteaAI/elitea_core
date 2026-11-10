@@ -578,7 +578,6 @@ def _delete_index_test_runs(session, toolkit_id: int, index_name: str | None = N
     """
     # Late: the schedule models need the running plugin, and most callers of this module never touch them
     from ..models.entity_schedule import RUN_APPLICATION_ID, RUN_FORM, EntityScheduleRun
-    from .schedule_test_runs import TestRunUnavailable, old_schema_guard
 
     conditions = [
         EntityScheduleRun.schedule_id.is_(None),
@@ -590,9 +589,10 @@ def _delete_index_test_runs(session, toolkit_id: int, index_name: str | None = N
     if index_name is not None:
         conditions.append(RUN_FORM['index_name'].as_string() == index_name)
     try:
-        with old_schema_guard(), session.begin_nested():
+        with session.begin_nested():
             session.execute(delete(EntityScheduleRun.__table__).where(*conditions))
-    except TestRunUnavailable:
+    except (ProgrammingError, OperationalError):
+        # Not the helpers of schedule_test_runs: importing them from here starts an import cycle
         log.warning("Test runs of toolkit %s not deleted: the schema has no Test run columns yet", toolkit_id)
 
 
@@ -639,9 +639,10 @@ def _toolkit_ids_with_indexes(project_id: int, toolkit_query) -> list[int]:
     if not schema_ids:
         return []
     try:
-        connection_string = VaultClient(project_id).get_secrets().get('pgvector_project_connstr')
+        from .vectorstore import get_pgvector_connection_string
+        connection_string = get_pgvector_connection_string(project_id)
         if not connection_string:
-            log.warning("No pgvector_project_connstr in vault for project_id=%s; has_indexes finds no toolkit", project_id)
+            log.warning("No pgvector connection string in vault for project_id=%s; has_indexes finds no toolkit", project_id)
             return []
         counts = batch_count_toolkit_indexes({schema: connection_string for schema in schema_ids})
     except Exception:

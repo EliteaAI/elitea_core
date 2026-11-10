@@ -105,9 +105,9 @@ def test_a_failing_summary_answers_400_without_the_error_text(api, monkeypatch):
 
 
 def with_pgvector(tools_env, monkeypatch, connection_string, counts):
-    secrets = {} if connection_string is None else {"pgvector_project_connstr": connection_string}
-    vault = types.SimpleNamespace(get_secrets=lambda: secrets)
-    monkeypatch.setattr(tools_env.module, "VaultClient", lambda project_id: vault, raising=False)
+    vectorstore = types.ModuleType(f"{PACKAGE}.utils.vectorstore")
+    vectorstore.get_pgvector_connection_string = lambda project_id: connection_string
+    monkeypatch.setitem(sys.modules, vectorstore.__name__, vectorstore)
     monkeypatch.setattr(tools_env.module, "batch_count_toolkit_indexes", counts, raising=False)
     tools = sys.modules[f"{PACKAGE}.models.all"].EliteATool
     with tools_env.session_factory() as session:

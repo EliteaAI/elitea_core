@@ -206,7 +206,7 @@ def check_index_rights(project_id: int, toolkit_id: int | None, scope: ScheduleS
         if access_error:
             body, status = access_error
             raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
-    if not scope.is_admin and INDEX_EDIT_PERMISSION not in scope.permissions:  # an admin needs no index edit grant
+    if INDEX_EDIT_PERMISSION not in scope.permissions:  # an admin too: the run re-checks it for the owner
         raise ScheduleError('read_only', INDEX_READ_ONLY, 403)
 
 

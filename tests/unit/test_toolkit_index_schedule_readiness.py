@@ -5,7 +5,8 @@ from unit import test_7269_readiness_requests as harness
 
 MEMBER, OWNER = harness.MEMBER, harness.OWNER
 credential, items, no_risks = harness.credential, harness.items, harness.no_risks
-env, ns = harness.env, harness.ns  # the harness fixtures, bound here under their own names
+env, ns = harness.env, harness.ns
+__all__ = ["env", "ns"]  # the harness fixtures, which the tests below take by name
 
 
 def index_schedule(ns, env, toolkit_id=1, owner=OWNER, index_name="docs"):
