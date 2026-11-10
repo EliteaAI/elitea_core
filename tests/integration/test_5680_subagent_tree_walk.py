@@ -76,6 +76,7 @@ def pu():
             'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': None,
         },
         'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': None},
+        'plugins.elitea_core.utils.conversation_starters_utils': {'get_max_conversation_starters': lambda: 4},
     }.items():
         mod = types.ModuleType(modname)
         for k, v in attrs.items():

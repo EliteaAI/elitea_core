@@ -655,6 +655,7 @@ def agent_publish(monkeypatch, md):
         f'{PKG}.models.skill', f'{PKG}.utils.create_utils', f'{PKG}.utils.export_import',
         f'{PKG}.utils.toolkit_meta', f'{PKG}.utils.llm_judge', f'{PKG}.utils.utils',
         f'{PKG}.utils.category_utils', f'{PKG}.utils.application_utils',
+        f'{PKG}.utils.conversation_starters_utils',
     ):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
     sys.modules[f'{PKG}.utils.skill_utils'].attach_skill_to_public_copy = lambda **kwargs: None

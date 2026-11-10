@@ -21,6 +21,7 @@ from ...utils.application_utils import (
     VersionNotUpdatableError
 )
 from ...utils.create_utils import clone_persisted_application_version
+from ...utils.conversation_starters_utils import ConversationStartersLimitError, limit_error_response
 from ...utils.mcp_versioning import (
     INTERNAL_MCP_ENVIRON_KEY,
     InstructionsPatchConflictError,
@@ -230,6 +231,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {'error': str(e)}, 400
         except InstructionsPatchConflictError as e:
             return {'error': str(e)}, 409
+        except ConversationStartersLimitError as e:
+            return limit_error_response(e), 400
         except ValidationError as e:
             return e.errors(
                 include_url=False,

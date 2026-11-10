@@ -548,6 +548,22 @@
       "requires_restart": false,
       "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
     },
+    "max_conversation_starters": {
+      "type": "integer",
+      "title": "Max Chat Starters per Version",
+      "description": "Maximum number of chat starters an agent or pipeline version can have. Starters are shown to users as one-click prompts in chat. Lowering the limit never removes existing starters: versions above the new limit keep them but can't add more. Allowed range: 1–10.",
+      "path": "conversation_starters_guardrail.max_per_version",
+      "section": "guardrails",
+      "default": 4,
+      "minimum": 1,
+      "maximum": 10,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+      }
+    },
     "enhance_agent_fixes_enabled": {
       "type": "boolean",
       "title": "Allow Agent Instruction Fixes",
