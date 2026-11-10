@@ -238,7 +238,10 @@ def _bare_decision_refusal(parsed) -> dict | None:
 
 
 def _drop_caller_inputs(parsed) -> None:
-    """Clear what the deciding user sent along: their tokens and server choices belong to them, not to the run."""
+    """Clear what the deciding user sent along: their tokens, server choices, model settings and attachments belong to
+    them, not to the run that resumes as another user."""
+    parsed.llm_settings = None
+    parsed.attachments_info = None
     parsed.mcp_tokens = {}
     parsed.ignored_mcp_servers = []
     parsed.user_declined_mcp_servers = None

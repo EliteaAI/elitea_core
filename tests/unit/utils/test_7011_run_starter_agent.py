@@ -15,6 +15,17 @@ PKG = "plugins.elitea_core"
 PROJECT_ID, SCHEDULE_ID, RUN_ID, OWNER, AGENT_ID, VERSION_ID = 34, 7, 31, 12, 5, 9
 CONVERSATION_ID = 77
 PROMPT = "Summarize open bugs"
+NEW_OWNER = 99
+
+
+def _actor_of(world):
+    """What the real run_actor_id returns: the starter of Run now, else the stored start owner, else the live owner."""
+    def actor(_session, run):
+        if getattr(run, "trigger", "cron") in ("manual", "test") and getattr(run, "requested_by", None) is not None:
+            return run.requested_by
+        return next((e["owner_id"] for e in getattr(run, "events", None) or []
+                     if e.get("kind") == "started" and "owner_id" in e), world.schedule.created_by)
+    return actor
 
 
 class Row(SimpleNamespace):
@@ -110,6 +121,7 @@ def world(monkeypatch):
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args: state.calls.append(("finish", *args)),
             "run_failure_reason": str,
+            "run_actor_id": _actor_of(state),
             "count_refusal": lambda *args: state.calls.append(("refused", *args)),  # #7254 has its own tests
             "end_refusal_streak": lambda *args: state.calls.append(("streak_end", *args)),
             "record_run_events": lambda *args, **kwargs: None,  # the run log has its own tests
@@ -372,3 +384,29 @@ def test_the_runtime_tool_name_is_an_alias_key_the_risk_scan_matches(world, monk
     assert runtime == "create_pull_request"
     assert security.is_tool_sensitive("github", spelled) is True
     assert security.is_tool_sensitive("github", runtime) is True
+
+
+@pytest.mark.parametrize("trigger", ["cron", "webhook"])
+def test_a_waiting_run_restarts_as_the_owner_it_started_under_after_a_change_of_owner(world, trigger):
+    world.schedule.created_by = NEW_OWNER
+    world.run.trigger, world.run.resumed_at = trigger, "2026-11-10"
+    world.run.events = [{"kind": "started", "owner_id": OWNER}]
+    _run(world)
+    checked = world.checked
+    assert world.call("prerun")[3] == OWNER
+    assert checked.created_by == OWNER and checked.principal == {"kind": "delegation", "ref": OWNER}
+    assert checked.keeps_started_owner is True and checked.run_as_caller is False
+
+
+def test_a_run_without_a_stored_start_owner_restarts_as_the_live_owner(world):
+    world.schedule.created_by = NEW_OWNER
+    world.run.trigger, world.run.events = "cron", [{"kind": "risk_check"}]
+    _run(world)
+    assert world.call("prerun")[3] == NEW_OWNER and world.checked.keeps_started_owner is False
+
+
+def test_a_run_started_by_the_current_owner_is_not_marked_as_a_former_owner(world):
+    world.schedule.created_by = NEW_OWNER
+    world.run.trigger, world.run.events = "cron", [{"kind": "started", "owner_id": NEW_OWNER}]
+    _run(world)
+    assert world.call("prerun")[3] == NEW_OWNER and world.checked.keeps_started_owner is False

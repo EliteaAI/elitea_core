@@ -109,7 +109,8 @@ def _parsed(**values):
         'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'hitl_resume': True,
         'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None,
         'mcp_auth_resume': False, 'mcp_auth_action': None, 'hitl_value': None, 'user_input': None,
-        'mcp_auth_decisions': None, 'mcp_tokens': {}, 'ignored_mcp_servers': [], 'user_declined_mcp_servers': None,
+        'mcp_auth_decisions': None, 'llm_settings': None, 'attachments_info': None, 'mcp_tokens': {},
+        'ignored_mcp_servers': [], 'user_declined_mcp_servers': None,
         **values,
     })
 
@@ -423,12 +424,13 @@ def test_a_sign_in_answer_is_plain_only_when_the_run_acts_as_another_user(values
 def test_the_inputs_of_the_deciding_user_are_dropped_before_the_resume():
     _, drop = _bare()
     parsed = _parsed(mcp_tokens={'https://mcp': 'owner-token'}, ignored_mcp_servers=['https://x'],
-                     user_declined_mcp_servers=[{'url': 'https://y'}], user_input='hello')
+                     user_declined_mcp_servers=[{'url': 'https://y'}], user_input='hello',
+                     llm_settings={'model_name': 'other'}, attachments_info=[{'name': 'a.txt'}])
 
     drop(parsed)
 
-    assert (parsed.mcp_tokens, parsed.ignored_mcp_servers, parsed.user_declined_mcp_servers, parsed.user_input) == (
-        {}, [], None, None)
+    assert (parsed.mcp_tokens, parsed.ignored_mcp_servers, parsed.user_declined_mcp_servers, parsed.user_input,
+            parsed.llm_settings, parsed.attachments_info) == ({}, [], None, None, None, None)
 
 
 def test_the_plain_answer_guard_runs_before_the_child_resume_and_every_write():

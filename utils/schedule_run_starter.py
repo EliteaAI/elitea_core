@@ -30,6 +30,7 @@ from .schedule_runs import (
     fail_schedule_run,
     finish_schedule_run,
     record_run_events,
+    run_actor_id,
     run_event,
     run_failure_reason,
 )
@@ -67,14 +68,18 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
             return None
         trigger = getattr(run_row, 'trigger', 'cron')
         # Run now by an admin acts as the admin: the checks, the credentials and the run use the caller, never the owner
-        requested_by = getattr(run_row, 'requested_by', None)
-        as_caller = (trigger in ('manual', 'test') and requested_by is not None
-                     and requested_by != schedule.created_by)
+        # The actor is the person who pressed Run now, else the owner the run started under: after a Change owner a
+        # waiting cron or webhook run restarts as the owner who decided it, never as the new owner
+        actor = (run_actor_id(session, run_row) if run_row is not None else None) or schedule.created_by
+        acts_for_another = actor != schedule.created_by
+        as_caller = acts_for_another and trigger in ('manual', 'test')
+        keeps_started_owner = acts_for_another and not as_caller
         return SimpleNamespace(
             schedule=SimpleNamespace(
                 id=schedule.id, name=schedule.name,
-                principal={'kind': 'delegation', 'ref': requested_by} if as_caller else schedule.principal,
-                created_by=requested_by if as_caller else schedule.created_by, run_as_caller=as_caller,
+                principal={'kind': 'delegation', 'ref': actor} if acts_for_another else schedule.principal,
+                created_by=actor, run_as_caller=as_caller,
+                keeps_started_owner=keeps_started_owner,
                 owner_id=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
