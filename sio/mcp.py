@@ -68,14 +68,15 @@ class SIO:  # pylint: disable=E1101,R0903
 
 
 def _bind_toolkit_configs(sid, payload):
-    """Attach the socket and timeouts to each server; return the servers and the names that cannot be registered."""
+    """Attach the socket and timeouts to each server, keeping a per-server call timeout; return the servers and the invalid names."""
     servers, invalid = [], []
     for toolkit_config in payload.toolkit_configs:
         requested_name = toolkit_config.name
         toolkit_config.project_id = payload.project_id
         toolkit_config.sio_sid = sid
         toolkit_config.timeout_tools_list = payload.timeout_tools_list
-        toolkit_config.timeout_tools_call = payload.timeout_tools_call
+        if "timeout_tools_call" not in toolkit_config.model_fields_set:
+            toolkit_config.timeout_tools_call = payload.timeout_tools_call
         toolkit_config.name = _sanitize_name(requested_name)
         if toolkit_config.name:
             servers.append(toolkit_config)

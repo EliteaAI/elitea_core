@@ -379,3 +379,14 @@ def test_a_payload_without_generation_still_takes_the_additive_path(mcp, platfor
 
     assert ack == {'ok': True, 'registered': ['jira'], 'declined': []}
     assert set(platform.servers_storage.get_servers_dict(PROJECT_ID)) == {'github', 'jira'}
+
+
+@pytest.mark.parametrize('payload', [_payload, _snapshot])
+def test_a_call_timeout_set_per_server_is_kept_and_the_payload_value_fills_the_rest(mcp, platform, users, payload):
+    data = payload('github', 'jira')
+    data['toolkit_configs'][0]['timeout_tools_call'] = 65
+
+    _connect(mcp, platform, data)
+
+    assert platform.servers_storage.get_server(PROJECT_ID, 'github').timeout_tools_call == 65
+    assert platform.servers_storage.get_server(PROJECT_ID, 'jira').timeout_tools_call == data['timeout_tools_call']
