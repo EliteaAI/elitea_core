@@ -39,6 +39,7 @@ def mcp_oauth():
     'teams_configuration',
     'outlook_configuration',
     'ms_graph_configuration',
+    'dataverse_configuration',
 ])
 def test_every_delegated_oauth_configuration_supplies_the_secret(mcp_oauth, key):
     settings = {key: {'client_id': 'cid', 'client_secret': 'real-secret', 'scopes': ['User.Read']}}
@@ -46,6 +47,21 @@ def test_every_delegated_oauth_configuration_supplies_the_secret(mcp_oauth, key)
 
     assert mcp_oauth.pick_oauth_setting(sources, 'client_secret') == 'real-secret'
     assert mcp_oauth.pick_oauth_setting(sources, 'client_id') == 'cid'
+
+
+def test_dataverse_toolkit_settings_supply_the_stored_client_secret(mcp_oauth):
+    settings = {
+        'dataverse_configuration': {
+            'url': 'https://org.crm4.dynamics.com',
+            'tenant_id': 'tenant-1',
+            'client_id': 'cid',
+            'client_secret': 'real-secret',
+        },
+    }
+    configs = mcp_oauth.get_oauth_configurations(settings)
+
+    assert configs == [settings['dataverse_configuration']]
+    assert mcp_oauth.pick_oauth_setting([settings, *configs], 'client_secret') == 'real-secret'
 
 
 def test_configurations_are_returned_by_reference_so_expansion_is_seen(mcp_oauth):

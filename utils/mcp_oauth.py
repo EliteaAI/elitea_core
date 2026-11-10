@@ -31,6 +31,7 @@ OAUTH_CONFIGURATION_KEYS = (
     'teams_configuration',
     'outlook_configuration',
     'ms_graph_configuration',
+    'dataverse_configuration',
 )
 
 
