@@ -157,6 +157,19 @@ def test_the_pausing_refusal_clears_next_run_and_the_ones_before_keep_it(firing)
     assert firing.next_run() is None
 
 
+def test_three_prerun_refusals_pause_the_schedule_and_clear_next_run(firing):
+    """The pre-run check of a webhook schedule counts with its own reason; the pause still clears the next run."""
+    runs_module = sys.modules[f"{PKG}.utils.schedule_runs"]
+    due = datetime.datetime(2030, 1, 1, 12, 0)
+    firing.set_next_run(due)
+    schedule = types.SimpleNamespace(id=1, created_by=OWNER)
+    for count in range(1, 4):
+        runs_module.count_refusal(PROJECT_ID, schedule, firing.fire(ADMITTED, governed=False), "The owner is gone",
+                                  disabled_reason=runs_module.PRERUN_REFUSED, text=runs_module.PAUSED_AFTER_PRERUN)
+        assert firing.next_run() == (due if count < 3 else None)
+    assert firing.schedule() == (3, False, "prerun_refused")
+
+
 def test_two_refusals_do_not_pause_the_schedule(firing):
     firing.fire(REFUSED)
     firing.fire(REFUSED)
