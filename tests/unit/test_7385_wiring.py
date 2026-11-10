@@ -32,7 +32,7 @@ class TestEnterRoom:
         handler = _between(source("sio/all.py"), "def enter_room(", "@web.sio(SioEvents.test_toolkit_enter_room)")
         assert handler.index("if not can_join_room(") < handler.index(
             "self.context.sio.enter_room(sid, get_chat_room(conversation_uuid))")
-        for write in ("commit(", "close_never_started_runs", "emit("):
+        for write in ("commit(", "close_stuck_runs", "emit("):
             assert write not in handler
 
     @staticmethod
@@ -115,7 +115,7 @@ class TestNeverStartedRuns:
 
     @staticmethod
     def test_cleanup_is_an_admin_task(source):
-        assert "    @web.method()\n    def close_never_started_chat_runs(" in source("methods/admin_tasks.py")
+        assert "    @web.method()\n    def close_stuck_chat_runs(" in source("methods/admin_tasks.py")
         module = source("module.py")
-        assert '"close_never_started_chat_runs", self.close_never_started_chat_runs,\n                group="R-2.0.9",' in module
-        assert module.count('"close_never_started_chat_runs", self.close_never_started_chat_runs') == 2
+        assert '"close_stuck_chat_runs", self.close_stuck_chat_runs,\n                group="R-2.0.9",' in module
+        assert module.count('"close_stuck_chat_runs", self.close_stuck_chat_runs') == 2

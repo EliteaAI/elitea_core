@@ -1,7 +1,7 @@
 """EL-7385: the queries that find running chats, run on SQLite over stand-in models.
 
 Contract under test: utils/running_conversations.py (the list spinner field, and the admin cleanup of rows
-whose run never started). The stand-in table has the real column names, so the compiled SQL is what
+stuck "streaming"). The stand-in table has the real column names, so the compiled SQL is what
 production runs.
 """
 import sys
@@ -67,6 +67,9 @@ ROWS = [
     # conversation 5: the same, a month ago
     dict(id=12, uuid="q7", conversation_id=5),
     dict(id=13, uuid="a7", conversation_id=5, reply_to_id=12, is_streaming=True, created_at=ANCIENT),
+    # conversation 6: a task that died without a stream end a month ago; it keeps its task id
+    dict(id=14, uuid="q8", conversation_id=6),
+    dict(id=15, uuid="a8", conversation_id=6, reply_to_id=14, is_streaming=True, task_id="t-dead", created_at=ANCIENT),
 ]
 
 
@@ -114,36 +117,54 @@ class TestRunningConversationIds:
     def test_a_run_that_never_started_is_not_running(running, session):
         assert running.running_conversation_ids(session, [4, 5]) == set()
 
-
-class TestCloseNeverStarted:
     @staticmethod
-    def test_one_conversation_and_live_runs_are_left_alone(running, session):
-        ended = running.close_never_started_runs(session, 4)
-        assert [row.uuid for row in ended] == ["a6"]
-        assert streaming(session, 11) is False
-        # A run with a task, and one still inside its start grace, keep streaming
-        assert running.close_never_started_runs(session, 3) == []
-        assert running.close_never_started_runs(session, 1) == []
-        assert streaming(session, 9) is True and streaming(session, 4) is True
+    def test_a_run_older_than_any_real_run_is_not_running_even_with_a_task_id(running, session):
+        assert running.running_conversation_ids(session, [6]) == set()
+
+
+class TestQueryShape:
+    @staticmethod
+    def test_streaming_is_compared_with_equals_so_the_partial_index_is_used(running):
+        # Postgres matches `is_streaming = true`, not `is_streaming IS true`, to `WHERE is_streaming`
+        for clause in (running.is_live_run(), running.is_stuck_run(timedelta(hours=1))):
+            sql = str(clause.compile(compile_kwargs={"literal_binds": True}))
+            assert "is_streaming = true" in sql.lower() or "is_streaming = 1" in sql.lower(), sql
+            assert " is true" not in sql.lower() and "is 1" not in sql.lower(), sql
+
+
+class TestCloseStuck:
+    @staticmethod
+    def test_old_rows_end_with_a_task_id_or_without(running, session):
+        # everything streaming for over an hour: two runs with a task id (2 h), never started (2 h, a month),
+        # and the dead task (a month)
+        assert running.close_stuck_runs(session, timedelta(hours=1)) == 5
+        session.expire_all()
+        for row_id in (4, 8, 11, 13, 15):
+            assert streaming(session, row_id) is False
 
     @staticmethod
-    def test_the_whole_project_without_a_conversation(running, session):
-        ended = running.close_never_started_runs(session)
-        assert sorted(row.uuid for row in ended) == ["a6", "a7"]
-        assert streaming(session, 9) is True and streaming(session, 8) is True
+    def test_live_runs_are_left_alone(running, session):
+        running.close_stuck_runs(session, timedelta(hours=1))
+        session.expire_all()
+        assert streaming(session, 9) is True  # just sent
 
     @staticmethod
-    def test_a_longer_grace_spares_younger_rows(running, session):
-        ended = running.close_never_started_runs(session, None, timedelta(hours=24))
-        assert [row.uuid for row in ended] == ["a7"]
-        assert streaming(session, 11) is True
+    def test_a_longer_age_spares_younger_rows(running, session):
+        assert running.close_stuck_runs(session, timedelta(hours=24)) == 2
+        session.expire_all()
+        assert streaming(session, 11) is True and streaming(session, 4) is True
+        assert streaming(session, 13) is False and streaming(session, 15) is False
 
     @staticmethod
     def test_count_matches_what_close_would_end(running, session):
-        assert running.count_never_started_runs(session) == 2
-        assert running.count_never_started_runs(session, timedelta(hours=24)) == 1
+        assert running.count_stuck_runs(session, timedelta(hours=1)) == 5
+        assert running.count_stuck_runs(session, timedelta(hours=24)) == 2
         # Counting writes nothing
-        assert streaming(session, 11) is True and streaming(session, 13) is True
+        assert streaming(session, 11) is True and streaming(session, 15) is True
+
+    @staticmethod
+    def test_nothing_to_end_is_zero(running, session):
+        assert running.close_stuck_runs(session, timedelta(days=365)) == 0
 
 
 class TestCleanupHours:
@@ -173,21 +194,22 @@ class TestCleanupRun:
         return get_session
 
     def test_a_dry_run_counts_and_writes_nothing(self, running, engine, session):
-        result = running.run_never_started_cleanup(self.sessions(engine), [1], 24, dry_run=True)
+        result = running.run_stuck_cleanup(self.sessions(engine), [1], 24, dry_run=True)
         assert result == {
-            "closed": 1, "projects": {1: 1}, "failed": 0, "failed_projects": [],
+            "closed": 2, "projects": {1: 2}, "failed": 0, "failed_projects": [],
             "older_than_hours": 24, "dry_run": True,
         }
-        assert streaming(session, 13) is True
+        assert streaming(session, 13) is True and streaming(session, 15) is True
 
     def test_a_real_run_ends_the_rows_past_the_grace(self, running, engine, session):
-        result = running.run_never_started_cleanup(self.sessions(engine), [1], 1, dry_run=False)
-        assert result["closed"] == 2 and result["dry_run"] is False
+        result = running.run_stuck_cleanup(self.sessions(engine), [1], 1, dry_run=False)
+        assert result["closed"] == 5 and result["dry_run"] is False
         session.expire_all()
         assert streaming(session, 11) is False and streaming(session, 13) is False
+        assert streaming(session, 15) is False
         assert streaming(session, 9) is True
 
     def test_a_failing_project_does_not_stop_the_others(self, running, engine):
-        result = running.run_never_started_cleanup(self.sessions(engine, fail_for={7}), [7, 1], 24, dry_run=True)
+        result = running.run_stuck_cleanup(self.sessions(engine, fail_for={7}), [7, 1], 24, dry_run=True)
         assert result["failed_projects"] == [{"project_id": 7}]
-        assert result["projects"] == {1: 1}
+        assert result["projects"] == {1: 2}

@@ -615,7 +615,7 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
-                "close_never_started_chat_runs", self.close_never_started_chat_runs,
+                "close_stuck_chat_runs", self.close_stuck_chat_runs,
                 group="R-2.0.9",
             )
         except Exception as e:
@@ -1536,7 +1536,7 @@ class Module(module.ModuleModel):
                 "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run
             )
             this.for_module("admin").module.unregister_admin_task(
-                "close_never_started_chat_runs", self.close_never_started_chat_runs
+                "close_stuck_chat_runs", self.close_stuck_chat_runs
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
