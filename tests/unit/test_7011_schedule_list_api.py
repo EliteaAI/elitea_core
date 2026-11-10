@@ -23,6 +23,7 @@ ROW_KEYS = {
     "last_run", "last_run_status", "last_run_reason", "last_conversation_id", "expires_at",
     "owner", "allowed_actions", "trigger_kind", "webhook_type", "webhook_url",
     "previous_secret_until", "gitlab_auth_method", "last_delivery_at", "last_delivery_outcome",
+    "running_runs", "run_cap",  # #7400: null on cron rows
 }
 
 

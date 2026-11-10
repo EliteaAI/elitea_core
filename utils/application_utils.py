@@ -37,6 +37,7 @@ from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
 from .trigger_write_rule import sanitize_trigger_for_write
 from .folder_access import folder_exclusion_clause
+from .conversation_starters_utils import count_conversation_starters, enforce_conversation_starters_limit
 
 
 class _AuthorSortRow(NamedTuple):
@@ -218,6 +219,12 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
     if version.status in ('published', 'embedded'):
         raise VersionNotUpdatableError(
             f'Version id {version_data.id} is {version.status} and can not be updated'
+        )
+
+    if 'conversation_starters' in fields:
+        enforce_conversation_starters_limit(
+            version_data.conversation_starters,
+            previous_count=count_conversation_starters(version.conversation_starters),
         )
 
     if version_data.variables is not None:

@@ -29,6 +29,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         2. Search by name: GET ...?query=sprint+review
         3. Filter by participant (agent): GET ...?participant_id=15
         4. Support conversations: GET ...?source=support
+
+        Each row has has_running_task: true while an answer in it is still being generated.
         """,
         mcp_tool=True,
         tags=["elitea_core/chat"],

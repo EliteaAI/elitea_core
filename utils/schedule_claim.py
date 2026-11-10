@@ -1,7 +1,7 @@
 """Due query, claim and cron run insert of the schedule tick, and the event list of a run (EL-7011)."""
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
@@ -12,6 +12,9 @@ LEGACY_LOCK_BASE = 7011 << 32
 EVENT_LIMIT = 200
 TEXT_LIMIT = 300
 FINISH_LEVELS = {'success': 'success', 'failed': 'error'}  # blocked and skipped are warnings
+# One lock per project: the project cap sums over all its webhooks, so a row lock would let two rows pass together
+WEBHOOK_RUNS_LOCK = "SELECT pg_advisory_xact_lock(hashtext('webhook-runs'), :project_id)"
+RUN_TRIGGERS = ('webhook', 'test')  # a sample run holds a worker as a delivery does
 
 
 def run_event(kind: str, text: str, level: str = 'info', **data) -> dict:
@@ -78,6 +81,24 @@ def claim_schedule(session, schedule_id: int, seen_next_run: datetime, new_next_
         .values(next_run=new_next_run, last_run=func.now())
     )
     return result.rowcount == 1
+
+
+def lock_project_runs(session, project_id: int) -> None:
+    """Order the webhook run counts of one project until the commit; SQLite tests have no advisory locks."""
+    if session.get_bind().dialect.name == 'postgresql':
+        session.execute(text(WEBHOOK_RUNS_LOCK), {'project_id': project_id})
+
+
+def running_webhook_runs(session, row_ids=None) -> dict[int, int]:
+    """Running runs by webhook row (deliveries and samples); `waiting_for_approval` holds no worker and is not counted."""
+    query = (select(EntityScheduleRun.schedule_id, func.count())
+             .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+             .where(EntitySchedule.trigger_kind == 'webhook', EntityScheduleRun.status == 'running',
+                    EntityScheduleRun.trigger.in_(RUN_TRIGGERS))
+             .group_by(EntityScheduleRun.schedule_id))
+    if row_ids is not None:
+        query = query.where(EntityScheduleRun.schedule_id.in_(row_ids))
+    return dict(session.execute(query).all())
 
 
 def insert_run(session, schedule_id: int | None, trigger: str, requested_by: int | None = None) -> int | None:

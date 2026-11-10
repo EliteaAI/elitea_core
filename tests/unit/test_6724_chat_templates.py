@@ -312,7 +312,10 @@ def _load_handler(session, module_name="chat_templates", validate_participants=_
         validation.validate_template_participants = validate_participants
         icons = types.ModuleType("elitea_core.utils.chat_template_icons")
         icons.attach_participant_icons = lambda templates, _project_id: templates
+        settings_access = types.ModuleType("elitea_core.utils.project_settings_access")
+        settings_access.require_project_settings_admin = lambda func: func
         sys.modules.update({
+            "elitea_core.utils.project_settings_access": settings_access,
             "elitea_core.utils.chat_template_icons": icons,
             "elitea_core.models.chat_template": ct_orm,
             "elitea_core.models.pd.chat_template": ct_pd,

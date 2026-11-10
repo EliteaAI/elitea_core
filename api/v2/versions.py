@@ -14,8 +14,27 @@ from ...models.pd.version import (
 from ...models.all import Application, ApplicationVersion
 from ...utils.authors import get_authors_data
 from ...utils.create_utils import create_version
+from ...utils.conversation_starters_utils import (
+    ConversationStartersLimitError,
+    count_conversation_starters,
+    enforce_conversation_starters_limit,
+    limit_error_response,
+)
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
+
+
+def _source_starters_count(session, application_id: int, source_version_id) -> int:
+    # Same int guard as copy_skill_mappings: a bad or foreign id is ignored, not an error.
+    try:
+        source_version_id = int(source_version_id)
+    except (TypeError, ValueError):
+        return 0
+    source = session.query(ApplicationVersion.conversation_starters).filter(
+        ApplicationVersion.id == source_version_id,
+        ApplicationVersion.application_id == application_id,
+    ).first()
+    return count_conversation_starters(source[0]) if source else 0
 
 
 class ProjectAPI(api_tools.APIModeHandler):
@@ -142,6 +161,16 @@ class ProjectAPI(api_tools.APIModeHandler):
                     include_context=False,
                     include_input=False,
                 ), 400
+            # "Save as new version" names its source; the copy may keep as many starters as the
+            # source had, so a version above the limit can still be branched. Any version of this
+            # application may be named, by design: write access is required and the cap of 10 holds.
+            try:
+                enforce_conversation_starters_limit(
+                    version_data.conversation_starters,
+                    previous_count=_source_starters_count(session, application_id, copy_id),
+                )
+            except ConversationStartersLimitError as e:
+                return limit_error_response(e), 400
             version = create_version(
                 version_data, application, session,
                 copy_skills_from_version_id=copy_id,

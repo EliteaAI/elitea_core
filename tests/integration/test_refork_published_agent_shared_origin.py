@@ -100,6 +100,7 @@ def fork_model():
         'plugins.elitea_core.utils.authors': {'get_authors_data': lambda *a, **k: []},
         'plugins.elitea_core.utils.toolkits_utils': {'get_mcp_schemas': lambda *a, **k: {}},
         'plugins.elitea_core.utils.pipeline_utils': {'validate_yaml_from_str': noop},
+        'plugins.elitea_core.utils.conversation_starters_utils': {'ABSOLUTE_MAX_CONVERSATION_STARTERS': 10},
         'plugins.elitea_core.utils.application_utils': {
             'apply_selected_tools_intersection': noop,
             'check_if_usable_attachment_toolkit': lambda *a, **k: True,
@@ -180,6 +181,7 @@ def _import_application_function(create_application, logged):
         'ApplicationImportModel': _ImportModel,
         'ValidationError': type('ValidationError', (Exception,), {}),
         'create_application': create_application,
+        'import_starters_errors': lambda agent_name, versions: [],
         'log': types.SimpleNamespace(
             info=lambda *a, **k: None,
             warning=lambda *a, **k: None,

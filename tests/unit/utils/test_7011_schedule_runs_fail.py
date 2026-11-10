@@ -6,6 +6,7 @@ in-memory SQLite; `tools.db.get_session` hands out the test session.
 import sys
 import types
 from contextlib import contextmanager
+from datetime import datetime
 
 import pytest
 from sqlalchemy import Column, Integer, Table, create_engine
@@ -135,6 +136,18 @@ def test_el_7011_r1_5_disable_schedule_switches_off_with_the_reason(runs, sessio
 
     session.refresh(schedule)
     assert (schedule.enabled, schedule.disabled_reason) == (False, "owner_lost_access")
+
+
+def test_disable_schedule_clears_next_run_of_the_named_schedule_only(runs, session):
+    due = datetime(2030, 1, 1, 12, 0)
+    target = _schedule(runs, session, next_run=due)
+    other = _schedule(runs, session, name="S2", created_by=2, next_run=due)
+
+    runs.disable_schedule(1, target.id, "owner_lost_access")
+
+    session.refresh(target)
+    session.refresh(other)
+    assert (target.next_run, other.next_run) == (None, due)
 
 
 def test_el_7011_r1_5_disable_schedule_changes_only_the_named_schedule(runs, session):

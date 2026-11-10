@@ -648,6 +648,74 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return run_schedule_test_run_migration(project_ids, dry_run_flag(param))
 
     @web.method()
+    def clear_paused_schedule_next_run(self, *args, **kwargs):
+        """Admin task: clear next_run of the schedules that were paused before a pause cleared it. Idempotent.
+
+        Schedules paused now have no next run; the list and the details read the column as it is, so a stale value
+        of an older pause shows and sorts wrong until this runs. A project is one transaction.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"              - dry run across all projects (default; changes nothing)
+            "project_id=34;dry_run=false" - clear project 34
+        """
+        from ..utils.schedule_lifecycle import CLEAR_PAUSED_NEXT_RUN  # pylint: disable=C0415
+        from ..utils.schedule_test_run_schema import dry_run_flag  # pylint: disable=C0415
+        from ..utils.skill_publish_schema import apply_project_statements  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("clear_paused_schedule_next_run: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        if dry_run_flag(param):
+            return {"migrated": len(project_ids), "failed": 0, "failed_projects": [], "dry_run": True}
+        migrated, failed = apply_project_statements(project_ids, (CLEAR_PAUSED_NEXT_RUN,))
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": False}
+
+    @web.method()
+    def close_stuck_chat_runs(self, *args, **kwargs):
+        """Admin task: end chat answers stuck "streaming" that nothing will end any more (R-2.0.9, EL-7385).
+
+        A send that broke before dispatch leaves a response row with is_streaming and no task id; a task that died
+        without a stream end (indexer crash, restart) leaves it with its task id. The chat list already ignores
+        both once they are old; this ends them in the database. Only rows older than ``older_than_hours``
+        (default 24, past the longest run allowed) are touched, with a task id or without, so a live run is
+        never ended.
+
+        Param format (optional):
+            "project_id=<all|N>[;older_than_hours=24][;dry_run=false]"
+
+        Examples:
+            "project_id=all"                                - dry run across all projects (default; changes nothing)
+            "project_id=all;dry_run=false"                  - end them everywhere
+            "project_id=34;older_than_hours=48;dry_run=false" - project 34, rows older than two days
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.running_conversations import cleanup_hours, run_stuck_cleanup  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        hours = cleanup_hours(param)
+        if hours is None:
+            log.error("close_stuck_chat_runs: older_than_hours must be a positive integer")
+            return {"closed": 0, "error": "older_than_hours must be a positive integer"}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("close_stuck_chat_runs: failed to list projects")
+            return {"closed": 0, "error": "failed to list projects"}
+
+        result = run_stuck_cleanup(db.get_session, project_ids, hours, dry_run_flag(param))
+        for failed in result["failed_projects"]:
+            log.error("close_stuck_chat_runs: project %s failed", failed["project_id"])
+        log.info("close_stuck_chat_runs: %s", result)
+        return result
+
+    @web.method()
     def create_agent_identity_tables(self, *args, **kwargs):
         """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
 

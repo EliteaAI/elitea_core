@@ -15,6 +15,7 @@ from ...utils.midturn_injection_utils import (
 )
 from ...utils.skill_publish_utils import get_skill_publish_blocked, get_skill_publish_whitelist
 from ...utils.skill_utils import get_max_instructions_length
+from ...utils.conversation_starters_utils import get_max_conversation_starters
 
 
 _DEFAULT_NEW_ITEM_DAYS = 14
@@ -136,6 +137,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ),
             "tool_spend": _tool_spend_availability(),
             "skill_instructions_max_length": get_max_instructions_length(),
+            "conversation_starters_max": get_max_conversation_starters(),
         }
         # (#7269) the project Governance tab shows only while credential governance is enforced; under off and audit
         # only the answer is as before (no field)

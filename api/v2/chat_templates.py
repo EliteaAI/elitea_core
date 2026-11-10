@@ -7,6 +7,7 @@ from ...models.pd.chat_template import ChatTemplateCreate, ChatTemplateRead, Cha
 from ...utils.chat_template_icons import attach_participant_icons
 from ...utils.chat_template_validation import validate_template_participants
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.project_settings_access import require_project_settings_admin
 
 MAX_TEMPLATES_PER_PROJECT = 5
 
@@ -36,6 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         },
     })
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def post(self, project_id: int, **kwargs):
         try:
             payload = ChatTemplateCreate.model_validate(request.json)
@@ -79,6 +81,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         },
     })
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def put(self, project_id: int, template_id: int, **kwargs):
         try:
             payload = ChatTemplateUpdate.model_validate(request.json)
@@ -117,6 +120,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         },
     })
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def delete(self, project_id: int, template_id: int, **kwargs):
         with db.get_session(project_id) as session:
             template = session.query(ChatTemplate).filter(ChatTemplate.id == template_id).first()

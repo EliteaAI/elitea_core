@@ -225,6 +225,7 @@ def _install_package(rpc_state):
     tools.register_openapi = lambda *a, **k: (lambda f: f)
     tools.rpc_tools = rpc_tools
     tools.db = types.SimpleNamespace(with_project_schema_session=lambda project_id: None)
+    tools.this = types.SimpleNamespace(descriptor=types.SimpleNamespace(config=rpc_state['plugin_config']))
 
     for name, mod in {
         PKG: pkg,
@@ -251,6 +252,7 @@ def _install_package(rpc_state):
         sys.modules[name] = mod
 
     _load_real('utils.error_text', 'utils/error_text.py')  # draft_llm_utils imports it
+    _load_real('utils.conversation_starters_utils', 'utils/conversation_starters_utils.py')
     _load_real('utils.draft_llm_utils', 'utils/draft_llm_utils.py')
     _load_real('utils.generate_skill_utils', 'utils/generate_skill_utils.py')
     _load_real('utils.generate_project_context_utils', 'utils/generate_project_context_utils.py')
@@ -272,6 +274,7 @@ def endpoints():
             (PUBLIC_PROJECT, 'claude-sonnet-5'): {'supports_reasoning': True, 'shared': True},
         },
         'resolvable': set(),
+        'plugin_config': {},
     }
     skill, project_context, application = _install_package(rpc_state)
     yield types.SimpleNamespace(
@@ -629,3 +632,53 @@ def test_skill_prompt_carries_the_output_contract(endpoints):
     assert f'max {SKILL_INSTRUCTIONS_MAX_LENGTH} characters' in handler.sent_instructions
     # validate_skill_name raises on these, so the authoritative contract has to repeat the rule
     assert "'claude' or 'anthropic'" in handler.sent_instructions
+
+
+def _starters_config(endpoints, limit):
+    endpoints.rpc_state['plugin_config']['conversation_starters_guardrail'] = {'max_per_version': limit}
+
+
+def _edit_with_saved_starters(endpoints, monkeypatch, saved):
+    monkeypatch.setattr(
+        endpoints.application, 'fetch_application_for_edit',
+        lambda *a, **k: {**APPLICATION_DRAFT, 'conversation_starters': saved},
+    )
+
+
+def _draft_with_starters(count):
+    return _thinking_result(json.dumps(
+        {**APPLICATION_DRAFT, 'conversation_starters': [f'q{i}' for i in range(count)]}
+    ))
+
+
+def test_a_new_draft_is_truncated_to_the_configured_starters_limit(endpoints):
+    _starters_config(endpoints, 3)
+    payload, status, _ = _call(endpoints.application, {'user_description': 'x'}, _draft_with_starters(6))
+
+    assert status == 200
+    assert payload['conversation_starters'] == ['q0', 'q1', 'q2']
+
+
+def test_an_ai_edit_keeps_the_starters_of_a_version_above_the_limit(endpoints, monkeypatch):
+    _starters_config(endpoints, 4)
+    _edit_with_saved_starters(endpoints, monkeypatch, [f's{i}' for i in range(7)])
+    body = {'user_description': 'x', 'application_id': 1, 'version_id': 1}
+
+    payload, status, _ = _call(endpoints.application, body, _draft_with_starters(7))
+    assert status == 200
+    assert len(payload['conversation_starters']) == 7
+
+    # The allowance is the saved count, not more
+    payload, status, _ = _call(endpoints.application, body, _draft_with_starters(9))
+    assert status == 200
+    assert len(payload['conversation_starters']) == 7
+
+
+def test_an_ai_edit_below_the_limit_is_truncated_to_the_limit(endpoints, monkeypatch):
+    _starters_config(endpoints, 5)
+    _edit_with_saved_starters(endpoints, monkeypatch, ['s0', 's1'])
+    body = {'user_description': 'x', 'application_id': 1, 'version_id': 1}
+
+    payload, status, _ = _call(endpoints.application, body, _draft_with_starters(8))
+    assert status == 200
+    assert len(payload['conversation_starters']) == 5

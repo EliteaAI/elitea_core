@@ -19,6 +19,11 @@ from ...models.pd.application import (
 
 from ...models.all import ApplicationVersion
 from ...utils.create_utils import create_application
+from ...utils.conversation_starters_utils import (
+    ConversationStartersLimitError,
+    enforce_conversation_starters_limit,
+    limit_error_response,
+)
 from ...utils.application_utils import list_applications_api
 from ...utils.utils import get_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
@@ -292,6 +297,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 include_context=False,
                 include_input=False,
             ), 400
+        try:
+            for version in application_data.versions:
+                enforce_conversation_starters_limit(version.conversation_starters)
+        except ConversationStartersLimitError as e:
+            return limit_error_response(e), 400
 
         with db.get_session(project_id) as session:
             application = create_application(application_data, session, project_id)

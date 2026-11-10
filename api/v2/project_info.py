@@ -4,6 +4,7 @@ from tools import api_tools, auth, config as c, rpc_tools
 from plugins.configurations.models.pd.project_icon import IconMeta
 from ...models.pd.chat_config import ProjectChatConfig
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.project_settings_access import can_manage_project_settings, require_project_settings_admin
 
 
 def _upsert_project_config(rpc, project_id, config_type, elitea_title, label, data_key, value):
@@ -80,6 +81,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 chat_config = chat_cfg["data"].get("chat_config")
             result['chat_config'] = chat_config or ProjectChatConfig().model_dump()
 
+        if not requested or 'can_manage_settings' in requested:
+            result['can_manage_settings'] = can_manage_project_settings(project_id, auth.current_user().get('id'))
+
         return result, 200
 
     @auth.decorators.check_api(
@@ -91,6 +95,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     )
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def put(self, project_id: int, **kwargs):
         """Update project icon_meta and/or chat_config."""
         raw = dict(request.json)
