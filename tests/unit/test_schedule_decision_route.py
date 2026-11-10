@@ -53,6 +53,7 @@ def decisions(harness, monkeypatch):
         run.requested_by if run.trigger in ('manual', 'test') and run.requested_by is not None
         else harness.row(run.schedule_id).created_by if run.schedule_id else run.requested_by)
     runs.ScheduleDecisionForbidden, runs.ScheduleRunNotWaiting = ScheduleDecisionForbidden, ScheduleRunNotWaiting
+    runs.DECISION_REFUSED = 'Only the owner of this schedule can approve or reject this run'
     runs.check_schedule_decision, runs.apply_schedule_decision = state.check, state.apply
     monkeypatch.setitem(sys.modules, runs.__name__, runs)
     state.started = []
@@ -174,7 +175,7 @@ def test_the_owner_rejects_and_the_run_does_not_start(harness, decisions):
 
 
 @pytest.mark.parametrize('action', ['approve', 'reject'])
-def test_an_admin_who_is_not_the_run_actor_gets_403_not_owner(harness, decisions, action):
+def test_an_admin_who_is_not_the_schedule_owner_gets_403_not_owner(harness, decisions, action):
     harness.request_as(ADMIN_ID, ADMIN)
     schedule_id = harness.seed()
     run_id = add_run(harness, schedule_id)
@@ -183,7 +184,7 @@ def test_an_admin_who_is_not_the_run_actor_gets_403_not_owner(harness, decisions
     body, status = decide(harness, schedule_id, run_id, action)
 
     assert (status, body['code']) == (403, 'not_owner')
-    assert body['error'] == 'Only the user this run acts as can approve or reject it'
+    assert body['error'] == 'Only the owner of this schedule can approve or reject this run'
     assert decisions.checks == [(run_id, ADMIN_ID, [action])]  # the admin is checked as any other caller
     assert decisions.applied == [] and decisions.started == []
 

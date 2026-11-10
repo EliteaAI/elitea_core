@@ -21,7 +21,11 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER, CONVERSATION_ID = 7, 9, 12, 31
-HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision'}
+ACTOR = 55
+REFUSED_TEXT = 'Only the owner of this schedule can approve or reject this run'
+HELPERS = {
+    '_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision', '_resume_user_id',
+}
 
 
 class Forbidden(Exception):
@@ -36,7 +40,7 @@ class NotWaiting(Exception):
     pass
 
 
-def _helpers(meta, error=None, decision='approve', apply_error=None):
+def _helpers(meta, error=None, decision='approve', apply_error=None, actor=ACTOR, resume=False):
     """The real helpers on a fake conversation meta; `calls` records each schedule_runs call."""
     calls = []
 
@@ -52,6 +56,10 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
         calls.append(('apply', project_id, run_id, decision))
         if apply_error:
             raise apply_error
+
+    def schedule_run_actor_id(project_id, run_id):
+        calls.append(('actor', project_id, run_id))
+        return actor
 
     chat = None if meta is None else types.SimpleNamespace(id=CONVERSATION_ID, meta=meta)
     query = types.SimpleNamespace(where=lambda *_: types.SimpleNamespace(first=lambda: chat))
@@ -70,12 +78,15 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
         'Conversation': types.SimpleNamespace(id='id', meta='meta', uuid='uuid'),
         'check_schedule_decision': check_schedule_decision,
         'apply_schedule_decision': apply_schedule_decision,
+        'schedule_run_actor_id': schedule_run_actor_id,
+        'DECISION_REFUSED': REFUSED_TEXT,
         'ScheduleDecisionForbidden': Forbidden,
         'ScheduleDecisionInvalid': Invalid,
         'ScheduleRunNotWaiting': NotWaiting,
     }
     namespace = load_cut(nodes, namespace, 'chat_all.py')  # the real helpers cut out of rpc/chat_all.py
-    return namespace['_check_schedule_decision'], namespace['_apply_schedule_decision'], calls
+    helpers = namespace['_check_schedule_decision'], namespace['_apply_schedule_decision'], calls
+    return helpers + (namespace['_resume_user_id'],) if resume else helpers
 
 
 def _parsed(**values):
@@ -110,7 +121,7 @@ def test_el_7011_r2_4_a_fan_out_child_on_a_resumed_run_has_nothing_to_apply():
 
     pending, denied = check(_parsed(thread_id='child-1'), OWNER)
 
-    assert (pending, denied) == (None, None)
+    assert (pending, denied) == ((RUN_ID, None), None)  # passed the check, nothing to write
     assert calls[0][-1] == {'fan_out': True, 'sign_in': False, 'conversation_id': CONVERSATION_ID}
     assert apply(PROJECT_ID, pending) is None
     assert [call[0] for call in calls] == ['check']
@@ -125,13 +136,49 @@ def test_el_7011_r2_3_r2_4_a_refused_check_answers_its_status(error, status):
     assert (pending, denied['status']) == (None, status)
 
 
-def test_a_refused_decision_by_a_user_the_run_does_not_act_as_names_the_actor_in_the_text():
+def test_a_refused_decision_by_a_user_who_is_not_the_schedule_owner_names_the_owner_in_the_text():
     check, _, _ = _helpers({'schedule_run_id': RUN_ID}, Forbidden())
 
     pending, denied = check(_parsed(), 1)
 
     assert pending is None
-    assert denied == {'error': 'Only the user this run acts as can approve or reject it', 'status': 403}
+    assert denied == {'error': REFUSED_TEXT, 'status': 403}
+
+
+def test_a_decided_schedule_run_resumes_as_the_user_it_acts_as():
+    _, _, calls, resume_user_id = _helpers({'schedule_run_id': RUN_ID}, resume=True)
+
+    assert resume_user_id(PROJECT_ID, (RUN_ID, 'approve'), OWNER) == ACTOR
+    assert calls == [('actor', PROJECT_ID, RUN_ID)]
+
+
+def test_a_fan_out_child_of_a_resumed_run_also_resumes_as_the_run_actor():
+    _, _, _, resume_user_id = _helpers({'schedule_run_id': RUN_ID}, resume=True)
+
+    assert resume_user_id(PROJECT_ID, (RUN_ID, None), OWNER) == ACTOR
+
+
+def test_a_chat_without_a_decided_run_resumes_as_its_caller():
+    _, _, calls, resume_user_id = _helpers({'schedule_run_id': RUN_ID}, resume=True)
+
+    assert resume_user_id(PROJECT_ID, None, OWNER) == OWNER
+    assert calls == []
+
+
+def test_a_run_without_an_actor_resumes_as_its_caller():
+    _, _, _, resume_user_id = _helpers({'schedule_run_id': RUN_ID}, actor=None, resume=True)
+
+    assert resume_user_id(PROJECT_ID, (RUN_ID, 'approve'), OWNER) == OWNER
+
+
+def test_the_resume_runs_as_the_actor_and_the_child_card_accepts_the_decided_owner():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    body = body[:body.index('\n    def ', 1)]
+
+    assert 'user_id=resume_user_id,' in body
+    assert "user_id=current_user['id']," not in body
+    assert 'decided=schedule_decision is not None' in body
+    assert 'and not decided' in CHAT_ALL[CHAT_ALL.index('def _continue_child_resume('):]
 
 
 @pytest.mark.parametrize('answer', ['authorize', 'skip'])

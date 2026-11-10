@@ -124,6 +124,11 @@ def test_the_started_event_names_trigger_type_and_delivery(world):
     assert "trigger: webhook · type: github · delivery gh-1" in started["text"]
 
 
+def test_the_started_event_of_a_delivery_keeps_the_schedule_owner(world):
+    _deliver(world)
+    assert world.events[0]["owner_id"] == OWNER
+
+
 def test_a_delivery_without_an_id_says_none(world):
     _deliver(world, delivery=None)
     assert "delivery none" in world.events[0]["text"]

@@ -243,9 +243,11 @@ def _run_detail_body(session, project_id: int, run, approval_rule: str | None, v
     """The `(body, status)` of one run, with the approval rule of its schedule or of its Test Run form.
 
     The tool results (`summary` and the preview of a `tool_call` event) go only to the user who started a manual or test run.
+    `decider_id` is the user who approves, rejects or signs in for the run, so a client shows the buttons to that user only.
     """
     # Late: only the detail routes read the conversation and the usage store
     from .schedule_run_detail import tool_call_events, usage_summary, version_label
+    from .schedule_runs import run_decider_id
     row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
     tokens, cost_usd = usage_summary(session, project_id, run)
     tool_events = tool_call_events(session, run.conversation_id, with_output=not _hides_tool_output(run, viewer_id))
@@ -255,6 +257,7 @@ def _run_detail_body(session, project_id: int, run, approval_rule: str | None, v
         "version_label": version_label(session, run.version_id),
         "principal_label": run.principal_label,
         "risk_outcome": run.risk_outcome,
+        "decider_id": run_decider_id(session, run),
         "approval_rule": approval_rule,
         "approval_expires_at": _iso(run.approval_expires_at),
         "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
@@ -488,6 +491,7 @@ def _decide(project_id: int, session, scope, run, entity_type: str, owner, body)
     check needs. Reads in `session`, which this function leaves open for the caller to close."""
     # Late: the decision writers load the run models, which the handler tests fake
     from .schedule_runs import (
+        DECISION_REFUSED,
         ScheduleDecisionForbidden,
         ScheduleRunNotWaiting,
         apply_schedule_decision,
@@ -508,7 +512,7 @@ def _decide(project_id: int, session, scope, run, entity_type: str, owner, body)
         if checked == "clean":  # only after the write: a lost race must leave no mark behind
             _remember_checked(run_id)
     except ScheduleDecisionForbidden:
-        return refusal("not_owner", "Only the user this run acts as can approve or reject it", 403)
+        return refusal("not_owner", DECISION_REFUSED, 403)
     except ScheduleRunNotWaiting:
         return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
     if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
@@ -699,7 +703,8 @@ class ScheduleItemHandlers:
 
         A webhook runs only as `test` with a sample `payload`, through the delivery path (#7455).
 
-        Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`. The run acts as the caller.
+        Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`. The run acts as the caller
+        and always pauses before a sensitive action; the owner of the schedule approves or rejects the pause.
         Errors: 400 invalid trigger or payload; 403; 404 not found, or a schedule outside the caller's scope; 409 deleted version or an active run
         (the body has `active_run_id`); 500 the run could not start.
         """
@@ -802,9 +807,9 @@ class ScheduleItemHandlers:
 
         Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
         Otherwise approve starts the run again. A run with a chat is decided in that chat.
-        Who may call: the user this run acts as, with `schedules.run`: the person who pressed Run now, else the owner.
-        An admin who is not that user gets 403.
-        Errors: 400 invalid action; 403 not the user the run acts as; 404 not found, or a schedule outside the caller's scope;
+        Who may call: the owner of the schedule when the run started, with `schedules.run`. An admin who is not
+        that owner gets 403, also for a run the admin started with Run now; the run keeps the admin's credentials.
+        Errors: 400 invalid action; 403 not the owner of the run; 404 not found, or a schedule outside the caller's scope;
         409 the run is not waiting, has a chat, or a credential is still missing.
         """
         body, error = _parse_body(ScheduleRunDecision)
@@ -924,6 +929,8 @@ class ScheduleItemHandlers:
         The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
         A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
         A manual or test run started by another user carries no tool result, only toolkit, tool and duration.
+        `decider_id` is the user who approves, rejects or signs in for a waiting run: the schedule owner at the start
+        of the run, also after a Change owner; for a Test Run its starter.
         Tokens and cost are null while the usage store has no row for the conversation.
         Who may call: the owner with `schedules.details`, or a schedules admin.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.

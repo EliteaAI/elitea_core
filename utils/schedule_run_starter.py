@@ -75,6 +75,7 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
                 id=schedule.id, name=schedule.name,
                 principal={'kind': 'delegation', 'ref': requested_by} if as_caller else schedule.principal,
                 created_by=requested_by if as_caller else schedule.created_by, run_as_caller=as_caller,
+                owner_id=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
@@ -246,21 +247,28 @@ def _webhook_row(schedule) -> bool:
 
 
 def _started_event(loaded, trigger: str, delivery: str | None) -> dict:
-    """The first run log line; a webhook run also names its type and delivery id."""
+    """The first run log line; a webhook run also names its type and delivery id.
+
+    It keeps `owner_id`, the schedule owner at the start: this user decides the pause of the run, also after a
+    Change owner (`run_decider_id`). A Test Run has no schedule and no owner id.
+    """
     label = 'Test run' if trigger == 'test' else 'Run'
+    owner_id = getattr(loaded.schedule, 'owner_id', None)
     sample = trigger == 'test' and _webhook_row(loaded.schedule)
     if trigger != 'webhook' and not sample:
         return run_event('started', f'{label} started · trigger: {trigger} · version {loaded.version.name}',
-                         trigger=trigger, version_id=loaded.version.id)
+                         trigger=trigger, version_id=loaded.version.id, owner_id=owner_id)
     webhook_type = loaded.schedule.webhook_type
     if sample:  # the sample body of the person who pressed the button (#7455)
         by = 'an admin' if getattr(loaded.schedule, 'run_as_caller', False) else 'the owner'
         return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
                                     f"Sample body by {by} · version {loaded.version.name}",
-                         trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, sample=True)
+                         trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, sample=True,
+                         owner_id=owner_id)
     return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
                                 f"delivery {delivery or 'none'} · version {loaded.version.name}",
-                     trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, delivery_id=delivery)
+                     trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, delivery_id=delivery,
+                     owner_id=owner_id)
 
 
 def _webhook_input(loaded, payload: bytes) -> tuple[str, str]:

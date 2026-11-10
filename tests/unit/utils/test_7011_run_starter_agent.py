@@ -309,6 +309,17 @@ def test_a_first_start_writes_the_started_event(world):
     assert _started_events(world) == ["started"]
 
 
+@pytest.mark.parametrize(("trigger", "requested_by"), [("cron", None), ("manual", OWNER + 1), ("manual", OWNER)])
+def test_the_started_event_keeps_the_schedule_owner_whoever_the_run_acts_as(world, trigger, requested_by):
+    world.run.trigger, world.run.requested_by = trigger, requested_by
+    fields = []
+    world.module.run_event = lambda kind, text, *args, **kwargs: fields.append((kind, kwargs)) or kind
+
+    _run(world)
+
+    assert [item["owner_id"] for kind, item in fields if kind == "started"] == [OWNER]
+
+
 def test_a_restart_of_an_approved_parked_run_writes_no_second_started_event(world):
     world.run.resumed_at = "2026-01-01"
     assert _started_events(world) == []

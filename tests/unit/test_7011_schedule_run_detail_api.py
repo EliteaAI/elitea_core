@@ -39,14 +39,17 @@ FINISHED = {'at': '2026-10-01T00:00:38+00:00', 'kind': 'finished', 'text': 'Run 
 TOOL = {'at': '2026-10-01T00:00:10+00:00', 'kind': 'tool_call', 'text': 'Tool call: github · list_issues',
         'level': 'info', 'toolkit': 'github', 'tool': 'list_issues', 'duration_ms': 1200}
 DETAIL_FIELDS = (FIELDS - {'tokens', 'cost_usd'}) | {  # the detail has the figures in `summary`
-    'version_label', 'principal_label', 'risk_outcome', 'approval_rule', 'approval_expires_at', 'summary', 'events',
+    'version_label', 'principal_label', 'risk_outcome', 'decider_id', 'approval_rule', 'approval_expires_at', 'summary', 'events',
 }
 
 
 @pytest.fixture
 def reads(monkeypatch):
     """The read helpers the handler imports late; `usage` is what the usage store answers."""
-    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], outputs=[], tool_events=[TOOL])
+    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], outputs=[], tool_events=[TOOL], decider=OWNER_ID)
+    runs = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')  # the decider logic has its own tests
+    runs.run_decider_id = lambda session, run: state.decider
+    monkeypatch.setitem(sys.modules, runs.__name__, runs)
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
     module.version_label = lambda session, version_id: {10: 'v3'}.get(version_id)
 
@@ -94,6 +97,7 @@ def test_cr_el7011_the_detail_has_the_run_version_account_risk_summary_and_event
         'Ann Smith (schedule owner)', 'needs_approval', 'pause_and_ask')
     assert body['summary'] == {'duration_ms': 38000, 'tokens': 2140, 'cost_usd': 0.03}
     assert body['duration_ms'] == 38000
+    assert body['decider_id'] == OWNER_ID
     # The stored events and the tool calls of the conversation, in time order
     assert [event['kind'] for event in body['events']] == ['started', 'tool_call', 'finished']
     assert reads.conversations == [901]
@@ -160,6 +164,17 @@ def test_cr_el7011_an_admin_reads_the_run_of_another_owner(harness, reads):
     harness.request_as(ADMIN_ID, ADMIN)
 
     assert call_run(harness, 'get', schedule_id, run_id)[1] == 200
+
+
+def test_the_detail_names_the_decider_of_the_run_not_the_viewer(harness, reads):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    run_id = seed_run(harness, schedule_id)
+    reads.decider = OTHER_ID
+    harness.request_as(ADMIN_ID, ADMIN)
+
+    body, status = call_run(harness, 'get', schedule_id, run_id)
+
+    assert (status, body['decider_id']) == (200, OTHER_ID)
 
 
 def test_cr_el7011_a_regular_user_gets_404_for_the_run_of_another_owner(harness, reads):

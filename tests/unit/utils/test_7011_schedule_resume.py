@@ -1,6 +1,7 @@
-"""Only the user a run acts as decides a waiting run, and only while it waits.
+"""Only the decider of a run decides it while it waits: the schedule owner at the start of the run.
 
-That is the owner for a cron or webhook run, and the person who pressed Run now or Test run for a manual run.
+An admin's Run now acts as the admin but the owner decides it. A Test run of a draft has no schedule: its starter
+decides it. A Change owner moves new runs to the new owner; a waiting run stays with the owner it started under.
 
 Contract under test: utils/schedule_runs.py (check_schedule_decision, apply_schedule_decision,
 ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting) on the real models,
@@ -183,11 +184,17 @@ def test_el_7011_r2_4_an_unknown_run_gets_not_waiting(runs, session, sent):
 
 @pytest.fixture
 def an_admin_run(runs, session):
-    """A waiting run of OWNER's schedule that ADMIN started with Run now, so it acts as ADMIN."""
+    """A waiting run of OWNER's schedule that ADMIN started with Run now: it acts as ADMIN, OWNER decides it."""
     schedule, run = _waiting(runs, session)
     run.trigger, run.requested_by = "manual", ADMIN
+    run.events = [_started(OWNER)]
     session.flush()
     return schedule, run
+
+
+def _started(owner_id):
+    return {"at": "2026-11-10T00:00:00+00:00", "kind": "started", "text": "Run started", "level": "info",
+            "owner_id": owner_id}
 
 
 def test_the_actor_of_a_manual_or_test_run_is_the_one_who_pressed_the_button(runs, session, sent):
@@ -216,34 +223,34 @@ def test_an_admin_cannot_decide_a_run_that_acts_as_the_owner(runs, session, sent
 
 
 @pytest.mark.parametrize("action", ["approve", "reject"])
-def test_the_owner_cannot_decide_a_run_that_acts_as_an_admin(runs, session, sent, an_admin_run, action):
+def test_the_admin_who_started_a_run_cannot_decide_it(runs, session, sent, an_admin_run, action):
     _, run = an_admin_run
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
-        runs.check_schedule_decision(1, run.id, OWNER, [action])
+        runs.check_schedule_decision(1, run.id, ADMIN, [action])
 
     session.refresh(run)
     assert run.status == "waiting_for_approval"
 
 
 @pytest.mark.parametrize("action", ["approve", "reject"])
-def test_an_admin_decides_the_run_they_started(runs, session, sent, an_admin_run, action):
+def test_the_owner_decides_a_run_an_admin_started(runs, session, sent, an_admin_run, action):
     _, run = an_admin_run
 
-    _decide(runs, run.id, ADMIN, [action])
+    _decide(runs, run.id, OWNER, [action])
 
     session.refresh(run)
     assert run.status == ("running" if action == "approve" else "failed")
 
 
-def test_the_run_log_names_an_admin_when_the_run_acts_as_an_admin(runs, session, sent, an_admin_run):
+def test_the_run_log_names_the_owner_when_an_admin_started_the_run(runs, session, sent, an_admin_run):
     _, run = an_admin_run
 
-    _decide(runs, run.id, ADMIN, ["approve"])
+    _decide(runs, run.id, OWNER, ["approve"])
 
     session.refresh(run)
     decision = next(event for event in run.events if event["kind"] == "decision")
-    assert (decision["text"], decision["by"]) == ("Approved by an admin", ADMIN)
+    assert (decision["text"], decision["by"]) == ("Approved by the schedule owner", OWNER)
 
 
 def test_the_run_log_names_the_owner_when_the_run_acts_as_the_owner(runs, session, sent):
@@ -256,10 +263,24 @@ def test_the_run_log_names_the_owner_when_the_run_acts_as_the_owner(runs, sessio
     assert (decision["text"], decision["by"]) == ("Rejected by the schedule owner", OWNER)
 
 
-def test_after_a_change_of_owner_the_new_owner_decides_a_waiting_cron_run(runs, session, sent):
+@pytest.mark.parametrize("trigger, requested_by", [("cron", None), ("webhook", None), ("manual", ADMIN)])
+def test_after_a_change_of_owner_the_old_owner_keeps_the_waiting_run(runs, session, sent, trigger, requested_by):
+    new_owner = 99
+    schedule, run = _waiting(runs, session)
+    run.trigger, run.requested_by, run.events = trigger, requested_by, [_started(OWNER)]
+    schedule.created_by = new_owner
+    session.flush()
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, new_owner, ["approve"])
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"]) == "approve"
+
+
+def test_a_run_that_started_after_a_change_of_owner_belongs_to_the_new_owner(runs, session, sent):
     new_owner = 99
     schedule, run = _waiting(runs, session)
     schedule.created_by = new_owner
+    run.events = [_started(new_owner)]
     session.flush()
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
@@ -267,9 +288,58 @@ def test_after_a_change_of_owner_the_new_owner_decides_a_waiting_cron_run(runs, 
     assert runs.check_schedule_decision(1, run.id, new_owner, ["approve"]) == "approve"
 
 
-@pytest.mark.parametrize("answer, decision", [("authorize", "approve"), ("skip", "reject")])
-def test_only_the_actor_answers_a_sign_in(runs, session, sent, answer, decision):
+@pytest.mark.parametrize("events", [None, [], [{"kind": "started"}], [{"kind": "started", "owner_id": "12"}],
+                                    [{"kind": "started", "owner_id": True}], ["started"]])
+def test_a_run_without_a_stored_owner_falls_back_to_the_live_owner(runs, session, sent, events):
+    schedule, run = _waiting(runs, session)
+    run.events = events
+    schedule.created_by = 99
+    session.flush()
+
+    assert runs.run_decider_id(session, run) == 99
+
+
+def test_a_run_without_a_schedule_is_decided_by_its_starter(runs, session, sent):
     _, run = _waiting(runs, session)
+    run.schedule_id, run.trigger, run.requested_by = None, "test", ADMIN
+    session.flush()
+
+    assert runs.run_decider_id(session, run) == ADMIN
+
+
+def test_the_sample_run_of_a_webhook_is_decided_by_the_schedule_owner(runs, session, sent):
+    _, run = _waiting(runs, session)
+    run.trigger, run.requested_by, run.events = "test", ADMIN, [_started(OWNER)]
+    session.flush()
+
+    assert runs.run_decider_id(session, run) == OWNER
+    assert runs.run_actor_id(session, run) == ADMIN
+
+
+def test_the_actor_id_of_a_run_is_read_by_run_id(runs, session, sent, an_admin_run, monkeypatch):
+    _, run = an_admin_run
+    monkeypatch.setattr(runs.db, "get_session", lambda project_id: _same(session), raising=False)
+
+    assert runs.schedule_run_actor_id(1, run.id) == ADMIN
+    assert runs.schedule_run_actor_id(1, run.id + 100) is None
+
+
+class _same:
+    """A context manager that hands the test session out and keeps it open."""
+
+    def __init__(self, session):
+        self.session = session
+
+    def __enter__(self):
+        return self.session
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("answer, decision", [("authorize", "approve"), ("skip", "reject")])
+def test_only_the_decider_answers_a_sign_in(runs, session, sent, an_admin_run, answer, decision):
+    _, run = an_admin_run
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
         runs.check_schedule_decision(1, run.id, ADMIN, [answer], sign_in=True)
@@ -290,14 +360,15 @@ SENSITIVE = {"hitl_interrupt": {"type": "hitl", "guardrail_type": "sensitive_too
 
 
 @pytest.mark.parametrize("trigger, requested_by, recipient", [
-    ("manual", ADMIN, ADMIN),   # Run now by an admin acts as the admin, who answers the card
+    ("manual", ADMIN, OWNER),   # Run now by an admin acts as the admin, but the owner answers the card
     ("cron", None, OWNER),
     ("manual", OWNER, OWNER),
 ])
-def test_the_approval_notice_goes_to_the_user_the_run_acts_as(runs, session, sent, trigger, requested_by, recipient):
+def test_the_approval_notice_goes_to_the_decider_of_the_run(runs, session, sent, trigger, requested_by, recipient):
     schedule = _schedule(runs, session, created_by=OWNER)
     run = _run(runs, session, schedule)
     run.trigger, run.requested_by, run.conversation_id = trigger, requested_by, 55
+    run.events = [_started(OWNER)]
     session.flush()
 
     runs.pause_schedule_run(1, run.id, SENSITIVE)

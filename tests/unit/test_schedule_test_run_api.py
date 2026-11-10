@@ -379,6 +379,9 @@ def reads(monkeypatch):
     module.tool_call_events = lambda session, conversation_id, with_output=True: []
     module.usage_summary = lambda session, project_id, run: (10, 0.5)
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    runs = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')  # a draft Test run is decided by its starter
+    runs.run_decider_id = lambda session, run: run.requested_by
+    monkeypatch.setitem(sys.modules, runs.__name__, runs)
 
 
 def read_runs(harness, application_id=1, **query):
@@ -475,6 +478,7 @@ def test_the_test_run_detail_has_the_body_of_the_run_detail_and_the_rule_of_the_
     assert (body['id'], body['trigger'], body['version_label']) == (run_id, 'test', 'v3')
     assert body['summary']['tokens'] == 10 and body['summary']['cost_usd'] == 0.5
     assert body['approval_rule'] == 'pause_and_ask'
+    assert body['decider_id'] == OWNER_ID
     assert {'events', 'status', 'conversation_id'} <= set(body)
 
 

@@ -115,11 +115,12 @@ RUN_DETAIL_EXAMPLE = {
     "id": 78, "trigger": "test", "status": "success", "reason": None, "conversation_id": 902, "requested_by": 20,
     "started_at": "2026-10-21T09:00:00+00:00", "finished_at": "2026-10-21T09:00:38+00:00", "version_id": 420,
     "duration_ms": 38000, "version_label": "v3", "principal_label": "Ann Smith (schedule owner)",
-    "risk_outcome": "needs_approval", "approval_rule": "pause_and_ask", "approval_expires_at": None,
+    "risk_outcome": "needs_approval", "decider_id": 20, "approval_rule": "pause_and_ask", "approval_expires_at": None,
     "summary": {"duration_ms": 38000, "tokens": 2140, "cost_usd": 0.03},
     "events": [
         {"at": "2026-10-21T09:00:00.120000+00:00", "kind": "started", "level": "info",
-         "text": "Test run started · trigger: test · version v3", "trigger": "test", "version_id": 420},
+         "text": "Test run started · trigger: test · version v3", "trigger": "test", "version_id": 420,
+         "owner_id": 20},
         {"at": "2026-10-21T09:00:00.410000+00:00", "kind": "account", "level": "info",
          "text": "Account: Ann Smith (schedule owner)"},
         {"at": "2026-10-21T09:00:00.900000+00:00", "kind": "risk_check", "level": "warning",
@@ -399,7 +400,8 @@ OPERATIONS = {
         "description": _text(
             "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time. "
             "A webhook runs only as `test` with a sample `payload` (at most 512 KB, not stored), through the "
-            "delivery path. The run acts as the caller.",
+            "delivery path. The run acts as the caller. An admin's run always pauses before a sensitive action, and "
+            "the owner of the schedule approves or rejects that pause.",
             "the owner or a holder of `schedules.admin`, with `schedules.run`",
             "400 an invalid trigger or payload; 403 no permission; 404 not found, or a schedule outside the caller's scope; "
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
@@ -502,16 +504,18 @@ OPERATIONS = {
         "name": "Decide a waiting run",
         "summary": "Decide a waiting run",
         "description": _text(
-            "Answer a run that waits for the user it acts as to add credentials. `approve` starts the run again and checks the "
-            "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",
-            "the user this run acts as, with `schedules.run`: the person who pressed Run now, else the owner. "
-            "An admin who is not that user cannot decide",
-            "400 an invalid action; 403 no permission, or not the user the run acts as; 404 not found, or a schedule outside the caller's scope; "
+            "Answer a run that waits for a person to add credentials. `approve` starts the run again and checks the "
+            "credentials once more, as the user the run acts as; `reject` ends it as failed. A run with a chat is "
+            "decided in that chat. The owner of the schedule at the start of the run decides, also when an admin "
+            "started the run with Run now, and also after a Change owner. An admin who is not that owner cannot "
+            "decide.",
+            "the owner of the schedule at the start of the run, with `schedules.run`",
+            "400 an invalid action; 403 no permission, or not the owner of the run; 404 not found, or a schedule outside the caller's scope; "
             "409 the run is not waiting, or has a chat; 500 the run could not start"),
         "parameters": RUN_PARAMS,
         "request_body": ScheduleRunDecision,
         "responses": _responses(200, "The decision was written", {"run_id": 77, "status": "running"}, {
-            400: None, 403: "No permission, or not the user the run acts as", 404: None,
+            400: None, 403: "No permission, or not the owner of the run", 404: None,
             409: "The run is not waiting, or has a chat", 500: "The run could not start"}),
     },
     ("get", RUN): {
@@ -525,6 +529,8 @@ OPERATIONS = {
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
             "A manual or test run started by another user shows only toolkit, tool and duration. "
+            "`decider_id` is the user who approves, rejects or signs in for a waiting run: the owner of the "
+            "schedule at the start of the run (for a Test Run of an unsaved form, its starter). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
             "while the status is `running` or `waiting_for_approval`.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),

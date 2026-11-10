@@ -322,13 +322,17 @@ firings need it. **Run now** and **Test run** act as the person who presses the 
 404, because the schedule is not in their view. The run is admitted and runs as the person who pressed the button, so
 an admin is checked as the admin and uses the admin's rights and credentials, never the owner's. The Run action in the
 schedule list follows the same permission. An admin's Run now also tells the owner when it starts. The run's own
-notices and its chat event go to the person it acts as.
+notices and its chat event go to the person it acts as; the notice that it waits for approval goes to the
+owner, who answers it.
 
-**Who answers a waiting run.** Only the person the run acts as can approve or reject it, or answer its sign-in
-request. That is the owner for a cron or webhook run, and the person who pressed the button for Run now and Test
-run. Anyone else gets 403 `not_owner`, an admin included: nobody acts with another person's credentials. The
-run log names the admin when an admin's run was answered. An admin can pause or resume the schedule, change its owner
-or start a new run as themselves. After a change of owner, a waiting cron run is answered by the new owner.
+**Who answers a waiting run.** Only the owner of the schedule can approve or reject a run that belongs to a schedule
+or a webhook, or answer its sign-in request. This is also true when an admin started the run with Run now: the run
+still uses the admin's credentials, and an admin's run always pauses before a sensitive action, so the owner
+approves it. The owner is the one the schedule had when the run started. After a Change owner, a waiting run stays
+with the old owner and the new owner gets 403 `not_owner`; new runs belong to the new owner. A Test run of a form that
+is not saved has no schedule, so the person who started it answers it. Anyone else gets 403 `not_owner`, an admin
+included (404 for a member who cannot see the schedule). The run detail has `decider_id`, the user who may answer.
+An admin can pause or resume the schedule, change its owner or start a new run as themselves.
 
 **Notice at save time.** When governance is on (audit only or enforce) and the version is bound but the owner has no
 mandate a run could use, the schedule is saved and the save shows:
