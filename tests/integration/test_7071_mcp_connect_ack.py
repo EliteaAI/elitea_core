@@ -390,3 +390,15 @@ def test_a_call_timeout_set_per_server_is_kept_and_the_payload_value_fills_the_r
 
     assert platform.servers_storage.get_server(PROJECT_ID, 'github').timeout_tools_call == 65
     assert platform.servers_storage.get_server(PROJECT_ID, 'jira').timeout_tools_call == data['timeout_tools_call']
+
+
+def test_a_server_the_client_added_between_snapshots_is_still_its_own_after_a_reconnect(mcp, platform, users):
+    _connect(mcp, platform, _snapshot('jira'))
+    _connect(mcp, platform, _payload('github'))
+
+    ack = _connect(mcp, platform, _snapshot('jira', 'github', generation=2), sid=OTHER_SID)
+    platform.servers_storage.remove_servers(SID)
+
+    assert (ack['registered'], ack['declined']) == (['jira', 'github'], [])
+    assert {name: server.sio_sid for name, server in platform.servers_storage.get_servers_dict(PROJECT_ID).items()} == {
+        'jira': OTHER_SID, 'github': OTHER_SID}

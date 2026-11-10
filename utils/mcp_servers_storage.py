@@ -78,8 +78,8 @@ class ServersStorage:
             state = self.clients.get(key)
             if state is not None and (epoch, generation) <= (state.epoch, state.generation):
                 return SnapshotResult(stale=True)
-            owned = state.names if state else set()
             project_servers = self.project_id_to_server_name_to_server.setdefault(project_id, {})
+            owned = self._find_owned_names(state, project_servers)
             result = SnapshotResult()
             for server in servers:
                 existing = project_servers.get(server.name)
@@ -103,6 +103,13 @@ class ServersStorage:
             if result.added or result.updated or result.removed:
                 schema_registry_version.bump()
             return result
+
+    @staticmethod
+    def _find_owned_names(state, project_servers):
+        """The client's names, including those it added without a snapshot while its socket did not get the answers."""
+        if state is None:
+            return set()
+        return state.names | {name for name, server in project_servers.items() if server.sio_sid == state.sid}
 
     def _replace_failed(self, project_id, state, failed, project_servers):
         failed_store = self.failed_servers.setdefault(project_id, {})
