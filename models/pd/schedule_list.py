@@ -82,7 +82,9 @@ class ScheduleListItem(BaseModel):
         None, description='Webhooks: the previous secret is accepted until this time')
     last_delivery_at: datetime | None = Field(None, description='Webhooks: time of the last authentic delivery')
     last_delivery_outcome: str | None = Field(
-        None, description='Webhooks: accepted, duplicate, ping, disabled, refused or start_failed')
+        None, description='Webhooks: accepted, duplicate, ping, disabled, refused, capped or start_failed')
+    running_runs: int | None = Field(None, description='Webhooks: runs running now (deliveries and samples)')
+    run_cap: int | None = Field(None, description='Webhooks: the running-run cap of this webhook')
     enabled: bool = Field(description='True: active, false: paused')
     disabled_reason: str | None = Field(None, description='Why the system paused the schedule')
     next_run: datetime | None = Field(None, description='Time of the next run; null when paused or expired')

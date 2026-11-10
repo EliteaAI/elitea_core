@@ -1,17 +1,18 @@
 """The public webhook door: cheap checks in order, then the hand-over to the run starter (#7453)."""
 import time
 from datetime import UTC, datetime
+from typing import NamedTuple
 from uuid import UUID
 
 from pylon.core.tools import log
 from sqlalchemy import select, update
 from tools import VaultClient
 
-from ..models.entity_schedule import EntitySchedule
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from .pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG, get_webhook_signature_header, normalize_secret_value, validate_webhook_secret,
 )
-from .schedule_claim import insert_run
+from .schedule_claim import finished_event, insert_run, lock_project_runs, running_webhook_runs
 from .webhook_secrets import current_key, is_signing_row, prev_key
 
 MAX_BODY_BYTES = 512 * 1024
@@ -20,6 +21,15 @@ RETRY_AFTER_SECONDS = 30
 DELIVERY_ID_HEADERS = ('X-GitHub-Delivery', 'X-Gitlab-Event-UUID', 'webhook-id')
 REJECT_LOG_INTERVAL = 60  # seconds between two "rejected" log lines of one process
 _last_reject_log = 0.0
+WEBHOOK_CAP = 'webhook_cap_reached'
+PROJECT_CAP = 'project_cap_reached'
+CAP_REASON = 'too many runs at once'
+
+
+class Capped(NamedTuple):
+    code: str  # WEBHOOK_CAP or PROJECT_CAP
+    running: int
+    cap: int
 
 
 class BodyTooLarge(Exception):
@@ -115,9 +125,51 @@ def release_delivery(redis, row_uuid, delivery: str | None) -> None:
         log.warning('Webhook %s delivery %s: cannot release the dedup claim', row_uuid, delivery)
 
 
-def admit_webhook_run(session, row_id: int, trigger: str = 'webhook') -> int | None:
-    """Insert the webhook run row (`test` for the owner's sample body); the caps of #7400 go here."""
+def check_caps(running: dict[int, int], row_id: int, row_cap: int, project_cap: int) -> Capped | None:
+    """The cap a new run of `row_id` would pass, or None; pure, so the rule is unit tested."""
+    mine, total = running.get(row_id, 0), sum(running.values())
+    if mine >= row_cap:
+        return Capped(WEBHOOK_CAP, mine, row_cap)
+    if total >= project_cap:
+        return Capped(PROJECT_CAP, total, project_cap)
+    return None
+
+
+def admit_webhook_run(session, project_id: int, row_id: int, trigger: str = 'webhook') -> int | Capped | None:
+    """Count and insert under the project lock: a run id, `Capped` over a cap, None when the active-run index refuses."""
+    from .schedule_settings import project_webhook_cap  # late: the door tests load without the settings RPC
+    from .schedule_timing import webhook_limits
+    limits = webhook_limits()
+    row_cap = project_webhook_cap(project_id, limits)  # an RPC: read before the lock is taken
+    lock_project_runs(session, project_id)
+    capped = check_caps(running_webhook_runs(session), row_id, row_cap, limits.per_project)
+    if capped is not None:
+        return capped
     return insert_run(session, row_id, trigger)
+
+
+def _skipped_event(count: int) -> dict:
+    reason = CAP_REASON if count == 1 else f'{count} deliveries in this minute, {CAP_REASON}'
+    return {**finished_event('skipped', reason), 'count': count}
+
+
+def record_capped(session, row_id: int, now: datetime) -> int:
+    """At most one `skipped` run per webhook and minute; a later refusal in the minute bumps its counter. Call under the lock."""
+    run = session.scalar(
+        select(EntityScheduleRun)
+        .where(EntityScheduleRun.schedule_id == row_id, EntityScheduleRun.trigger == 'webhook',
+               EntityScheduleRun.status == 'skipped',
+               EntityScheduleRun.started_at >= now.replace(second=0, microsecond=0))
+        .order_by(EntityScheduleRun.id.desc()).limit(1).with_for_update())
+    if run is None:
+        session.add(EntityScheduleRun(schedule_id=row_id, trigger='webhook', status='skipped', reason=CAP_REASON,
+                                      started_at=now, finished_at=now, events=[_skipped_event(1)]))
+        session.flush()
+        return 1
+    events = list(run.events or [])
+    count = int((events[-1] if events else {}).get('count') or 1) + 1
+    run.events = [*events[:-1], _skipped_event(count)]  # a new list: JSONB tracks assignment, not in-place edits
+    return count
 
 
 def record_delivery(session, row_id: int, outcome: str, now: datetime) -> None:
