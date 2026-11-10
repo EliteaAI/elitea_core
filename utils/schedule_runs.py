@@ -216,15 +216,27 @@ def run_owner_id(session, run) -> int | None:
     return session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
 
 
-def run_actor_id(session, run) -> int | None:
-    """The user a run acts as: the person who pressed Run now or Test run, else the owner of the schedule.
+def _owner_at_start(session, run) -> int | None:
+    """The schedule owner when the run started: `owner_id` of the start line of the run log, else the live owner.
 
-    An admin who runs another user's schedule now acts as the admin, never as the owner. The actor is who the
-    run uses credentials of; `run_decider_id` is who answers its pause.
+    A run with no such line (made before it was written, or when the log write failed) falls back to the live owner.
+    """
+    started = next((event for event in run.events or []
+                    if isinstance(event, dict) and event.get('kind') == 'started'), None)
+    owner_id = (started or {}).get('owner_id')
+    return owner_id if isinstance(owner_id, int) and not isinstance(owner_id, bool) else run_owner_id(session, run)
+
+
+def run_actor_id(session, run) -> int | None:
+    """The user a run acts as: the person who pressed Run now or Test run, else the owner it had at its start.
+
+    An admin who runs another user's schedule now acts as the admin, never as the owner. After a Change owner a
+    waiting cron or webhook run keeps acting as the owner it started under; new runs act as the new owner.
+    The actor is who the run uses credentials of; `run_decider_id` is who answers its pause.
     """
     if run.trigger in ('manual', 'test') and run.requested_by is not None:
         return run.requested_by
-    return run_owner_id(session, run)
+    return _owner_at_start(session, run)
 
 
 def run_decider_id(session, run) -> int | None:
@@ -237,10 +249,7 @@ def run_decider_id(session, run) -> int | None:
     """
     if run.schedule_id is None:
         return run.requested_by
-    started = next((event for event in run.events or []
-                    if isinstance(event, dict) and event.get('kind') == 'started'), None)
-    owner_id = (started or {}).get('owner_id')
-    return owner_id if isinstance(owner_id, int) and not isinstance(owner_id, bool) else run_owner_id(session, run)
+    return _owner_at_start(session, run)
 
 
 def schedule_run_actor_id(project_id: int, run_id: int) -> int | None:

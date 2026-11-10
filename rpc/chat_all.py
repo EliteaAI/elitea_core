@@ -197,6 +197,54 @@ def _resume_user_id(project_id, pending, caller_id) -> int:
     return schedule_run_actor_id(project_id, pending[0]) or caller_id
 
 
+# When the schedule owner decides a run another user started, only a plain answer passes (see `_bare_decision_refusal`)
+_BARE_HITL_ACTIONS = ('approve', 'reject')
+_BARE_SIGN_IN_ACTIONS = ('authorize', 'skip')
+# What a decision item may carry: the action and the identity of the card it answers; `value` only when empty
+_BARE_ITEM_KEYS = frozenset({
+    'action', 'value', 'interrupt_id', 'decision_id', 'tool_call_id', 'thread_id', 'child_thread_id',
+    'root_thread_id', 'authorization_request_id',
+})
+_BARE_REFUSAL = {
+    "error": "This run acts as another user: only a plain approve or reject (authorize or skip for a sign-in) is accepted",
+    "field": "hitl_action", "status": 400,
+}
+
+
+def _bare_decision_refusal(parsed) -> dict | None:
+    """The 400 dict unless the answer is a plain approve or reject (authorize or skip for a sign-in), else None.
+
+    The schedule owner may decide a run an admin started, but the run resumes as the admin: an edit, a typed answer,
+    a note, a filled item value or a typed message would be run with the admin's rights, so none of them passes.
+    """
+    def plain(action, allowed) -> bool:  # an action of another type is no action, never a TypeError
+        return action is None or (isinstance(action, str) and action in allowed)
+
+    def plain_items(items, allowed) -> bool:
+        return all(
+            isinstance(item, dict) and set(item) <= _BARE_ITEM_KEYS and item.get('value') in (None, '')
+            and isinstance(item.get('action'), str) and item['action'] in allowed
+            for item in items or []
+        )
+
+    if not (
+        plain(parsed.hitl_action, _BARE_HITL_ACTIONS) and plain(parsed.mcp_auth_action, _BARE_SIGN_IN_ACTIONS)
+        and plain_items(parsed.hitl_decisions, _BARE_HITL_ACTIONS)
+        and plain_items(parsed.mcp_auth_decisions, _BARE_SIGN_IN_ACTIONS)
+        and parsed.hitl_value in (None, '') and not parsed.user_input
+    ):
+        return _BARE_REFUSAL
+    return None
+
+
+def _drop_caller_inputs(parsed) -> None:
+    """Clear what the deciding user sent along: their tokens and server choices belong to them, not to the run."""
+    parsed.mcp_tokens = {}
+    parsed.ignored_mcp_servers = []
+    parsed.user_declined_mcp_servers = None
+    parsed.user_input = None
+
+
 def _apply_schedule_decision(project_id, pending) -> dict | None:
     """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
     if pending is None or pending[1] is None:
@@ -2166,6 +2214,11 @@ class RPC:
                 return self._refuse_schedule_decision(sid, parsed, denied)
         # The owner decides, but the run resumes as the user it started as; the run log keeps who decided
         resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])
+        if resume_user_id != current_user['id']:
+            denied = _bare_decision_refusal(parsed)
+            if denied:
+                return self._refuse_schedule_decision(sid, parsed, denied)
+            _drop_caller_inputs(parsed)
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything

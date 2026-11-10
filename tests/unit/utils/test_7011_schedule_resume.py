@@ -263,6 +263,41 @@ def test_the_run_log_names_the_owner_when_the_run_acts_as_the_owner(runs, sessio
     assert (decision["text"], decision["by"]) == ("Rejected by the schedule owner", OWNER)
 
 
+@pytest.mark.parametrize("trigger", ["cron", "webhook"])
+def test_after_a_change_of_owner_a_waiting_run_keeps_acting_as_the_owner_it_started_under(runs, session, sent, trigger):
+    new_owner = 99
+    schedule, run = _waiting(runs, session)
+    run.trigger, run.events = trigger, [_started(OWNER)]
+    schedule.created_by = new_owner
+    session.flush()
+
+    assert runs.run_actor_id(session, run) == OWNER
+
+
+def test_a_run_that_started_after_a_change_of_owner_acts_as_the_new_owner(runs, session, sent):
+    new_owner = 99
+    schedule, run = _waiting(runs, session)
+    schedule.created_by = new_owner
+    run.events = [_started(new_owner)]
+    session.flush()
+
+    assert runs.run_actor_id(session, run) == new_owner
+
+
+def test_a_run_without_a_stored_owner_acts_as_the_live_owner(runs, session, sent):
+    schedule, run = _waiting(runs, session)
+    schedule.created_by = 99
+    session.flush()
+
+    assert runs.run_actor_id(session, run) == 99
+
+
+def test_an_admin_started_run_acts_as_the_admin_whatever_the_stored_owner(runs, session, sent, an_admin_run):
+    _, run = an_admin_run
+
+    assert runs.run_actor_id(session, run) == ADMIN
+
+
 @pytest.mark.parametrize("trigger, requested_by", [("cron", None), ("webhook", None), ("manual", ADMIN)])
 def test_after_a_change_of_owner_the_old_owner_keeps_the_waiting_run(runs, session, sent, trigger, requested_by):
     new_owner = 99

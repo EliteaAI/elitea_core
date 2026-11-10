@@ -89,11 +89,28 @@ def _helpers(meta, error=None, decision='approve', apply_error=None, actor=ACTOR
     return helpers + (namespace['_resume_user_id'],) if resume else helpers
 
 
+BARE_NAMES = {'_BARE_HITL_ACTIONS', '_BARE_SIGN_IN_ACTIONS', '_BARE_ITEM_KEYS', '_BARE_REFUSAL',
+              '_bare_decision_refusal', '_drop_caller_inputs'}
+
+
+def _bare():
+    """The plain-answer guard cut out of rpc/chat_all.py: (the refusal check, the clearing of the caller's inputs)."""
+    nodes = [
+        node for node in ast.parse(CHAT_ALL).body
+        if getattr(node, 'name', None) in BARE_NAMES
+        or any(getattr(target, 'id', None) in BARE_NAMES for target in getattr(node, 'targets', []))
+    ]
+    namespace = load_cut(nodes, {}, 'chat_all.py')
+    return namespace['_bare_decision_refusal'], namespace['_drop_caller_inputs']
+
+
 def _parsed(**values):
     return types.SimpleNamespace(**{
         'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'hitl_resume': True,
         'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None,
-        'mcp_auth_resume': False, 'mcp_auth_action': None, **values,
+        'mcp_auth_resume': False, 'mcp_auth_action': None, 'hitl_value': None, 'user_input': None,
+        'mcp_auth_decisions': None, 'mcp_tokens': {}, 'ignored_mcp_servers': [], 'user_declined_mcp_servers': None,
+        **values,
     })
 
 
@@ -350,3 +367,75 @@ def test_a_sign_in_answer_in_a_chat_without_a_schedule_run_is_left_alone():
 
     assert check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='skip'), OWNER) == (None, None)
     assert calls == []
+
+
+def test_a_plain_approve_or_reject_passes_when_the_run_acts_as_another_user():
+    refuse, _ = _bare()
+
+    assert refuse(_parsed(hitl_action='approve')) is None
+    assert refuse(_parsed(hitl_action='reject', hitl_value='')) is None
+    assert refuse(_parsed(hitl_action=None, hitl_decisions=[
+        {'tool_call_id': 't1', 'interrupt_id': 'i1', 'action': 'approve', 'value': ''}, {'action': 'reject'}])) is None
+
+
+@pytest.mark.parametrize('values', [
+    {'hitl_action': 'edit'},
+    {'hitl_action': 'answer'},
+    {'hitl_action': 'block_with_comment'},
+    {'hitl_action': 'approve', 'hitl_value': 'delete everything'},
+    {'hitl_action': 'approve', 'hitl_value': {'answer': 'yes'}},
+    {'hitl_action': 'approve', 'user_input': 'run this instead'},
+    {'hitl_action': 'approve', 'hitl_decisions': [{'action': 'edit', 'value': 'x'}]},
+    {'hitl_action': 'approve', 'hitl_decisions': [{'action': 'approve', 'value': 'x'}]},
+    {'hitl_action': 'approve', 'hitl_decisions': [{'action': 'approve', 'edited_action': {'args': {}}}]},
+    {'hitl_action': 'approve', 'hitl_decisions': [{'action': 'approve', 'text': 'x'}]},
+    {'hitl_action': 'approve', 'hitl_decisions': [{'action': ['approve']}]},
+    {'hitl_action': 'approve', 'hitl_decisions': [{'action': 5}]},
+    {'hitl_action': 'approve', 'hitl_decisions': [{}]},
+    {'hitl_action': 'approve', 'hitl_decisions': ['approve']},
+    {'hitl_action': ['approve']},
+    {'hitl_action': 'approve', 'mcp_auth_decisions': [{'action': 'authorize', 'token': 't'}]},
+    {'hitl_action': 'approve', 'mcp_auth_action': 'approve'},
+])
+def test_an_edit_or_a_typed_answer_is_refused_when_the_run_acts_as_another_user(values):
+    refuse, _ = _bare()
+
+    denied = refuse(_parsed(**values))
+
+    assert denied['status'] == 400 and denied['field'] == 'hitl_action'
+
+
+@pytest.mark.parametrize('values, refused', [
+    ({'hitl_resume': False, 'mcp_auth_resume': True, 'mcp_auth_action': 'authorize', 'hitl_action': None}, False),
+    ({'hitl_resume': False, 'mcp_auth_resume': True, 'mcp_auth_action': 'skip', 'hitl_action': None}, False),
+    ({'hitl_resume': False, 'mcp_auth_resume': True, 'mcp_auth_action': 'approve', 'hitl_action': None}, True),
+    ({'hitl_resume': False, 'mcp_auth_resume': True, 'hitl_action': None,
+      'mcp_auth_decisions': [{'action': 'authorize', 'authorization_request_id': 'a1'}]}, False),
+    ({'hitl_resume': False, 'mcp_auth_resume': True, 'hitl_action': None,
+      'mcp_auth_decisions': [{'action': 'authorize', 'access_token': 'secret'}]}, True),
+])
+def test_a_sign_in_answer_is_plain_only_when_the_run_acts_as_another_user(values, refused):
+    refuse, _ = _bare()
+
+    assert (refuse(_parsed(**values)) is not None) is refused
+
+
+def test_the_inputs_of_the_deciding_user_are_dropped_before_the_resume():
+    _, drop = _bare()
+    parsed = _parsed(mcp_tokens={'https://mcp': 'owner-token'}, ignored_mcp_servers=['https://x'],
+                     user_declined_mcp_servers=[{'url': 'https://y'}], user_input='hello')
+
+    drop(parsed)
+
+    assert (parsed.mcp_tokens, parsed.ignored_mcp_servers, parsed.user_declined_mcp_servers, parsed.user_input) == (
+        {}, [], None, None)
+
+
+def test_the_plain_answer_guard_runs_before_the_child_resume_and_every_write():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    guard = body.index('_bare_decision_refusal(parsed)')
+
+    assert body.index('resume_user_id = _resume_user_id(') < guard
+    assert 'if resume_user_id != current_user[\'id\']:' in body[:guard]
+    assert body.index('_drop_caller_inputs(parsed)') < body.index('self.is_chat_run_stopped(parsed.message_id)')
+    assert guard < body.index('self._continue_child_resume(') < body.index('_apply_schedule_decision(parsed.project_id')

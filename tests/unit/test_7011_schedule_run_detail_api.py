@@ -177,9 +177,36 @@ def test_the_detail_names_the_decider_of_the_run_not_the_viewer(harness, reads):
     assert (status, body['decider_id']) == (200, OTHER_ID)
 
 
+def test_after_a_change_of_owner_the_old_owner_reads_the_run_they_decide(harness, reads):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    run_id = seed_run(harness, schedule_id)
+    reads.decider = OWNER_ID
+
+    body, status = call_run(harness, 'get', schedule_id, run_id)
+
+    assert (status, body['decider_id']) == (200, OWNER_ID)
+
+
+def test_after_a_change_of_owner_another_member_gets_404_for_the_run(harness, reads):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    run_id = seed_run(harness, schedule_id)
+    reads.decider = OTHER_ID
+
+    assert call_run(harness, 'get', schedule_id, run_id) == (NOT_FOUND, 404)
+
+
+def test_the_old_owner_gets_404_for_a_run_id_of_another_schedule(harness, reads):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    other_run_id = seed_run(harness, harness.seed(created_by=OTHER_ID))
+    reads.decider = OWNER_ID
+
+    assert call_run(harness, 'get', schedule_id, other_run_id) == (NOT_FOUND, 404)
+
+
 def test_cr_el7011_a_regular_user_gets_404_for_the_run_of_another_owner(harness, reads):
     schedule_id = harness.seed(created_by=OTHER_ID)
     run_id = seed_run(harness, schedule_id)
+    reads.decider = OTHER_ID  # the viewer decides no run of it
 
     assert call_run(harness, 'get', schedule_id, run_id) == (NOT_FOUND, 404)
 

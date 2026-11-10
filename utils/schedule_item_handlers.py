@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from tools import auth, db
 
-from ..models.entity_schedule import ACTIVE_STATUSES, EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, EntitySchedule, EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
     ScheduleCreate,
@@ -41,6 +41,7 @@ from .schedule_rights import may_run
 from .schedule_service import (
     INVALID_INPUT,
     ScheduleError,
+    ScheduleNotFound,
     audit_schedule_event,
     check_entity,
     check_schedule_body,
@@ -232,6 +233,24 @@ def _run_filters(query: RunFilters) -> list:
     if query.version_id:
         where.append(EntityScheduleRun.version_id == query.version_id)
     return where
+
+
+def _load_schedule_for_run(session, schedule_id: int, run_id: int, scope):
+    """The schedule row for a run route: in the caller's scope, or the row of a run the caller decides.
+
+    After a Change owner the old owner no longer owns the schedule but still decides the runs that started under
+    them (`run_decider_id`), so the run routes let that user through. Anyone else gets the same not-found.
+    """
+    try:
+        return load_schedule_in_scope(session, schedule_id, scope)
+    except ScheduleNotFound:
+        # Late: the run writers load the run models, which the handler tests fake
+        from .schedule_runs import run_decider_id
+        run = session.get(EntityScheduleRun, run_id) if run_id <= MAX_DB_ID else None
+        row = session.get(EntitySchedule, schedule_id) if schedule_id <= MAX_DB_ID else None
+        if run is None or row is None or run.schedule_id != schedule_id or run_decider_id(session, run) != scope.user_id:
+            raise
+        return row
 
 
 def _hides_tool_output(run, viewer_id: int) -> bool:
@@ -807,8 +826,9 @@ class ScheduleItemHandlers:
 
         Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
         Otherwise approve starts the run again. A run with a chat is decided in that chat.
-        Who may call: the owner of the schedule when the run started, with `schedules.run`. An admin who is not
-        that owner gets 403, also for a run the admin started with Run now; the run keeps the admin's credentials.
+        Who may call: the owner of the schedule when the run started, with `schedules.run`, also after a Change
+        owner. An admin who is not that owner gets 403, also for a run the admin started with Run now; the run
+        keeps the admin's credentials. The new owner gets 403 for a run that started under the old owner.
         Errors: 400 invalid action; 403 not the owner of the run; 404 not found, or a schedule outside the caller's scope;
         409 the run is not waiting, has a chat, or a credential is still missing.
         """
@@ -818,7 +838,7 @@ class ScheduleItemHandlers:
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                row = load_schedule_in_scope(session, schedule_id, scope)
+                row = _load_schedule_for_run(session, schedule_id, run_id, scope)
             except ScheduleError as e:
                 return e.response
             run = session.get(EntityScheduleRun, run_id)
@@ -932,13 +952,14 @@ class ScheduleItemHandlers:
         `decider_id` is the user who approves, rejects or signs in for a waiting run: the schedule owner at the start
         of the run, also after a Change owner; for a Test Run its starter.
         Tokens and cost are null while the usage store has no row for the conversation.
-        Who may call: the owner with `schedules.details`, or a schedules admin.
+        Who may call: the owner with `schedules.details`, or a schedules admin; also the user who decides the run
+        (`decider_id`), the owner it started under after a Change owner.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
         """
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                schedule = load_schedule_in_scope(session, schedule_id, scope)
+                schedule = _load_schedule_for_run(session, schedule_id, run_id, scope)
             except ScheduleError as e:
                 return e.response
             run = session.scalar(select(EntityScheduleRun).where(
