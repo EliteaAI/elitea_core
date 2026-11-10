@@ -106,6 +106,12 @@ def scan(isolated_sys_modules):
     app_tools.expand_toolkit_settings = expand_toolkit_settings
     sys.modules[app_tools.__name__] = app_tools
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_utils.py', f'{PKG}.utils.pipeline_utils')
+    # the package stubs have an empty __path__, so the two real modules the rule reads are loaded by hand
+    pd_package = types.ModuleType(f'{PKG}.models.pd')
+    pd_package.__path__ = []
+    sys.modules[pd_package.__name__] = pd_package
+    load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'mcp_oauth.py', f'{PKG}.models.pd.mcp_oauth')
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'stored_oauth_tokens.py', f'{PKG}.utils.stored_oauth_tokens')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_risk.py', f'{PKG}.utils.schedule_risk')
     state.review = lambda version_id=VERSION_ID: module.scan_schedule(12, version_id, 42)
     state.run = lambda version_id=VERSION_ID: _flat(state.review(version_id))
@@ -243,6 +249,58 @@ class TestEL7011R2PersonalToken:
     def test_r2_2_warning_text_holds_no_secret(self, scan):
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'oauth_discovery_endpoint': 'https://idp', 'token': 's3cret'})])
         assert 's3cret' not in json.dumps(scan.review())
+
+
+ENTRA = 'https://login.microsoftonline.com/tenant-1/v2.0'
+DATAVERSE = {'tenant_id': 'tenant-1', 'url': 'https://org.crm4.dynamics.com'}
+DELEGATED = {
+    'dataverse': DATAVERSE,
+    'outlook': {'oauth_discovery_endpoint': ENTRA},
+    'teams': {'oauth_discovery_endpoint': ENTRA},
+    'ms_graph': {'oauth_discovery_endpoint': ENTRA},
+    'sharepoint': {'oauth_discovery_endpoint': ENTRA},
+}
+NEW_TYPES = ['dataverse', 'outlook', 'teams', 'ms_graph']
+
+
+def _stored_login_scan(scan, type_, credential, refresh_token='unset'):
+    """A toolkit that points at a credential; the owner expansion answers `credential` plus the token."""
+    scan.version = _version(tools=[_tool(type_, 'Toolkit', settings={f'{type_}_configuration': {'elitea_title': 'c'}})])
+    expanded = dict(credential)
+    if refresh_token != 'unset':
+        expanded['refresh_token'] = refresh_token
+    scan.expanded[type_] = {f'{type_}_configuration': expanded}
+
+
+class TestStoredLoginSignIn:
+    @pytest.mark.parametrize('type_', NEW_TYPES)
+    def test_a_delegated_credential_with_no_refresh_token_needs_a_sign_in(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_])
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('type_', NEW_TYPES)
+    def test_an_empty_refresh_token_needs_a_sign_in(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_], refresh_token='')
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('type_', list(DELEGATED))
+    def test_a_refresh_token_that_is_still_a_secret_reference_needs_a_sign_in(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_], refresh_token='{{secret.abc}}')
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('type_', list(DELEGATED))
+    def test_a_resolved_refresh_token_is_a_saved_login(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_], refresh_token='real-token')
+        assert scan.run() == []
+
+    @pytest.mark.parametrize('type_, credential', [
+        ('outlook', {'client_id': 'x'}), ('teams', {'client_id': 'x'}), ('ms_graph', {'client_id': 'x'}),
+        ('dataverse', {'url': 'https://org.crm4.dynamics.com'}),
+        ('dataverse', {'tenant_id': 'tenant-1', 'url': 'https://example.com'}),
+    ])
+    def test_a_credential_that_cannot_sign_in_from_the_browser_gets_no_finding(self, scan, type_, credential):
+        _stored_login_scan(scan, type_, credential)
+        assert scan.run() == []
 
 
 class TestEL7011R2SensitiveActions:
@@ -396,7 +454,8 @@ class TestEL7011CrPersonalCredential:
     """Owner decision 2026-10-21: a personal credential is "warn and confirm", not silent and not blocked."""
 
     @pytest.mark.parametrize('type_, name, label', [
-        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence')])
+        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence'),
+        ('ms_graph', 'Graph', 'MS Graph')])
     def test_el7011_cr_a_personal_credential_is_a_sensitive_item(self, scan, type_, name, label):
         scan.version = _version(tools=[_personal(type_, name)])
         review = scan.review()
@@ -406,6 +465,12 @@ class TestEL7011CrPersonalCredential:
             'toolkit': name, 'toolkit_type': type_, 'tool': None, 'risk_level': 'needs_approval',
             'badge': 'personal_credential', 'effect': f"Runs with the owner's personal {label} credential.",
         }]
+
+    def test_a_personal_ms_graph_credential_with_a_saved_login_is_named_ms_graph(self, scan):
+        scan.version = _version(tools=[_personal('ms_graph', 'Graph')])
+        scan.expanded['ms_graph'] = {'ms_graph_configuration': {'oauth_discovery_endpoint': ENTRA, 'refresh_token': 'r'}}
+        [item] = scan.review()['sensitive']
+        assert item['code'] == 'personal_credential' and 'MS Graph' in item['message']
 
     def test_el7011_cr_a_shared_credential_adds_nothing(self, scan):
         scan.version = _version(tools=[_personal(private=False)])
@@ -450,6 +515,20 @@ class TestWaitingForTheOwner:
         assert review['blocking'] == []
         assert _codes(review['notices']) == ['personal_signin_required']
         assert review['notices'][0]['fix'] and review['notices'][0]['hint']
+
+    def test_a_dataverse_toolkit_with_no_login_is_a_notice_with_a_fix_and_a_hint_under_pause_and_ask(self, scan):
+        _stored_login_scan(scan, 'dataverse', DATAVERSE)
+        review = self._review(scan, 'pause_and_ask')
+        assert review['blocking'] == []
+        [notice] = review['notices']
+        assert notice['code'] == 'personal_signin_required' and notice['hint'] == scan.module.WAIT_HINT
+        assert notice['fix']
+
+    def test_a_dataverse_toolkit_with_no_login_blocks_under_run_without_asking(self, scan):
+        _stored_login_scan(scan, 'dataverse', DATAVERSE)
+        review = self._review(scan, 'run_without_asking')
+        assert _codes(review['blocking']) == ['personal_signin_required'] and review['notices'] == []
+        assert review['blocking'][0]['fix']
 
     def test_a_missing_credential_is_a_notice_under_pause_and_ask(self, scan):
         scan.version = _version(tools=[_personal('jira', 'Jira')])

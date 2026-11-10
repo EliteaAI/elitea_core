@@ -184,3 +184,56 @@ def test_run_without_asking_never_holds_for_a_form_even_with_the_project_setting
     assert auto_approve is False
     outcome, _ = starter._risk_check(review, schedule.approval_rule, auto_approve)
     assert outcome == "needs_approval"
+
+
+SIGNIN = {"code": "personal_signin_required", "toolkit": "Dataverse", "message": "Toolkit needs a sign-in"}
+
+
+@pytest.fixture
+def logging_starter(starter, monkeypatch):
+    """The starter with a run_event that keeps its text and level (the loader stubs it with an empty dict)."""
+    def run_event(kind: str, text: str, level: str = "info") -> dict:
+        return {"kind": kind, "text": text, "level": level}
+
+    monkeypatch.setattr(starter, "run_event", run_event)
+    return starter
+
+
+class TestSignInPartOfTheRiskLine:
+    def test_a_sign_in_notice_alone_gives_its_own_outcome_and_line(self, logging_starter):
+        review = {**clean_review(), "notices": [SIGNIN]}
+
+        outcome, event = logging_starter._risk_check(review, "pause_and_ask", False)
+
+        assert outcome == "needs_signin"
+        assert event["text"] == "Risk check: needs a personal sign-in (Dataverse)"
+        assert event["level"] == "warning"
+
+    def test_a_sign_in_notice_beside_a_sensitive_tool_ends_the_approval_line(self, logging_starter):
+        review = {**clean_review(), "sensitive": [SENSITIVE], "notices": [SIGNIN]}
+
+        outcome, event = logging_starter._risk_check(review, "pause_and_ask", False)
+
+        assert outcome == "needs_approval"
+        assert event["text"] == "Risk check: needs approval for Outlook · send_email; needs a personal sign-in (Dataverse)"
+
+    def test_a_sign_in_notice_beside_an_incomplete_scan_keeps_the_unknown_outcome(self, logging_starter):
+        review = {**clean_review(), "notices": [{"code": "scan_incomplete", "message": "x"}, SIGNIN]}
+
+        outcome, event = logging_starter._risk_check(review, "pause_and_ask", False)
+
+        assert outcome == "unknown"
+        assert event["text"] == "Risk check: not complete; needs a personal sign-in (Dataverse)"
+
+    def test_the_line_names_each_toolkit_once_in_order(self, logging_starter):
+        other = {**SIGNIN, "toolkit": "Outlook"}
+        review = {**clean_review(), "notices": [SIGNIN, other, SIGNIN]}
+
+        _, event = logging_starter._risk_check(review, "pause_and_ask", False)
+
+        assert event["text"] == "Risk check: needs a personal sign-in (Dataverse, Outlook)"
+
+    def test_a_clean_review_still_says_ok(self, logging_starter):
+        outcome, event = logging_starter._risk_check(clean_review(), "pause_and_ask", False)
+
+        assert (outcome, event["text"]) == ("ok", "Risk check: OK")

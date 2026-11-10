@@ -202,13 +202,22 @@ def _confirmed_pairs(review: dict):
     return list(dict.fromkeys(pairs)) or False
 
 
+def _signin_part(review: dict) -> str:
+    """The run log part for the toolkits whose login the owner must give; empty when there is none."""
+    names = dict.fromkeys(item.get('toolkit') or item.get('toolkit_type') or 'toolkit'
+                          for item in review['notices'] if item.get('code') == 'personal_signin_required')
+    return f"needs a personal sign-in ({', '.join(names)})" if names else ''
+
+
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
     """The risk outcome of the run for the run log and its `risk_check` event (owner CR 2026-10-21).
 
     `blocked` (a blocking finding), `needs_approval` (listed sensitive tools, or "Run without asking" turned
-    back to "Pause and ask me"), `unknown` (a tool could not be checked) or `ok`.
+    back to "Pause and ask me"), `unknown` (a tool could not be checked), `needs_signin` (a toolkit needs the
+    owner's login) or `ok`. A sign-in notice adds its part to the line of `needs_approval` and `unknown`.
     """
     from .schedule_risk import scan_complete
+    signin = _signin_part(review)
     if review['blocking']:
         reasons = '; '.join(item['message'] for item in review['blocking'])
         return 'blocked', run_event('risk_check', f'Risk check: blocked: {reasons}', 'error')
@@ -216,13 +225,17 @@ def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]
     if any(item.get('code') == 'sensitive_action' for item in review['sensitive']):
         tools = ', '.join(f"{item.get('toolkit')} · {item.get('tool') or '*'}" for item in review['sensitive'])
         text = f'Risk check: needs approval for {tools}'
+        if signin:
+            text += f'; {signin}'
         if auto_approve:
             text += '; Run without asking is on'
         elif rule == 'run_without_asking':
             text += '; Run without asking does not hold, so the run pauses and asks'
         return 'needs_approval', run_event('risk_check', text, 'warning')
     if not scan_complete(review):
-        return 'unknown', run_event('risk_check', 'Risk check: not complete', 'warning')
+        return 'unknown', run_event('risk_check', f"Risk check: not complete{'; ' + signin if signin else ''}", 'warning')
+    if signin:
+        return 'needs_signin', run_event('risk_check', f'Risk check: {signin}', 'warning')
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
 
