@@ -31,6 +31,11 @@ def _door(world, monkeypatch):
         f"{PACKAGE}.utils.webhook_secrets": {"current_key": None, "is_signing_row": None, "prev_key": None},
     }.items():
         monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(**attrs))
+    # #7400: the project value is an RPC to configurations; None here, so the platform default applies
+    monkeypatch.setitem(sys.modules, f"{PACKAGE}.utils.schedule_settings", types.SimpleNamespace(
+        project_webhook_cap=lambda project_id, limits: min(world.project_cap or limits.per_webhook,
+                                                           limits.per_webhook_limit)))
+    world.project_cap = getattr(world, "project_cap", None)
     sys.modules["tools"].VaultClient = None
     import importlib.util  # pylint: disable=C0415
     name = f"{PACKAGE}.utils.webhook_door"
@@ -58,7 +63,7 @@ def test_7453_admit_inserts_parallel_webhook_runs_and_record_delivery_writes_the
     now = datetime.now(UTC)
     with world.session() as session:
         row = session.get(world.models.EntitySchedule, hook)
-        first, second = door.admit_webhook_run(session, hook), door.admit_webhook_run(session, hook)
+        first, second = door.admit_webhook_run(session, PROJECT_ID, hook), door.admit_webhook_run(session, PROJECT_ID, hook)
         door.record_delivery(session, hook, "accepted", now)
         session.commit()
     assert first and second and first != second  # webhook runs are outside the active-run index

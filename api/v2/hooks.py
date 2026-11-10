@@ -20,6 +20,11 @@ def _busy(code: str):
     return {'code': code}, 503, {'Retry-After': str(door.RETRY_AFTER_SECONDS)}
 
 
+def _capped(capped):
+    return ({'code': capped.code, 'running': capped.running, 'cap': capped.cap}, 429,
+            {'Retry-After': str(door.RETRY_AFTER_SECONDS)})
+
+
 def _record(project_id: int, row_id: int, outcome: str, now) -> None:
     with db.get_session(project_id) as session:
         door.record_delivery(session, row_id, outcome, now)
@@ -86,7 +91,12 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             _record(project_id, row.id, 'refused', now)
             return ({'code': REFUSAL_CODES.get(refusal, 'refused')}, 403), 'refused'
         with db.get_session(project_id) as session:
-            run_id = door.admit_webhook_run(session, row.id)
+            run_id = door.admit_webhook_run(session, project_id, row.id)
+            if isinstance(run_id, door.Capped):
+                door.record_capped(session, row.id, now)  # still under the project lock: one row a minute
+                door.record_delivery(session, row.id, 'capped', now)
+                session.commit()
+                return _capped(run_id), 'capped'
             if run_id is None:
                 session.rollback()
                 return _busy('run_in_progress'), 'busy'

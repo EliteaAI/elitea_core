@@ -11,11 +11,23 @@ DEFAULT_MIN_INTERVAL_MINUTES = 5
 DEFAULT_MAX_ENABLED_PER_PROJECT = 50
 MAX_MIN_INTERVAL_MINUTES = 1440
 MAX_ENABLED_PER_PROJECT_LIMIT = 1000
+DEFAULT_WEBHOOK_MAX_RUNS = 3
+DEFAULT_WEBHOOK_MAX_RUNS_LIMIT = 20
+DEFAULT_WEBHOOK_PROJECT_MAX_RUNS = 10
+DEFAULT_WEBHOOK_MAX_WAITING = 10
+WEBHOOK_LIMIT_CEILING = 1000
 
 
 class ScheduleLimits(NamedTuple):
     min_interval_minutes: int
     max_enabled_per_project: int
+
+
+class WebhookLimits(NamedTuple):
+    per_webhook: int  # platform default, already at most `per_webhook_limit`
+    per_webhook_limit: int
+    per_project: int
+    waiting: int
 
 
 class ScheduleLimitError(Exception):
@@ -40,6 +52,20 @@ def schedule_limits() -> ScheduleLimits:
         at_least_one(section, 'min_interval_minutes', DEFAULT_MIN_INTERVAL_MINUTES, MAX_MIN_INTERVAL_MINUTES),
         at_least_one(section, 'max_enabled_per_project', DEFAULT_MAX_ENABLED_PER_PROJECT,
                      MAX_ENABLED_PER_PROJECT_LIMIT),
+    )
+
+
+def webhook_limits() -> WebhookLimits:
+    """The webhook run caps of #7400, read at each call so an admin change applies to the next delivery."""
+    section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
+    limit = at_least_one(section, 'webhook_max_concurrent_runs_limit', DEFAULT_WEBHOOK_MAX_RUNS_LIMIT,
+                         WEBHOOK_LIMIT_CEILING)
+    return WebhookLimits(
+        min(at_least_one(section, 'webhook_max_concurrent_runs', DEFAULT_WEBHOOK_MAX_RUNS, WEBHOOK_LIMIT_CEILING), limit),
+        limit,
+        at_least_one(section, 'webhook_project_max_concurrent_runs', DEFAULT_WEBHOOK_PROJECT_MAX_RUNS,
+                     WEBHOOK_LIMIT_CEILING),
+        at_least_one(section, 'webhook_max_waiting_runs', DEFAULT_WEBHOOK_MAX_WAITING, WEBHOOK_LIMIT_CEILING),
     )
 
 

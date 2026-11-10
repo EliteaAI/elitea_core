@@ -162,9 +162,13 @@ def _sample_body_error(row, body):
 
 def _start_sample_run(session, project_id: int, row, payload: str):
     """Run a webhook row with the owner's sample body through the delivery path; the body is never stored."""
-    from .webhook_door import admit_webhook_run  # pylint: disable=C0415 -- late: only webhook rows reach it
+    from .webhook_door import Capped, admit_webhook_run  # pylint: disable=C0415 -- late: only webhook rows reach it
     schedule_id = row.id
-    run_id = admit_webhook_run(session, schedule_id, trigger="test")
+    run_id = admit_webhook_run(session, project_id, schedule_id, trigger="test")
+    if isinstance(run_id, Capped):  # no skipped row: the owner sees the answer at once
+        session.rollback()
+        return refusal(run_id.code, f"Too many runs at once ({run_id.running} running, cap {run_id.cap}); try again later",
+                       429, running=run_id.running, cap=run_id.cap)
     if run_id is None:  # one sample at a time; deliveries are not limited by the active-run index
         session.rollback()
         active_id = session.scalar(select(EntityScheduleRun.id).where(

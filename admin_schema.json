@@ -934,6 +934,70 @@
         "maximum": 720
       }
     },
+    "schedules_webhook_max_concurrent_runs": {
+      "type": "integer",
+      "title": "Webhook Max Running Runs",
+      "description": "Running runs one webhook may have at the same time; a delivery over it gets 429 with Retry-After. A project admin may set a lower value. Kept at most the limit below. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_concurrent_runs",
+      "section": "runtime",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_max_concurrent_runs_limit": {
+      "type": "integer",
+      "title": "Webhook Max Running Runs Limit",
+      "description": "Highest per-webhook running-run cap a project admin may set in the project settings. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_concurrent_runs_limit",
+      "section": "runtime",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_project_max_concurrent_runs": {
+      "type": "integer",
+      "title": "Webhook Project Max Running Runs",
+      "description": "Running webhook runs one project may have at the same time, over all its webhooks. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_project_max_concurrent_runs",
+      "section": "runtime",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_max_waiting_runs": {
+      "type": "integer",
+      "title": "Webhook Max Waiting Runs",
+      "description": "Runs of one webhook that may wait for approval of a sensitive tool at the same time; the next pause fails its run. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_waiting_runs",
+      "section": "runtime",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
     "schedules_legacy_step_enabled": {
       "type": "boolean",
       "title": "Schedules Legacy Step Enabled",
