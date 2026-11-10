@@ -173,8 +173,6 @@ def harness(isolated_sys_modules, monkeypatch):
         with_modes=lambda urls: urls,
         endpoint_metrics=lambda func: func,
     )
-    tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
-        timeout=lambda seconds: types.SimpleNamespace())))
     tools.auth = types.SimpleNamespace(
         decorators=types.SimpleNamespace(check_api=harness.check_api),
         current_user=lambda: {'id': harness.user_id},

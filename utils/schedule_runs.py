@@ -6,11 +6,9 @@ from pylon.core.tools import log
 from sqlalchemy import and_, case, func, or_, select, update
 from tools import db
 
-from ..models.entity_schedule import (
-    ACTIVE_STATUSES, REFUSAL_STREAK, RUN_APPLICATION_ID, RUN_FORM, EntitySchedule, EntityScheduleRun)
+from ..models.entity_schedule import ACTIVE_STATUSES, REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
-from .schedule_rights import may_run_or_decide
 from .schedule_timing import at_least_one
 
 STALE_REASON = 'the run did not finish in time'
@@ -29,8 +27,6 @@ SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not as
 SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
 # The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
 DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
-# What a caller may do to a run that acts as another user: edit, answer and note would run under that user's identity
-OTHER_USER_ACTIONS = ('approve', 'reject')
 # A schedule pauses itself at this many governance refusals in a row (#7254); an admitted start or a resume ends a streak
 REFUSAL_PAUSE_AFTER = 3
 # Platform-side outage codes: they neither count nor end a streak (#7254 review M1). A missing sign-in or app is a
@@ -48,11 +44,7 @@ PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (la
 
 
 class ScheduleDecisionForbidden(Exception):
-    """The caller of an approve or reject is not the schedule owner, the user the run acts as or a schedules admin."""
-
-
-class ScheduleEditForbidden(ScheduleDecisionForbidden):
-    """The caller may approve or reject, but sends an edit, an answer, a note or text for a run that acts as another user."""
+    """The caller of an approve or reject is not the user the run acts as; an admin included."""
 
 
 class ScheduleDecisionInvalid(Exception):
@@ -219,13 +211,6 @@ def run_actor_id(session, run) -> int | None:
     if run.trigger in ('manual', 'test') and run.requested_by is not None:
         return run.requested_by
     return run_owner_id(session, run)
-
-
-def schedule_run_actor_id(project_id: int, run_id: int) -> int | None:
-    """`run_actor_id` of the run with this id; None when the run is gone."""
-    with db.get_session(project_id) as session:
-        run = session.get(EntityScheduleRun, run_id)
-        return run_actor_id(session, run) if run is not None else None
 
 
 def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
@@ -398,89 +383,41 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
     return PAUSE_REASON
 
 
-def _run_entity(session, run) -> tuple | None:
-    """The (entity type, application id) of the agent or pipeline a run starts; None when its schedule is gone."""
-    if run.schedule_id is not None:
-        row = session.execute(select(EntitySchedule.entity_type, EntitySchedule.application_id)
-                              .where(EntitySchedule.id == run.schedule_id)).one_or_none()
-        return tuple(row) if row else None
-    form, application_id = session.execute(
-        select(RUN_FORM, RUN_APPLICATION_ID).where(EntityScheduleRun.id == run.id)).one()
-    return (form or {}).get('entity_type'), application_id
-
-
-def _actor_lost_rights(project_id: int, actor_id: int | None, entity: tuple | None) -> bool:
-    """True when the user a run acts as is no longer a project member, lost `schedules.run` or the folder of the agent.
-
-    A check that cannot answer counts as lost (fail closed). Call it with no database session open: the checks are RPCs.
-    """
-    if actor_id is None:
-        return True
-    # late: the pre-run module loads the RPC layer and imports these writers late
-    from .schedule_prerun import check_owner_access, check_owner_rights
-    entity_type, application_id = entity or (None, None)
-    return bool(check_owner_access(project_id, actor_id)
-                or check_owner_rights(project_id, actor_id, entity_type, application_id))
-
-
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
-                            fan_out: bool = False, sign_in: bool = False, is_admin: bool | None = None,
-                            conversation_id: int | None = None, recheck_actor: bool = False,
-                            has_text: bool = False) -> str | None:
+                            fan_out: bool = False, sign_in: bool = False, conversation_id: int | None = None) -> str | None:
     """Check the decision on a waiting run without changing it; `reject` or `approve`.
 
-    A chat passes its `conversation_id`: the run must be linked to that chat, else `ScheduleRunNotWaiting`,
-    because the run id in the conversation meta is written by the client. Any `reject` in `actions` rejects.
-    `ScheduleDecisionForbidden` for anyone but the user the run acts as (`run_actor_id`), the owner of the run or a
-    holder of `schedules.admin` (`may_run_or_decide`; `is_admin` None reads the permission); then
-    `ScheduleDecisionInvalid` for an empty or unknown action; then `ScheduleEditForbidden` when a caller who is not
-    the user the run acts as sends anything but approve or reject, or any text (`has_text`): only that user edits,
-    answers or notes, because the tools run with their identity; then `ScheduleRunNotWaiting` when the run is not
-    waiting. None when a
-    fan-out child decides a run that an earlier decision of the same pause resumed: nothing to change. With
-    `sign_in`, the actions are the sign-in answers (`authorize`, `skip`) and map to approve and reject. Only the
-    user the run acts as may `authorize`: the sign-in is theirs, so another user gets `ScheduleEditForbidden`
-    and may only `skip` (which rejects the run).
-    With `recheck_actor`, an approve by another user is refused while the user the run acts as lost project
-    access, `schedules.run` or the folder of the agent: the chat resumes the run at once, with no pre-run check.
+    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but the user the run acts as
+    (`run_actor_id`), an admin included, because the run uses that user's credentials; a chat passes its
+    `conversation_id`, and the run must be linked to that chat, else `ScheduleRunNotWaiting`, because the run id in
+    the conversation meta is written by the client. Then `ScheduleDecisionInvalid` for an empty or unknown action;
+    then `ScheduleRunNotWaiting` when the run is not waiting. None when a fan-out child decides a run
+    that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
+    the sign-in answers (`authorize`, `skip`) and map to approve and reject.
     """
-    authorizes = sign_in and 'authorize' in actions  # read before the mapping turns it into an approve
     if sign_in:  # an unknown answer stays in the list, so the check below refuses it
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
         if run is None or (conversation_id is not None and run.conversation_id != conversation_id):
             raise ScheduleRunNotWaiting(run_id)
-        actor_id = run_actor_id(session, run)
-        owner_id = run_owner_id(session, run)
-        entity = _run_entity(session, run) if recheck_actor else None
+        if run_actor_id(session, run) != caller_id:
+            raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
-    # Outside the session: the permission read of a chat caller is an RPC
-    if caller_id != actor_id and not may_run_or_decide(project_id, owner_id, caller_id, is_admin):
-        raise ScheduleDecisionForbidden(run_id)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
-    only_decides = all(action in OTHER_USER_ACTIONS for action in actions)
-    if caller_id != actor_id and (has_text or authorizes or not only_decides):
-        raise ScheduleEditForbidden(run_id)
     if fan_out and status == 'running' and resumed_at is not None:
         return None
     if status != 'waiting_for_approval':
         raise ScheduleRunNotWaiting(run_id)
-    decision = 'reject' if 'reject' in actions else 'approve'
-    if decision == 'approve' and recheck_actor and caller_id != actor_id and _actor_lost_rights(
-            project_id, actor_id, entity):
-        raise ScheduleDecisionForbidden(run_id)
-    return decision
+    return 'reject' if 'reject' in actions else 'approve'
 
 
-def apply_schedule_decision(project_id: int, run_id: int, decision: str, decided_by: int | None = None) -> None:
+def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None:
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
-    The run log gets the decision and who made it: `decided_by`, or the owner when it is not given. The check
-    already let only the owner, the user the run acts as or a schedules admin through; the owner is told when
-    a user other than the owner decided.
+    The run log gets the decision; only the user the run acts as decides (the check), so that user is who decided.
     """
     conversation_id = None
     with db.get_session(project_id) as session:
@@ -492,44 +429,26 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, decided
         )
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
+        actor_id = run_actor_id(session, run)
         owner_id = run_owner_id(session, run)
-        chat_id = run.conversation_id
         approved = decision == 'approve'
-        by = owner_id if decided_by is None else decided_by
-        who = 'the schedule owner' if by == owner_id else 'an admin'
-        told = None  # an admin's decision is told to the owner after the commit; a Test Run has no schedule page
-        if by != owner_id and owner_id is not None and run.schedule_id is not None:
-            told = session.execute(select(EntitySchedule.id, EntitySchedule.name)
-                                   .where(EntitySchedule.id == run.schedule_id)).one_or_none()
+        # An admin's Run now acts as the admin: the log names who answered. A Test Run has no owner to compare with
+        who = 'an admin' if owner_id is not None and actor_id != owner_id else 'the schedule owner'
         append_run_events(session, run_id, run_event(
             'decision', f"{'Approved' if approved else 'Rejected'} by {who}",
-            'info' if approved else 'warning', action=decision, by=by))
+            'info' if approved else 'warning', action=decision, by=actor_id))
         if approved:
             session.execute(
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
             _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
-        else:
-            _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, chat_id,
+        else:  # no notice: the user the run acts as made this end
+            _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
-            conversation_id = chat_id
+            conversation_id = run.conversation_id
         session.commit()
-    if told is not None:  # after the session closed: the notice fires an event
-        _tell_owner_of_admin_decision(project_id, owner_id, told, run_id, chat_id, approved)
     delete_run_checkpoints(project_id, conversation_id)
-
-
-def _tell_owner_of_admin_decision(project_id: int, owner_id: int, schedule, run_id: int,
-                                  conversation_id: int | None, approved: bool) -> None:
-    """Tell the owner that an admin approved or rejected a waiting run; a lost notice never undoes the decision."""
-    from .schedule_notifications import notify_schedule_event  # late, as _announce
-    try:
-        action = 'approved a waiting run of' if approved else 'rejected a waiting run of'
-        run = SimpleNamespace(id=run_id, conversation_id=conversation_id, reason=None)
-        notify_schedule_event(project_id, owner_id, 'schedule_edited_by_admin', schedule, run, extra={'action': action})
-    except Exception:  # noqa: BLE001 -- the decision is committed
-        log.exception('Schedule run %s: cannot send the admin decision notice', run_id)
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:

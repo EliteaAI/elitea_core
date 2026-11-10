@@ -200,3 +200,19 @@ def test_r3_4_el7011_regular_caller_gets_nothing_on_other_owner_row(load):
 def test_r3_3_el7011_regular_owner_never_gets_change_owner(load):
     module = load(FakeAuth())
     assert "change_owner" not in module.allowed_actions(_row(), _scope(module, 5, *VERBS))
+
+
+@pytest.mark.parametrize("owner, caller, is_admin, expected", [
+    (5, 5, False, True),
+    (5, 6, True, True),
+    (5, 6, False, False),
+    (None, 6, False, False),
+    (None, 6, True, True),
+])
+def test_may_run_is_the_owner_or_a_schedules_admin(owner, caller, is_admin, expected):
+    spec = importlib.util.spec_from_file_location(
+        "schedule_rights_7011", PLUGIN_ROOT / "utils" / "schedule_rights.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.may_run(owner, caller, is_admin) is expected

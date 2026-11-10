@@ -399,7 +399,7 @@ OPERATIONS = {
         "description": _text(
             "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time. "
             "A webhook runs only as `test` with a sample `payload` (at most 512 KB, not stored), through the "
-            "delivery path.",
+            "delivery path. The run acts as the caller.",
             "the owner or a holder of `schedules.admin`, with `schedules.run`",
             "400 an invalid trigger or payload; 403 no permission; 404 not found, or a schedule outside the caller's scope; "
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
@@ -502,15 +502,16 @@ OPERATIONS = {
         "name": "Decide a waiting run",
         "summary": "Decide a waiting run",
         "description": _text(
-            "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
+            "Answer a run that waits for the user it acts as to add credentials. `approve` starts the run again and checks the "
             "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",
-            "the owner or a holder of `schedules.admin`, with `schedules.run`",
-            "400 an invalid action; 403 no permission; 404 not found, or a schedule outside the caller's scope; "
+            "the user this run acts as, with `schedules.run`: the person who pressed Run now, else the owner. "
+            "An admin who is not that user cannot decide",
+            "400 an invalid action; 403 no permission, or not the user the run acts as; 404 not found, or a schedule outside the caller's scope; "
             "409 the run is not waiting, or has a chat; 500 the run could not start"),
         "parameters": RUN_PARAMS,
         "request_body": ScheduleRunDecision,
         "responses": _responses(200, "The decision was written", {"run_id": 77, "status": "running"}, {
-            400: None, 403: "No permission", 404: None,
+            400: None, 403: "No permission, or not the user the run acts as", 404: None,
             409: "The run is not waiting, or has a chat", 500: "The run could not start"}),
     },
     ("get", RUN): {

@@ -49,7 +49,7 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
     """Actions the caller may take on one schedule row; a pure function of the row and the scope.
 
     `run` is shown to the owner and to a schedules admin, the same test as the run route
-    (`schedule_rights.may_run_or_decide`).
+    (`schedule_rights.may_run`).
     """
     is_owner = row.created_by == scope.user_id
     if not (is_owner or scope.is_admin):
@@ -70,9 +70,12 @@ def allowed_actions(row, scope: ScheduleScope) -> list[str]:
 
 
 def _webhook_actions(row, scope: ScheduleScope, is_owner: bool, granted: set[str]) -> list[str]:
-    """Plan-b §4.2: only the owner edits; an admin pauses, deletes, rotates and changes the owner, all audited."""
+    """Plan-b §4.2: only the owner edits; an admin pauses, deletes, rotates and changes the owner, all audited.
+
+    The owner and an admin both start a sample-body run; it acts as the caller, as Run now does on a cron row.
+    """
     actions = []
-    if is_owner and "run" in granted and row.version_id is not None:  # a sample-body run (#7455)
+    if "run" in granted and row.version_id is not None:  # a sample-body run (#7455)
         actions.append("run")
     if "update" in granted:
         if is_owner:

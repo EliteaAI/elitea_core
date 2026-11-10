@@ -1,16 +1,15 @@
-"""The schedule owner, the user a run acts as or a holder of the schedules admin permission decides a waiting run, and only
-while it waits. Only the user the run acts as edits, answers or sends text.
+"""Only the user a run acts as decides a waiting run, and only while it waits.
+
+That is the owner for a cron or webhook run, and the person who pressed Run now or Test run for a manual run.
 
 Contract under test: utils/schedule_runs.py (check_schedule_decision, apply_schedule_decision,
-ScheduleDecisionForbidden, ScheduleEditForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting) on the real models,
+ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting) on the real models,
 in-memory SQLite.
 Cases: TC-US18-05, TC-US18-08, TC-US18-09, TC-US18-10.
 """
-import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import insert, select
 
 # Shared fixtures of the US-09 and US-13 writer tests: pytest injects them by name
 from unit.utils.test_7011_schedule_runs_fail import _run, _schedule, runs, session  # noqa: F401
@@ -19,12 +18,6 @@ from unit.utils.test_7011_schedule_runs_outcome import sent  # noqa: F401
 # ruff: noqa: F811
 
 OWNER, ADMIN = 12, 1
-
-
-@pytest.fixture
-def project_admins(runs):
-    """The user ids that hold the admin permission for the RPC read of the chat path."""
-    return runs.permission_holders
 
 
 def _waiting(runs, session, **schedule_values):
@@ -103,93 +96,7 @@ def test_el_7011_r2_2_a_reject_fails_the_run_with_its_conversation(runs, session
     assert (schedule.last_run_status, schedule.last_conversation_id) == ("failed", 55)
 
 
-@pytest.mark.parametrize("action", ["approve", "reject"])
-def test_a_schedules_admin_who_is_not_the_owner_decides(runs, session, sent, action):
-    _, run = _waiting(runs, session)
-
-    decision = runs.check_schedule_decision(1, run.id, ADMIN, [action], is_admin=True)
-    runs.apply_schedule_decision(1, run.id, decision, ADMIN)
-
-    session.refresh(run)
-    assert run.status == ("running" if action == "approve" else "failed")
-    assert next(event for event in run.events if event["kind"] == "decision")["by"] == ADMIN
-
-
-@pytest.mark.parametrize("action", ["approve", "reject"])
-def test_the_chat_path_reads_the_admin_permission_of_the_caller(runs, session, sent, project_admins, action):
-    project_admins.add(ADMIN)
-    _, run = _waiting(runs, session)
-
-    assert runs.check_schedule_decision(1, run.id, ADMIN, [action]) == action
-
-
-def test_the_chat_path_refuses_a_caller_whose_permission_read_fails(runs, session, sent):
-    _, run = _waiting(runs, session)
-
-    with pytest.raises(runs.ScheduleDecisionForbidden):
-        runs.check_schedule_decision(1, run.id, ADMIN, ["approve"])
-
-
-def test_a_caller_who_is_not_a_schedules_admin_gets_forbidden_even_when_the_route_says_so(runs, session, sent,
-                                                                                         project_admins):
-    project_admins.add(ADMIN)  # the flag of the route wins: the permission read is not asked
-    _, run = _waiting(runs, session)
-
-    with pytest.raises(runs.ScheduleDecisionForbidden):
-        runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], is_admin=False)
-
-
-def test_the_permission_read_is_not_asked_for_the_owner(runs, session, sent, monkeypatch):
-    _, run = _waiting(runs, session)
-
-    def refuse(project_id, owner_id, entity_type=None, entity_id=None, verbs=("run",)):
-        raise AssertionError("the owner must not trigger the permission read")
-
-    monkeypatch.setattr(sys.modules["plugins.elitea_core.utils.schedule_prerun"], "check_owner_rights", refuse)
-
-    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"]) == "approve"
-
-
-def test_a_run_linked_to_another_conversation_is_not_decided(runs, session, sent):
-    _, run = _waiting(runs, session)
-    run.conversation_id = 55
-    session.flush()
-
-    with pytest.raises(runs.ScheduleRunNotWaiting):
-        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], conversation_id=56)
-    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"], conversation_id=55) == "approve"
-
-
-@pytest.mark.parametrize("action,text", [("approve", "approved"), ("reject", "rejected")])
-def test_the_owner_gets_a_notice_when_an_admin_decides(runs, session, sent, action, text):
-    _, run = _waiting(runs, session)
-
-    decision = runs.check_schedule_decision(1, run.id, ADMIN, [action], is_admin=True)
-    runs.apply_schedule_decision(1, run.id, decision, ADMIN)
-
-    assert sent.notices == [(OWNER, "schedule_edited_by_admin", run.id)]
-    assert text in sent.extras[0]["action"]
-
-
-def test_the_owner_gets_no_notice_for_their_own_decision(runs, session, sent):
-    _, run = _waiting(runs, session)
-
-    runs.apply_schedule_decision(1, run.id, runs.check_schedule_decision(1, run.id, OWNER, ["reject"]), OWNER)
-
-    assert sent.notices == []
-
-
-def test_the_actor_of_a_manual_run_is_the_one_who_pressed_run_now(runs, session, sent):
-    schedule, run = _waiting(runs, session)
-    run.trigger, run.requested_by = "manual", ADMIN
-    session.flush()
-
-    assert runs.run_actor_id(session, run) == ADMIN
-    run.trigger = "cron"
-    assert runs.run_actor_id(session, run) == OWNER
-
-
-def test_a_user_who_is_not_an_admin_or_the_owner_gets_forbidden(runs, session, sent):
+def test_an_admin_who_is_not_the_owner_gets_forbidden(runs, session, sent):
     _, run = _waiting(runs, session)
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
@@ -274,216 +181,112 @@ def test_el_7011_r2_4_an_unknown_run_gets_not_waiting(runs, session, sent):
         runs.check_schedule_decision(1, 999, OWNER, ["approve"])
 
 
-SENSITIVE = {"hitl_interrupt": {"type": "hitl", "guardrail_type": "sensitive_tool"}}
-
-
-def _waiting_run(runs, session, trigger="cron", requested_by=None):
-    """A run of OWNER's schedule that waits for approval; a manual run was started by `requested_by`."""
-    schedule = _schedule(runs, session, created_by=OWNER)
-    run = _run(runs, session, schedule, status="waiting_for_approval")
-    run.trigger, run.requested_by, run.conversation_id = trigger, requested_by, 55
-    run.approval_expires_at = datetime.now(UTC) + timedelta(hours=24)
+@pytest.fixture
+def an_admin_run(runs, session):
+    """A waiting run of OWNER's schedule that ADMIN started with Run now, so it acts as ADMIN."""
+    schedule, run = _waiting(runs, session)
+    run.trigger, run.requested_by = "manual", ADMIN
     session.flush()
     return schedule, run
 
 
-@pytest.mark.parametrize("action", ["edit", "answer", "block_with_comment"])
-def test_an_admin_cannot_edit_answer_or_note_a_run_that_acts_as_the_owner(runs, session, sent, action):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
+def test_the_actor_of_a_manual_or_test_run_is_the_one_who_pressed_the_button(runs, session, sent):
+    _, run = _waiting(runs, session)
+
+    assert runs.run_actor_id(session, run) == OWNER
+    for trigger in ("manual", "test"):
+        run.trigger, run.requested_by = trigger, ADMIN
+        assert runs.run_actor_id(session, run) == ADMIN
+    run.trigger, run.requested_by = "manual", None
+    assert runs.run_actor_id(session, run) == OWNER
+
+
+@pytest.mark.parametrize("trigger", ["cron", "webhook"])
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_an_admin_cannot_decide_a_run_that_acts_as_the_owner(runs, session, sent, trigger, action):
+    _, run = _waiting(runs, session)
+    run.trigger = trigger
+    session.flush()
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
         runs.check_schedule_decision(1, run.id, ADMIN, [action])
-    with pytest.raises(runs.ScheduleDecisionForbidden):
-        runs.check_schedule_decision(1, run.id, ADMIN, ["approve", action])
+
+    session.refresh(run)
+    assert run.status == "waiting_for_approval"
 
 
 @pytest.mark.parametrize("action", ["approve", "reject"])
-def test_the_owner_may_approve_or_reject_a_run_that_acts_as_an_admin(runs, session, sent, action):
-    _, run = _waiting_run(runs, session, "manual", ADMIN)
+def test_the_owner_cannot_decide_a_run_that_acts_as_an_admin(runs, session, sent, an_admin_run, action):
+    _, run = an_admin_run
 
-    assert runs.check_schedule_decision(1, run.id, OWNER, [action]) == action
-
-
-@pytest.mark.parametrize("action", ["edit", "answer", "block_with_comment"])
-def test_the_owner_cannot_edit_answer_or_note_a_run_that_acts_as_an_admin(runs, session, sent, action):
-    _, run = _waiting_run(runs, session, "manual", ADMIN)
-
-    with pytest.raises(runs.ScheduleEditForbidden):
+    with pytest.raises(runs.ScheduleDecisionForbidden):
         runs.check_schedule_decision(1, run.id, OWNER, [action])
-    with pytest.raises(runs.ScheduleEditForbidden):
-        runs.check_schedule_decision(1, run.id, OWNER, ["approve", action])
-
-
-def test_the_owner_decision_reads_no_admin_permission(runs, session, sent):
-    _, run = _waiting_run(runs, session, "manual", ADMIN)
-
-    runs.check_schedule_decision(1, run.id, OWNER, ["approve"])
-
-    assert runs.rights_calls == []
-
-
-def test_an_admin_edit_on_the_owner_run_raises_the_edit_refusal(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
-
-    with pytest.raises(runs.ScheduleDecisionForbidden) as refused:
-        runs.check_schedule_decision(1, run.id, ADMIN, ["edit"])
-
-    assert type(refused.value) is runs.ScheduleEditForbidden
-
-
-@pytest.mark.parametrize("caller, trigger, requested_by", [
-    (ADMIN, "cron", None),      # a schedules admin on the owner's cron run
-    (OWNER, "manual", ADMIN),   # the owner on a run that acts as an admin
-])
-def test_a_non_actor_approve_with_text_is_refused(runs, session, sent, caller, trigger, requested_by):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session, trigger, requested_by)
-
-    with pytest.raises(runs.ScheduleEditForbidden):
-        runs.check_schedule_decision(1, run.id, caller, ["approve"], has_text=True)
 
     session.refresh(run)
     assert run.status == "waiting_for_approval"
 
 
-def test_a_user_without_rights_gets_the_rights_refusal_even_with_text(runs, session, sent):
-    _, run = _waiting_run(runs, session)
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_an_admin_decides_the_run_they_started(runs, session, sent, an_admin_run, action):
+    _, run = an_admin_run
 
-    with pytest.raises(runs.ScheduleDecisionForbidden) as refused:
-        runs.check_schedule_decision(1, run.id, ADMIN, ["edit"], has_text=True)
-
-    assert type(refused.value) is runs.ScheduleDecisionForbidden
-
-
-@pytest.mark.parametrize("caller, trigger, requested_by", [(OWNER, "cron", None), (ADMIN, "manual", ADMIN)])
-def test_the_actor_may_approve_with_text(runs, session, sent, caller, trigger, requested_by):
-    _, run = _waiting_run(runs, session, trigger, requested_by)
-
-    assert runs.check_schedule_decision(1, run.id, caller, ["approve"], has_text=True) == "approve"
-
-
-def test_the_user_a_run_acts_as_may_edit_it(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session, "manual", ADMIN)
-
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["edit"]) == "approve"
-
-
-def test_an_admin_who_lost_the_admin_permission_still_decides_their_own_run(runs, session, sent):
-    _, run = _waiting_run(runs, session, "manual", ADMIN)
-
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"]) == "approve"
-
-
-def test_a_non_actor_skip_of_a_sign_in_rejects_the_run(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
-
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["skip"], sign_in=True) == "reject"
-
-
-@pytest.mark.parametrize("answers", [["authorize"], ["skip", "authorize"]])
-def test_a_non_actor_cannot_authorize_a_sign_in(runs, session, sent, answers):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
-
-    with pytest.raises(runs.ScheduleEditForbidden):
-        runs.check_schedule_decision(1, run.id, ADMIN, answers, sign_in=True)
+    _decide(runs, run.id, ADMIN, [action])
 
     session.refresh(run)
-    assert run.status == "waiting_for_approval"
+    assert run.status == ("running" if action == "approve" else "failed")
 
 
-@pytest.mark.parametrize("caller, trigger, requested_by", [(OWNER, "cron", None), (ADMIN, "manual", ADMIN)])
-def test_the_actor_authorizes_their_own_sign_in(runs, session, sent, caller, trigger, requested_by):
-    _, run = _waiting_run(runs, session, trigger, requested_by)
+def test_the_run_log_names_an_admin_when_the_run_acts_as_an_admin(runs, session, sent, an_admin_run):
+    _, run = an_admin_run
 
-    assert runs.check_schedule_decision(1, run.id, caller, ["authorize"], sign_in=True) == "approve"
-    assert runs.check_schedule_decision(1, run.id, caller, ["skip"], sign_in=True) == "reject"
+    _decide(runs, run.id, ADMIN, ["approve"])
 
-
-def test_a_user_without_rights_gets_the_rights_refusal_for_a_sign_in_authorize(runs, session, sent):
-    _, run = _waiting_run(runs, session)
-
-    with pytest.raises(runs.ScheduleDecisionForbidden) as refused:
-        runs.check_schedule_decision(1, run.id, ADMIN, ["authorize"], sign_in=True)
-
-    assert type(refused.value) is runs.ScheduleDecisionForbidden
+    session.refresh(run)
+    decision = next(event for event in run.events if event["kind"] == "decision")
+    assert (decision["text"], decision["by"]) == ("Approved by an admin", ADMIN)
 
 
-def test_an_unknown_action_of_an_admin_is_invalid_not_forbidden(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
+def test_the_run_log_names_the_owner_when_the_run_acts_as_the_owner(runs, session, sent):
+    _, run = _waiting(runs, session)
 
-    with pytest.raises(runs.ScheduleDecisionInvalid):
-        runs.check_schedule_decision(1, run.id, ADMIN, ["maybe"])
+    _decide(runs, run.id, OWNER, ["reject"])
+
+    session.refresh(run)
+    decision = next(event for event in run.events if event["kind"] == "decision")
+    assert (decision["text"], decision["by"]) == ("Rejected by the schedule owner", OWNER)
 
 
-def test_an_admin_approve_is_refused_when_the_user_the_run_acts_as_lost_access(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    runs.lost_access.add(OWNER)
-    _, run = _waiting_run(runs, session)
+def test_after_a_change_of_owner_the_new_owner_decides_a_waiting_cron_run(runs, session, sent):
+    new_owner = 99
+    schedule, run = _waiting(runs, session)
+    schedule.created_by = new_owner
+    session.flush()
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
-        runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], recheck_actor=True)
-
-    session.refresh(run)
-    assert run.status == "waiting_for_approval"
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"])
+    assert runs.check_schedule_decision(1, run.id, new_owner, ["approve"]) == "approve"
 
 
-def test_an_admin_approve_is_refused_when_the_rights_check_of_the_actor_cannot_answer(runs, session, sent, monkeypatch):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
-    monkeypatch.setattr(sys.modules["plugins.elitea_core.utils.schedule_prerun"], "check_owner_rights",
-                        lambda *args, **kwargs: "access check unavailable")
+@pytest.mark.parametrize("answer, decision", [("authorize", "approve"), ("skip", "reject")])
+def test_only_the_actor_answers_a_sign_in(runs, session, sent, answer, decision):
+    _, run = _waiting(runs, session)
 
     with pytest.raises(runs.ScheduleDecisionForbidden):
-        runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], recheck_actor=True)
+        runs.check_schedule_decision(1, run.id, ADMIN, [answer], sign_in=True)
+    assert runs.check_schedule_decision(1, run.id, OWNER, [answer], sign_in=True) == decision
 
 
-def test_an_admin_reject_needs_no_rights_of_the_user_the_run_acts_as(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    runs.lost_access.add(OWNER)
-    _, run = _waiting_run(runs, session)
+def test_a_run_linked_to_another_conversation_is_not_decided(runs, session, sent):
+    _, run = _waiting(runs, session)
+    run.conversation_id = 55
+    session.flush()
 
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["reject"], recheck_actor=True) == "reject"
-
-
-def test_the_recheck_asks_for_the_agent_of_the_schedule(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    _, run = _waiting_run(runs, session)
-
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"], recheck_actor=True) == "approve"
-    assert (OWNER, "agent", 1, ("run",)) in runs.rights_calls
+    with pytest.raises(runs.ScheduleRunNotWaiting):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], conversation_id=56)
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"], conversation_id=55) == "approve"
 
 
-def test_the_recheck_asks_for_the_agent_of_a_test_run(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    session.execute(insert(runs.EntityScheduleRun.__table__).values(
-        trigger="test", status="waiting_for_approval", requested_by=OWNER, conversation_id=55,
-        form={"entity_type": "pipeline"}, application_id=1))
-    run_id = session.scalar(select(runs.EntityScheduleRun.id).where(runs.EntityScheduleRun.trigger == "test"))
-
-    assert runs.check_schedule_decision(1, run_id, ADMIN, ["approve"], recheck_actor=True) == "approve"
-    assert (OWNER, "pipeline", 1, ("run",)) in runs.rights_calls
-
-
-def test_the_user_a_run_acts_as_is_not_rechecked_for_their_own_decision(runs, session, sent):
-    runs.lost_access.add(OWNER)
-    _, run = _waiting_run(runs, session)
-
-    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"], recheck_actor=True) == "approve"
-    assert runs.rights_calls == []
-
-
-def test_the_recheck_is_off_unless_asked_for(runs, session, sent):
-    runs.permission_holders.add(ADMIN)
-    runs.lost_access.add(OWNER)
-    _, run = _waiting_run(runs, session)
-
-    assert runs.check_schedule_decision(1, run.id, ADMIN, ["approve"]) == "approve"
+SENSITIVE = {"hitl_interrupt": {"type": "hitl", "guardrail_type": "sensitive_tool"}}
 
 
 @pytest.mark.parametrize("trigger, requested_by, recipient", [

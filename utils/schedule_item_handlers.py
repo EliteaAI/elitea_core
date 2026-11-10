@@ -37,7 +37,7 @@ from .schedule_access import (
 from .schedule_claim import fail_run, insert_run, merge_events
 from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
-from .schedule_rights import may_run_or_decide
+from .schedule_rights import may_run
 from .schedule_service import (
     INVALID_INPUT,
     ScheduleError,
@@ -487,15 +487,15 @@ def _decide(project_id: int, session, scope, run, entity_type: str, owner, body)
     owner.created_by = run_actor_id(session, run)  # the credentials are checked for the user the run acts as
     session.close()  # the checks below open their own sessions
     try:
-        decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action], is_admin=scope.is_admin)
+        decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
         checked = _credential_check(project_id, owner) if decision == "approve" else "unknown"
         if checked == "missing":
             return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
-        apply_schedule_decision(project_id, run_id, decision, scope.user_id)
+        apply_schedule_decision(project_id, run_id, decision)
         if checked == "clean":  # only after the write: a lost race must leave no mark behind
             _remember_checked(run_id)
     except ScheduleDecisionForbidden:
-        return refusal("not_owner", "Only the schedule owner or a project admin can approve or reject this run", 403)
+        return refusal("not_owner", "Only the user this run acts as can approve or reject it", 403)
     except ScheduleRunNotWaiting:
         return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
     if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
@@ -699,7 +699,7 @@ class ScheduleItemHandlers:
                 row = load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            if not may_run_or_decide(project_id, row.created_by, scope.user_id, scope.is_admin):
+            if not may_run(row.created_by, scope.user_id, scope.is_admin):
                 return refusal("not_owner", "Only the owner of this schedule or a project admin can run it", 403)
             if row.version_id is None:
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
@@ -789,10 +789,10 @@ class ScheduleItemHandlers:
 
         Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
         Otherwise approve starts the run again. A run with a chat is decided in that chat.
-        Who may call: the owner, the user the run acts as or a holder of `schedules.admin`, with `schedules.run`.
-        A caller outside the schedule's scope gets 404; the body holds only approve or reject, no text.
-        Errors: 400 invalid action; 403; 404 not found, or a schedule outside the caller's scope; 409 the run is not waiting,
-        has a chat, or a credential is still missing.
+        Who may call: the user this run acts as, with `schedules.run`: the person who pressed Run now, else the owner.
+        An admin who is not that user gets 403.
+        Errors: 400 invalid action; 403 not the user the run acts as; 404 not found, or a schedule outside the caller's scope;
+        409 the run is not waiting, has a chat, or a credential is still missing.
         """
         body, error = _parse_body(ScheduleRunDecision)
         if error:
