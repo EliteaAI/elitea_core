@@ -1,6 +1,21 @@
-from typing import Any, List, Dict, Optional
+import re
+from typing import Annotated, Any, List, Dict, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+CLIENT_TEXT_LIMIT = 500
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+FailureKind = Literal["command_not_found", "exited", "timeout", "unreachable", "auth", "invalid_config"]
+
+
+def clean_client_text(value: Any) -> Any:
+    """Text a local client reports is shown to users and logged: cut it short and drop control characters."""
+    if not isinstance(value, str):
+        return value
+    return CONTROL_CHARACTERS.sub(" ", value)[:CLIENT_TEXT_LIMIT]
+
+
+ClientText = Annotated[str, BeforeValidator(clean_client_text)]
 
 
 class McpInputSchema(BaseModel):
@@ -65,11 +80,28 @@ class EliteaMcpToolkit(BaseModel):
         return hash(self.title)
 
 
+class McpFailedServer(BaseModel):
+    name: ClientText
+    transport: ClientText = "stdio"
+    kind: FailureKind
+    message: ClientText = ""
+
+
 class McpConnectSioPayload(BaseModel):
     project_id: int
     timeout_tools_list: int
     timeout_tools_call: int
     toolkit_configs: List[McpServer]
+    protocol: Optional[int] = None
+    client_id: Optional[str] = Field(None, min_length=1, max_length=128)
+    epoch: Optional[str] = Field(None, min_length=1, max_length=64)
+    generation: Optional[int] = Field(None, ge=0)
+    failed_servers: List[McpFailedServer] = Field(default_factory=list)
+
+    @property
+    def is_snapshot(self) -> bool:
+        """A client that numbers its messages sends its whole state each time; older clients only add servers."""
+        return self.generation is not None and self.client_id is not None and self.epoch is not None
 
 
 class McpToolCallSioPayload(BaseModel):
