@@ -10,8 +10,6 @@ from tools import rpc_tools
 AUTH_TIMEOUT = 3  # seconds; a check never hangs the starter thread
 PRINCIPAL_MISMATCH = 'principal does not match the owner'
 OWNER_LOST_ACCESS = 'owner lost access'
-# Saving an index schedule changes the index settings, so a run needs the same permission as the index editor
-INDEX_EDIT_PERMISSION = 'models.applications.index_meta.edit'
 ACCESS_CHECK_UNAVAILABLE = 'access check unavailable'
 DISABLED_OWNER_LOST_ACCESS = 'owner_lost_access'
 NO_TOKEN = 'no token for the owner'
@@ -98,7 +96,7 @@ def check_owner_rights(project_id: int, owner_id: int, entity_type: str | None =
     """
     # Late: the permission table pulls in the auth tools, the folder check the social RPCs
     from .folder_access import entity_access_error
-    from .schedule_access import SCHEDULE_PERMISSIONS
+    from .schedule_access import INDEX_EDIT_PERMISSION, SCHEDULE_PERMISSIONS
     is_index = entity_type == 'toolkit_index'
     try:
         permissions = rpc_tools.RpcMixin().rpc.timeout(AUTH_TIMEOUT).auth_get_project_user_permissions(

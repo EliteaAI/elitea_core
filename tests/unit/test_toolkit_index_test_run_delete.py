@@ -13,7 +13,11 @@ PROJECT_ID = 7
 
 
 @pytest.fixture
-def tools_env(env):  
+def tools_env(env):
+    return load_tools_env(env)
+
+
+def load_tools_env(env):
     """The SQLite environment with `utils/application_tools.py` loaded over it."""
     sys.modules[f"{PACKAGE}.models.all"].EntityToolMapping = MagicMock()
     for name in ("models.indexer", "utils.exceptions", "utils.utils"):

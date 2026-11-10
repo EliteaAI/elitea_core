@@ -13,7 +13,6 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).parent))  # the shared harness lives beside this file
 from fixtures import schedule_sqlite as sqlite_db  # noqa: E402
 from test_7011_schedule_crud_api import (  # noqa: E402,F401 -- `harness` is a fixture
-    ADMIN,
     OTHER_ID,
     OWNER_ID,
     PACKAGE,
@@ -111,6 +110,7 @@ def index(harness, monkeypatch):
         session.add(toolkit_model(id=TOOLKIT_ID, name='Docs toolkit', type='artifact'))
         session.commit()
     sys.modules[f'{PACKAGE}.utils.folder_access'].TOOLKIT_ENTITY_TYPES = ('artifact',)
+    harness.permissions.add('models.applications.index_meta.edit')  # the caller may edit indexes
     service = sys.modules[f'{PACKAGE}.utils.schedule_service']
     monkeypatch.setattr(service, 'read_index_configuration',
                         lambda project_id, toolkit, index_name: state.configuration)
@@ -208,8 +208,16 @@ def test_the_active_test_run_of_an_index_refuses_the_next_one_whoever_started_it
     response = index.test_run()
 
     assert_refusal(response, 409, 'A run of this index is active', code='run_active')
-    assert response[0]['active_run_id'] == active
+    assert response[0]['active_run_id'] is None  # the id of another user's run stays out of the answer
     assert index.run_ids() == [active] and index.starts == []
+
+
+def test_the_own_active_test_run_of_an_index_is_named_in_the_refusal(harness, index):
+    active = index.add_run(requested_by=OWNER_ID, status='running')
+
+    response = index.test_run()
+
+    assert_refusal(response, 409, 'A run of this index is active', code='run_active', active_run_id=active)
 
 
 def test_a_waiting_test_run_of_an_index_also_refuses_the_next_one(harness, index):

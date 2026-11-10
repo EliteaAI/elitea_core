@@ -74,6 +74,7 @@ def env(harness, monkeypatch):
                                   settings={'pgvector_configuration': {'elitea_title': 'store'}}))
         session.commit()
     sys.modules[f'{PACKAGE}.utils.folder_access'].TOOLKIT_ENTITY_TYPES = ('artifact',)
+    harness.permissions.add('models.applications.index_meta.edit')  # the caller may edit indexes
     service = sys.modules[f'{PACKAGE}.utils.schedule_service']
     monkeypatch.setattr(service, 'read_index_configuration',
                         lambda project_id, toolkit, index_name: state.configuration)

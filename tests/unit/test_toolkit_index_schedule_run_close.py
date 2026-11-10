@@ -164,7 +164,8 @@ def stream(env):
 @pytest.mark.parametrize('state', ['completed', 'scheduled_reindex'])
 def test_a_completed_index_task_ends_its_run_as_success(env, state):
     run_id = env.add_run(env.seed_schedule())
-    assert env.close(state) is True
+    closed = env.close(state)
+    assert closed is True
     assert env.run(run_id) == ('success', None)
 
 
@@ -199,7 +200,8 @@ def test_a_cancelled_task_ends_its_run_as_failed_with_a_fallback_text(env):
 @pytest.mark.parametrize('state', ['created', 'in_progress', None, 'unknown'])
 def test_a_state_that_is_not_final_closes_no_run(env, state):
     run_id = env.add_run(env.seed_schedule())
-    assert env.close(state) is False
+    closed = env.close(state)
+    assert closed is False
     assert env.run(run_id) == ('running', None)
 
 
@@ -211,14 +213,17 @@ def test_a_state_enum_value_closes_the_run(env):
 
 def test_an_event_of_another_task_leaves_the_run_open(env):
     run_id = env.add_run(env.seed_schedule())
-    assert env.close('completed', task_id='task-2') is False
-    assert env.close('completed', task_id=None) is False
+    closed = env.close('completed', task_id='task-2')
+    assert closed is False
+    closed = env.close('completed', task_id=None)
+    assert closed is False
     assert env.run(run_id)[0] == 'running'
 
 
 def test_a_run_without_an_index_task_event_stays_open(env):
     run_id = env.add_run(env.seed_schedule(), task_id=None)
-    assert env.close('completed') is False
+    closed = env.close('completed')
+    assert closed is False
     assert env.run(run_id)[0] == 'running'
 
 
@@ -239,8 +244,10 @@ def test_an_agent_run_with_the_same_task_id_is_not_closed(env):
 
 def test_a_second_close_sends_no_second_notice(env):
     env.add_run(env.seed_schedule())
-    assert env.close('completed') is True
-    assert env.close('completed') is False
+    closed = env.close('completed')
+    assert closed is True
+    closed = env.close('completed')
+    assert closed is False
     assert [event for event, _, _ in env.notices] == ['schedule_run_succeeded']
 
 

@@ -96,24 +96,49 @@ def schema_module(isolated_sys_modules, monkeypatch):
 
 
 def test_toolkit_index_ddl_every_statement_is_guarded_so_a_rerun_is_a_no_op(schema_module):
-    for sql in schema_module.toolkit_index_statements("p_3"):
+    for sql in schema_module.toolkit_index_statements():
         guarded = ("IF NOT EXISTS" in sql or "DROP NOT NULL" in sql or sql.startswith("COMMENT ON")
                    or "IF EXISTS (SELECT 1 FROM pg_constraint" in sql)
         assert guarded, sql
-        assert '"p_3"' in sql
+        assert '"p_' not in sql
 
 
 def test_toolkit_index_ddl_every_new_column_gets_a_comment(schema_module):
-    sql = "\n".join(schema_module.toolkit_index_statements("p_3"))
+    sql = "\n".join(schema_module.toolkit_index_statements())
     for name, _ in schema_module.COMMENTS:
-        assert f'COMMENT ON COLUMN "p_3".entity_schedules.{name} IS' in sql
+        assert f"COMMENT ON COLUMN entity_schedules.{name} IS" in sql
 
 
 def test_toolkit_index_ddl_statement_order_relaxes_before_it_constrains(schema_module):
-    statements = schema_module.toolkit_index_statements("p_3")
+    statements = schema_module.toolkit_index_statements()
     first = {key: next(i for i, sql in enumerate(statements) if key in sql)
              for key in ("DROP NOT NULL", "ADD COLUMN IF NOT EXISTS toolkit_id", "ck_entity_schedules_target",
                          "uq_entity_schedules_toolkit_index")}
     assert first["DROP NOT NULL"] < first["ck_entity_schedules_target"]
     assert first["ADD COLUMN IF NOT EXISTS toolkit_id"] < first["ck_entity_schedules_target"]
     assert first["ck_entity_schedules_target"] < first["uq_entity_schedules_toolkit_index"]
+
+
+def test_toolkit_index_ddl_runs_in_the_project_schema_through_a_bound_search_path(schema_module):
+    executed = []
+
+    class Session:
+        def execute(self, statement, params=None):
+            executed.append((str(statement), params))
+
+        def commit(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    schema_module.db = types.SimpleNamespace(get_session=lambda pid: Session())
+    migrated, failed = schema_module.apply_toolkit_index_schedule_columns([3])
+    assert (migrated, failed) == ([3], [])
+    assert executed[0][1] == {"path": "p_3"}
+    assert "set_config('search_path', :path, true)" in executed[0][0]
+    assert [sql for sql, _ in executed[1:]] == list(schema_module.toolkit_index_statements())
+    assert all(params is None for _, params in executed[1:])

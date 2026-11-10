@@ -163,6 +163,9 @@ class ImportEnv:
 def env(import_env, monkeypatch):
     folder_access = sys.modules[f'{PACKAGE}.utils.folder_access']
     folder_access.TOOLKIT_ENTITY_TYPES = ('toolkit',)
+    # The importing admin may edit indexes; the schedule scope reads the caller's permissions once
+    monkeypatch.setattr(sys.modules['tools'].auth, 'resolve_permissions',
+                        lambda **kwargs: {'models.applications.index_meta.edit'}, raising=False)
     load_plugin_module('utils/schedule_test_runs.py', 'utils.schedule_test_runs')  # the index insert reads its error codes
     holder = ImportEnv(import_env)
     reader = mock.create_autospec(import_env.service.read_index_configuration, side_effect=holder.read)

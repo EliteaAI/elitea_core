@@ -5,8 +5,11 @@ from queue import Empty
 from types import SimpleNamespace
 
 import pytest
+from unit import test_7011_schedule_access as access_tests
 from unit._tool_spend_loader import load
-from unit.test_7011_schedule_access import FakeAuth, _scope, load as access_loader  # noqa: F401 -- fixture
+
+FakeAuth, _scope = access_tests.FakeAuth, access_tests._scope
+access_loader = access_tests.load  # the loader fixture of the access tests, bound here under its own name
 
 LOST = "owner lost access"
 UNAVAILABLE = "access check unavailable"

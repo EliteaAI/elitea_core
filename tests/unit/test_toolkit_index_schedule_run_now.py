@@ -9,13 +9,16 @@ import types
 from unittest.mock import create_autospec
 
 import pytest
+from fixtures.helpers import load_module_with_stubs
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))  # the shared harness lives beside this file
 from test_7011_schedule_crud_api import (  # noqa: E402,F401 -- `harness` is a fixture
     ADMIN,
+    ADMIN_ID,
     OTHER_ID,
     OWNER_ID,
     PACKAGE,
+    PLUGIN_ROOT,
     PROJECT_ID,
     assert_refusal,
 )
@@ -88,6 +91,8 @@ def index(harness, monkeypatch):
     state.schedule_id = harness.seed(
         entity_type='toolkit_index', application_id=None, version_id=None, prompt=None, variables=[],
         toolkit_id=TOOLKIT_ID, index_name=INDEX)
+    sys.modules[f'{PACKAGE}.utils.folder_access'].TOOLKIT_ENTITY_TYPES = ('artifact',)
+    harness.permissions.add('models.applications.index_meta.edit')  # the owner may edit indexes
     harness.module.start_schedule_run = lambda *args: state.starts.append(args) or True
     monkeypatch.setattr(harness.module, '_index_row_is_live', lambda project_id, toolkit, name: state.live)
 
@@ -148,8 +153,16 @@ def test_run_now_over_a_live_index_row_answers_409_and_inserts_no_run(harness, i
     assert index.starts == []
 
 
-def test_run_now_over_an_active_test_run_of_the_index_names_that_run(harness, index):
-    test_run = index.add_test_run(requested_by=OTHER_ID)
+def test_run_now_over_a_test_run_of_another_user_does_not_name_that_run(harness, index):
+    index.add_test_run(requested_by=OTHER_ID)
+    response = index.run()
+    assert_refusal(response, 409, 'A run of this index is active', code='run_active')
+    assert response[0]['active_run_id'] is None
+    assert index.starts == []
+
+
+def test_run_now_over_the_own_test_run_of_the_index_names_that_run(harness, index):
+    test_run = index.add_test_run(requested_by=OWNER_ID)
     assert_refusal(index.run(), 409, 'A run of this index is active', code='run_active', active_run_id=test_run)
     assert index.starts == []
 
@@ -169,6 +182,50 @@ def test_run_now_of_an_index_is_refused_for_an_admin_who_is_not_the_owner(harnes
     harness.request_as(OTHER_ID, ADMIN)
     assert_refusal(index.run(), 403, code='not_owner')
     assert index.runs() == []
+
+
+def test_run_now_of_an_index_is_refused_for_an_owner_without_the_index_edit_permission(harness, index):
+    harness.permissions.discard('models.applications.index_meta.edit')
+    assert_refusal(index.run(), 403, code='read_only')
+    assert index.runs() == []
+    assert index.starts == []
+
+
+def test_run_now_of_an_index_is_refused_for_an_owner_who_cannot_write_the_toolkit_folder(harness, index):
+    harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
+    assert_refusal(index.run(), 404, code='not_found')
+    assert index.starts == []
+
+
+CANNOT_USE = 'the new owner cannot use schedules'
+
+
+@pytest.fixture
+def owner_check(harness):
+    """The real owner module with a fake eligibility check that, like the real one, needs the toolkit id of an index."""
+    load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py', f'{PACKAGE}.utils.schedule_prerun')
+    module = load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_owner.py', f'{PACKAGE}.utils.schedule_owner')
+    module.seen = []
+
+    def validate_new_owner(project_id, owner_id, entity_type=None, entity_id=None):
+        module.seen.append((entity_type, entity_id))
+        return None if entity_id == TOOLKIT_ID and owner_id == OTHER_ID else CANNOT_USE
+
+    module.validate_new_owner = validate_new_owner
+    harness.request_as(ADMIN_ID, ADMIN)
+    return module
+
+
+def test_the_owner_change_of_an_index_row_checks_the_new_owner_against_the_toolkit(harness, index, owner_check):
+    body, status = harness.call('post', {'owner_id': OTHER_ID}, index.schedule_id, suffix='/owner')
+    assert (status, body['created_by']) == (200, OTHER_ID)
+    assert owner_check.seen == [('toolkit_index', TOOLKIT_ID)]
+
+
+def test_the_owner_change_of_an_index_row_refuses_a_new_owner_without_the_index_rights(harness, index, owner_check):
+    response = harness.call('post', {'owner_id': OTHER_ID + 100}, index.schedule_id, suffix='/owner')
+    assert_refusal(response, 400, CANNOT_USE, code='invalid_input', field='owner_id')
+    assert harness.row(index.schedule_id).created_by == OWNER_ID
 
 
 def test_an_agent_row_without_a_version_is_still_refused(harness, index):

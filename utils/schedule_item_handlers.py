@@ -14,7 +14,7 @@ from sqlalchemy.exc import DBAPIError
 from tools import VaultClient, auth, db
 
 from ..models.all import EliteATool
-from ..models.entity_schedule import ACTIVE_STATUSES, EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
     INDEX_NAME_MAX,
@@ -47,6 +47,7 @@ from .schedule_service import (
     audit_schedule_event,
     check_entity,
     check_index_body,
+    check_index_rights,
     check_schedule_body,
     check_webhook_owner_edit,
     create_schedule,
@@ -616,23 +617,28 @@ def _index_row_is_live(project_id: int, toolkit, index_name: str) -> bool:
         return False
 
 
-def _index_busy(session, project_id: int, toolkit_id: int, index_name: str, schedule_id: int | None = None):
+def _index_busy(session, project_id: int, user_id: int, toolkit_id: int, index_name: str,
+                schedule_id: int | None = None):
     """The 409 `run_active` answer while a run of the index is active, else None.
 
     The unique index of an active Test Run keys on the agent, which an index run does not have, so the toolkit row
-    is locked first: a second caller waits for the commit of the first and then sees its run.
+    is locked first: a second caller waits for the commit of the first and then sees its run. The answer names the
+    run only when the caller owns it: another user's Test Run id stays out of the body.
     """
     toolkit = session.scalars(select(EliteATool).where(EliteATool.id == toolkit_id).with_for_update()).one_or_none()
+    shown_id = None
     try:
         with session.begin_nested():  # a missing Test Run column must not abort the outer transaction
             active_id = active_index_test_run_id(session, toolkit_id, index_name)
+            if active_id is not None:
+                shown_id = active_test_run_id(session, user_id, toolkit_id=toolkit_id, index_name=index_name)
     except TestRunUnavailable:
         active_id = None  # no Test Run column yet, so no Test Run exists
     if active_id is None and schedule_id is not None:
-        active_id = session.scalar(select(EntityScheduleRun.id).where(
+        active_id = shown_id = session.scalar(select(EntityScheduleRun.id).where(
             EntityScheduleRun.schedule_id == schedule_id, EntityScheduleRun.status.in_(ACTIVE_STATUSES)).limit(1))
     if active_id is not None or (toolkit is not None and _index_row_is_live(project_id, toolkit, index_name)):
-        return refusal("run_active", INDEX_RUN_ACTIVE_TEXT, 409, active_run_id=active_id)
+        return refusal("run_active", INDEX_RUN_ACTIVE_TEXT, 409, active_run_id=shown_id)
     return None
 
 
@@ -894,6 +900,11 @@ class ScheduleItemHandlers:
             if row.created_by != scope.user_id:  # an admin sees the row but never runs it as the owner
                 return refusal("not_owner", "Only the owner of this schedule can run it", 403)
             is_index = row.entity_type == TOOLKIT_INDEX
+            if is_index and not scope.is_admin:  # the owner needs the rights a save needs
+                try:
+                    check_index_rights(project_id, row.toolkit_id, scope)
+                except ScheduleError as e:
+                    return e.response
             if row.version_id is None and not is_index:  # an index has no version by design
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
             sample_error = _sample_body_error(row, body)
@@ -904,7 +915,7 @@ class ScheduleItemHandlers:
             entity_type = row.entity_type
             try:   # the owner's own run (#7254), from this signed-in request; None when off. Built before the run row
                 if is_index:
-                    busy = _index_busy(session, project_id, row.toolkit_id, row.index_name)
+                    busy = _index_busy(session, project_id, scope.user_id, row.toolkit_id, row.index_name)
                     if busy:
                         return busy
                 from .mandate_admission import owner_run_request, schedule_trigger_ref  # pylint: disable=C0415
@@ -952,7 +963,7 @@ class ScheduleItemHandlers:
             try:
                 _check_test_body(session, project_id, body)
                 if is_index:
-                    busy = _index_busy(session, project_id, body.toolkit_id, body.index_name)
+                    busy = _index_busy(session, project_id, scope.user_id, body.toolkit_id, body.index_name)
                     if busy:
                         return busy
                 run_id = insert_test_run(session, scope.user_id, body)
@@ -1161,7 +1172,8 @@ class ScheduleItemHandlers:
                 row = load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            reason = validate_new_owner(project_id, owner_id, row.entity_type, row.application_id)
+            entity_id = row.toolkit_id if row.entity_type == TOOLKIT_INDEX else row.application_id
+            reason = validate_new_owner(project_id, owner_id, row.entity_type, entity_id)
             if reason == ACCESS_CHECK_UNAVAILABLE:
                 return refusal("access_check_unavailable", reason, 503)
             if reason:

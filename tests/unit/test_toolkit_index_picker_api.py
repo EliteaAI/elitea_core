@@ -9,8 +9,17 @@ from unit import test_toolkit_index_schedule_service as service_env
 from unit import test_toolkit_index_test_run_delete as run_delete
 
 PACKAGE, env = service_env.PACKAGE, service_env.env
-api, tools_env = api_block.api, run_delete.tools_env
 BODY = {"cron": "0 3 * * *", "enabled": True, "created_by": 7}
+
+
+@pytest.fixture
+def api(env):
+    return api_block.load_api(env)
+
+
+@pytest.fixture
+def tools_env(env):
+    return run_delete.load_tools_env(env)
 
 
 @pytest.mark.parametrize("configuration, expected", [
@@ -96,9 +105,9 @@ def test_a_failing_summary_answers_400_without_the_error_text(api, monkeypatch):
 
 
 def with_pgvector(tools_env, monkeypatch, connection_string, counts):
-    vectorstore = types.ModuleType(f"{PACKAGE}.utils.vectorstore")
-    vectorstore.get_pgvector_connection_string = lambda project_id: connection_string
-    monkeypatch.setitem(sys.modules, vectorstore.__name__, vectorstore)
+    secrets = {} if connection_string is None else {"pgvector_project_connstr": connection_string}
+    vault = types.SimpleNamespace(get_secrets=lambda: secrets)
+    monkeypatch.setattr(tools_env.module, "VaultClient", lambda project_id: vault, raising=False)
     monkeypatch.setattr(tools_env.module, "batch_count_toolkit_indexes", counts, raising=False)
     tools = sys.modules[f"{PACKAGE}.models.all"].EliteATool
     with tools_env.session_factory() as session:

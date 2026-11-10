@@ -631,8 +631,6 @@ def _toolkit_ids_with_indexes(project_id: int, toolkit_query) -> list[int]:
     One batch count for the whole query, as the unfiltered list runs it. Without a vector store connection
     or on a failed count no toolkit counts, so the picker shows none rather than a toolkit it cannot use.
     """
-    from .vectorstore import get_pgvector_connection_string
-
     schema_ids = []
     for row_id, row_settings in toolkit_query.with_entities(EliteATool.id, EliteATool.settings).all():
         pgvector = row_settings.get('pgvector_configuration') if isinstance(row_settings, dict) else None
@@ -641,7 +639,7 @@ def _toolkit_ids_with_indexes(project_id: int, toolkit_query) -> list[int]:
     if not schema_ids:
         return []
     try:
-        connection_string = get_pgvector_connection_string(project_id)
+        connection_string = VaultClient(project_id).get_secrets().get('pgvector_project_connstr')
         if not connection_string:
             log.warning("No pgvector_project_connstr in vault for project_id=%s; has_indexes finds no toolkit", project_id)
             return []

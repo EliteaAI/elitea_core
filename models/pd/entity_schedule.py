@@ -55,8 +55,8 @@ class ScheduleTiming(BaseModel):
         return v
 
 
-MAX_ID = 2**31 - 1  # the database integer range; schedule_list holds the same bound, this module loads without it
-DbId = Annotated[int, Field(ge=1, le=MAX_ID)]
+# The database integer range. schedule_list holds the same type; the body-model tests load this module without it
+DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]
 NAME_MAX = 256
 DESCRIPTION_MAX = 2304  # the entity_schedules.description column width
 RunMode = Literal['entry_point', 'prompt']

@@ -67,7 +67,8 @@ def rows(env):
 
 def test_the_write_adds_the_row_and_drops_only_the_moved_keys(migration):
     migration.set_meta({"docs": {"schedules": {"7": BODY, "-1": TEAM, "9": BODY}}, "other": {"schedules": {"7": BODY}}})
-    assert write(migration, row_values(moved={"7": BODY, "-1": TEAM}), keys=("7", "-1")) is True
+    written = write(migration, row_values(moved={"7": BODY, "-1": TEAM}), keys=("7", "-1"))
+    assert written is True
     found = rows(migration)
     assert [(r.index_name, r.toolkit_id, r.entity_type) for r in found] == [("docs", 3, "toolkit_index")]
     assert list(migration.schedules_of("docs")) == ["9"]
@@ -77,7 +78,8 @@ def test_the_write_adds_the_row_and_drops_only_the_moved_keys(migration):
 def test_the_write_keeps_the_json_when_the_index_already_has_a_row(migration):
     migration.set_meta({"docs": {"schedules": {"7": BODY}}})
     migration.seed_index("docs")
-    assert write(migration, row_values()) is False
+    written = write(migration, row_values())
+    assert written is False
     assert len(rows(migration)) == 1
     assert list(migration.schedules_of("docs")) == ["7"]
 

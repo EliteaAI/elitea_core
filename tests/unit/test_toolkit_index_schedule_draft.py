@@ -83,6 +83,7 @@ def env(monkeypatch):
     env = DraftEnv()
     env.hidden, env.with_indexes, env.blocked, env.config = set(), set(), set(), {}
     with sandbox(monkeypatch, env) as (Base, engine):
+        sqlite_db.install_trace_span(types.SimpleNamespace(set_attribute=lambda key, value: None))
         env.EliteATool = sys.modules[f'{PACKAGE}.models.all'].EliteATool
         tools = sqlite_db.LenientModule('tools')
         tools.db = types.SimpleNamespace(with_project_schema_session=lambda project_id: env.session_factory())
@@ -107,7 +108,8 @@ def env(monkeypatch):
                 ('folder_access', {'entity_access_error': env.access, 'folder_exclusion_clause': env.folder_clause,
                                    'TOOLKIT_ENTITY_TYPES': TOOLKIT_TYPES, 'APPLICATION_ENTITY_TYPES': ['agent']}),
                 ('application_tools', {'_toolkit_ids_with_indexes': env.index_counts}),
-                ('schedule_settings', {'is_run_without_asking_allowed': env.run_without_asking})):
+                ('schedule_settings', {'is_run_without_asking_allowed': env.run_without_asking}),
+                ('schedule_notifications', {'notify_schedule_event': lambda *args, **kwargs: True})):
             module = types.ModuleType(f'{PACKAGE}.utils.{name}')
             module.__dict__.update(attrs)
             monkeypatch.setitem(sys.modules, module.__name__, module)
@@ -115,7 +117,11 @@ def env(monkeypatch):
         env.EntitySchedule = sqlite_db.create_schedule_table(load_plugin_module, Base, engine)
         load_plugin_module('models/pd/index.py', 'models.pd.index')
         load_plugin_module('utils/schedule_timing.py', 'utils.schedule_timing')
+        load_plugin_module('utils/constants.py', 'utils.constants')
+        load_plugin_module('utils/schedule_access.py', 'utils.schedule_access')
+        load_plugin_module('models/pd/schedule_list.py', 'models.pd.schedule_list')
         load_plugin_module('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
+        load_plugin_module('utils/schedule_service.py', 'utils.schedule_service')  # the one interval floor rule
         env.models = load_plugin_module('models/pd/generate_schedule_draft.py', 'models.pd.generate_schedule_draft')
         env.module = load_plugin_module('utils/schedule_draft_utils.py', 'utils.schedule_draft_utils')
         yield env

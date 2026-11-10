@@ -8,7 +8,7 @@ import pytest
 from fixtures import schedule_sqlite as sqlite_db
 from fixtures.helpers import load_module_with_stubs
 from pydantic import ValidationError
-from unit.test_7011_legacy_migration_rows import migration  # noqa: F401 -- the fixture
+from unit import test_7011_legacy_migration_rows as legacy_rows
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
@@ -16,13 +16,15 @@ PROJECT_ID = 7
 OWNER_ID, OTHER_ID = 42, 43
 DAILY = '0 9 * * *'
 SAVED = {'chunk_size': 500}
+INDEX_EDIT = 'models.applications.index_meta.edit'
+migration = legacy_rows.migration  # the fixture of the migration tests, bound here under its own name
 
 
 class Env:
     """The loaded service, the body models and one SQLite database with an artifact toolkit."""
 
-    def scope(self, user_id=OWNER_ID):
-        return self.access.ScheduleScope(user_id=user_id, is_admin=False, permissions=frozenset())
+    def scope(self, user_id=OWNER_ID, is_admin=False):
+        return self.access.ScheduleScope(user_id=user_id, is_admin=is_admin, permissions=frozenset(self.permissions))
 
     def index_body(self, **changes):
         values = {'name': 'Nightly index', 'entity_type': 'toolkit_index', 'toolkit_id': 3, 'index_name': 'docs',
@@ -39,11 +41,11 @@ class Env:
             **{'entity_type': 'toolkit_index', 'application_id': None, 'version_id': None, 'prompt': None,
                'toolkit_id': 3, 'index_name': index_name, **fields})
 
-    def update(self, schedule_id, **changes):
+    def update(self, schedule_id, is_admin=False, **changes):
         with self.session_factory() as session:
             row = session.get(self.EntitySchedule, schedule_id)
             return self.service.update_schedule(
-                session, PROJECT_ID, row, self.pd.ScheduleUpdate(**changes), self.scope())
+                session, PROJECT_ID, row, self.pd.ScheduleUpdate(**changes), self.scope(is_admin=is_admin))
 
     def check(self, **overrides):
         values = {'toolkit_id': 3, 'index_name': 'docs', **overrides}
@@ -65,7 +67,9 @@ def env(monkeypatch):
     engine = sqlite_db.sqlite_engine()
     env.session_factory = lambda: sqlite_db.orm.Session(engine, expire_on_commit=False)
     tools = sqlite_db.LenientModule('tools')
-    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': OWNER_ID})
+    env.permissions = {INDEX_EDIT}
+    tools.auth = types.SimpleNamespace(
+        current_user=lambda: {'id': OWNER_ID}, resolve_permissions=lambda mode=None, project_id=None: env.permissions)
     tools.config = types.SimpleNamespace(
         ADMINISTRATION_MODE='administration', DEFAULT_MODE='default', POSTGRES_TENANT_SCHEMA='tenant')
     tools.db = types.SimpleNamespace(get_session=lambda project_id=None: env.session_factory(), Base=Base)
@@ -208,6 +212,64 @@ def test_check_entity_refuses_an_index_with_a_legacy_schedule(env):
     assert error_of(excinfo)[:2] == ('index_scheduled', 409)
 
 
+def test_check_entity_refuses_a_caller_without_the_index_edit_permission(env):
+    env.permissions = set()
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.check()
+    assert error_of(excinfo)[:2] == ('read_only', 403)
+    assert env.lookups == []
+
+
+def test_check_entity_keeps_a_hidden_toolkit_a_404_for_a_caller_without_the_permission(env):
+    env.permissions = set()
+    env.folder_refusal = ({'ok': False, 'error': 'Not found'}, 404)
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.check()
+    assert error_of(excinfo)[:2] == ('not_found', 404)
+
+
+def test_create_refuses_a_caller_without_the_index_edit_permission_and_stores_nothing(env):
+    env.permissions = set()
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.create()
+    assert error_of(excinfo)[:2] == ('read_only', 403)
+    with env.session_factory() as session:
+        assert session.query(env.EntitySchedule).count() == 0
+
+
+def test_update_of_an_index_row_refuses_an_owner_without_the_index_edit_permission(env):
+    schedule_id = env.seed_index()
+    env.permissions = set()
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.update(schedule_id, enabled=False)
+    assert error_of(excinfo)[:2] == ('read_only', 403)
+    with env.session_factory() as session:
+        assert session.get(env.EntitySchedule, schedule_id).enabled is True
+
+
+def test_update_of_an_index_row_refuses_an_owner_without_folder_write(env):
+    schedule_id = env.seed_index()
+    env.folder_refusal = ({'ok': False, 'error': 'read only'}, 403)
+    with pytest.raises(env.service.ScheduleError) as excinfo:
+        env.update(schedule_id, name='Renamed')
+    assert error_of(excinfo)[:2] == ('read_only', 403)
+    assert env.folder_calls == [(['toolkit', 'mcp'], 3, True)]
+
+
+def test_update_of_an_index_row_lets_an_admin_change_any_row_without_the_permission(env):
+    schedule_id = env.seed_index()
+    env.permissions = set()
+    assert env.update(schedule_id, is_admin=True, name='Renamed').name == 'Renamed'
+    assert env.folder_calls == []
+
+
+def test_update_of_an_agent_row_needs_neither_the_index_permission_nor_a_toolkit_folder(env):
+    schedule_id = sqlite_db.seed_schedule(env.session_factory, env.EntitySchedule, OWNER_ID)
+    env.permissions = set()
+    assert env.update(schedule_id, name='Renamed').name == 'Renamed'
+    assert env.folder_calls == []
+
+
 def test_check_entity_lets_another_index_of_the_toolkit_through(env):
     env.seed_index(index_name='wiki')
     env.check()
@@ -283,6 +345,24 @@ def test_update_applies_the_index_floor_to_a_new_cron(env):
     with pytest.raises(env.service.ScheduleError) as excinfo:
         env.update(schedule_id, cron='*/30 * * * *')
     assert error_of(excinfo) == ('invalid_input', 400, 'cron')
+
+
+def test_delete_of_an_index_row_is_refused_without_the_index_edit_permission(env):
+    schedule_id = env.seed_index()
+    env.permissions = set()
+    with env.session_factory() as session:
+        row = session.get(env.EntitySchedule, schedule_id)
+        with pytest.raises(env.service.ScheduleError) as refused:
+            env.service.delete_schedule(session, PROJECT_ID, row, env.scope())
+    assert error_of(refused)[:2] == ('read_only', 403)
+    with env.session_factory() as session:
+        assert session.get(env.EntitySchedule, schedule_id) is not None
+
+
+def test_check_entity_lets_an_admin_through_without_the_index_edit_permission(env):
+    env.permissions = {env.access.SCHEDULE_PERMISSIONS['admin']}
+    assert env.check() is None
+    assert env.folder_calls == [(['toolkit', 'mcp'], 3, True)]  # the folder write still counts
 
 
 def test_resume_of_an_index_row_needs_no_version(env):

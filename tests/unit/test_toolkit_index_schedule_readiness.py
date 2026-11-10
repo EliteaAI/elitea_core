@@ -1,9 +1,11 @@
 """Toolkit Index schedules in the governance readiness: only the toolkit's credentials count, no version, no mandate."""
 import pytest
 
-from unit.test_7269_readiness_requests import (  # noqa: F401  pylint: disable=W0611 -- the shared harness fixtures
-    MEMBER, OWNER, credential, env, items, no_risks, ns,
-)
+from unit import test_7269_readiness_requests as harness
+
+MEMBER, OWNER = harness.MEMBER, harness.OWNER
+credential, items, no_risks = harness.credential, harness.items, harness.no_risks
+env, ns = harness.env, harness.ns  # the harness fixtures, bound here under their own names
 
 
 def index_schedule(ns, env, toolkit_id=1, owner=OWNER, index_name="docs"):

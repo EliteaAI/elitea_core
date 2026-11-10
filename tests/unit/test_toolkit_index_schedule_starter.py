@@ -3,7 +3,6 @@
 The modules around the starter (tokens, admission, the index worker, the vector store) are stand-ins whose signatures
 match the real ones, so a call with a wrong argument fails here. Each stand-in is set by the test through `Start`.
 """
-import pathlib
 import sys
 import types
 from unittest.mock import create_autospec

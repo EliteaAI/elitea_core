@@ -7,7 +7,8 @@ from uuid import UUID
 
 from opentelemetry import trace as otel_trace
 from pylon.core.tools import log
-from sqlalchemy import inspect, select, text, update
+from sqlalchemy import column, inspect, select, table, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 
 from ..models.all import Application, ApplicationVersion, EliteATool
@@ -16,7 +17,7 @@ from ..models.enums.all import AgentTypes, NotificationEventTypes
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
 from ..models.pd.index import _cron_gaps
 from .folder_access import entity_access_error
-from .schedule_access import ScheduleScope
+from .schedule_access import INDEX_EDIT_PERMISSION, ScheduleScope, schedule_scope
 from .schedule_notifications import notify_schedule_event
 from .schedule_timing import check_enabled_cap, compute_next_run, end_of_day, min_interval_minutes_for
 
@@ -35,6 +36,7 @@ TOOLKIT_INDEX = 'toolkit_index'
 TOOLKIT_INDEX_UNIQUE = 'uq_entity_schedules_toolkit_index'
 INDEX_SCHEDULED = 'This index already has a schedule'
 INDEX_UNAVAILABLE = 'The index could not be checked; try again'
+INDEX_READ_ONLY = 'You have read-only access to this index'
 # A Toolkit Index run starts from the saved index settings: no version, input or approval of its own
 INDEX_REFUSED_FIELDS = ('application_id', 'version_id', 'run_mode', 'prompt', 'risk_ack')
 
@@ -134,7 +136,8 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
     has no schedule yet, in `entity_schedules` or in the legacy `indexes_meta` of the toolkit.
     """
     if entity_type == TOOLKIT_INDEX:
-        return check_toolkit_index(session, project_id, toolkit_id, index_name)
+        check_toolkit_index(session, project_id, toolkit_id, index_name)
+        return
     if application_id is None or version_id is None:
         raise _field_error('application_id' if application_id is None else 'version_id', 'Field required')
     if session.get(Application, application_id) is None:
@@ -175,12 +178,12 @@ def read_index_configuration(project_id: int, toolkit, index_name: str) -> dict 
     engine = _get_pgvector_engine(connection_string)
     if not inspect(engine).has_table('langchain_pg_embedding', schema=schema):
         return None
+    # Core constructs, not SQL text: the schema name is quoted as an identifier and the index name is a bound value
+    meta = table('langchain_pg_embedding', column('cmetadata', JSONB), schema=schema).c.cmetadata
+    query = select(meta['index_configuration'].astext.label('configuration')).where(
+        meta['type'].astext == 'index_meta', meta['collection'].astext == index_name).limit(1)
     with engine.connect() as conn:
-        found = conn.execute(text(
-            f"SELECT cmetadata ->> 'index_configuration' AS configuration "  # nosec B608 - the schema is a toolkit id
-            f'FROM "{schema}".langchain_pg_embedding '
-            f"WHERE cmetadata ->> 'type' = 'index_meta' AND cmetadata ->> 'collection' = :name LIMIT 1"
-        ), {'name': index_name}).first()
+        found = conn.execute(query).first()
     if found is None:
         return None
     configuration = found.configuration
@@ -192,22 +195,34 @@ def read_index_configuration(project_id: int, toolkit, index_name: str) -> dict 
     return configuration if isinstance(configuration, dict) else {}
 
 
+def check_index_rights(project_id: int, toolkit_id: int | None, scope: ScheduleScope) -> None:
+    """Raise unless the caller may write the folder of the toolkit and holds the index edit permission.
+
+    The folder answers first, so a hidden toolkit stays a 404; a missing permission answers like a read-only folder.
+    """
+    from .folder_access import TOOLKIT_ENTITY_TYPES  # late: only an index schedule needs the toolkit folder types
+    if toolkit_id is not None:
+        access_error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True)
+        if access_error:
+            body, status = access_error
+            raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
+    if not scope.is_admin and INDEX_EDIT_PERMISSION not in scope.permissions:  # an admin needs no index edit grant
+        raise ScheduleError('read_only', INDEX_READ_ONLY, 403)
+
+
 def check_toolkit_index(session, project_id: int, toolkit_id: int | None, index_name: str | None) -> None:
     """Raise unless the index can get a schedule.
 
-    Order: the toolkit exists and the caller may write its folder (a hidden toolkit answers 404 before the
-    index is looked at), the index exists and has saved settings, and nothing schedules the index yet.
+    Order: the toolkit exists, the caller may write its folder and holds the index edit permission (a hidden
+    toolkit answers 404 before the index is looked at), the index exists and has saved settings, and nothing
+    schedules the index yet.
     """
     if toolkit_id is None or not index_name:
         raise _field_error('toolkit_id' if toolkit_id is None else 'index_name', 'Field required')
     toolkit = session.get(EliteATool, toolkit_id)
     if toolkit is None:
         raise _field_error('toolkit_id', 'The toolkit is not in this project')
-    from .folder_access import TOOLKIT_ENTITY_TYPES  # late: only an index schedule needs the toolkit folder types
-    access_error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True)
-    if access_error:
-        body, status = access_error
-        raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
+    check_index_rights(project_id, toolkit_id, schedule_scope(project_id))
     try:
         configuration = read_index_configuration(project_id, toolkit, index_name)
     except Exception as e:  # noqa: BLE001 -- an unreachable store is a retry for the caller, not a verdict
@@ -477,6 +492,8 @@ def update_schedule(
         raise _field_error(set_cron_fields[0], 'A webhook has no cron, time zone or stop date')
     is_index = row.entity_type == TOOLKIT_INDEX
     if is_index:
+        if not scope.is_admin:  # an admin changes any row; the owner needs the rights a save needs
+            check_index_rights(project_id, row.toolkit_id, scope)
         _check_index_changes(row, body, changes)
     resuming = changes.get('enabled') is True and not row.enabled
     # A Toolkit Index runs the saved index settings and has no version to choose
@@ -523,6 +540,8 @@ def update_schedule(
 
 def delete_schedule(session, project_id: int, row: EntitySchedule, scope: ScheduleScope) -> None:
     """Delete the schedule; an admin deleting another owner's schedule is audited and the owner told."""
+    if row.entity_type == TOOLKIT_INDEX and not scope.is_admin:  # the owner needs the rights a save needs
+        check_index_rights(project_id, row.toolkit_id, scope)
     admin_change = _is_admin_change(row, scope)
     if admin_change:
         mark_audit_span(row)

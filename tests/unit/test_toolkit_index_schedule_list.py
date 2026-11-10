@@ -4,9 +4,12 @@ import sys
 
 import pytest
 from fixtures.helpers import load_module_with_stubs
-from unit.test_toolkit_index_schedule_service import (  # noqa: F401  pylint: disable=W0611 -- the fixture and its names
-    OTHER_ID, OWNER_ID, PACKAGE, PLUGIN_ROOT, env, sqlite_db,
-)
+from unit import test_toolkit_index_schedule_service as service_tests
+
+OTHER_ID, OWNER_ID, PACKAGE, PLUGIN_ROOT = (
+    service_tests.OTHER_ID, service_tests.OWNER_ID, service_tests.PACKAGE, service_tests.PLUGIN_ROOT)
+sqlite_db = service_tests.sqlite_db
+env = service_tests.env  # the SQLite harness fixture, bound here under its own name
 
 
 @pytest.fixture

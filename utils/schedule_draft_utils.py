@@ -1,14 +1,12 @@
 """Check the fields of a Build with AI schedule draft one by one (EL-7011, US-21)."""
 import json
-from datetime import date, timedelta
+from datetime import date
 
 from pydantic import ValidationError
 
 from ..models.pd.entity_schedule import ScheduleTiming
 from ..models.pd.generate_schedule_draft import ScheduleDraft
-from ..models.pd.index import _cron_gaps
 from .schedule_settings import is_run_without_asking_allowed
-from .schedule_timing import min_interval_minutes_for
 
 TOOLKIT_INDEX = 'toolkit_index'
 INDEX_SLOT = '{toolkit_indexes}'  # the placeholder of the service prompt that lists the pairs below
@@ -167,10 +165,12 @@ def _check_schedule(raw: dict, out: dict, warn, index: bool = False) -> None:
         except ValueError as error:
             warn(field, str(error))
     if index and out.get('cron'):
-        floor = min_interval_minutes_for(TOOLKIT_INDEX)
-        if min(_cron_gaps(out['cron'])) < timedelta(minutes=floor):
+        from .schedule_service import ScheduleError, check_index_interval  # late: the service loads the ORM models
+        try:
+            check_index_interval(out['cron'])  # the one floor rule of the save path
+        except ScheduleError as error:
             out.pop('cron')
-            warn('cron', f'Runs must be at least {floor} minutes apart')
+            warn('cron', str(error))
 
 
 def _resolve_index(index_rows: list[dict], raw: dict, locked: dict | None, out: dict, warn,

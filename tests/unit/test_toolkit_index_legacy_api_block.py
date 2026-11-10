@@ -31,7 +31,11 @@ def passthrough(*args, **kwargs):
 
 
 @pytest.fixture
-def api(env):  
+def api(env):
+    return load_api(env)
+
+
+def load_api(env):
     """`api/v2/index_schedule.py` and `api/v2/index_meta.py` loaded over the SQLite env; `env.request` holds the query."""
     tools = sys.modules["tools"]
     tools.api_tools = types.SimpleNamespace(
