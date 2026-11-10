@@ -15,8 +15,8 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.message_trace_step import MessageTraceStep
 from .schedule_claim import EVENT_LIMIT, TEXT_LIMIT
 
-# The owner and a schedules admin read the full tool result (owner decision 2026-10-21); only a huge
-# stored result is cut, at this many characters, and marked
+# The viewer reads the full tool result; for a manual or test run only the starter does (other viewers
+# get toolkit, tool and duration). Only a huge stored result is cut, at this many characters, and marked
 RESULT_LIMIT = 20_000
 TRUNCATED = ' (truncated)'
 PREVIEW_LIMIT = 120  # characters of a tool result in the one-line `text`

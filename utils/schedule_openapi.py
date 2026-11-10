@@ -524,6 +524,7 @@ OPERATIONS = {
             "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
+            "A manual or test run started by another user shows only toolkit, tool and duration. "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
             "while the status is `running` or `waiting_for_approval`.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
