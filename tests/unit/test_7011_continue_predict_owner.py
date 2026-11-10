@@ -9,10 +9,12 @@ Run via:
     python tests/run_tests.py unit/test_7011_continue_predict_owner.py -v
 """
 import ast
+import builtins
 import pathlib
 import sys
 import types
 from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 import pytest
 from fixtures.cut_source import load_cut
@@ -370,3 +372,132 @@ def test_the_resume_call_adds_the_keyword_through_the_helper_for_every_resume_ki
 
     assert '**_approve_all_kwargs(session, conversation, rpc_func)' in call
     assert body.count('getattr(self.context.rpc_manager.call, rpc_func)(') == 1  # HITL and sign-in resumes share it
+
+
+class _Rows:
+    """A fake query: every chained call returns itself, `first()` hands out the next row."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __getattr__(self, _name):
+        return lambda *_, **__: self
+
+    def first(self):
+        return self._rows.pop(0)
+
+
+class _PredictCalls:
+    """`rpc_manager.call`: any attribute is a predict RPC that records its name and keywords."""
+
+    def __init__(self):
+        self.sent = []
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            self.sent.append((name, kwargs))
+            return {'queued': True}
+        return call
+
+
+def _continue_predict(schedule_meta, events, **request):
+    """Run the real `continue_predict_sio` of rpc/chat_all.py; return the predict calls it made.
+
+    Every name the method reads from the module is a MagicMock unless it is set here.
+    """
+    cls = next(node for node in ast.parse(CHAT_ALL).body if getattr(node, 'name', None) == 'RPC')
+    method = next(node for node in cls.body if getattr(node, 'name', None) == 'continue_predict_sio')
+    method.decorator_list, method.returns = [], None
+    for arg in method.args.args:
+        arg.annotation = None
+    used = {node.id for node in ast.walk(method) if isinstance(node, ast.Name)} - set(dir(builtins))
+    helpers = [node for node in ast.parse(CHAT_ALL).body
+               if getattr(node, 'name', None) in {'_chat_trigger_kwargs', '_approve_all_kwargs'}]
+    calls = _PredictCalls()
+    resumed = types.SimpleNamespace(author_participant=None, reply_to_id=None, uuid='m-1')
+    conversation = types.SimpleNamespace(meta=schedule_meta, uuid='c-1')
+    response = types.SimpleNamespace(
+        meta={'generation': 'g'}, message_items=[], author_participant=types.SimpleNamespace(entity_name='agent'),
+        author_participant_id=3, uuid='m-1', reply_to_id=5, is_streaming=False, id=6)
+    question = types.SimpleNamespace(uuid='q-1')
+    rows = _Rows([resumed, conversation, response, question])  # in the order the method reads them
+    session = types.SimpleNamespace(
+        query=lambda *_: rows, commit=lambda: None,
+        refresh=lambda *_: None, add=lambda *_: None, flush=lambda: None)
+
+    @contextmanager
+    def get_session(_project_id):
+        yield session
+
+    parsed = types.SimpleNamespace(**{
+        'project_id': PROJECT_ID, 'message_id': 'm-1', 'conversation_uuid': 'c-1', 'thread_id': None,
+        'hitl_resume': False, 'mcp_auth_resume': False, 'hitl_decisions': None, 'hitl_action': 'approve',
+        'hitl_value': None, 'authorization_request_id': 'a-1', 'mcp_auth_action': 'authorize',
+        'token_limit_continuation': False, **request})
+    owner = types.SimpleNamespace(
+        is_chat_run_stopped=lambda _id: False, _continue_child_resume=lambda *_: None,
+        _offer_supervised_decision=lambda *_: None, finalize_timed_out_response=lambda *_, **__: None,
+        context=types.SimpleNamespace(sio=MagicMock(), rpc_manager=types.SimpleNamespace(call=calls)))
+    namespace = {name: MagicMock() for name in used}
+    namespace.update({
+        'db': types.SimpleNamespace(get_session=get_session),
+        'SioValidationError': lambda **kwargs: Invalid(kwargs['error']),
+        'SioContinuePredictModel': types.SimpleNamespace(model_validate=lambda _data: parsed),
+        'auth': types.SimpleNamespace(current_user=lambda **_: {'id': OWNER}),
+        '_check_schedule_decision': lambda *_: (None, None),
+        '_apply_schedule_decision': lambda *_: None,
+        'CHAT_PREDICT_MAPPER': {'agent': 'applications_predict_sio'},
+        'TriggerType': types.SimpleNamespace(CHAT='chat'),
+        'approves_all': lambda _session, run_id: any(
+            item.get('kind') == 'decision' and item.get('approve_all') is True for item in events.get(run_id, [])),
+        'EXECUTION_GENERATION_KEY': 'generation', 'INTERNAL_CONTINUE_TOKEN': object(),
+        'pending_interrupts': lambda _meta: [{'id': 'i-1'}],
+        'pending_authorization_requests': lambda _meta: [{'id': 'a-1'}],
+        'interrupt_identity': lambda item: item['id'], 'authorization_identity': lambda item: item['id'],
+        'get_direct_pipeline_hitl_interrupt': lambda *_: None,
+        'retire_interrupts': lambda meta, _ids: meta, 'retire_authorization_requests': lambda meta, _ids: meta,
+        'generate_payload': lambda *_, **__: {'thread_id': 't-1'},
+        'prepare_conversation_history': lambda *_: ([], [], True),
+        'generate_payload_chat_history': lambda *_, **__: ([], []),
+        'get_context_manager_feature_flag': lambda _project_id: False,
+        'is_token_limit_continuation': lambda **_: False,
+        'pop_skill_dispatch': lambda *_: ({}, None), 'pop_chat_skills': lambda _payload: {},
+        'authoring_kwargs': lambda *_: {},
+    })
+    namespace = load_cut([*helpers, method], namespace, 'chat_all.py')
+    result = namespace['continue_predict_sio'](owner, None, **{'data': {}})
+    assert result == {'queued': True}
+    return calls.sent
+
+
+APPROVE_ALL_EVENTS = {RUN_ID: [{'kind': 'paused'}, {'kind': 'decision', 'approve_all': True}]}
+PLAIN_APPROVE_EVENTS = {RUN_ID: [{'kind': 'paused'}, {'kind': 'decision', 'text': 'Approved by the schedule owner'}]}
+
+
+@pytest.mark.parametrize('request_values', [
+    {'hitl_resume': True},
+    {'mcp_auth_resume': True},
+], ids=['sensitive-tool approval', 'sign-in resume'])
+def test_a_resumed_approve_all_schedule_run_predicts_with_the_auto_approve_keyword(request_values):
+    ((rpc_func, kwargs),) = _continue_predict({'schedule_run_id': RUN_ID}, APPROVE_ALL_EVENTS, **request_values)
+
+    assert rpc_func == 'applications_predict_sio'
+    assert kwargs['auto_approve_sensitive_actions'] is True
+
+
+@pytest.mark.parametrize('request_values', [
+    {'hitl_resume': True},
+    {'mcp_auth_resume': True},
+], ids=['sensitive-tool approval', 'sign-in resume'])
+def test_a_resumed_schedule_run_without_approve_all_predicts_without_the_keyword(request_values):
+    ((_, kwargs),) = _continue_predict({'schedule_run_id': RUN_ID}, PLAIN_APPROVE_EVENTS, **request_values)
+
+    assert 'auto_approve_sensitive_actions' not in kwargs
+    assert kwargs['trigger_source'] == 'chat'
+
+
+@pytest.mark.parametrize('meta', [None, {}, {'schedule_id': 3}])
+def test_a_resumed_chat_that_is_not_a_schedule_run_predicts_without_the_keyword(meta):
+    ((_, kwargs),) = _continue_predict(meta, APPROVE_ALL_EVENTS, hitl_resume=True)
+
+    assert 'auto_approve_sensitive_actions' not in kwargs

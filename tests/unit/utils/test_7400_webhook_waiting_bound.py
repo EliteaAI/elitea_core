@@ -84,3 +84,19 @@ def test_the_waiting_limit_is_read_from_the_config(runs):
     assert runs.webhook_waiting_limit() == 2
     runs.config['scheduler']['schedules']['webhook_max_waiting_runs'] = None
     assert runs.webhook_waiting_limit() == 10
+
+
+def test_the_second_pause_of_an_approved_webhook_run_is_bounded_too(runs, session, sent):
+    schedule = _webhook_row(runs, session)
+    approved = _running(runs, session, schedule, 'webhook')
+    _pause_all(runs, session, [approved])
+    runs.apply_schedule_decision(1, approved.id, 'approve')
+    session.refresh(approved)
+    assert approved.status == 'running'
+    others = [_running(runs, session, schedule, 'webhook') for _ in range(2)]
+    _pause_all(runs, session, others)
+
+    _pause_all(runs, session, [approved])
+
+    assert [row.status for row in others] == ['waiting_for_approval', 'waiting_for_approval']
+    assert (approved.status, approved.reason) == ('failed', 'too many runs waiting for approval')
