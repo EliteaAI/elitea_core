@@ -180,6 +180,100 @@ def test_7011_r2_3_enabling_a_paused_schedule_recomputes_next_run(env):
     assert utc(env.row(schedule_id).next_run) > datetime.now(UTC)
 
 
+def test_pausing_a_schedule_clears_next_run(env):
+    schedule_id = env.seed()
+    env.edit('update_schedule', schedule_id, env.scope(OWNER_ID), env.pd.ScheduleUpdate(enabled=False))
+    row = env.row(schedule_id)
+    assert (row.enabled, row.next_run) == (False, None)
+
+
+def test_cron_change_on_a_paused_schedule_keeps_next_run_empty(env):
+    schedule_id = env.seed(enabled=False, next_run=None)
+    env.edit('update_schedule', schedule_id, env.scope(OWNER_ID), env.pd.ScheduleUpdate(cron='30 6 * * *'))
+    assert env.row(schedule_id).next_run is None
+
+
+def test_pause_then_resume_sets_next_run_from_cron_and_timezone(env):
+    schedule_id = env.seed(cron='30 6 * * *', timezone='Asia/Tokyo')
+    scope = env.scope(OWNER_ID)
+    env.edit('update_schedule', schedule_id, scope, env.pd.ScheduleUpdate(enabled=False))
+    env.edit('update_schedule', schedule_id, scope, env.pd.ScheduleUpdate(enabled=True))
+    row = env.row(schedule_id)
+    expected = env.timing.compute_next_run('30 6 * * *', 'Asia/Tokyo', datetime.now(UTC))
+    assert abs(utc(row.next_run) - expected) < timedelta(minutes=1)
+
+
+def test_create_disabled_stores_no_next_run(env):
+    row = env.run('create_schedule', env.body(enabled=False), env.scope(OWNER_ID))
+    assert env.row(row.id).next_run is None
+
+
+def test_pause_with_a_cron_change_in_one_request_leaves_next_run_empty(env):
+    schedule_id = env.seed()
+    env.edit('update_schedule', schedule_id, env.scope(OWNER_ID),
+             env.pd.ScheduleUpdate(enabled=False, cron='30 6 * * *'))
+    row = env.row(schedule_id)
+    assert (row.enabled, row.cron, row.next_run) == (False, '30 6 * * *', None)
+
+
+def test_resume_with_a_new_cron_computes_next_run_from_the_new_cron(env):
+    schedule_id = env.seed(enabled=False, next_run=None)
+    env.edit('update_schedule', schedule_id, env.scope(OWNER_ID),
+             env.pd.ScheduleUpdate(enabled=True, cron='30 6 * * *', timezone='Asia/Tokyo'))
+    expected = env.timing.compute_next_run('30 6 * * *', 'Asia/Tokyo', datetime.now(UTC))
+    assert abs(utc(env.row(schedule_id).next_run) - expected) < timedelta(minutes=1)
+
+
+@pytest.fixture
+def listing(env):
+    """The real list query over the same database; returns `(name, enabled, next_run)` of every row in order."""
+    load_module_with_stubs(PLUGIN_ROOT / 'models/pd/schedule_list.py', f'{PACKAGE}.models.pd.schedule_list')
+    queries = load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_queries.py', f'{PACKAGE}.utils.schedule_queries')
+    filters = sys.modules[f'{PACKAGE}.models.pd.schedule_list'].ScheduleListFilters
+
+    def rows(sort_order):
+        with env.session_factory() as session:
+            _total, found = queries.list_schedules(
+                session, env.scope(ADMIN_ID, is_admin=True), filters(sort_by='next_run', sort_order=sort_order), 100, 0)
+        return [(row.name, row.enabled, row.next_run) for row in found]
+
+    return rows
+
+
+def _seed_two_running_and_two_paused(env):
+    """Two running schedules and two paused ones; before the pause the paused ones had the earliest next runs."""
+    soon = datetime.now(UTC) + timedelta(days=1)
+    ids = {name: env.seed(name=name, next_run=soon + timedelta(days=days))
+           for name, days in (('early-paused', 0), ('late-paused', 1), ('second', 3), ('first', 2))}
+    for name in ('early-paused', 'late-paused'):
+        env.edit('update_schedule', ids[name], env.scope(OWNER_ID), env.pd.ScheduleUpdate(enabled=False))
+    return ids
+
+
+@pytest.mark.parametrize('sort_order, expected', [
+    ('asc', ['first', 'second', 'early-paused', 'late-paused']),
+    ('desc', ['second', 'first', 'early-paused', 'late-paused']),
+])
+def test_list_sorted_by_next_run_puts_paused_schedules_last_together(env, listing, sort_order, expected):
+    _seed_two_running_and_two_paused(env)
+    assert [name for name, _enabled, _next_run in listing(sort_order)] == expected
+
+
+def test_list_shows_no_next_run_for_every_paused_schedule(env, listing):
+    _seed_two_running_and_two_paused(env)
+    shown = {name: (enabled, next_run) for name, enabled, next_run in listing('asc')}
+    assert shown['early-paused'] == (False, None)
+    assert shown['late-paused'] == (False, None)
+    assert shown['first'][0] is True and shown['first'][1] is not None
+
+
+def test_a_resumed_schedule_sorts_among_the_running_ones_again(env, listing):
+    ids = _seed_two_running_and_two_paused(env)
+    env.edit('update_schedule', ids['late-paused'], env.scope(OWNER_ID), env.pd.ScheduleUpdate(enabled=True))
+    names = [name for name, _enabled, _next_run in listing('asc')]
+    assert names == ['late-paused', 'first', 'second', 'early-paused']
+
+
 def test_7011_r2_3_a_rename_leaves_next_run_alone(env):
     schedule_id = env.seed()
     env.edit('update_schedule', schedule_id, env.scope(OWNER_ID), env.pd.ScheduleUpdate(name='Renamed'))

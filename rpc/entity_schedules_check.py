@@ -173,7 +173,7 @@ def _disable_schedule(session, project_id: int, schedule_id: int, owner_id: int,
     disabled = session.execute(
         update(EntitySchedule)
         .where(EntitySchedule.id == schedule_id, EntitySchedule.enabled.is_(True))
-        .values(enabled=False, disabled_reason=reason)
+        .values(enabled=False, disabled_reason=reason, next_run=None)
     ).rowcount == 1  # zero rows means another replica disabled it and sent the notice
     session.commit()
     if not disabled:
