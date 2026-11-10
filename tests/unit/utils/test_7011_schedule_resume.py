@@ -177,3 +177,69 @@ def test_el_7011_r2_4_a_reject_of_a_finished_run_gets_not_waiting(runs, session,
 def test_el_7011_r2_4_an_unknown_run_gets_not_waiting(runs, session, sent):
     with pytest.raises(runs.ScheduleRunNotWaiting):
         runs.check_schedule_decision(1, 999, OWNER, ["approve"])
+
+
+def _decision_events(session, run):
+    session.refresh(run)
+    return [event for event in run.events or [] if event["kind"] == "decision"]
+
+
+def test_an_approve_all_writes_the_choice_into_the_decision_event(runs, session, sent):
+    _, run = _waiting(runs, session)
+
+    runs.apply_schedule_decision(1, run.id, "approve", approve_all=True)
+
+    (event,) = _decision_events(session, run)
+    assert event["text"] == "Approved; this run asks no more approvals"
+    assert (event["action"], event["by"], event["approve_all"]) == ("approve", OWNER, True)
+    assert run.status == "running"
+
+
+def test_a_plain_approve_keeps_the_owner_text_and_no_choice(runs, session, sent):
+    _, run = _waiting(runs, session)
+
+    runs.apply_schedule_decision(1, run.id, "approve")
+
+    (event,) = _decision_events(session, run)
+    assert event["text"] == "Approved by the schedule owner"
+    assert "approve_all" not in event
+
+
+def test_a_reject_with_approve_all_fails_the_run_and_records_no_choice(runs, session, sent):
+    _, run = _waiting(runs, session)
+
+    runs.apply_schedule_decision(1, run.id, "reject", approve_all=True)
+
+    (event,) = _decision_events(session, run)
+    assert event["text"] == "Rejected by the schedule owner" and "approve_all" not in event
+    assert (run.status, run.reason) == ("failed", "rejected by the owner")
+    assert runs.approves_all(session, run.id) is False
+
+
+def test_approves_all_is_false_for_a_plain_approve(runs, session, sent):
+    _, run = _waiting(runs, session)
+    runs.apply_schedule_decision(1, run.id, "approve")
+
+    assert runs.approves_all(session, run.id) is False
+
+
+def test_approves_all_is_true_after_an_approve_all(runs, session, sent):
+    _, run = _waiting(runs, session)
+    runs.apply_schedule_decision(1, run.id, "approve", approve_all=True)
+
+    assert runs.approves_all(session, run.id) is True
+
+
+def test_approves_all_is_false_for_an_unknown_run_and_a_run_without_events(runs, session, sent):
+    _, run = _waiting(runs, session)
+
+    assert runs.approves_all(session, run.id) is False
+    assert runs.approves_all(session, 999) is False
+
+
+def test_a_paused_event_that_carries_the_flag_is_no_choice(runs, session, sent):
+    _, run = _waiting(runs, session)
+    run.events = [{"kind": "paused", "text": "x", "approve_all": True}]
+    session.flush()
+
+    assert runs.approves_all(session, run.id) is False

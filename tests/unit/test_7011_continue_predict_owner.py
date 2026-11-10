@@ -21,7 +21,8 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER = 7, 9, 12
-HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision'}
+HELPERS = {'_SCHEDULE_REFUSALS', '_SIGN_IN_REFUSAL', '_check_schedule_decision', '_apply_schedule_decision',
+           '_approve_all_kwargs'}
 
 
 class Forbidden(Exception):
@@ -87,11 +88,11 @@ def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decisio
     check, apply, calls = _helpers({'schedule_run_id': RUN_ID})
 
     pending, denied = check(_parsed(), OWNER)
-    assert (pending, denied) == ((RUN_ID, 'approve'), None)
+    assert (pending, denied) == ((RUN_ID, 'approve', False), None)
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False})]
 
     assert apply(PROJECT_ID, pending) is None
-    assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve')
+    assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve', False)
 
 
 def test_el_7011_r2_2_a_decision_list_passes_every_action():
@@ -190,9 +191,11 @@ def post(monkeypatch):
     tools.db = types.SimpleNamespace()
     tools.config = types.SimpleNamespace(ADMINISTRATION_MODE='administration', DEFAULT_MODE='default')
     tools.register_openapi = decorator
+    rpc = types.SimpleNamespace(result=None, approve_all=False, sent=[])
     payload = types.SimpleNamespace(model_validate=lambda raw: types.SimpleNamespace(
         conversation_uuid='c-1', message_id='m-1', mcp_auth_resume=False, hitl_resume=True,
         hitl_action='approve', hitl_value=None, hitl_decisions=None, mcp_auth_action=None,
+        approve_all=rpc.approve_all,
         mcp_auth_decisions=None, authorization_request_id=None, user_input=None, thread_id=None,
         await_task_timeout=-1))
     stubs = {
@@ -220,9 +223,9 @@ def post(monkeypatch):
         monkeypatch.setitem(sys.modules, name, stub)
     module = load_module_with_stubs(
         PLUGIN_ROOT / 'api' / 'v2' / 'continue_predict.py', 'plugins.elitea_core.api.v2.continue_predict')
-    rpc = types.SimpleNamespace(result=None)
     handler = module.PromptLibAPI()
-    handler.module = types.SimpleNamespace(chat_continue_predict_sio=lambda **_: rpc.result)
+    handler.module = types.SimpleNamespace(
+        chat_continue_predict_sio=lambda **kwargs: (rpc.sent.append(kwargs), rpc.result)[1])
     return rpc, lambda: handler.post(PROJECT_ID, 'c-1')
 
 
@@ -246,7 +249,7 @@ def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
 
     pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize'), OWNER)
 
-    assert (pending, denied) == ((RUN_ID, 'approve'), None)
+    assert (pending, denied) == ((RUN_ID, 'approve', False), None)
     assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True})]
 
 
@@ -274,3 +277,96 @@ def test_a_sign_in_answer_in_a_chat_without_a_schedule_run_is_left_alone():
 
     assert check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='skip'), OWNER) == (None, None)
     assert calls == []
+
+
+@pytest.mark.parametrize('approve_all', [True, False])
+def test_rest_forwards_approve_all(post, approve_all):
+    rpc, call = post
+    rpc.result = {'stopped': True}
+    rpc.approve_all = approve_all
+
+    call()
+
+    assert rpc.sent[0]['data']['approve_all'] is approve_all
+
+
+@pytest.mark.parametrize('decision, approve_all, expected', [
+    ('approve', True, True), ('approve', False, False), ('reject', True, False)])
+def test_the_check_carries_approve_all_only_with_an_approve(decision, approve_all, expected):
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, decision=decision)
+
+    pending, _ = check(_parsed(approve_all=approve_all), OWNER)
+
+    assert pending == (RUN_ID, decision, expected)
+
+
+def test_the_check_never_carries_approve_all_on_a_sign_in_answer():
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID})
+
+    pending, _ = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize',
+                               approve_all=True), OWNER)
+
+    assert pending == (RUN_ID, 'approve', False)
+
+
+def test_the_apply_passes_approve_all_to_the_run():
+    _, apply, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    assert apply(PROJECT_ID, (RUN_ID, 'approve', True)) is None
+
+    assert calls == [('apply', PROJECT_ID, RUN_ID, 'approve', True)]
+
+
+def _kwargs_helper(approved_runs):
+    """`_approve_all_kwargs` cut out of rpc/chat_all.py; `asked` records the run ids it looked up."""
+    asked = []
+
+    def approves_all(session, run_id):
+        asked.append((session, run_id))
+        return run_id in approved_runs
+
+    nodes = [node for node in ast.parse(CHAT_ALL).body if getattr(node, 'name', None) == '_approve_all_kwargs']
+    namespace = load_cut(nodes, {
+        'approves_all': approves_all, 'log': types.SimpleNamespace(debug=lambda *_: None)}, 'chat_all.py')
+    return namespace['_approve_all_kwargs'], asked
+
+
+def test_a_resume_of_an_approve_all_run_passes_the_auto_approve_keyword():
+    helper, asked = _kwargs_helper({RUN_ID})
+    conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
+
+    assert helper('session', conversation, 'applications_predict_sio') == {'auto_approve_sensitive_actions': True}
+    assert asked == [('session', RUN_ID)]
+
+
+def test_a_resume_without_approve_all_passes_no_auto_approve_keyword():
+    helper, _ = _kwargs_helper(set())
+    conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
+
+    assert helper('session', conversation, 'applications_predict_sio') == {}
+
+
+@pytest.mark.parametrize('rpc_func', ['llm_predict_sio', 'toolkits_predict_sio'])
+def test_the_other_predict_rpcs_never_get_the_auto_approve_keyword(rpc_func):
+    helper, asked = _kwargs_helper({RUN_ID})
+    conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
+
+    assert helper('session', conversation, rpc_func) == {}
+    assert asked == []
+
+
+@pytest.mark.parametrize('meta', [None, {}, {'schedule_id': 3}])
+def test_a_chat_that_is_not_a_schedule_run_never_gets_the_auto_approve_keyword(meta):
+    helper, asked = _kwargs_helper({RUN_ID})
+
+    assert helper('session', types.SimpleNamespace(meta=meta), 'applications_predict_sio') == {}
+    assert asked == []
+
+
+def test_the_resume_call_adds_the_keyword_through_the_helper_for_every_resume_kind():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    call = body[body.index('getattr(self.context.rpc_manager.call, rpc_func)('):]
+    call = call[:call.index('self.finalize_timed_out_response(')]
+
+    assert '**_approve_all_kwargs(session, conversation, rpc_func)' in call
+    assert body.count('getattr(self.context.rpc_manager.call, rpc_func)(') == 1  # HITL and sign-in resumes share it

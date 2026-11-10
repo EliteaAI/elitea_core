@@ -17,6 +17,7 @@ EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 MORE_RESERVE = len(' (+999 more)')
 PAUSE_LIST_LIMIT = 50  # tools named in one pause line; the rest are counted. lean: raise it when a real run shows more
+APPROVE_ALL_TEXT = 'Approved; this run asks no more approvals'
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
@@ -369,33 +370,6 @@ def _paused_event(items: list[dict]) -> dict:
                      toolkit=tools[0]['toolkit'], tool=tools[0]['tool'], tools=tools[:PAUSE_LIST_LIMIT])
 
 
-def listed_tools(review: dict) -> list[dict]:
-    """The sensitive tools of a risk review that need the owner's approval: `{toolkit, tool}`, a toolkit name required.
-
-    A personal credential item has no tool and a nameless toolkit cannot be approved as a pair: neither is listed.
-    """
-    return _tool_names([item for item in review['sensitive'] if item.get('code') == 'sensitive_action' and item.get('toolkit')],
-                       'toolkit', 'tool')
-
-
-def park_before_start(project_id: int, run_id: int, review: dict) -> bool:
-    """Make a run wait for the owner's approval of its sensitive tools before the first tool call.
-
-    The run has no conversation yet; the owner decides it through the run decision route, as for a missing
-    credential. The event holds the tools, the tools that may still ask during the run, and the fingerprint of
-    the review: the restart approves the listed pairs only when the review still has that fingerprint.
-    False, with nothing written, when the review lists no tool or the run is not running.
-    """
-    tools = listed_tools(review)
-    if not tools:
-        return False
-    may_ask = _tool_names([item for item in review['notices'] if item.get('may_apply')], 'toolkit', 'tool')
-    return _park_run(project_id, run_id, run_event(
-        'paused', _pause_text('Paused for approval before the first tool call: ', tools), 'warning',
-        need='tools', tools=tools[:PAUSE_LIST_LIMIT], may_ask=may_ask[:PAUSE_LIST_LIMIT] or None,
-        fingerprint=review['fingerprint']), [])
-
-
 def _sign_in_event(item: dict) -> dict:
     """The pause line for a sign-in: the toolkit only, never a URL or a token."""
     toolkit = str(item.get('toolkit_name') or '?')[:NAME_LIMIT]
@@ -440,11 +414,12 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     return 'reject' if 'reject' in actions else 'approve'
 
 
-def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None:
+def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve_all: bool = False) -> None:
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
     The run log gets the decision; only the owner decides (the check), so the owner is who decided.
+    `approve_all` with an approve is written into the decision event: the run asks no more tool approvals.
     """
     conversation_id = None
     with db.get_session(project_id) as session:
@@ -458,9 +433,12 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
             raise ScheduleRunNotWaiting(run_id)
         owner_id = run_owner_id(session, run)
         approved = decision == 'approve'
-        append_run_events(session, run_id, run_event(
-            'decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
-            'info' if approved else 'warning', action=decision, by=owner_id))
+        if approved and approve_all:
+            event = run_event('decision', APPROVE_ALL_TEXT, 'info', action=decision, by=owner_id, approve_all=True)
+        else:
+            event = run_event('decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
+                              'info' if approved else 'warning', action=decision, by=owner_id)
+        append_run_events(session, run_id, event)
         if approved:
             session.execute(
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
@@ -473,6 +451,18 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
             conversation_id = run.conversation_id
         session.commit()
     delete_run_checkpoints(project_id, conversation_id)
+
+
+def approves_all(session, run_id: int) -> bool:
+    """True when the owner approved all sensitive tools for the rest of this run.
+
+    The choice is a `decision` event with `approve_all`. It takes the caller's session, because the continue flow
+    holds one open. lean: 200 events; move the choice to a column when a run needs more. The event list keeps the
+    first 199 events and each newer event replaces the last one, so a very long approval loop can lose the choice
+    and the next sensitive call pauses again.
+    """
+    events = session.scalar(select(EntityScheduleRun.events).where(EntityScheduleRun.id == run_id)) or []
+    return any(event.get('kind') == 'decision' and event.get('approve_all') is True for event in events)
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:

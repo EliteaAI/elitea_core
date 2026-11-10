@@ -181,6 +181,9 @@ class SioContinuePredictModel(BaseModel):
         default=None,
         description="Per-child HITL decisions for a parallel sub-agent resume",
     )
+    approve_all: bool = Field(
+        default=False,
+        description="Only for a scheduled run: with hitl_action approve, the run asks no more sensitive-tool approvals until it ends")
     mcp_auth_resume: bool = Field(default=False, description="Resume a durable toolkit authorization interrupt")
     mcp_auth_action: Optional[str] = Field(default=None, description="Toolkit authorization action: authorize or skip")
     mcp_auth_decisions: Optional[List[Dict[str, Any]]] = Field(default=None, description="Per-request toolkit authorization decisions")
@@ -190,6 +193,12 @@ class SioContinuePredictModel(BaseModel):
     llm_settings: Optional[EntitySettingsLlm] = None
     attachments_info: Optional[List[AttachmentMessageItemPredict]] = None
     question_id: Optional[str] = None
+
+    @model_validator(mode='after')
+    def approve_all_needs_an_approve(self):
+        if self.approve_all and not (self.hitl_resume and self.hitl_action == 'approve'):
+            raise ValueError('approve_all is valid only with hitl_resume and hitl_action approve')
+        return self
 
 
 class SioRegenerateModel(BaseModel):

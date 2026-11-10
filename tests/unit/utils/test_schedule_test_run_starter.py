@@ -141,10 +141,6 @@ class FakeSession:
 def starter(monkeypatch):
     module = load_starter(monkeypatch, create=lambda **kw: None, predict=lambda **kw: None,
                           prerun=lambda *a: None)
-    return _fake_models(module, monkeypatch)
-
-
-def _fake_models(module, monkeypatch):
     module.ApplicationVersion, module.Application = object(), type("Application", (), {})
     monkeypatch.setattr(module, "select", lambda *a: types.SimpleNamespace(where=lambda *w: None))
     monkeypatch.setattr(module, "EntityScheduleRun", types.SimpleNamespace(id=None))
@@ -152,10 +148,10 @@ def _fake_models(module, monkeypatch):
 
 
 def _load_from_form(starter, form=FORM, version=types.SimpleNamespace(id=4, application_id=3, name="v4"),
-                    agent=types.SimpleNamespace(name="Agent"), **run_values):
+                    agent=types.SimpleNamespace(name="Agent")):
     session = FakeSession(form, version, agent)
     session.models = starter
-    run = types.SimpleNamespace(**{"id": 7, "requested_by": OWNER, "trigger": "test", "resumed_at": None, **run_values})
+    run = types.SimpleNamespace(id=7, requested_by=OWNER, trigger="test", resumed_at=None)
     starter.credential_toolkit_refs = lambda version: []
     return starter._load_test_run(session, run)
 
@@ -170,29 +166,6 @@ def test_load_of_a_run_with_no_schedule_builds_the_values_from_its_form(starter)
         "Try", "agent", "prompt", 3, 4)
     assert (loaded.prompt, loaded.variables, loaded.trigger, loaded.resumed, loaded.entity_name) == (
         "Go {{ x }}", [{"name": "x", "value": "1"}], "test", False, "Agent")
-
-
-def test_a_resumed_test_run_starts_with_the_listed_pairs(monkeypatch):
-    predicts = []
-    pause = {"kind": "paused", "need": "tools", "fingerprint": "fp-1"}
-    review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
-    module = _fake_models(load_starter(
-        monkeypatch, create=lambda **kw: ("uuid-1", 7, "resp-1"), predict=lambda **kw: predicts.append(kw),
-        prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER), review=lambda *a: review,
-        listed_tools=lambda found: [{"toolkit": "Outlook", "tool": "send_email"}]), monkeypatch)
-    form = {**FORM, "approval_rule": "pause_and_ask"}
-    loaded = _load_from_form(module, form=form, resumed_at="2026-11-06", events=[{"kind": "started"}, pause])
-    monkeypatch.setattr(module, "_load", lambda *a: loaded)
-    monkeypatch.setattr(module, "TriggerType", types.SimpleNamespace(SCHEDULED="scheduled", SCHEDULE_MANUAL="manual"))
-
-    module.run_owner_schedule(34, None, 7)
-
-    assert (loaded.resumed, loaded.pre_start_pause) == (True, pause)
-    assert predicts[-1]["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
-
-
-def test_a_test_run_never_parked_has_no_pre_start_pause(starter):
-    assert _load_from_form(starter).pre_start_pause is None
 
 
 @pytest.mark.parametrize("version", [None, types.SimpleNamespace(id=4, application_id=99, name="v4")])

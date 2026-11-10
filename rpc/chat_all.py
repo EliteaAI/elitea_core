@@ -65,7 +65,7 @@ from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
     ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
-    apply_schedule_decision, check_schedule_decision,
+    apply_schedule_decision, approves_all, check_schedule_decision,
 )
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
@@ -112,6 +112,22 @@ def _chat_trigger_kwargs(rpc_func: str) -> dict:
     return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
 
 
+def _approve_all_kwargs(session, conversation, rpc_func: str) -> dict:
+    """``auto_approve_sensitive_actions=True`` on a resume of a scheduled run whose owner chose "approve all".
+
+    The server-side keyword is the only way in: ``predict_sio`` builds the worker payload again and ignores a payload key.
+    The other predict RPCs take no such argument; a chat that is not a scheduled run gets nothing.
+    lean: a supervised fan-out answered in this process gets no flag; a scheduled run fails a child pause before then.
+    """
+    if rpc_func != 'applications_predict_sio':
+        return {}
+    run_id = (getattr(conversation, 'meta', None) or {}).get('schedule_run_id')
+    if run_id is None or not approves_all(session, run_id):
+        return {}
+    log.debug('Schedule run %s resumes with all sensitive tools approved by its owner', run_id)
+    return {'auto_approve_sensitive_actions': True}
+
+
 def _get_agent_type(
     session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
 ) -> str | None:
@@ -149,7 +165,7 @@ _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field
 def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
-    The (run id, decision) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    The (run id, decision, approve all) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
@@ -177,7 +193,8 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    return ((run_id, decision) if decision else None), None
+    approve_all = bool(getattr(parsed, 'approve_all', False)) and decision == 'approve' and not sign_in
+    return ((run_id, decision, approve_all) if decision else None), None
 
 
 def _apply_schedule_decision(project_id, pending) -> dict | None:
@@ -2677,7 +2694,7 @@ class RPC:
                     **skill_rpc_kwargs,
                     **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
                     **_chat_trigger_kwargs(rpc_func),
-
+                    **_approve_all_kwargs(session, conversation, rpc_func),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

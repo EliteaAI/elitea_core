@@ -32,6 +32,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - edit — continue with `hitl_value` as the edited text.
         - block_with_comment — block and continue with `hitl_value` as the note.
 
+        approve_all: only for a schedule run; ignored outside a schedule run.
+
         For an on-demand Toolkit authorization pause, send `mcp_auth_resume: true`,
         `mcp_auth_action: authorize|skip`, and the exact `authorization_request_id`
         returned by the pause. Do not set `hitl_resume` for this protocol.
@@ -79,6 +81,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "hitl_action": parsed.hitl_action,
             "hitl_value": parsed.hitl_value,
             "hitl_decisions": parsed.hitl_decisions,
+            "approve_all": parsed.approve_all,
             "mcp_auth_resume": parsed.mcp_auth_resume,
             "mcp_auth_action": parsed.mcp_auth_action,
             "mcp_auth_decisions": parsed.mcp_auth_decisions,
