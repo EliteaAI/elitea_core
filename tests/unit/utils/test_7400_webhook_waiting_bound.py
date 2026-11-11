@@ -1,4 +1,4 @@
-"""#7400 AC3: at most N webhook runs of one row wait for approval; the next pause fails its run with a notice.
+"""At most N webhook runs of one row wait for approval; the first pause of a run over that number fails it with a notice.
 
 Since #7454 a webhook run never waits before it starts, so a sensitive-tool pause during the run is the only
 wait counted here. Fixtures are the ones of the US-09 / US-13 run writer tests (real models, SQLite).

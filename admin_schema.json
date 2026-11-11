@@ -985,7 +985,7 @@
     "schedules_webhook_max_waiting_runs": {
       "type": "integer",
       "title": "Webhook Max Waiting Runs",
-      "description": "Runs of one webhook that may wait for approval of a sensitive tool at the same time; the next pause fails its run. Allowed range: 1–1000.",
+      "description": "Runs of one webhook that may wait for approval of a sensitive tool at the same time; the first pause of a run over this number fails the run. A run the owner already approved once is not counted again on its later pauses. Allowed range: 1–1000.",
       "path": "scheduler.schedules.webhook_max_waiting_runs",
       "section": "runtime",
       "default": 10,
