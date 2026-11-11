@@ -24,7 +24,10 @@ from pylon.core.tools import log
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
-from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oauth_setting, refresh_token
+from ...utils.mcp_oauth import (
+    dataverse_token_endpoint, exchange_token, get_oauth_configurations, is_foreign_token_endpoint, pick_oauth_setting,
+    refresh_token,
+)
 from ....configurations.utils import expand_configuration
 
 
@@ -43,10 +46,11 @@ def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_typ
     return app['client_id'], app['client_secret'], app['token_endpoint'], ' '.join(scopes)
 
 
-def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list) -> bool:
+def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list,
+                            pinned_endpoint: str = None) -> bool:
     """token_endpoint is caller-supplied: only send a stored secret to the endpoint the toolkit
     declares, or for callers who can edit toolkits anyway."""
-    stored_endpoint = pick_oauth_setting(credential_sources, 'token_endpoint', 'token_url')
+    stored_endpoint = pinned_endpoint or pick_oauth_setting(credential_sources, 'token_endpoint', 'token_url')
     if stored_endpoint and stored_endpoint.rstrip('/') == (token_endpoint or '').rstrip('/'):
         return True
     user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
@@ -105,6 +109,7 @@ class ProjectAPI(api_tools.APIModeHandler):
 
         vault_client = VaultClient(project_id)
         credential_sources = []
+        pinned_endpoint = None
 
         # Default app mode: the browser knows only the app reference, never its secret
         if data.oauth_app_id and not data.used_dcr:
@@ -164,6 +169,18 @@ class ProjectAPI(api_tools.APIModeHandler):
 
                     credential_sources = [settings, *oauth_configs]
 
+                    # A Dataverse credential saves no token endpoint, so any toolkit editor could aim the
+                    # request at their own host and read its secret: only the endpoint of its tenant is served.
+                    # Default app mode swaps the endpoint for the app's own just above.
+                    if not (data.oauth_app_id and not data.used_dcr) and is_foreign_token_endpoint(
+                            settings, data.token_endpoint):
+                        log.warning(f"MCP OAuth proxy: token_endpoint refused for toolkit {data.toolkit_id}, "
+                                    f"it is not the endpoint of the Dataverse credential")
+                        return {"error": "invalid_token_endpoint",
+                                "error_description": "token_endpoint is not the endpoint of this credential"}, 400
+                    # The credential's own endpoint is the one a viewer's sign-in may send the stored secret to
+                    pinned_endpoint = dataverse_token_endpoint(settings)
+
                     # FE always sends the DCR client_id in the same request, so the guard below
                     # is not hit in practice, but is included for symmetry with the secret guard
                     # to prevent a stale DB client_id from overwriting a DCR-registered one.
@@ -175,7 +192,8 @@ class ProjectAPI(api_tools.APIModeHandler):
                     # to reject the token request with "unknown client".
                     if not client_secret and not data.used_dcr:
                         client_secret = pick_oauth_setting(credential_sources, 'client_secret')
-                        if client_secret and not _may_send_stored_secret(project_id, data.token_endpoint, credential_sources):
+                        if client_secret and not _may_send_stored_secret(
+                                project_id, data.token_endpoint, credential_sources, pinned_endpoint):
                             log.warning(f"MCP OAuth proxy: stored client_secret withheld for toolkit {data.toolkit_id}, "
                                         f"token_endpoint does not match the toolkit and caller cannot edit toolkits")
                             client_secret = None
