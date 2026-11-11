@@ -325,6 +325,19 @@ def test_a_refused_approve_all_answers_its_status_and_names_the_field(error, sta
     assert (denied['status'], denied['field']) == (status, field)
 
 
+def test_the_approve_all_refusal_of_the_setting_has_a_code_that_tells_it_from_a_run_that_does_not_wait():
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, SettingOff())
+
+    _, denied = check(_parsed(approve_all=True), OWNER)
+
+    assert denied == {
+        'error': 'This project does not allow "Run without asking", so all tools cannot be approved',
+        'field': 'approve_all', 'code': 'approve_all_off', 'status': 409,
+    }
+    _, not_waiting = _helpers({'schedule_run_id': RUN_ID}, NotWaiting())[0](_parsed(approve_all=True), OWNER)
+    assert (not_waiting['status'], 'code' in not_waiting) == (409, False)
+
+
 @pytest.mark.parametrize('request_values, asked', [
     ({'approve_all': True}, True),
     ({'approve_all': False}, False),

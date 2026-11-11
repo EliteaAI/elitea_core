@@ -170,7 +170,7 @@ _SCHEDULE_REFUSALS = {
     },
     ScheduleApproveAllOff: {
         "error": 'This project does not allow "Run without asking", so all tools cannot be approved',
-        "field": "approve_all", "status": 409,
+        "field": "approve_all", "code": "approve_all_off", "status": 409,
     },
 }
 _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field": "mcp_auth_action", "status": 400}
