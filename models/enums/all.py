@@ -67,6 +67,7 @@ class NotificationEventTypes(StrEnum):
     schedule_disabled = 'schedule_disabled'
     schedule_edited_by_admin = 'schedule_edited_by_admin'
     schedule_owner_changed = 'schedule_owner_changed'
+    schedule_credential_expired = 'schedule_credential_expired'
 
 
 class IndexDataStatus(StrEnum):

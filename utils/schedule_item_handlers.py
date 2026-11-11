@@ -8,13 +8,14 @@ from types import SimpleNamespace
 from flask import request
 from pydantic import BaseModel, Field, ValidationError
 from pylon.core.tools import log
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError
 from tools import auth, db
 
-from ..models.entity_schedule import ACTIVE_STATUSES, EntityScheduleRun
+from ..models.entity_schedule import ACTIVE_STATUSES, EntitySchedule, EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
+    ScheduleConnectionsCheck,
     ScheduleCreate,
     ScheduleDetails,
     ScheduleEdit,
@@ -320,8 +321,45 @@ def _check_scope_error(row, body, scope: ScheduleScope) -> dict | None:
     return None
 
 
+CONNECTIONS_NOT_READY = "Every toolkit must run without a person signed in; sign in on the rows that are not OK"
+# A switch-off for one of these is lifted only after the Connections check passes again (#7401)
+RECHECK_ON_RESUME = frozenset({"credential_expired", "connections_changed", "owner_changed"})
+
+
+def _connections(project_id: int, application_id: int, version_id: int | None, owner_id: int, refresh: bool = True):
+    from .schedule_prerun import check_connections  # pylint: disable=C0415 -- late: the check expands toolkits
+    if version_id is None:
+        return {"rows": [], "credential_refs": None}
+    return check_connections(project_id, application_id, version_id, owner_id, refresh)
+
+
+def _connections_gate(project_id: int, application_id: int, version_id: int | None, owner_id: int,
+                      trigger_kind: str) -> list | None:
+    """The version's credential references; a webhook that cannot run unattended raises 409 `connections_not_ready`."""
+    from .schedule_prerun import connections_ready  # pylint: disable=C0415
+    webhook = trigger_kind == "webhook"
+    result = _connections(project_id, application_id, version_id, owner_id, refresh=webhook)
+    if webhook and not connections_ready(result):
+        raise ScheduleError("connections_not_ready", CONNECTIONS_NOT_READY, 409, rows=result["rows"])
+    return result["credential_refs"]
+
+
+def _resume_check(project_id: int, row) -> None:
+    """Resume of a trigger switched off for its connections: 409 `connections_not_ready` while they still fail."""
+    # A schedule only needs its saved logins back: it may wait for a sign-in during a run (#7304)
+    from .schedule_prerun import connections_ready, lost_logins  # pylint: disable=C0415
+    if row.disabled_reason not in RECHECK_ON_RESUME or row.version_id is None:
+        return
+    result = _connections(project_id, row.application_id, row.version_id, row.created_by)
+    failing = not connections_ready(result) if row.trigger_kind == "webhook" else bool(lost_logins(result))
+    if failing:
+        raise ScheduleError("connections_not_ready", CONNECTIONS_NOT_READY, 409, rows=result["rows"])
+    if result["credential_refs"] is not None:
+        row.credential_refs = result["credential_refs"]
+
+
 def _review_save(project_id: int, version_id: int | None, owner_id: int, name: str, rule: str, ack,
-                 stored_fingerprint: str | None = None):
+                 stored_fingerprint: str | None = None, trigger_kind: str = "cron"):
     """Check a save against the risk review; return the review and, for a confirmed "Run without asking", it again.
 
     An edit without `risk_ack` that keeps "Run without asking" and the stored fingerprint keeps the stored
@@ -332,7 +370,7 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
             `approval_rule_not_allowed` (incomplete scan) or `risk_name_mismatch` (`field: risk_ack`).
     """
     from .schedule_risk import scan_complete, scan_schedule
-    review = scan_schedule(project_id, version_id, owner_id, rule)
+    review = scan_schedule(project_id, version_id, owner_id, rule, trigger_kind)
     without_asking = rule == RUN_WITHOUT_ASKING
     if review["blocking"]:
         raise ScheduleError("schedule_blocked", BLOCKED, 409, **review)
@@ -362,7 +400,7 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
     """
     if review is None:
         from .schedule_risk import scan_schedule
-        review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
+        review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule, row.trigger_kind)
     warnings = review["blocking"] + review["sensitive"] + review["notices"]
     return {**_read_answer(row, scope, project_id, review), "warnings": warnings, "governance_notice": notice}
 
@@ -374,7 +412,7 @@ def _needs_reconfirm(row, project_id: int, review: dict | None) -> bool | None:
     try:
         if review is None:
             from .schedule_risk import scan_schedule  # pylint: disable=C0415 -- late: the scan expands toolkits
-            review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
+            review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule, row.trigger_kind)
     except Exception:  # noqa: BLE001 -- a failed scan must not break the read
         log.exception("Schedule %s: cannot scan for needs_reconfirm", row.id)
         return None
@@ -451,8 +489,16 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
                     check_entity(session, project_id, row.entity_type, row.application_id, body.version_id)
                 review, confirmed = _review_save(
                     project_id, body.version_id or row.version_id, row.created_by, body.name or row.name,
-                    body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row),
+                    body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row), row.trigger_kind,
                 )
+                # A rename or a prompt edit leaves the toolkits as they are: no token calls, no new refusal
+                if (body.version_id or row.version_id) != row.version_id or row.credential_refs is None:
+                    refs = _connections_gate(project_id, row.application_id, body.version_id or row.version_id,
+                                             row.created_by, row.trigger_kind)
+                    if refs is not None:
+                        row.credential_refs = refs
+            elif body.enabled is True and not row.enabled:
+                _resume_check(project_id, row)
             row = update_schedule(session, project_id, row, body, scope, confirmed)
             notice = schedule_governance_notice(
                 module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id,
@@ -546,7 +592,7 @@ class ScheduleItemHandlers:
         body, error = _parse_body(ScheduleRiskCheck)
         if error:
             return error
-        owner_id, stored, rule = auth.current_user()["id"], None, body.approval_rule
+        owner_id, stored, rule, kind = auth.current_user()["id"], None, body.approval_rule, body.trigger_kind
         with db.get_session(project_id) as session:
             try:
                 if body.schedule_id is not None:
@@ -557,15 +603,54 @@ class ScheduleItemHandlers:
                         return refused
                     owner_id, stored = row.created_by, _kept_fingerprint(row)
                     rule = rule or row.approval_rule
+                    kind = row.trigger_kind
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response
-        review = scan_schedule(project_id, body.version_id, owner_id, rule)
+        review = scan_schedule(project_id, body.version_id, owner_id, rule, kind or "cron")
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
         answer = {**review, "run_without_asking_allowed": allowed}
         if body.schedule_id is not None:
             answer["confirmed"] = stored is not None and stored == review["fingerprint"]
         return answer, 200
+
+    @auth.decorators.check_api(schedule_check_spec("create"))
+    def _check_connections(self, project_id: int):
+        """Can every toolkit of a version run with no person signed in (#7401); the Swagger text has the details."""
+        # The owner's check of a trigger also saves its refs and switches off on a lost login
+        from .schedule_prerun import connections_ready, lost_logins, switch_off_for_login
+        body, error = _parse_body(ScheduleConnectionsCheck)
+        if error:
+            return error
+        owner_id, kind, row_id = auth.current_user()["id"], body.trigger_kind, None
+        caller_id = owner_id
+        with db.get_session(project_id) as session:
+            try:
+                if body.schedule_id is not None:
+                    scope = schedule_scope(project_id)
+                    row = load_schedule_in_scope(session, body.schedule_id, scope)
+                    refused = _check_scope_error(row, body, scope)
+                    if refused:
+                        return refused
+                    owner_id, kind, row_id = row.created_by, row.trigger_kind, row.id
+                check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+            except ScheduleError as e:
+                return e.response
+        result = _connections(project_id, body.application_id, body.version_id, owner_id)
+        lost_login = False
+        if row_id is not None and caller_id == owner_id:
+            for lost in {item["credential_uuid"]: item for item in lost_logins(result)}.values():
+                switch_off_for_login(project_id, owner_id, lost)
+                lost_login = True
+            if result["credential_refs"] is not None:
+                with db.get_session(project_id) as session:  # only if the row still has this owner and version
+                    session.execute(update(EntitySchedule).where(
+                        EntitySchedule.id == row_id, EntitySchedule.created_by == owner_id,
+                        EntitySchedule.version_id == body.version_id).values(credential_refs=result["credential_refs"]))
+                    session.commit()
+        ready = connections_ready(result)
+        return {"rows": result["rows"], "all_ok": ready, "blocking": kind == "webhook" and not ready,
+                "lost_login": lost_login}, 200
 
     @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):
@@ -591,8 +676,12 @@ class ScheduleItemHandlers:
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
                 review, confirmed = _review_save(
                     project_id, body.version_id, scope.user_id, body.name, body.approval_rule, body.risk_ack,
+                    trigger_kind=body.trigger_kind,
                 )
+                refs = _connections_gate(project_id, body.application_id, body.version_id, scope.user_id,
+                                         body.trigger_kind)
                 row = create_schedule(session, project_id, body, scope, confirmed=confirmed)
+                row.credential_refs = refs
                 session.commit()
             except ScheduleError as e:
                 return e.response

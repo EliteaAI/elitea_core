@@ -17,6 +17,7 @@ from unit.test_7011_schedule_crud_api import (
     OWNER_ID,
     PACKAGE,
     PLUGIN_ROOT,
+    fake_connections,
 )
 from unit.test_7011_schedule_crud_api import harness as _crud_harness
 
@@ -26,7 +27,8 @@ harness = _crud_harness  # the CRUD harness fixture, shared
 @pytest.fixture
 def owner(harness):
     """The real owner module with a fake eligibility check; `ineligible` maps an owner id to its reason."""
-    load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py', f'{PACKAGE}.utils.schedule_prerun')
+    fake_connections(harness, load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py',
+                                                  f'{PACKAGE}.utils.schedule_prerun'))
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_owner.py', f'{PACKAGE}.utils.schedule_owner')
     module.ineligible, module.checked = {}, []
     module.entities = []
