@@ -70,13 +70,13 @@ class TestCheck:
         assert status == 200
         assert body == {'blocking': [SIGNIN], 'sensitive': [SENSITIVE], 'notices': [NOTICE],
                         'run_without_asking_allowed': True, 'fingerprint': 'fp-1'}
-        assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, None)]
+        assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, None, 'cron')]
         assert count_rows(harness) == 0
 
     @pytest.mark.parametrize('rule, bucket', [('pause_and_ask', 'notices'), ('run_without_asking', 'blocking')])
     def test_check_sorts_a_missing_credential_and_a_sign_in_by_the_chosen_rule(self, harness, monkeypatch, rule, bucket):
         monkeypatch.setattr(sys.modules[f'{PACKAGE}.utils.schedule_risk'], 'scan_schedule',
-                            lambda project_id, version_id, owner_id, approval_rule: (
+                            lambda project_id, version_id, owner_id, approval_rule, trigger_kind='cron': (
                                 harness.scans.append((approval_rule,)) or {
                                     'blocking': [] if approval_rule == 'pause_and_ask' else [SIGNIN, CREDENTIAL],
                                     'sensitive': [],
@@ -90,13 +90,13 @@ class TestCheck:
     def test_check_uses_the_stored_rule_of_the_schedule_when_none_is_sent(self, harness):
         schedule_id = harness.seed(approval_rule='run_without_asking')
         harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
-        assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'run_without_asking')]
+        assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'run_without_asking', 'cron')]
 
     def test_check_prefers_the_sent_rule_over_the_stored_one(self, harness):
         schedule_id = harness.seed(approval_rule='run_without_asking')
         body = {**CHECK_BODY, 'schedule_id': schedule_id, 'approval_rule': 'pause_and_ask'}
         harness.call('post', body, suffix='/check')
-        assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'pause_and_ask')]
+        assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'pause_and_ask', 'cron')]
 
     def test_el7011_cr_check_refuses_run_without_asking_when_the_scan_is_incomplete(self, harness):
         harness.risk_warnings = [INCOMPLETE]
@@ -261,7 +261,7 @@ def test_el7011_cr_a_save_scans_the_version_once(harness):
     harness.risk_warnings = [NOTICE]
     body, status = harness.call('post', agent_body())
     assert (status, body['warnings']) == (201, [NOTICE])
-    assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'pause_and_ask')]
+    assert harness.scans == [(PROJECT_ID, 10, OWNER_ID, 'pause_and_ask', 'cron')]
 
 
 # Owner decision 2026-10-21: a personal credential is "warn and confirm"
@@ -323,7 +323,7 @@ class TestCheckAsOwner:
         harness.request_as(ADMIN_ID, ADMIN)
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
         assert status == 200 and body['confirmed'] is True
-        assert harness.scans[-1] == (PROJECT_ID, 10, OTHER_ID, 'run_without_asking')
+        assert harness.scans[-1] == (PROJECT_ID, 10, OTHER_ID, 'run_without_asking', 'cron')
         harness.request_as(OTHER_ID, EDITOR)
         body, status = harness.call('put', {'risk_ack': _ack(fingerprint=body['fingerprint'])},
                                     schedule_id=schedule_id)
@@ -368,7 +368,7 @@ class TestReviewRound2:
         assert harness.scans == []
         harness.request_as(OWNER_ID, EDITOR)
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
-        assert status == 200 and harness.scans[-1] == (PROJECT_ID, 10, OWNER_ID, 'run_without_asking')
+        assert status == 200 and harness.scans[-1] == (PROJECT_ID, 10, OWNER_ID, 'run_without_asking', 'cron')
 
     def test_el7011_bug36_check_of_the_same_version_needs_no_edit_right(self, harness):
         harness.risk_warnings = [SENSITIVE]

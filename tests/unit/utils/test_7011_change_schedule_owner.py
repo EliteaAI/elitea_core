@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
 from fixtures.helpers import load_module_with_stubs
-from unit.test_7011_schedule_crud_api import ADMIN_ID, OTHER_ID, OWNER_ID, PACKAGE
+from unit.test_7011_schedule_crud_api import ADMIN_ID, OTHER_ID, OWNER_ID, PACKAGE, fake_connections
 from unit.test_7011_schedule_crud_api import harness as _crud_harness
 
 harness = _crud_harness  # the CRUD harness fixture: real schedule table in SQLite
@@ -14,7 +14,8 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def owner(harness):
-    load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py', f'{PACKAGE}.utils.schedule_prerun')
+    fake_connections(harness, load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py',
+                                                  f'{PACKAGE}.utils.schedule_prerun'))
     return load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_owner.py', f'{PACKAGE}.utils.schedule_owner')
 
 

@@ -52,7 +52,10 @@ def wizard():
         _module(name)
     _module(f'{PKG}.models.pd.import_wizard', IMPORT_MODEL_ENTITY_MAPPER={'skills': _SkillImportItem}, DEPRECATED_ENTITIES=())
     _module(f'{PKG}.models.pd.skill', SkillImportResultModel=lambda **kwargs: types.SimpleNamespace(**kwargs))
-    _module(f'{PKG}.utils.skill_utils', attach_skill_to_agent=None, SkillError=Exception)
+    _module(
+        f'{PKG}.utils.skill_utils', attach_skill_to_agent=None, SkillError=Exception,
+        SkillLimitExceededError=type('SkillLimitExceededError', (Exception,), {}),
+    )
     _module(
         f'{PKG}.utils.export_import_utils',
         ENTITY_IMPORT_MAPPER={'skills': 'applications_import_skill'},
