@@ -6,7 +6,13 @@ checks that both tables match. `Module._register_openapi` registers every entry 
 """
 from typing import get_args
 
-from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck, WebhookSecretAction
+from ..models.pd.entity_schedule import (
+    ScheduleConnectionsCheck,
+    ScheduleCreate,
+    ScheduleEdit,
+    ScheduleRiskCheck,
+    WebhookSecretAction,
+)
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
@@ -171,7 +177,8 @@ CHECK_EXAMPLE = {
 }
 SAVE_CONFLICTS = (
     ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed` (the body has the findings and "
-     "the `fingerprint`), or the project limit of active schedules"), {
+     "the `fingerprint`), `connections_not_ready` for a webhook whose toolkit cannot run unattended (the body "
+     "has the `rows` of the Connections check), or the project limit of active schedules"), {
         "code": "risk_confirmation_required",
         "error": "Review the sensitive tools, then save again with `risk_ack` and this fingerprint",
         "blocking": [], "sensitive": [SENSITIVE_FINDING], "notices": [], "fingerprint": FINGERPRINT,
@@ -220,6 +227,14 @@ REFUSAL_SCHEMA = {
     },
     "additionalProperties": True,
 }
+
+
+CONNECTIONS_EXAMPLE = {"rows": [
+    {"toolkit": "Mail", "toolkit_type": "outlook", "status": "ok", "reason": None, "credential_uuid": "5c1e...",
+     "credential_type": "outlook", "credential_title": "team_outlook", "private": False, "login": "ok"},
+    {"toolkit": "Remote tools", "toolkit_type": "mcp", "status": "unsupported",
+     "reason": "Webhooks cannot wait for a sign-in; use a toolkit with a saved login."}],
+    "all_ok": False, "blocking": True, "lost_login": False}
 
 
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
@@ -324,6 +339,25 @@ OPERATIONS = {
             400: ("A version that is not of the agent or pipeline", {
                 "error": "The version does not belong to this agent or pipeline", "field": "version_id"}),
             403: None, 404: "The agent or pipeline, the schedule of `schedule_id` or its run `run_id` is not visible"}),
+    },
+    ("post", "connections"): {
+        "name": "Check the connections of a schedule",
+        "summary": "Check that every toolkit can run unattended",
+        "description": _text(
+            "One row per toolkit of the version, its sub-agents included: `ok`, `sign_in_required` or `unsupported` "
+            "with a `reason`. A saved Microsoft login (SharePoint, Outlook, Teams, Dataverse) gets a real token "
+            "refresh of the login saved on the server; a browser session never counts. A toolkit that signs in "
+            "only in a browser (remote MCP, OpenAPI with OAuth) or acts with the signed-in person's account is "
+            "`unsupported`. `blocking` is true for a webhook with any row that is not ok: its save is refused. "
+            "With `schedule_id` the check runs as the trigger's owner; when the caller is the owner it saves the "
+            "credential references, and an expired or removed saved login switches off every trigger of the owner "
+            "using that credential (`lost_login` is true when it did).",
+            "a project member with `schedules.create`, as for the risk check",
+            "400 an invalid field; 403 no permission; 404 the agent or pipeline, or the `schedule_id`, is not visible"),
+        "parameters": PROJECT_PARAMS,
+        "request_body": ScheduleConnectionsCheck,
+        "responses": _responses(200, "The connections", CONNECTIONS_EXAMPLE, {
+            400: None, 403: None, 404: "The agent or pipeline, or the schedule of `schedule_id`, is not visible"}),
     },
     ("get", ITEM): {
         "name": "Read a schedule",

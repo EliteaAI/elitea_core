@@ -86,6 +86,7 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
                 approval_confirmed_by=schedule.approval_confirmed_by,
                 trigger_kind=schedule.trigger_kind, webhook_type=schedule.webhook_type,
+                credential_refs=list(getattr(schedule, 'credential_refs', None) or []),
                 credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
@@ -318,7 +319,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         return
     # late: the scan pulls in the toolkit expansion
     from .schedule_risk import scan_schedule
-    review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule)
+    review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule,
+                           getattr(loaded.schedule, 'trigger_kind', None) or 'cron')  # a Test Run has no kind
     auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
     approved = _confirmed_pairs(review) if auto_approve else False
     outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved))

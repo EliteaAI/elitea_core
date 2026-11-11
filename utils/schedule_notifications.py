@@ -19,7 +19,11 @@ MESSAGES = {
     Types.schedule_disabled: '{Noun} "{link}" was switched off{reason}',
     Types.schedule_edited_by_admin: 'An admin {action} your {noun} "{link}"',
     Types.schedule_owner_changed: 'The owner of {noun} "{link}" changed{reason}',
+    Types.schedule_credential_expired: 'The saved login of "{credential}" stopped working: {noun} "{link}"{more} '
+                                       'switched off. {fix}, then re-enable it.',
 }
+# Who can sign the credential in again: its owner for a personal one, a project admin for a team one
+CREDENTIAL_FIX = {True: 'Sign in again on the credential', False: 'Ask a project admin to sign in again'}
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
 _NAME_BRACKETS = str.maketrans('[]', '［］')
@@ -54,7 +58,8 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
     """Send one schedule notice to the owner. Return True when it was fired, False when dropped or failed.
 
     `extra` may carry `reason` (when there is no run), `action` ("deleted" for schedule_edited_by_admin, default
-    "edited") and, for schedule_owner_changed, `old_owner_id` and `new_owner_id`.
+    "edited"), for schedule_owner_changed `old_owner_id` and `new_owner_id`, and for schedule_credential_expired
+    `credential`, `private`, `more` and `schedule_ids`.
     """
     extra = extra or {}
     if event_type == Types.schedule_run_succeeded and not _owner_wants_success(project_id, owner_id, schedule):
@@ -72,6 +77,9 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
                 hours=hours,
+                credential=extra.get('credential') or 'a credential',
+                more=f' and {extra["more"]} more' if extra.get('more') else '',
+                fix=CREDENTIAL_FIX[bool(extra.get('private'))],
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
@@ -79,6 +87,8 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
             'run_id': run.id if run else None,
             'conversation_id': run.conversation_id if run else None,
         }
+        if event_type == Types.schedule_credential_expired:
+            meta.update(schedule_ids=extra.get('schedule_ids') or [schedule.id], credential=extra.get('credential'))
         if event_type == Types.schedule_owner_changed:
             meta.update(old_owner_id=extra.get('old_owner_id'), new_owner_id=extra.get('new_owner_id'))
         rpc_tools.EventManagerMixin().event_manager.fire_event('notifications_stream', {

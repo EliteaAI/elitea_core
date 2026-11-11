@@ -154,6 +154,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception(f"Error while changing toolkit relation: {str(e)}")
             return {'error': 'Can not change toolkit relation'}, 500
 
+        # #7401: a newly linked toolkit may not run unattended; the triggers of that version check again
+        from ...utils.schedule_prerun import recheck_version_triggers_later
+        recheck_version_triggers_later(project_id, update_relation_data.get('entity_version_id'))
         return result, 201
 
     @register_openapi(
@@ -286,6 +289,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     }
                 )
             session.commit()
+            # #7401: a changed credential or endpoint may no longer run unattended
+            from ...utils.schedule_prerun import recheck_toolkit_triggers_later
+            recheck_toolkit_triggers_later(project_id, tool_id)
             toolkit_data = new_tool_parsed.dict()
             toolkit_data['project_id'] = project_id
             self.module.context.event_manager.fire_event(

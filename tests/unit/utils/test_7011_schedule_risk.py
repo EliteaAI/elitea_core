@@ -468,3 +468,55 @@ class TestWaitingForTheOwner:
         scan.version = _version(agent_type='pipeline', instructions=PIPELINE)
         review = self._review(scan, 'pause_and_ask')
         assert set(_codes(review['blocking'])) == {'human_input_step'}
+
+
+class TestWebhookNeverWaits:
+    """#7401: a webhook fires too often to wait for a sign-in, so these findings block under both rules."""
+
+    @pytest.fixture
+    def delegated(self, scan):
+        # consent_scope is the governance read of the Entra-delegated credentials the version uses
+        scan.scope = []
+        identity = types.ModuleType(f'{PKG}.utils.mandate_identity')
+        identity.consent_scope = lambda project_id, version_id, owner_id: scan.scope
+        sys.modules[identity.__name__] = identity
+        return scan
+
+    def _review(self, scan, rule, kind='webhook'):
+        return scan.module.scan_schedule(12, VERSION_ID, 42, rule, kind)
+
+    @pytest.mark.parametrize('rule', ['pause_and_ask', 'run_without_asking'])
+    def test_7401_a_sign_in_blocks_a_webhook_under_both_rules(self, delegated, rule):
+        delegated.version = _version(tools=[_personal('sharepoint', 'Docs')])
+        delegated.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
+        review = self._review(delegated, rule)
+        assert _codes(review['blocking']) == ['personal_signin_required'] and review['notices'] == []
+        assert review['blocking'][0]['hint'] == delegated.module.WEBHOOK_SIGN_IN
+
+    @pytest.mark.parametrize('rule', ['pause_and_ask', 'run_without_asking'])
+    def test_7401_a_missing_credential_blocks_a_webhook_under_both_rules(self, delegated, rule):
+        delegated.version = _version(tools=[_personal('jira', 'Jira')])
+        delegated.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
+        assert _codes(self._review(delegated, rule)['blocking']) == ['missing_credential']
+
+    def test_7401_a_cron_schedule_under_pause_and_ask_still_waits(self, delegated):
+        delegated.version = _version(tools=[_personal('sharepoint', 'Docs')])
+        delegated.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
+        review = self._review(delegated, 'pause_and_ask', 'cron')
+        assert review['blocking'] == [] and _codes(review['notices']) == ['personal_signin_required']
+
+    def test_7401_an_entra_delegated_credential_blocks_a_webhook_only(self, delegated):
+        delegated.version = _version(tools=[_tool('sharepoint', 'Docs')])
+        delegated.scope = [{'credential_ref': 'r1', 'toolkits': ['Docs']}]
+        review = self._review(delegated, 'pause_and_ask')
+        assert _codes(review['blocking']) == ['delegated_credential']
+        assert review['blocking'][0]['reason'] == 'DENIED_MANDATE_DELEGATION_UNSUPPORTED'
+        assert 'delegated_credential' not in _codes(_flat(self._review(delegated, 'pause_and_ask', 'cron')))
+
+    def test_7401_an_unreadable_delegated_check_is_an_incomplete_notice(self, delegated):
+        def broken(*_args):
+            raise RuntimeError('facts down')
+        sys.modules[f'{PKG}.utils.mandate_identity'].consent_scope = broken
+        delegated.version = _version(tools=[_tool()])
+        review = self._review(delegated, 'pause_and_ask')
+        assert review['blocking'] == [] and _codes(review['notices']) == ['scan_incomplete']

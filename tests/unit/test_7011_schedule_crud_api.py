@@ -60,6 +60,8 @@ class Harness:
         self.fingerprint = 'fp-1'
         self.run_without_asking_allowed = False
         self.scans = []
+        # #7401 Connections check: `connections` maps version id -> rows; unknown versions are all ok
+        self.connections, self.connection_calls, self.switched_off = {}, [], []
         self.path = ''
         self.query = {}
 
@@ -115,6 +117,23 @@ class Harness:
 
 BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
 SENSITIVE_CODES = {'sensitive_action', 'personal_credential'}
+
+
+def fake_connections(state, prerun=None):
+    """The #7401 Connections check of `utils/schedule_prerun` (its own tests), over `state.connections`."""
+    prerun = prerun or types.ModuleType(f'{PACKAGE}.utils.schedule_prerun')
+
+    def check_connections(project_id, application_id, version_id, owner_id, refresh=True):
+        state.connection_calls.append((version_id, owner_id, refresh))
+        rows = state.connections.get(version_id, [])
+        return {'rows': rows, 'credential_refs': sorted({r['credential_uuid'] for r in rows if r.get('credential_uuid')})}
+
+    prerun.check_connections = check_connections
+    prerun.connections_ready = lambda result: all(row['status'] == 'ok' for row in result['rows'])
+    prerun.lost_logins = lambda result: [row for row in result['rows'] if row.get('login') in ('expired', 'gone')]
+    prerun.switch_off_for_login = lambda project_id, owner_id, row: state.switched_off.append(
+        (owner_id, row['credential_uuid']))
+    return prerun
 
 
 def fake_risk_module(state):
@@ -196,6 +215,7 @@ def harness(isolated_sys_modules, monkeypatch):
     notifications.notify_schedule_event = lambda *args, **kwargs: harness.notify(*args, **kwargs)
     sys.modules[folder_access.__name__] = folder_access
     sys.modules[f'{PACKAGE}.utils.schedule_risk'] = fake_risk_module(harness)  # the scan has its own tests (US-17)
+    sys.modules[f'{PACKAGE}.utils.schedule_prerun'] = fake_connections(harness)  # the check has its own tests
     settings = types.ModuleType(f'{PACKAGE}.utils.schedule_settings')
     settings.is_run_without_asking_allowed = lambda project_id: harness.run_without_asking_allowed
     sys.modules[settings.__name__] = settings

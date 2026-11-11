@@ -24,6 +24,7 @@ MAX_APPROVAL_WAIT_HOURS = 720
 REJECT_REASON = 'rejected'
 TOO_MANY_WAITING = 'too many runs waiting for approval'
 SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not ask the owner"
+WEBHOOK_SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and a webhook cannot wait for one; use a saved login"
 # The owner's answer on a sign-in pause: `authorize` goes on, `skip` ends the run
 SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
 # The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
@@ -138,6 +139,30 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
             .values(enabled=False, disabled_reason=reason, next_run=None)
         )
         session.commit()
+
+
+def disable_by_credential(project_id: int, owner_id: int, credential_uuid: str, reason: str,
+                          credential: str | None = None, private: bool = False, also_id: int | None = None) -> list:
+    """Switch off the owner's enabled triggers whose `credential_refs` hold the credential; one notice for all."""
+    from ..models.enums.all import NotificationEventTypes as Types  # late, as in count_refusal
+    from .schedule_notifications import notify_schedule_event
+    with db.get_session(project_id) as session:
+        rows = session.execute(
+            update(EntitySchedule)
+            # `also_id`: the trigger whose run found it, even with refs not written yet (saved before #7401)
+            .where(EntitySchedule.created_by == owner_id, EntitySchedule.enabled.is_(True),
+                   or_(EntitySchedule.credential_refs.contains([str(credential_uuid)]),
+                       EntitySchedule.id == also_id))
+            .values(enabled=False, disabled_reason=reason, next_run=None)
+            .returning(EntitySchedule.id, EntitySchedule.name, EntitySchedule.trigger_kind)
+        ).all()
+        session.commit()
+    if rows:
+        first = SimpleNamespace(id=rows[0].id, name=rows[0].name, trigger_kind=rows[0].trigger_kind)
+        notify_schedule_event(project_id, owner_id, Types.schedule_credential_expired, first, extra={
+            'credential': credential, 'private': private, 'more': len(rows) - 1,
+            'schedule_ids': [row.id for row in rows]})
+    return rows
 
 
 def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None,
@@ -301,18 +326,21 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
                        author_id: int | None = None) -> None:
     """A sensitive-tool or sign-in pause makes a running run wait for the owner; any other pause fails it.
 
-    A schedule that does not ask the owner fails on a sign-in at once. `conversation_id` and `author_id` of the
-    paused chat tie the pause to its own run (see `_own_conversation`).
+    A schedule that does not ask the owner, and any webhook, fails on a sign-in at once. `conversation_id` and
+    `author_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
     """
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
-    if sign_in is not None and _approval_rule(project_id, run_id) == 'run_without_asking':
-        name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
-        finish_schedule_run(project_id, run_id, 'failed', SIGN_IN_REASON.format(name), conversation_id,
-                            author_id=author_id)
-        return
+    if sign_in is not None:
+        rule, kind = _sign_in_policy(project_id, run_id)
+        if rule == 'run_without_asking' or kind == 'webhook':
+            name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
+            reason = WEBHOOK_SIGN_IN_REASON if kind == 'webhook' else SIGN_IN_REASON
+            finish_schedule_run(project_id, run_id, 'failed', reason.format(name), conversation_id,
+                                author_id=author_id)
+            return
     waiting = sensitive or sign_in
     if waiting is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
@@ -416,6 +444,18 @@ def _approval_rule(project_id: int, run_id: int, session=None) -> str | None:
         return session.scalar(query)
     with db.get_session(project_id) as own:
         return own.scalar(query)
+
+
+def _sign_in_policy(project_id: int, run_id: int) -> tuple[str | None, str | None]:
+    """The approval rule and trigger kind of the run's schedule, in one read; a Test Run has no kind."""
+    query = (select(func.coalesce(EntitySchedule.approval_rule, RUN_FORM['approval_rule'].astext),
+                    EntitySchedule.trigger_kind)
+             .select_from(EntityScheduleRun)
+             .outerjoin(EntitySchedule, EntityScheduleRun.schedule_id == EntitySchedule.id)
+             .where(EntityScheduleRun.id == run_id))
+    with db.get_session(project_id) as session:
+        row = session.execute(query).one_or_none()
+    return (row[0], row[1]) if row is not None else (None, None)
 
 
 def _copy_status(session, run_id: int, status: str) -> None:

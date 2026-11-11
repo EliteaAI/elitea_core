@@ -9,7 +9,7 @@ import sys
 import pytest
 from fixtures.helpers import load_module_with_stubs
 from unit.test_7011_schedule_crud_api import (  # noqa: F401 -- `harness` is a fixture
-    ADMIN, ADMIN_ID, EDITOR, OTHER_ID, OWNER_ID, PACKAGE, PLUGIN_ROOT, harness,
+    ADMIN, ADMIN_ID, EDITOR, OTHER_ID, OWNER_ID, PACKAGE, PLUGIN_ROOT, fake_connections, harness,
 )
 
 SIGNING_TOKEN = 'whsec_' + 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo='  # base64 of 26 letters
@@ -302,7 +302,8 @@ def test_7404_vault_failure_on_rotate_keeps_the_current_secret(api):
 
 @pytest.fixture
 def owner_change(api):
-    load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py', f'{PACKAGE}.utils.schedule_prerun')
+    fake_connections(api, load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py',
+                                                  f'{PACKAGE}.utils.schedule_prerun'))
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_owner.py', f'{PACKAGE}.utils.schedule_owner')
     module.validate_new_owner = lambda *args, **kwargs: None
     return api
