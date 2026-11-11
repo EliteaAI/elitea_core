@@ -205,6 +205,14 @@ _BARE_ITEM_KEYS = frozenset({
     'action', 'value', 'interrupt_id', 'decision_id', 'tool_call_id', 'thread_id', 'child_thread_id',
     'root_thread_id', 'authorization_request_id',
 })
+# The continue fields a plain answer may carry. The caller's own tokens, server lists, model settings and attachments are
+# cleared by `_drop_caller_inputs`; any other field that is set and truthy changes what runs as the actor, so it is refused
+_BARE_PAYLOAD_FIELDS = frozenset({
+    'project_id', 'conversation_uuid', 'message_id', 'thread_id', 'should_continue', 'hitl_resume', 'hitl_action',
+    'hitl_value', 'hitl_decisions', 'mcp_auth_resume', 'mcp_auth_action', 'mcp_auth_decisions',
+    'authorization_request_id', 'interaction_uuid', 'question_id', 'user_input', 'mcp_tokens', 'ignored_mcp_servers',
+    'user_declined_mcp_servers', 'llm_settings', 'attachments_info',
+})
 _BARE_REFUSAL = {
     "error": "This run acts as another user: only a plain approve or reject (authorize or skip for a sign-in) is accepted",
     "field": "hitl_action", "status": 400,
@@ -215,7 +223,8 @@ def _bare_decision_refusal(parsed) -> dict | None:
     """The 400 dict unless the answer is a plain approve or reject (authorize or skip for a sign-in), else None.
 
     The schedule owner may decide a run an admin started, but the run resumes as the admin: an edit, a typed answer,
-    a note, a filled item value or a typed message would be run with the admin's rights, so none of them passes.
+    a note, a filled item value, a typed message or any other field of the payload (such as an approve-all switch)
+    would be run with the admin's rights, so none of them passes.
     """
     def plain(action, allowed) -> bool:  # an action of another type is no action, never a TypeError
         return action is None or (isinstance(action, str) and action in allowed)
@@ -232,6 +241,7 @@ def _bare_decision_refusal(parsed) -> dict | None:
         and plain_items(parsed.hitl_decisions, _BARE_HITL_ACTIONS)
         and plain_items(parsed.mcp_auth_decisions, _BARE_SIGN_IN_ACTIONS)
         and parsed.hitl_value in (None, '') and not parsed.user_input
+        and not any(getattr(parsed, name, None) for name in parsed.model_fields_set - _BARE_PAYLOAD_FIELDS)
     ):
         return _BARE_REFUSAL
     return None
@@ -2742,8 +2752,10 @@ class RPC:
                     'question_id': str(msg_group.uuid),
                 })
                 record_skill_run(session, response_msg, start_event_content)
+                # With a socket the predict RPC takes the user and the stream room of that socket, over `user_id`: a run
+                # that resumes as another user gets neither the decider's socket nor the decider as its user
                 result = getattr(self.context.rpc_manager.call, rpc_func)(
-                    sid, payload, SioEvents.chat_predict.value,
+                    sid if resume_user_id == current_user['id'] else None, payload, SioEvents.chat_predict.value,
                     start_event_content=start_event_content,
                     chat_project_id=parsed.project_id,
                     await_task_timeout=await_task_timeout,

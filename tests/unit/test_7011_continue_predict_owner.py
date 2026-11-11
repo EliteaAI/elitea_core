@@ -89,7 +89,7 @@ def _helpers(meta, error=None, decision='approve', apply_error=None, actor=ACTOR
     return helpers + (namespace['_resume_user_id'],) if resume else helpers
 
 
-BARE_NAMES = {'_BARE_HITL_ACTIONS', '_BARE_SIGN_IN_ACTIONS', '_BARE_ITEM_KEYS', '_BARE_REFUSAL',
+BARE_NAMES = {'_BARE_HITL_ACTIONS', '_BARE_SIGN_IN_ACTIONS', '_BARE_ITEM_KEYS', '_BARE_PAYLOAD_FIELDS', '_BARE_REFUSAL',
               '_bare_decision_refusal', '_drop_caller_inputs'}
 
 
@@ -105,14 +105,16 @@ def _bare():
 
 
 def _parsed(**values):
-    return types.SimpleNamespace(**{
+    fields = {
         'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'hitl_resume': True,
         'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None,
         'mcp_auth_resume': False, 'mcp_auth_action': None, 'hitl_value': None, 'user_input': None,
         'mcp_auth_decisions': None, 'llm_settings': None, 'attachments_info': None, 'mcp_tokens': {},
         'ignored_mcp_servers': [], 'user_declined_mcp_servers': None,
         **values,
-    })
+    }
+    # Like a pydantic model, the payload knows which fields the client sent
+    return types.SimpleNamespace(model_fields_set=set(fields), **fields)
 
 
 def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decision():
@@ -419,6 +421,57 @@ def test_a_sign_in_answer_is_plain_only_when_the_run_acts_as_another_user(values
     refuse, _ = _bare()
 
     assert (refuse(_parsed(**values)) is not None) is refused
+
+
+@pytest.mark.parametrize('field, value', [
+    ('approve_all', True),
+    ('approve_all', 'yes'),
+    ('approve_all', 1),
+    ('approve_all', [['github', '*']]),
+    ('token_limit_continuation', True),
+    ('a_field_added_later', {'x': 1}),
+])
+def test_a_field_outside_the_plain_answer_is_refused_when_the_run_acts_as_another_user(field, value):
+    refuse, _ = _bare()
+
+    denied = refuse(_parsed(**{field: value}))
+
+    assert denied['status'] == 400 and denied['field'] == 'hitl_action'
+
+
+@pytest.mark.parametrize('field, value', [
+    ('approve_all', False),
+    ('approve_all', None),
+    ('token_limit_continuation', False),
+    ('should_continue', True),
+    ('question_id', 'q-1'),
+])
+def test_an_unset_or_identity_field_does_not_refuse_a_plain_answer(field, value):
+    refuse, _ = _bare()
+
+    assert refuse(_parsed(**{field: value})) is None
+
+
+def test_a_field_the_client_did_not_send_is_not_checked():
+    refuse, _ = _bare()
+    parsed = _parsed()
+    parsed.approve_all = True  # a default on the model, not sent by the client
+
+    assert refuse(parsed) is None
+
+
+def test_a_run_started_by_its_owner_resumes_as_the_owner_and_gets_no_refusal_check():
+    _, _, _, resume_user_id = _helpers({'schedule_run_id': RUN_ID}, actor=OWNER, resume=True)
+
+    assert resume_user_id(PROJECT_ID, (RUN_ID, 'approve'), OWNER) == OWNER  # the guard runs only when this differs
+
+
+def test_the_resume_of_another_users_run_gets_neither_the_decider_socket_nor_the_decider_as_user():
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    call = body[body.index('rpc_func)('):]
+    call = call[:call.index('user_id=resume_user_id')]
+
+    assert "sid if resume_user_id == current_user['id'] else None, payload" in call
 
 
 def test_the_inputs_of_the_deciding_user_are_dropped_before_the_resume():
