@@ -98,56 +98,35 @@ def test_nothing_found_returns_none(mcp_oauth):
     assert mcp_oauth.pick_oauth_setting([{}, {'client_secret': ''}], 'client_secret') is None
 
 
-TENANT_ENDPOINT = 'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token'
+def test_dataverse_token_endpoint_is_built_from_the_credential_tenant(mcp_oauth):
+    settings = {'dataverse_configuration': {'tenant_id': ' contoso.onmicrosoft.com ', 'client_secret': 's'}}
+
+    assert mcp_oauth.dataverse_token_endpoint(settings) == (
+        'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token')
 
 
-def _dataverse(tenant_id='tenant-1'):
-    return {'dataverse_configuration': {'tenant_id': tenant_id, 'client_secret': 's'}}
+@pytest.mark.parametrize('settings', [{}, {'teams_configuration': {'tenant_id': 't'}},
+                                      {'dataverse_configuration': None}, {'dataverse_configuration': {}}])
+def test_a_toolkit_without_a_dataverse_credential_has_no_pinned_endpoint(mcp_oauth, settings):
+    assert mcp_oauth.dataverse_token_endpoint(settings) is None
 
 
-@pytest.mark.parametrize('endpoint', [TENANT_ENDPOINT, f'{TENANT_ENDPOINT}/'])
-def test_a_dataverse_credential_accepts_the_endpoint_of_its_tenant(mcp_oauth, endpoint):
-    assert mcp_oauth.is_foreign_token_endpoint(_dataverse(), endpoint) is False
+@pytest.mark.parametrize('tenant', [None, '', '   ', '../x', 'a/b', 'evil.example/', '-lead', 'a b', 't' * 101])
+def test_a_dataverse_credential_with_a_bad_tenant_pins_no_acceptable_endpoint(mcp_oauth, tenant):
+    endpoint = mcp_oauth.dataverse_token_endpoint({'dataverse_configuration': {'tenant_id': tenant, 'url': 'u'}})
+
+    assert endpoint == ''
+    assert not mcp_oauth.is_same_endpoint(endpoint, endpoint)
 
 
-@pytest.mark.parametrize('endpoint', [
-    'https://attacker.example/token',
-    'https://login.microsoftonline.com/other-tenant/oauth2/v2.0/token',
-    'https://login.microsoftonline.com.attacker.example/tenant-1/oauth2/v2.0/token',
-    'http://login.microsoftonline.com/tenant-1/oauth2/v2.0/token',
-    'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token?x=1',
-    '',
-    None,
+@pytest.mark.parametrize('given, same', [
+    ('https://login.microsoftonline.com/t/oauth2/v2.0/token', True),
+    ('https://login.microsoftonline.com/t/oauth2/v2.0/token/', True),
+    ('https://login.microsoftonline.com/T/oauth2/v2.0/token', False),
+    ('https://login.microsoftonline.com/other/oauth2/v2.0/token', False),
+    ('https://login.microsoftonline.com/t/oauth2/v2.0/token?x=1', False),
+    ('', False),
+    (None, False),
 ])
-def test_a_dataverse_credential_refuses_any_other_endpoint(mcp_oauth, endpoint):
-    assert mcp_oauth.is_foreign_token_endpoint(_dataverse(), endpoint) is True
-
-
-@pytest.mark.parametrize('tenant', [None, '', '  ', 'a/../b', 'tenant-1/x', 'ten ant', 7])
-def test_a_dataverse_credential_without_a_usable_tenant_matches_no_endpoint(mcp_oauth, tenant):
-    settings = _dataverse(tenant_id=tenant)
-
-    assert mcp_oauth.is_foreign_token_endpoint(settings, TENANT_ENDPOINT) is True
-
-
-def test_the_endpoint_of_a_dataverse_credential_is_built_from_its_tenant(mcp_oauth):
-    assert mcp_oauth.dataverse_token_endpoint(_dataverse()) == TENANT_ENDPOINT
-    assert mcp_oauth.dataverse_token_endpoint(_dataverse(tenant_id='')) is None
-    assert mcp_oauth.dataverse_token_endpoint({'teams_configuration': {'tenant_id': 'tenant-1'}}) is None
-
-
-def test_the_tenant_is_trimmed_before_the_endpoint_is_built(mcp_oauth):
-    assert mcp_oauth.is_foreign_token_endpoint(_dataverse(tenant_id=' tenant-1 '), TENANT_ENDPOINT) is False
-
-
-@pytest.mark.parametrize('settings', [
-    {},
-    {'dataverse_configuration': None},
-    {'dataverse_configuration': {}},
-    {'sharepoint_configuration': {'client_secret': 's'}},
-    {'openapi_configuration': {'client_secret': 's', 'token_endpoint': 'https://idp.example/token'}},
-    {'teams_configuration': {'client_secret': 's'}},
-    {'outlook_configuration': {'client_secret': 's'}},
-])
-def test_other_sign_in_types_keep_any_endpoint(mcp_oauth, settings):
-    assert mcp_oauth.is_foreign_token_endpoint(settings, 'https://attacker.example/token') is False
+def test_an_endpoint_is_the_same_only_when_it_is_the_pinned_one(mcp_oauth, given, same):
+    assert mcp_oauth.is_same_endpoint('https://login.microsoftonline.com/t/oauth2/v2.0/token', given) is same

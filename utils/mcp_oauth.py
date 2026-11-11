@@ -31,33 +31,33 @@ OAUTH_CONFIGURATION_KEYS = (
     'openapi_configuration',
     'teams_configuration',
     'outlook_configuration',
-    'dataverse_configuration',
+    'dataverse_configuration',  # its token endpoint is pinned: see dataverse_token_endpoint
 )
 
 
-# Dataverse credentials save no token endpoint, so the one endpoint their client secret may go to
-# is built from the tenant of the credential.
-DATAVERSE_TOKEN_ENDPOINT = 'https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token'
-TENANT_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,99}$')
+DATAVERSE_CONFIGURATION_KEY = 'dataverse_configuration'
+# Same shape the SDK accepts for a tenant: a GUID or a domain name, never a path or a host
+_TENANT_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]{0,99}')
 
 
 def dataverse_token_endpoint(settings: dict) -> Optional[str]:
-    """The token endpoint of the Dataverse credential in ``settings``, or None without a valid tenant."""
-    config = settings.get('dataverse_configuration')
-    tenant = config.get('tenant_id') if isinstance(config, dict) else None
-    tenant = tenant.strip() if isinstance(tenant, str) else ''
-    return DATAVERSE_TOKEN_ENDPOINT.format(tenant_id=tenant) if TENANT_PATTERN.match(tenant) else None
+    """The only token endpoint a Dataverse toolkit may sign in at, built from its credential's tenant.
 
-
-def is_foreign_token_endpoint(settings: dict, token_endpoint: Optional[str]) -> bool:
-    """True when the settings hold a Dataverse credential and ``token_endpoint`` is not its endpoint.
-
-    A Dataverse credential without a valid tenant matches no endpoint. Other credential types pin nothing.
+    None when the toolkit has no Dataverse credential. An empty string when it has one but the tenant is
+    missing or malformed: no endpoint is then acceptable.
     """
-    config = settings.get('dataverse_configuration')
+    config = settings.get(DATAVERSE_CONFIGURATION_KEY)
     if not isinstance(config, dict) or not config:
-        return False
-    return (token_endpoint or '').rstrip('/') != dataverse_token_endpoint(settings)
+        return None
+    tenant = str(config.get('tenant_id') or '').strip()
+    if not _TENANT_PATTERN.fullmatch(tenant):
+        return ''
+    return f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token'
+
+
+def is_same_endpoint(expected: str, given: Optional[str]) -> bool:
+    """Whether ``given`` is ``expected``, ignoring a trailing slash; an empty ``expected`` matches nothing."""
+    return bool(expected) and expected.rstrip('/') == (given or '').strip().rstrip('/')
 
 
 def get_oauth_configurations(settings: dict) -> list:
