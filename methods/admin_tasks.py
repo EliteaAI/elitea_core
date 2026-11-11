@@ -3178,6 +3178,58 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     # pylint: disable=R,W0613
     @web.method()
+    def migrate_sharepoint_site_url_to_toolkit(self, *args, **kwargs):
+        """Admin task: copy 'site_url' from the SharePoint credential to its toolkits (#7197).
+
+        The Site URL now belongs to the SharePoint toolkit, so one credential can serve many sites. For every
+        SharePoint toolkit without its own 'site_url' this copies the value from the credential it references.
+        The credential keeps its (now hidden, deprecated) 'site_url' on purpose: other toolkits, private
+        credentials and toolkits not migrated yet fall back to it at run time, so nothing stops working.
+
+        Idempotent: toolkits that already have a 'site_url' are skipped. Toolkits whose credential cannot be found
+        in the same project (private or shared credentials) are skipped and counted; they keep using the fallback.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+        """
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        try:
+            from plugins.configurations.models.configuration import Configuration  # pylint: disable=C0415
+        except ImportError:
+            log.error("migrate_sharepoint_site_url_to_toolkit: configurations plugin not available")
+            return {"migrated": 0, "error": "configurations plugin not available"}
+
+        usage = "project_id=<all|N>[;dry_run]"
+        values, error = _parse_project_param(
+            "migrate_sharepoint_site_url_to_toolkit", kwargs.get("param", "") or "", usage)
+        if error:
+            return {"migrated": 0, "error": error}
+        dry_run = values["dry_run"]
+        prefix = "[DRY RUN] " if dry_run else ""
+
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, kwargs.get("param", "") or "")
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_sharepoint_site_url_to_toolkit: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        total = {"toolkits_migrated": 0, "toolkits_skipped": 0, "failed_projects": 0, "errors": []}
+        for project_id in project_ids:
+            try:
+                result = _run_sharepoint_site_url_migration(
+                    project_id, dry_run, prefix, db, EliteATool, Configuration)
+                total["toolkits_migrated"] += result["toolkits_migrated"]
+                total["toolkits_skipped"] += result["toolkits_skipped"]
+            except Exception as e:  # pylint: disable=W0703
+                log.exception("%smigrate_sharepoint_site_url_to_toolkit: error in project %s", prefix, project_id)
+                total["failed_projects"] += 1
+                total["errors"].append({"project_id": project_id, "error": str(e)})
+        total["dry_run"] = dry_run
+        return total
+
+    @web.method()
     def migrate_llm_model(self, *args, **kwargs):
         """Migrate stale LLM model_name references in ApplicationVersions and ParticipantMappings.
 
@@ -4492,6 +4544,51 @@ def _run_ado_project_migration(  # pylint: disable=R0913,R0914
         if not dry_run:
             session.commit()
 
+    return results
+
+
+def _sharepoint_site_url_from_credential(settings, credentials_by_title):
+    """The credential's site_url for a SharePoint toolkit that has none of its own, else ``None``."""
+    if (settings.get("site_url") or "").strip():
+        return None
+    reference = settings.get("sharepoint_configuration") or {}
+    credential = credentials_by_title.get(reference.get("elitea_title"))
+    site_url = ((credential or {}).get("site_url") or "").strip()
+    return site_url or None
+
+
+def _run_sharepoint_site_url_migration(  # pylint: disable=R0913
+    project_id, dry_run, prefix, db, EliteATool, Configuration,
+):
+    """Core of migrate_sharepoint_site_url_to_toolkit (#7197): one project, one transaction."""
+    from copy import deepcopy  # pylint: disable=C0415
+    from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+
+    results = {"toolkits_migrated": 0, "toolkits_skipped": 0}
+    with db.with_project_schema_session(project_id) as session:
+        toolkits = session.query(EliteATool).filter(EliteATool.type == "sharepoint").all()
+        if not toolkits:
+            return results
+        credentials_by_title = {
+            configuration.elitea_title: configuration.data or {}
+            for configuration in session.query(Configuration).filter(Configuration.type == "sharepoint").all()
+        }
+        for toolkit in toolkits:
+            settings = toolkit.settings or {}
+            site_url = _sharepoint_site_url_from_credential(settings, credentials_by_title)
+            if site_url is None:
+                results["toolkits_skipped"] += 1
+                continue
+            log.info("%sproject %s, toolkit id=%s: site_url='%s' from its credential",
+                     prefix, project_id, toolkit.id, site_url)
+            if not dry_run:
+                new_settings = deepcopy(settings)
+                new_settings["site_url"] = site_url
+                toolkit.settings = new_settings
+                flag_modified(toolkit, "settings")
+            results["toolkits_migrated"] += 1
+        if not dry_run:
+            session.commit()
     return results
 
 
