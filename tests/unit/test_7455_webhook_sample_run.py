@@ -14,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import types
 
 from test_7011_schedule_crud_api import (  # noqa: F401
-    ADMIN, ADMIN_ID, OWNER_ID, PACKAGE, PROJECT_ID, harness as _crud_harness,
+    ADMIN, ADMIN_ID, OTHER_ID, OWNER_ID, PACKAGE, PROJECT_ID, harness as _crud_harness,
 )
 from test_7011_schedule_run_api import runs
 
@@ -27,8 +27,8 @@ def harness(_crud_harness):
     insert_run = sys.modules[f'{PACKAGE}.utils.schedule_claim'].insert_run
     door.admitted, door.capped = [], None
     door.Capped = collections.namedtuple('Capped', 'code running cap')
-    door.admit_webhook_run = lambda session, project_id, row_id, trigger='webhook': door.capped or (
-        door.admitted.append(trigger) or insert_run(session, row_id, trigger))
+    door.admit_webhook_run = lambda session, project_id, row_id, trigger='webhook', requested_by=None: door.capped or (
+        door.admitted.append(trigger) or insert_run(session, row_id, trigger, requested_by))
     sys.modules[door.__name__] = door
     _crud_harness.door = door
     return _crud_harness
@@ -58,7 +58,7 @@ def test_a_sample_run_inserts_a_test_run_and_passes_the_body_in_memory(harness, 
     hook = _hook(harness)
     body, status = _run(harness, hook, payload='{"action": "opened"}')
     assert status == 202
-    assert runs(harness) == [(body['run_id'], hook, 'test', 'running', None)]
+    assert runs(harness) == [(body['run_id'], hook, 'test', 'running', OWNER_ID)]
     assert harness.door.admitted == ['test']
     args, kwargs = started[0]
     assert args == ('agent', PROJECT_ID, hook, body['run_id'])   # no owner ticket: governed as a delivery
@@ -108,10 +108,18 @@ def test_a_sample_run_that_cannot_start_is_failed_and_500(harness):
     assert [row[3] for row in runs(harness)] == ['failed']
 
 
-def test_only_the_owner_runs_a_sample(harness, started):
-    hook = _hook(harness)
-    harness.request_as(ADMIN_ID, ADMIN)   # an admin sees the row but never runs it as the owner
-    assert _run(harness, hook, payload='{}')[1] == 403
+def test_a_schedules_admin_runs_a_sample_as_themselves_and_the_owner_is_told(harness, started):
+    hook = _hook(harness, created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    body, status = _run(harness, hook, payload='{}')
+    assert status == 202
+    assert runs(harness) == [(body['run_id'], hook, 'test', 'running', ADMIN_ID)]   # the starter reads the actor from here
+    assert harness.notices == [(OTHER_ID, 'schedule_edited_by_admin', hook)]
+
+
+def test_a_member_without_schedules_admin_cannot_run_a_sample_of_another_owner(harness, started):
+    hook = _hook(harness, created_by=OTHER_ID)
+    assert _run(harness, hook, payload='{}')[1] == 404
     assert runs(harness) == []
 
 

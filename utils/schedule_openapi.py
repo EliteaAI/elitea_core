@@ -6,7 +6,13 @@ checks that both tables match. `Module._register_openapi` registers every entry 
 """
 from typing import get_args
 
-from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck, WebhookSecretAction
+from ..models.pd.entity_schedule import (
+    ScheduleConnectionsCheck,
+    ScheduleCreate,
+    ScheduleEdit,
+    ScheduleRiskCheck,
+    WebhookSecretAction,
+)
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
@@ -115,11 +121,12 @@ RUN_DETAIL_EXAMPLE = {
     "id": 78, "trigger": "test", "status": "success", "reason": None, "conversation_id": 902, "requested_by": 20,
     "started_at": "2026-10-21T09:00:00+00:00", "finished_at": "2026-10-21T09:00:38+00:00", "version_id": 420,
     "duration_ms": 38000, "version_label": "v3", "principal_label": "Ann Smith (schedule owner)",
-    "risk_outcome": "needs_approval", "approval_rule": "pause_and_ask", "approval_expires_at": None,
+    "risk_outcome": "needs_approval", "decider_id": 20, "approval_rule": "pause_and_ask", "approval_expires_at": None,
     "summary": {"duration_ms": 38000, "tokens": 2140, "cost_usd": 0.03},
     "events": [
         {"at": "2026-10-21T09:00:00.120000+00:00", "kind": "started", "level": "info",
-         "text": "Test run started · trigger: test · version v3", "trigger": "test", "version_id": 420},
+         "text": "Test run started · trigger: test · version v3", "trigger": "test", "version_id": 420,
+         "owner_id": 20},
         {"at": "2026-10-21T09:00:00.410000+00:00", "kind": "account", "level": "info",
          "text": "Account: Ann Smith (schedule owner)"},
         {"at": "2026-10-21T09:00:00.900000+00:00", "kind": "risk_check", "level": "warning",
@@ -170,7 +177,8 @@ CHECK_EXAMPLE = {
 }
 SAVE_CONFLICTS = (
     ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed` (the body has the findings and "
-     "the `fingerprint`), or the project limit of active schedules"), {
+     "the `fingerprint`), `connections_not_ready` for a webhook whose toolkit cannot run unattended (the body "
+     "has the `rows` of the Connections check), or the project limit of active schedules"), {
         "code": "risk_confirmation_required",
         "error": "Review the sensitive tools, then save again with `risk_ack` and this fingerprint",
         "blocking": [], "sensitive": [SENSITIVE_FINDING], "notices": [], "fingerprint": FINGERPRINT,
@@ -219,6 +227,14 @@ REFUSAL_SCHEMA = {
     },
     "additionalProperties": True,
 }
+
+
+CONNECTIONS_EXAMPLE = {"rows": [
+    {"toolkit": "Mail", "toolkit_type": "outlook", "status": "ok", "reason": None, "credential_uuid": "5c1e...",
+     "credential_type": "outlook", "credential_title": "team_outlook", "private": False, "login": "ok"},
+    {"toolkit": "Remote tools", "toolkit_type": "mcp", "status": "unsupported",
+     "reason": "Webhooks cannot wait for a sign-in; use a toolkit with a saved login."}],
+    "all_ok": False, "blocking": True, "lost_login": False}
 
 
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
@@ -310,16 +326,38 @@ OPERATIONS = {
             "does not allow the rule or a tool could not be checked. Send the `fingerprint` back in `risk_ack`. "
             "An edit sends `schedule_id`: the scan runs as the schedule owner, and the answer adds `confirmed`, "
             "true when the schedule keeps \"Run without asking\" with this fingerprint stored, so the save "
-            "needs no new `risk_ack`.",
-            "a project member with `schedules.create`, as for a create",
-            "400 an invalid field, or a version that is not of the agent or pipeline; 403 no permission; "
-            "404 the agent or pipeline, or the `schedule_id`, is not visible"),
+            "needs no new `risk_ack`. A waiting run sends `schedule_id` and `run_id`: the scan runs as the user "
+            "the run acts as (the person who pressed Run now, else the owner), never as a user the client names, "
+            "and the answer has no `confirmed`.",
+            "a project member with `schedules.create`, as for a create; with `run_id` also `schedules.run`",
+            "400 an invalid field (`run_id` needs `schedule_id`), or a version that is not of the agent or "
+            "pipeline; 403 no permission, or `run_id` without `schedules.run`; 404 the agent or pipeline, or the "
+            "`schedule_id`, is not visible, or the `run_id` is unknown or of another schedule"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleRiskCheck,
         "responses": _responses(200, "The risk review", CHECK_EXAMPLE, {
             400: ("A version that is not of the agent or pipeline", {
                 "error": "The version does not belong to this agent or pipeline", "field": "version_id"}),
-            403: None, 404: "The agent or pipeline, or the schedule of `schedule_id`, is not visible"}),
+            403: None, 404: "The agent or pipeline, the schedule of `schedule_id` or its run `run_id` is not visible"}),
+    },
+    ("post", "connections"): {
+        "name": "Check the connections of a schedule",
+        "summary": "Check that every toolkit can run unattended",
+        "description": _text(
+            "One row per toolkit of the version, its sub-agents included: `ok`, `sign_in_required` or `unsupported` "
+            "with a `reason`. A saved Microsoft login (SharePoint, Outlook, Teams, Dataverse) gets a real token "
+            "refresh of the login saved on the server; a browser session never counts. A toolkit that signs in "
+            "only in a browser (remote MCP, OpenAPI with OAuth) or acts with the signed-in person's account is "
+            "`unsupported`. `blocking` is true for a webhook with any row that is not ok: its save is refused. "
+            "With `schedule_id` the check runs as the trigger's owner; when the caller is the owner it saves the "
+            "credential references, and an expired or removed saved login switches off every trigger of the owner "
+            "using that credential (`lost_login` is true when it did).",
+            "a project member with `schedules.create`, as for the risk check",
+            "400 an invalid field; 403 no permission; 404 the agent or pipeline, or the `schedule_id`, is not visible"),
+        "parameters": PROJECT_PARAMS,
+        "request_body": ScheduleConnectionsCheck,
+        "responses": _responses(200, "The connections", CONNECTIONS_EXAMPLE, {
+            400: None, 403: None, 404: "The agent or pipeline, or the schedule of `schedule_id`, is not visible"}),
     },
     ("get", ITEM): {
         "name": "Read a schedule",
@@ -396,14 +434,15 @@ OPERATIONS = {
         "description": _text(
             "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time. "
             "A webhook runs only as `test` with a sample `payload` (at most 512 KB, not stored), through the "
-            "delivery path.",
-            "the owner with `schedules.run`; an admin sees the schedule but cannot run it",
-            "400 an invalid trigger or payload; 403 no permission or not the owner; 404 not found; "
+            "delivery path. The run acts as the caller. An admin's run always pauses before a sensitive action, and "
+            "the owner of the schedule approves or rejects that pause.",
+            "the owner or a holder of `schedules.admin`, with `schedules.run`",
+            "400 an invalid trigger or payload; 403 no permission; 404 not found, or a schedule outside the caller's scope; "
             "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,
         "responses": _responses(202, "The run started", {"run_id": 77, "application_id": 12}, {
-            400: None, 403: "No permission, or not the owner", 404: None,
+            400: None, 403: "No permission", 404: None,
             409: ("The version is deleted, or a run is active", {
                 "error": "A run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start"}),
@@ -499,15 +538,18 @@ OPERATIONS = {
         "name": "Decide a waiting run",
         "summary": "Decide a waiting run",
         "description": _text(
-            "Answer a run that waits for the owner to add credentials. `approve` starts the run again and checks the "
-            "credentials once more; `reject` ends it as failed. A run with a chat is decided in that chat.",
-            "the owner with `schedules.run`; an admin cannot decide",
-            "400 an invalid action; 403 no permission or not the owner; 404 not found; "
+            "Answer a run that waits for a person to add credentials. `approve` starts the run again and checks the "
+            "credentials once more, as the user the run acts as; `reject` ends it as failed. A run with a chat is "
+            "decided in that chat. The owner of the schedule at the start of the run decides, also when an admin "
+            "started the run with Run now, and also after a Change owner. An admin who is not that owner cannot "
+            "decide.",
+            "the owner of the schedule at the start of the run, with `schedules.run`",
+            "400 an invalid action; 403 no permission, or not the owner of the run; 404 not found, or a schedule outside the caller's scope; "
             "409 the run is not waiting, or has a chat; 500 the run could not start"),
         "parameters": RUN_PARAMS,
         "request_body": ScheduleRunDecision,
         "responses": _responses(200, "The decision was written", {"run_id": 77, "status": "running"}, {
-            400: None, 403: "No permission, or not the owner", 404: None,
+            400: None, 403: "No permission, or not the owner of the run", 404: None,
             409: "The run is not waiting, or has a chat", 500: "The run could not start"}),
     },
     ("get", RUN): {
@@ -520,6 +562,9 @@ OPERATIONS = {
             "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
+            "A manual or test run started by another user shows only toolkit, tool and duration. "
+            "`decider_id` is the user who approves, rejects or signs in for a waiting run: the owner of the "
+            "schedule at the start of the run (for a Test Run of an unsaved form, its starter). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
             "while the status is `running` or `waiting_for_approval`.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),

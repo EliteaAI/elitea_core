@@ -21,9 +21,10 @@ CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a sch
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 DEFAULT_APPROVAL_WAIT_HOURS = 24
 MAX_APPROVAL_WAIT_HOURS = 720
-REJECT_REASON = 'rejected by the owner'
+REJECT_REASON = 'rejected'
 TOO_MANY_WAITING = 'too many runs waiting for approval'
 SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not ask the owner"
+WEBHOOK_SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and a webhook cannot wait for one; use a saved login"
 # The owner's answer on a sign-in pause: `authorize` goes on, `skip` ends the run
 SIGN_IN_ACTIONS = {'authorize': 'approve', 'skip': 'reject'}
 # The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
@@ -44,8 +45,12 @@ PRERUN_REFUSED = 'prerun_refused'
 PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (last: {reason}). Fix it and resume.'
 
 
+# One refusal text for the REST route and the chat: the decider is the schedule owner at the start of the run
+DECISION_REFUSED = 'Only the owner of this schedule can approve or reject this run'
+
+
 class ScheduleDecisionForbidden(Exception):
-    """The caller of an approve or reject is not the schedule owner; an admin included (R2.3)."""
+    """The caller of an approve or reject is not the decider of the run (`run_decider_id`); an admin included."""
 
 
 class ScheduleDecisionInvalid(Exception):
@@ -136,6 +141,30 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
         session.commit()
 
 
+def disable_by_credential(project_id: int, owner_id: int, credential_uuid: str, reason: str,
+                          credential: str | None = None, private: bool = False, also_id: int | None = None) -> list:
+    """Switch off the owner's enabled triggers whose `credential_refs` hold the credential; one notice for all."""
+    from ..models.enums.all import NotificationEventTypes as Types  # late, as in count_refusal
+    from .schedule_notifications import notify_schedule_event
+    with db.get_session(project_id) as session:
+        rows = session.execute(
+            update(EntitySchedule)
+            # `also_id`: the trigger whose run found it, even with refs not written yet (saved before #7401)
+            .where(EntitySchedule.created_by == owner_id, EntitySchedule.enabled.is_(True),
+                   or_(EntitySchedule.credential_refs.contains([str(credential_uuid)]),
+                       EntitySchedule.id == also_id))
+            .values(enabled=False, disabled_reason=reason, next_run=None)
+            .returning(EntitySchedule.id, EntitySchedule.name, EntitySchedule.trigger_kind)
+        ).all()
+        session.commit()
+    if rows:
+        first = SimpleNamespace(id=rows[0].id, name=rows[0].name, trigger_kind=rows[0].trigger_kind)
+        notify_schedule_event(project_id, owner_id, Types.schedule_credential_expired, first, extra={
+            'credential': credential, 'private': private, 'more': len(rows) - 1,
+            'schedule_ids': [row.id for row in rows]})
+    return rows
+
+
 def count_refusal(project_id: int, schedule, run_id: int, reason: str, code: str | None = None,
                   disabled_reason: str = GOVERNANCE_REFUSED, text: str = PAUSED_AFTER_REFUSALS) -> None:
     """One more governance refusal of a run of `schedule` (#7254), Run now and Test run included. The
@@ -212,6 +241,49 @@ def run_owner_id(session, run) -> int | None:
     return session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
 
 
+def _owner_at_start(session, run) -> int | None:
+    """The schedule owner when the run started: `owner_id` of the start line of the run log, else the live owner.
+
+    A run with no such line (made before it was written, or when the log write failed) falls back to the live owner.
+    """
+    started = next((event for event in run.events or []
+                    if isinstance(event, dict) and event.get('kind') == 'started'), None)
+    owner_id = (started or {}).get('owner_id')
+    return owner_id if isinstance(owner_id, int) and not isinstance(owner_id, bool) else run_owner_id(session, run)
+
+
+def run_actor_id(session, run) -> int | None:
+    """The user a run acts as: the person who pressed Run now or Test run, else the owner it had at its start.
+
+    An admin who runs another user's schedule now acts as the admin, never as the owner. After a Change owner a
+    waiting cron or webhook run keeps acting as the owner it started under; new runs act as the new owner.
+    The actor is who the run uses credentials of; `run_decider_id` is who answers its pause.
+    """
+    if run.trigger in ('manual', 'test') and run.requested_by is not None:
+        return run.requested_by
+    return _owner_at_start(session, run)
+
+
+def run_decider_id(session, run) -> int | None:
+    """The user who approves, rejects or signs in for a run: the schedule owner at the start of the run.
+
+    A Change owner moves later runs to the new owner; a run that waits stays with the owner it started under, the
+    start line of the run log keeps that id. A run with no such line (made before it was written, or when the log
+    write failed) falls back to the live owner. A Test Run has no schedule: its starter decides it.
+    An admin's Run now acts as the admin (`run_actor_id`) and is still decided by the owner.
+    """
+    if run.schedule_id is None:
+        return run.requested_by
+    return _owner_at_start(session, run)
+
+
+def schedule_run_actor_id(project_id: int, run_id: int) -> int | None:
+    """The user a run acts as (`run_actor_id`), read in its own session; None when the run is gone."""
+    with db.get_session(project_id) as session:
+        run = session.get(EntityScheduleRun, run_id)
+        return run_actor_id(session, run) if run is not None else None
+
+
 def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
     """Conditions that tie a chat hook to its own run: the run is linked to this conversation, or has none yet
     and the chat author owns the schedule. The run id comes from conversation meta, which a client can write.
@@ -254,18 +326,21 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
                        author_id: int | None = None) -> None:
     """A sensitive-tool or sign-in pause makes a running run wait for the owner; any other pause fails it.
 
-    A schedule that does not ask the owner fails on a sign-in at once. `conversation_id` and `author_id` of the
-    paused chat tie the pause to its own run (see `_own_conversation`).
+    A schedule that does not ask the owner, and any webhook, fails on a sign-in at once. `conversation_id` and
+    `author_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
     """
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
-    if sign_in is not None and _approval_rule(project_id, run_id) == 'run_without_asking':
-        name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
-        finish_schedule_run(project_id, run_id, 'failed', SIGN_IN_REASON.format(name), conversation_id,
-                            author_id=author_id)
-        return
+    if sign_in is not None:
+        rule, kind = _sign_in_policy(project_id, run_id)
+        if rule == 'run_without_asking' or kind == 'webhook':
+            name = str(sign_in.get('toolkit_name') or '?')[:NAME_LIMIT]
+            reason = WEBHOOK_SIGN_IN_REASON if kind == 'webhook' else SIGN_IN_REASON
+            finish_schedule_run(project_id, run_id, 'failed', reason.format(name), conversation_id,
+                                author_id=author_id)
+            return
     waiting = sensitive or sign_in
     if waiting is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
@@ -310,7 +385,9 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
         if run.schedule_id is None:  # a Test Run has no schedule page to link a notice to
             return True
         schedule = session.get(EntitySchedule, run.schedule_id)
-        notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
+        # The notice goes to who must answer: an admin's Run now acts as the admin, and the owner still decides it
+        recipient = run_decider_id(session, run) or schedule.created_by
+        notify_schedule_event(project_id, recipient, 'schedule_approval_needed', schedule, run)
     except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it
         log.exception('Schedule run %s: cannot send the approval notice', run_id)
     return True
@@ -369,6 +446,18 @@ def _approval_rule(project_id: int, run_id: int, session=None) -> str | None:
         return own.scalar(query)
 
 
+def _sign_in_policy(project_id: int, run_id: int) -> tuple[str | None, str | None]:
+    """The approval rule and trigger kind of the run's schedule, in one read; a Test Run has no kind."""
+    query = (select(func.coalesce(EntitySchedule.approval_rule, RUN_FORM['approval_rule'].astext),
+                    EntitySchedule.trigger_kind)
+             .select_from(EntityScheduleRun)
+             .outerjoin(EntitySchedule, EntityScheduleRun.schedule_id == EntitySchedule.id)
+             .where(EntityScheduleRun.id == run_id))
+    with db.get_session(project_id) as session:
+        row = session.execute(query).one_or_none()
+    return (row[0], row[1]) if row is not None else (None, None)
+
+
 def _copy_status(session, run_id: int, status: str) -> None:
     """Copy a run status that is not an end to its schedule, so the Schedules list follows the run (R1.6)."""
     schedule_id = select(EntityScheduleRun.schedule_id).where(EntityScheduleRun.id == run_id).scalar_subquery()
@@ -399,12 +488,15 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
-                            fan_out: bool = False, sign_in: bool = False) -> str | None:
-    """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
+                            fan_out: bool = False, sign_in: bool = False, conversation_id: int | None = None) -> str | None:
+    """Check the decision on a waiting run without changing it; `reject` or `approve`.
 
-    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
-    included (R2.3); then `ScheduleDecisionInvalid` for an empty or unknown action; then
-    `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
+    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but the decider of the run
+    (`run_decider_id`), an admin included; the run still uses the credentials of the user it acts as
+    (`run_actor_id`), which the caller of the resume picks. A chat passes its
+    `conversation_id`, and the run must be linked to that chat, else `ScheduleRunNotWaiting`, because the run id in
+    the conversation meta is written by the client. Then `ScheduleDecisionInvalid` for an empty or unknown action;
+    then `ScheduleRunNotWaiting` when the run is not waiting. None when a fan-out child decides a run
     that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
     the sign-in answers (`authorize`, `skip`) and map to approve and reject.
     """
@@ -412,9 +504,9 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
-        if run is None:
+        if run is None or (conversation_id is not None and run.conversation_id != conversation_id):
             raise ScheduleRunNotWaiting(run_id)
-        if run_owner_id(session, run) != caller_id:
+        if run_decider_id(session, run) != caller_id:
             raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
@@ -430,7 +522,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
-    The run log gets the decision; only the owner decides (the check), so the owner is who decided.
+    The run log gets the decision; only the decider passes the check, so that user is who decided.
     """
     conversation_id = None
     with db.get_session(project_id) as session:
@@ -442,18 +534,17 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
         )
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
-        owner_id = run_owner_id(session, run)
         approved = decision == 'approve'
         append_run_events(session, run_id, run_event(
             'decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
-            'info' if approved else 'warning', action=decision, by=owner_id))
+            'info' if approved else 'warning', action=decision, by=run_decider_id(session, run)))
         if approved:
             session.execute(
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
             _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
-        else:  # no notice: the owner made this end (R2.2)
+        else:  # no notice: the decider made this end
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
             conversation_id = run.conversation_id
@@ -573,9 +664,10 @@ def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTIC
         schedule = session.get(EntitySchedule, run.schedule_id)
         # One failed notice must not leave the other runs of a batch without theirs
         try:
-            notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
+            recipient = run_actor_id(session, run) or schedule.created_by  # the chat of an admin's run is the admin's
+            notify_schedule_event(project_id, recipient, event, schedule, run)
             if schedule.entity_type == 'agent':
                 emit_schedule_run_finished(
-                    schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
+                    recipient, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
         except Exception:  # noqa: BLE001 - the run already ended; only its notice is lost
             log.exception('Schedule run %s: cannot send the %s notice', run_id, event)

@@ -1,11 +1,11 @@
-from typing import Optional
+from typing import NamedTuple, Optional, Union
 
 from pydantic import ValidationError
 from sqlalchemy import Integer
 
 from ..models.pd.import_wizard import IMPORT_MODEL_ENTITY_MAPPER, DEPRECATED_ENTITIES
 from ..models.pd.skill import SkillImportResultModel
-from ..utils.skill_utils import attach_skill_to_agent, SkillError
+from ..utils.skill_utils import attach_skill_to_agent, SkillError, SkillLimitExceededError
 from ..utils.export_import_utils import (
     ENTITY_IMPORT_MAPPER, _wrap_import_error,
     _wrap_import_result
@@ -224,6 +224,11 @@ def _collect_agent_skill_attachments(item: dict, app_name: str, item_index: int)
     return None
 
 
+class SkillLimitReached(NamedTuple):
+    """The agent version is full: every skill still to attach would hit the same limit."""
+    max_allowed: int
+
+
 def _resolve_and_attach_skill(
     project_id,
     agent_name,
@@ -232,9 +237,12 @@ def _resolve_and_attach_skill(
     skill_ref,
     skill_id_mapper,
     session,
-) -> Optional[str]:
+) -> Union[str, SkillLimitReached, None]:
     """Resolve one skill reference (import_uuid -> id, version_name -> version id) and
-    attach it to the agent version."""
+    attach it to the agent version.
+
+    Returns None on success, an error message for a skipped skill, or SkillLimitReached when
+    the agent version cannot take more skills."""
 
     import_uuid = skill_ref.get('import_uuid')
     skill_info = skill_id_mapper.get(import_uuid)
@@ -259,8 +267,11 @@ def _resolve_and_attach_skill(
             skill_version_id=skill_version_id,
             session=session,
         )
+    except SkillLimitExceededError as ex:
+        # Reported once per agent version by the caller, not once per skill.
+        return SkillLimitReached(ex.max_allowed)
     except SkillError as ex:
-        # Limit exceeded / already attached / not found -> non-fatal warning.
+        # Already attached / not found -> non-fatal warning.
         return (f"Skill not attached to agent '{agent_name}' version "
                 f"'{version_name}': {ex}")
     except Exception as ex:
@@ -296,12 +307,36 @@ def _attach_imported_skills(project_id, agents_with_skills, skill_id_mapper,
                     continue
                 _app_id, app_version_id = target
 
-                for skill_ref in skill_refs:
+                attached = 0
+                for ref_index, skill_ref in enumerate(skill_refs):
                     err = _resolve_and_attach_skill(
-                        project_id, agent_name, version_name, app_version_id, skill_ref, skill_id_mapper, s,
+                        project_id, agent_name, version_name, app_version_id, skill_ref,
+                        skill_id_mapper, s,
                     )
+                    if isinstance(err, SkillLimitReached):
+                        # Every remaining skill would hit the same limit: report once. The agent and
+                        # its skills already exist at this point, so the message says what was kept
+                        # instead of suggesting a re-import, which would create a second agent.
+                        not_attached = len(skill_refs) - ref_index
+                        errors['skills'].append(_wrap_import_error(
+                            item_index,
+                            f"Agent '{agent_name}' (version '{version_name}') was imported with "
+                            f"{attached} of {len(skill_refs)} skills: the project allows at most "
+                            f"{err.max_allowed} skills per agent, so {not_attached} skills were not "
+                            f"attached. Open the imported agent to remove skills or add the missing "
+                            f"ones after raising the limit.",
+                            import_uuid=raw_item.get('import_uuid'),
+                            version_name=version_name,
+                        ))
+                        break
                     if err:
-                        errors['skills'].append(_wrap_import_error(item_index, err))
+                        errors['skills'].append(_wrap_import_error(
+                            item_index, err,
+                            import_uuid=raw_item.get('import_uuid'),
+                            version_name=version_name,
+                        ))
+                    else:
+                        attached += 1
         s.commit()
 
 

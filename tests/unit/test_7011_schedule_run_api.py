@@ -112,11 +112,45 @@ def test_7011_r2_2_deleted_version_is_409_and_inserts_nothing(harness, started):
     assert (runs(harness), started) == ([], [])
 
 
-def test_7011_r3_1_admin_who_is_not_the_owner_is_403_and_inserts_nothing(harness, started):
+@pytest.mark.parametrize('trigger', ['manual', 'test'])
+def test_a_schedules_admin_who_is_not_the_owner_runs_the_schedule_as_themselves(harness, started, trigger):
     schedule_id = harness.seed(created_by=OTHER_ID)
     harness.request_as(ADMIN_ID, ADMIN)
-    assert_refusal(run(harness, schedule_id), 403, code='not_owner')
-    assert (runs(harness), started, harness.owner_requests) == ([], [], [])   # refused before any admission
+    body, status = run(harness, schedule_id, trigger)
+    assert status == 202
+    assert runs(harness) == [(body['run_id'], schedule_id, trigger, 'running', ADMIN_ID)]
+    assert harness.owner_requests == [(ADMIN_ID, {'project_id': PROJECT_ID, 'application_id': 1, 'version_id': 10,
+                                                  'trigger_ref': f'schedule:entity:{schedule_id}'})]
+    assert started == [('agent', PROJECT_ID, schedule_id, body['run_id'], None)]
+
+
+def test_the_owner_is_told_when_a_schedules_admin_starts_a_run_of_their_schedule(harness, started):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    assert run(harness, schedule_id)[1] == 202
+    assert harness.notices == [(OTHER_ID, 'schedule_edited_by_admin', schedule_id)]
+    assert harness.notice_extras == [{'action': 'started a run of'}]
+
+
+def test_the_owner_gets_no_start_notice_for_their_own_run(harness, started):
+    schedule_id = harness.seed()
+    assert run(harness, schedule_id)[1] == 202
+    assert harness.notices == []
+
+
+def test_no_start_notice_goes_out_when_the_admin_run_does_not_start(harness):
+    harness.module.start_schedule_run = lambda *args: False
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    assert run(harness, schedule_id)[1] == 500
+    assert harness.notices == []
+
+
+def test_a_user_with_run_but_without_schedules_admin_cannot_run_another_owners_schedule(harness, started):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, EDITOR)
+    assert_refusal(run(harness, schedule_id), 404, NOT_FOUND['error'])
+    assert (runs(harness), started, harness.owner_requests) == ([], [], [])
 
 
 def test_7011_r3_2_regular_user_run_of_another_owners_schedule_is_404(harness, started):

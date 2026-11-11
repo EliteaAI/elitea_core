@@ -1,4 +1,4 @@
-"""EL-7011 US-18 R2.1, R2.2, R2.3, R2.4: the owner decides on a run that waits for approval.
+"""The user a run acts as decides a run that waits for approval.
 
 Real: `check_schedule_decision` and `apply_schedule_decision` of `utils/schedule_runs.py` and the schedule models, over SQLite tables.
 The harness is the `world` fixture of the US-11 integration test.
@@ -46,14 +46,14 @@ def test_7011_r2_2_the_owner_reject_fails_the_run_with_the_reason(waiting):
     _decide(waiting.runs, OWNER, "reject")
 
     run = waiting.world.run_row()
-    assert (run.status, run.reason, run.finished_at is not None) == ("failed", "rejected by the owner", True)
+    assert (run.status, run.reason, run.finished_at is not None) == ("failed", "rejected", True)
     assert waiting.world.schedule().last_run_status == "failed"
 
 
-# R2.3: another user, an admin included, is refused and the run keeps waiting
+# Another user, an admin included, is refused and the run keeps waiting
 @pytest.mark.parametrize("caller", [ADMIN, OWNER + 1])
 @pytest.mark.parametrize("action", ["approve", "reject"])
-def test_7011_r2_3_another_user_is_refused_and_the_run_keeps_waiting(waiting, caller, action):
+def test_another_user_is_refused_and_the_run_keeps_waiting(waiting, caller, action):
     with pytest.raises(waiting.runs.ScheduleDecisionForbidden):
         _decide(waiting.runs, caller, action)
 

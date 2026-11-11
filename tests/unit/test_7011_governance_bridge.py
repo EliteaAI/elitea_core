@@ -40,6 +40,7 @@ def starter(ns):
             "block_schedule_run": lambda *args: writes.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args, **kwargs: writes.calls.append(("finish", *args)),
             "run_failure_reason": lambda error: f"The run failed: {error}",
+            "run_actor_id": lambda session, run: None,   # no stored start owner: the live owner acts
             "count_refusal": lambda *args: writes.streak.append(("refused", *args)),   # #7254: own tests
             "end_refusal_streak": lambda *args: writes.streak.append(("end", *args)),
             "record_run_events": lambda *args, **kwargs: None,

@@ -30,6 +30,7 @@ from .schedule_runs import (
     fail_schedule_run,
     finish_schedule_run,
     record_run_events,
+    run_actor_id,
     run_event,
     run_failure_reason,
 )
@@ -65,19 +66,31 @@ def _load(project_id: int, schedule_id: int | None, run_id: int) -> SimpleNamesp
         agent = version and session.get(Application, version.application_id)
         if not agent:
             return None
+        trigger = getattr(run_row, 'trigger', 'cron')
+        # Run now by an admin acts as the admin: the checks, the credentials and the run use the caller, never the owner
+        # The actor is the person who pressed Run now, else the owner the run started under: after a Change owner a
+        # waiting cron or webhook run restarts as the owner who decided it, never as the new owner
+        actor = (run_actor_id(session, run_row) if run_row is not None else None) or schedule.created_by
+        acts_for_another = actor != schedule.created_by
+        as_caller = acts_for_another and trigger in ('manual', 'test')
+        keeps_started_owner = acts_for_another and not as_caller
         return SimpleNamespace(
             schedule=SimpleNamespace(
-                id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
+                id=schedule.id, name=schedule.name,
+                principal={'kind': 'delegation', 'ref': actor} if acts_for_another else schedule.principal,
+                created_by=actor, run_as_caller=as_caller,
+                keeps_started_owner=keeps_started_owner,
+                owner_id=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
                 approval_confirmed_by=schedule.approval_confirmed_by,
                 trigger_kind=schedule.trigger_kind, webhook_type=schedule.webhook_type,
+                credential_refs=list(getattr(schedule, 'credential_refs', None) or []),
                 credential_toolkits=credential_toolkit_refs(version)),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
-            trigger=getattr(run_row, 'trigger', 'cron'),
-            resumed=getattr(run_row, 'resumed_at', None) is not None)
+            trigger=trigger, resumed=getattr(run_row, 'resumed_at', None) is not None)
 
 
 def _load_test_run(session, run_row) -> SimpleNamespace | None:
@@ -130,17 +143,21 @@ def _setting_allows_auto_approve(project_id: int) -> bool:
 # identity service once. A display name only; nothing is decided on it
 OWNER_LABEL_TTL_S = 60.0
 MAX_OWNER_LABELS = 1024
-_OWNER_LABELS = {}   # owner id -> (label, monotonic until)
+_OWNER_LABELS = {}   # user id -> (name, monotonic until)
 _OWNER_LABELS_LOCK = threading.Lock()
 
 
-def _owner_label(owner_id: int) -> str:
-    """The account the run uses: its owner by name, else email, else id."""
+def _owner_label(owner_id: int, role: str = 'schedule owner') -> str:
+    """The account the run uses: by name, else email, else id, with its `role`.
+
+    Only the name is kept per user; the role comes from the run, as one user is the owner of one schedule and an
+    admin on another.
+    """
     now = time.monotonic()
     with _OWNER_LABELS_LOCK:
         kept = _OWNER_LABELS.get(owner_id)
         if kept is not None and kept[1] > now:
-            return kept[0]
+            return f'{kept[0]} ({role})'
     try:
         # Late: only the run log needs the auth lookup
         from .authors import get_authors_data
@@ -148,13 +165,13 @@ def _owner_label(owner_id: int) -> str:
     except Exception as e:  # noqa: BLE001 -- a name must never stop a run
         log.warning('Schedule run owner %s: name lookup failed: %s', owner_id, e)
         user = None
-    label = f"{(user or {}).get('name') or (user or {}).get('email') or f'user {owner_id}'} (schedule owner)"
+    name = (user or {}).get('name') or (user or {}).get('email') or f'user {owner_id}'
     if user is not None:   # a failed lookup is asked again by the next run
         with _OWNER_LABELS_LOCK:
             if len(_OWNER_LABELS) >= MAX_OWNER_LABELS:
                 _OWNER_LABELS.clear()
-            _OWNER_LABELS[owner_id] = (label, now + OWNER_LABEL_TTL_S)
-    return label
+            _OWNER_LABELS[owner_id] = (name, now + OWNER_LABEL_TTL_S)
+    return f'{name} ({role})'
 
 
 def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
@@ -165,6 +182,8 @@ def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
     from .schedule_risk import scan_complete
     if schedule.approval_rule != 'run_without_asking' or not scan_complete(review):
         return False
+    # The owner's confirmation does not cover another account's credentials: a run that acts as an admin
+    # (created_by is the caller) never matches it, so it always pauses before a sensitive action.
     if review['sensitive'] and (review['fingerprint'] != schedule.approval_fingerprint
                                 or schedule.approval_confirmed_by != schedule.created_by):
         return False
@@ -247,20 +266,28 @@ def _webhook_row(schedule) -> bool:
 
 
 def _started_event(loaded, trigger: str, delivery: str | None) -> dict:
-    """The first run log line; a webhook run also names its type and delivery id."""
+    """The first run log line; a webhook run also names its type and delivery id.
+
+    It keeps `owner_id`, the schedule owner at the start: this user decides the pause of the run, also after a
+    Change owner (`run_decider_id`). A Test Run has no schedule and no owner id.
+    """
     label = 'Test run' if trigger == 'test' else 'Run'
+    owner_id = getattr(loaded.schedule, 'owner_id', None)
     sample = trigger == 'test' and _webhook_row(loaded.schedule)
     if trigger != 'webhook' and not sample:
         return run_event('started', f'{label} started · trigger: {trigger} · version {loaded.version.name}',
-                         trigger=trigger, version_id=loaded.version.id)
+                         trigger=trigger, version_id=loaded.version.id, owner_id=owner_id)
     webhook_type = loaded.schedule.webhook_type
-    if sample:  # the owner's sample body (#7455)
+    if sample:  # the sample body of the person who pressed the button (#7455)
+        by = 'an admin' if getattr(loaded.schedule, 'run_as_caller', False) else 'the owner'
         return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
-                                    f"Sample body by the owner · version {loaded.version.name}",
-                         trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, sample=True)
+                                    f"Sample body by {by} · version {loaded.version.name}",
+                         trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, sample=True,
+                         owner_id=owner_id)
     return run_event('started', f"{label} started · trigger: webhook · type: {webhook_type} · "
                                 f"delivery {delivery or 'none'} · version {loaded.version.name}",
-                     trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, delivery_id=delivery)
+                     trigger=trigger, version_id=loaded.version.id, webhook_type=webhook_type, delivery_id=delivery,
+                     owner_id=owner_id)
 
 
 def _webhook_input(loaded, payload: bytes) -> tuple[str, str]:
@@ -279,7 +306,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
     A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
     closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
     Under governance (C-1009) a cron firing is admitted on its owner's mandate or refused; a refusal ends it at once.
-    Run now and Test run (``owner_request``, built by the run endpoint) are the owner's own run: no mandate (#7254).
+    Run now and Test run (``owner_request``, built by the run endpoint) act as the person who pressed the button, the
+    owner or an admin: no mandate (#7254).
     A webhook delivery (#7454) brings its body in ``payload`` (memory only) and its id in ``delivery``.
     """
     loaded = _load(project_id, schedule_id, run_id)
@@ -294,7 +322,9 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return
-    label = _owner_label(check.owner_id)
+    # A run an admin started acts as the admin: the log names that account as the admin, not as the owner
+    role = 'admin' if getattr(loaded.schedule, 'run_as_caller', False) else 'schedule owner'
+    label = _owner_label(check.owner_id, role)
     record_run_events(project_id, run_id, run_event('account', f'Account: {label}'), principal_label=label)
     scope = closed_budget_scope(project_id, check.owner_id)  # fails open (R2.2)
     if scope:
@@ -302,7 +332,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         return
     # late: the scan pulls in the toolkit expansion
     from .schedule_risk import scan_schedule
-    review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule)
+    review = scan_schedule(project_id, loaded.version.id, check.owner_id, loaded.schedule.approval_rule,
+                           getattr(loaded.schedule, 'trigger_kind', None) or 'cron')  # a Test Run has no kind
     auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
     approved = _confirmed_pairs(review) if auto_approve else False
     outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved))
@@ -330,7 +361,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int, owner_req
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    manual = trigger in ('manual', 'test') and not webhook  # Run now and Test run are the owner's own runs
+    manual = trigger in ('manual', 'test') and not webhook  # Run now and Test run are the caller's own runs
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.WEBHOOK if webhook else TriggerType.SCHEDULED
     extra_meta = {'schedule_id': loaded.schedule.id, 'schedule_run_id': run_id, 'execution_type': trigger_type}
     if webhook:

@@ -151,7 +151,7 @@ def test_cr_el7011_a_reject_logs_the_decision_then_the_failed_end(runs, session,
     events = _events(session, run)
     assert [e["kind"] for e in events] == ["paused", "decision", "finished"]
     assert (events[1]["text"], events[2]["text"]) == (
-        "Rejected by the schedule owner", "Run finished: failed (rejected by the owner)")
+        "Rejected by the schedule owner", "Run finished: failed (rejected)")
     assert run.status == "failed"
 
 

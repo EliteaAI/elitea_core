@@ -29,9 +29,14 @@ def test_7404_owner_gets_run_edit_pause_rotate_delete(access):
     assert actions == ["run", "edit", "pause", "rotate_secret", "delete"]
 
 
-def test_7404_admin_on_another_owners_webhook_cannot_edit(access):
+def test_admin_on_another_owners_webhook_runs_a_sample_but_cannot_edit(access):
     actions = access.allowed_actions(_hook(), _scope(access, ADMIN, *EDITOR_VERBS, "admin"))
-    assert actions == ["pause", "rotate_secret", "delete", "change_owner"]
+    assert actions == ["run", "pause", "rotate_secret", "delete", "change_owner"]
+
+
+def test_admin_without_the_run_permission_gets_no_sample_run(access):
+    names = tuple(name for name in EDITOR_VERBS if name != "run")
+    assert "run" not in access.allowed_actions(_hook(), _scope(access, ADMIN, *names, "admin"))
 
 
 def test_7404_editor_sees_nothing_on_another_owners_webhook(access):
@@ -48,7 +53,7 @@ def test_7404_resume_after_owner_change_is_for_the_owner_only(access, user_id, n
     assert ("resume" in actions) is can_resume
 
 
-def test_7404_admin_may_resume_a_webhook_paused_for_another_reason(access):
+def test_admin_may_resume_a_webhook_paused_for_another_reason(access):
     actions = access.allowed_actions(_hook(enabled=False), _scope(access, ADMIN, *EDITOR_VERBS, "admin"))
     assert "resume" in actions
 
@@ -56,4 +61,4 @@ def test_7404_admin_may_resume_a_webhook_paused_for_another_reason(access):
 def test_7404_cron_rows_keep_the_schedule_matrix(access):
     row = types.SimpleNamespace(created_by=OWNER, enabled=True, version_id=10, trigger_kind="cron")
     actions = access.allowed_actions(row, _scope(access, ADMIN, *EDITOR_VERBS, "admin"))
-    assert actions == ["edit", "pause", "delete", "change_owner"]
+    assert actions == ["run", "edit", "pause", "delete", "change_owner"]

@@ -18,7 +18,8 @@ from .stored_oauth_tokens import LOGIN_RESOLVERS
 
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
-BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+DELEGATED_CODE = 'delegated_credential'
+BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential', DELEGATED_CODE}
 # The owner can fix these while the run waits, so "Pause and ask me" saves and starts with them
 WAIT_FOR_OWNER_CODES = {'personal_signin_required', 'missing_credential'}
 WAIT_HINT = 'Sign in or add the credentials before the run; otherwise the run waits for you.'
@@ -28,6 +29,9 @@ SENSITIVE_CODES = {SENSITIVE_CODE, PERSONAL_CODE}
 TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint', 'openapi': 'OpenAPI',
                'ms_graph': 'MS Graph'}
 INCOMPLETE_CODE = 'scan_incomplete'
+# Same wording as the Connections check (schedule_prerun BROWSER_ONLY_TEXT / DELEGATED_TEXT)
+WEBHOOK_SIGN_IN = 'Webhooks cannot wait for a sign-in; use a toolkit with a saved login.'
+DELEGATED_TEXT = "acts with the signed-in person's Microsoft account; unattended runs cannot use it"
 
 
 def _warning(code, message, **extra):
@@ -195,16 +199,38 @@ def _fingerprint(version_id: int | None, sensitive: list, digest: str | None) ->
     return hashlib.sha256(json.dumps([version_id, pairs, digest]).encode()).hexdigest()
 
 
-def scan_schedule(project_id: int, version_id: int | None, owner_id: int, approval_rule: str | None = None) -> dict:
+def _delegated_warnings(project_id: int, version_id: int | None, owner_id: int) -> list:
+    """One blocking item per toolkit using an Entra-delegated credential: governance refuses it unattended."""
+    if not version_id:
+        return []
+    from .mandate_identity import consent_scope  # pylint: disable=C0415 -- late: reads the credential facts
+    try:
+        scope = consent_scope(project_id, version_id, owner_id)
+    except Exception:  # noqa: BLE001 - the governed release refuses it anyway; the scan only says it early
+        log.exception('Schedule risk scan: delegated credentials of version %s could not be read', version_id)
+        return [_warning(INCOMPLETE_CODE, 'The credentials could not be checked for a person\'s sign-in')]
+    names = sorted({name for item in scope for name in item.get('toolkits') or []})
+    return [_warning(DELEGATED_CODE, f'Toolkit "{name}" {DELEGATED_TEXT}', toolkit=name,
+                     reason='DENIED_MANDATE_DELEGATION_UNSUPPORTED') for name in names]
+
+
+def scan_schedule(project_id: int, version_id: int | None, owner_id: int, approval_rule: str | None = None,
+                  trigger_kind: str = 'cron') -> dict:
     """The risk review of one version run by one owner: `blocking`, `sensitive`, `notices`, `fingerprint`.
 
     A blocking finding carries `fix`, the agent or pipeline version to open. With the rule `pause_and_ask`,
-    a missing credential or a personal sign-in is a notice with `fix` and a hint, not a block. `sensitive` holds the
+    a missing credential or a personal sign-in is a notice with `fix` and a hint, not a block; for a webhook
+    (`trigger_kind`) both always block, and so does an Entra-delegated credential. `sensitive` holds the
     `sensitive_action` tools and the `personal_credential` toolkits (`tool` null). Never raises: a
     failure is a `scan_incomplete` notice.
     """
     findings, fix, digest = _findings(project_id, version_id, owner_id)
-    waits = WAIT_FOR_OWNER_CODES if approval_rule == 'pause_and_ask' else set()
+    webhook = trigger_kind == 'webhook'
+    if webhook:  # a webhook never waits for a sign-in, under either rule
+        findings += _delegated_warnings(project_id, version_id, owner_id)
+        findings = [{**item, 'hint': WEBHOOK_SIGN_IN} if item['code'] == 'personal_signin_required' else item
+                    for item in findings]
+    waits = WAIT_FOR_OWNER_CODES if approval_rule == 'pause_and_ask' and not webhook else set()
     blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES - waits]
     sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES and not item.get('may_apply')]
     notices = [{**item, 'fix': fix, 'hint': WAIT_HINT} if item['code'] in waits else item

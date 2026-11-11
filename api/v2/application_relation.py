@@ -61,6 +61,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception(f"Error while changing relation: {str(e)}")
             return {'error': 'Can not change relation'}, 500
 
+        # #7401: a newly linked sub-agent brings its own toolkits; the triggers of this version check again
+        from ...utils.schedule_prerun import recheck_version_triggers_later
+        recheck_version_triggers_later(project_id, version_id)
         return result, 201
 
 

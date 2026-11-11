@@ -222,6 +222,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     session.rollback()
                     return res['msg'], 400
                 session.commit()
+                # #7401: triggers on this version re-check their connections; a webhook that broke switches off
+                from ...utils.schedule_prerun import recheck_version_triggers_later
+                recheck_version_triggers_later(project_id, version_id)
                 if backup_version is not None:
                     res['data']['mcp_backup_version'] = {
                         'id': backup_version.id,
