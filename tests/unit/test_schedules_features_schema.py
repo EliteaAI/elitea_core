@@ -1,4 +1,4 @@
-"""The scheduling settings live in the Features -> Schedules section, not in Configuration -> Runtime."""
+"""The scheduling settings live in the Features -> Schedules section and the webhook settings in Features -> Webhooks, not in Configuration -> Runtime."""
 import json
 import pathlib
 
@@ -29,13 +29,15 @@ CARDS = {
         'index_scheduling_enabled',
         'index_scheduling_cron',
     ],
-    'Webhooks': [
-        'schedules_webhook_max_concurrent_runs',
-        'schedules_webhook_max_concurrent_runs_limit',
-        'schedules_webhook_project_max_concurrent_runs',
-        'schedules_webhook_max_waiting_runs',
-    ],
 }
+
+# the Webhooks section has one card with the same title
+WEBHOOK_KEYS = [
+    'schedules_webhook_max_concurrent_runs',
+    'schedules_webhook_max_concurrent_runs_limit',
+    'schedules_webhook_project_max_concurrent_runs',
+    'schedules_webhook_max_waiting_runs',
+]
 
 # key -> path, type, default, minimum, maximum, requires_restart
 MOVED = {
@@ -75,9 +77,22 @@ def _section_keys(properties, section):
     return [key for key, field in properties.items() if field.get('section') == section]
 
 
-def test_the_schedules_section_holds_the_nineteen_scheduler_settings(properties):
-    assert sorted(_section_keys(properties, 'schedules')) == sorted(MOVED)
+def test_the_schedules_and_webhooks_sections_hold_the_nineteen_scheduler_settings(properties):
+    schedule_keys = _section_keys(properties, 'schedules')
+    webhook_keys = _section_keys(properties, 'webhooks')
+
+    assert sorted(schedule_keys + webhook_keys) == sorted(MOVED)
+    assert len(schedule_keys) == 15
+    assert len(webhook_keys) == 4
     assert len(MOVED) == 19
+
+
+def test_the_webhooks_section_lists_its_four_settings_in_order(properties):
+    assert _section_keys(properties, 'webhooks') == WEBHOOK_KEYS
+
+
+def test_no_webhook_setting_stays_in_the_schedules_section(properties):
+    assert [key for key in _section_keys(properties, 'schedules') if key in WEBHOOK_KEYS] == []
 
 
 def test_runtime_no_longer_offers_a_moved_scheduler_setting(properties):
@@ -94,7 +109,7 @@ def test_each_card_lists_its_keys_in_schema_order(properties):
         assert positions == sorted(positions), title
     assert {title: len(keys) for title, keys in CARDS.items()} == {
         'Schedule Settings': 6, 'Agent Schedules': 1, 'Pipeline Schedules': 3,
-        'Index Schedules': 5, 'Webhooks': 4,
+        'Index Schedules': 5,
     }
 
 
@@ -111,6 +126,7 @@ def test_only_the_parallel_runs_limit_asks_for_a_reload(properties):
     assert [
         key for key in _section_keys(properties, 'schedules') if properties[key].get('requires_restart')
     ] == ['schedules_max_parallel_runs']
+    assert [key for key in _section_keys(properties, 'webhooks') if properties[key].get('requires_restart')] == []
 
 
 @pytest.mark.parametrize('cron, switch', CRON_SWITCHES.items())
