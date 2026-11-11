@@ -232,6 +232,18 @@ def test_approves_all_is_true_after_an_approve_all(runs, session, sent):
     assert runs.approves_all(session, run.id) is True
 
 
+@pytest.mark.parametrize('status, expected', [
+    ('running', True), ('waiting_for_approval', True),
+    ('completed', False), ('failed', False), ('blocked', False), ('cancelled', False)])
+def test_approves_all_holds_only_while_the_run_is_active(runs, session, sent, status, expected):
+    _, run = _waiting(runs, session)
+    runs.apply_schedule_decision(1, run.id, "approve", approve_all=True)
+    run.status = status
+    session.flush()
+
+    assert runs.approves_all(session, run.id) is expected
+
+
 def test_approves_all_is_false_for_an_unknown_run_and_a_run_without_events(runs, session, sent):
     _, run = _waiting(runs, session)
 

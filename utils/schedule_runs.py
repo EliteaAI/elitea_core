@@ -535,15 +535,19 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
 
 
 def approves_all(session, run_id: int) -> bool:
-    """True when the owner approved all sensitive tools for the rest of this run.
+    """True when the owner approved all sensitive tools for the rest of this run, and the run is not over.
 
-    The choice is a `decision` event with `approve_all`. It takes the caller's session, because the continue flow
-    holds one open. lean: 200 events; move the choice to a column when a run needs more. The event list keeps the
-    first 199 events and each newer event replaces the last one, so a very long approval loop can lose the choice
-    and the next sensitive call pauses again.
+    The choice is a `decision` event with `approve_all`. It ends with the run: a Continue on the chat after the run
+    ended gets the normal approval again. It takes the caller's session, because the continue flow holds one open.
+    lean: 200 events; move the choice to a column when a run needs more. The event list keeps the first 199 events
+    and each newer event replaces the last one, so a very long approval loop can lose the choice and the next
+    sensitive call pauses again.
     """
-    events = session.scalar(select(EntityScheduleRun.events).where(EntityScheduleRun.id == run_id)) or []
-    return any(event.get('kind') == 'decision' and event.get('approve_all') is True for event in events)
+    row = session.execute(
+        select(EntityScheduleRun.status, EntityScheduleRun.events).where(EntityScheduleRun.id == run_id)).first()
+    if row is None or row.status not in ACTIVE_STATUSES:
+        return False
+    return any(event.get('kind') == 'decision' and event.get('approve_all') is True for event in row.events or [])
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
