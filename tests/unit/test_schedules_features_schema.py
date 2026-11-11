@@ -22,7 +22,13 @@ CARDS = {
         'pipeline_scheduling_cron',
         'schedules_legacy_step_enabled',
     ],
-    'Index Schedules': ['index_scheduling_enabled', 'index_scheduling_cron'],
+    'Index Schedules': [
+        'toolkit_index_scheduling_enabled',
+        'toolkit_index_min_interval_minutes',
+        'legacy_index_step_enabled',
+        'index_scheduling_enabled',
+        'index_scheduling_cron',
+    ],
     'Webhooks': [
         'schedules_webhook_max_concurrent_runs',
         'schedules_webhook_max_concurrent_runs_limit',
@@ -49,6 +55,9 @@ MOVED = {
     'schedules_webhook_max_concurrent_runs_limit': ('scheduler.schedules.webhook_max_concurrent_runs_limit', 'integer', 20, 1, 1000, False),
     'schedules_webhook_project_max_concurrent_runs': ('scheduler.schedules.webhook_project_max_concurrent_runs', 'integer', 10, 1, 1000, False),
     'schedules_webhook_max_waiting_runs': ('scheduler.schedules.webhook_max_waiting_runs', 'integer', 10, 1, 1000, False),
+    'toolkit_index_scheduling_enabled': ('scheduler.schedules.toolkit_index_scheduling_enabled', 'boolean', True, None, None, None),
+    'toolkit_index_min_interval_minutes': ('scheduler.schedules.toolkit_index_min_interval_minutes', 'integer', 1440, 1, 1440, False),
+    'legacy_index_step_enabled': ('scheduler.schedules.legacy_index_step_enabled', 'boolean', False, None, None, None),
 }
 
 CRON_SWITCHES = {
@@ -66,9 +75,9 @@ def _section_keys(properties, section):
     return [key for key, field in properties.items() if field.get('section') == section]
 
 
-def test_the_schedules_section_holds_the_sixteen_scheduler_settings(properties):
+def test_the_schedules_section_holds_the_nineteen_scheduler_settings(properties):
     assert sorted(_section_keys(properties, 'schedules')) == sorted(MOVED)
-    assert len(MOVED) == 16
+    assert len(MOVED) == 19
 
 
 def test_runtime_no_longer_offers_a_moved_scheduler_setting(properties):
@@ -85,7 +94,7 @@ def test_each_card_lists_its_keys_in_schema_order(properties):
         assert positions == sorted(positions), title
     assert {title: len(keys) for title, keys in CARDS.items()} == {
         'Schedule Settings': 6, 'Agent Schedules': 1, 'Pipeline Schedules': 3,
-        'Index Schedules': 2, 'Webhooks': 4,
+        'Index Schedules': 5, 'Webhooks': 4,
     }
 
 
