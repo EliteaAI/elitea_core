@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..models.pd.index import ToolkitIndexingSchedule
+from .constants import LEGACY_INDEX_STEP_DEFAULT
 from .legacy_schedule_migration import (
     DISABLED_INVALID_CRON,
     NAME_LIMIT,
@@ -31,6 +32,7 @@ INDEX_LOOKUP_FAILED = 'index_lookup_failed'
 INDEX_ALREADY_SCHEDULED = 'index_already_scheduled'
 CREDENTIAL_REVIEW = 'credential_review'
 EXPIRED = 'expired'
+RESTORE_HISTORY_WARNING = 'a restored schedule is deleted with its run history'
 RESTORE_FAILED = 'the schedule could not be restored; see the log'
 RESTORE_REFUSED = 'the legacy index step is on: switch legacy_index_step_enabled off before a restore'
 FIRST_RUN_DELAY = timedelta(seconds=60)
@@ -38,7 +40,7 @@ FIRST_RUN_DELAY = timedelta(seconds=60)
 
 def index_restore_refusal(settings: dict | None) -> str | None:
     """The refusal text of a restore while the legacy index step is on (it would move the schedules again)."""
-    return RESTORE_REFUSED if (settings or {}).get('legacy_index_step_enabled') else None
+    return RESTORE_REFUSED if (settings or {}).get('legacy_index_step_enabled', LEGACY_INDEX_STEP_DEFAULT) else None
 
 
 def _rank_key(item: tuple) -> tuple:
@@ -275,7 +277,8 @@ def restore_index_schedules(project_id: int) -> dict:
     from ..models.all import EliteATool
     from ..models.entity_schedule import EntitySchedule
 
-    report = {'project_id': project_id, 'restored': [], 'errors': [], 'without_original_trigger': 0}
+    report = {'project_id': project_id, 'restored': [], 'errors': [], 'without_original_trigger': 0,
+              'warning': RESTORE_HISTORY_WARNING}
     with db.get_session(project_id) as session:
         rows = session.execute(
             select(EntitySchedule.id, EntitySchedule.toolkit_id, EntitySchedule.index_name)

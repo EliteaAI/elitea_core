@@ -29,8 +29,6 @@ from ..utils.exceptions import PoolSaturationError
 from ..utils.utils import parse_ids_filter
 
 RPC_CALL_TIMEOUT = 3
-# The index schedule routes of the toolkit settings answer 400 with this text: the Schedules page owns index schedules
-INDEX_SCHEDULE_MANAGED_MESSAGE = "Index schedules are managed on the Schedules page"
 
 from pylon.core.tools import log
 

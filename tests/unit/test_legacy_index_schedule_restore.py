@@ -91,6 +91,7 @@ def test_the_restore_writes_the_keys_back_and_deletes_the_row(migration):
     assert (len(report["restored"]), report["errors"], report["without_original_trigger"]) == (1, [], 0)
     assert rows(migration) == []
     assert set(migration.schedules_of("docs")) == {"7", "-1"}
+    assert "run history" in report["warning"]
 
 
 def test_the_restore_never_overwrites_a_key_and_keeps_rows_without_an_original(migration):

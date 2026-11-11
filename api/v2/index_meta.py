@@ -10,7 +10,6 @@ from ...models.elitea_tools import EliteATool
 from ...models.entity_schedule import EntitySchedule
 from ...models.indexer import EmbeddingStore, IndexRun
 from ...utils.application_tools import (
-    INDEX_SCHEDULE_MANAGED_MESSAGE,
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
     get_pending_index_run_heartbeats,
@@ -24,7 +23,8 @@ from ...utils.application_tools import (
     _get_pgvector_engine,
     _is_undefined_table_error,
 )
-from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
+from ...utils.index_schedule_compat import save_index_schedule
 from ...utils.predict_utils import get_toolkit_config
 from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
@@ -265,9 +265,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def patch(self, project_id: int, toolkit_id: int, index_meta_id: str):
-        # Index schedules are rows of the Schedules module; writing the old settings key would start a second,
-        # unseen schedule for the same index
-        return {"ok": False, "error": INDEX_SCHEDULE_MANAGED_MESSAGE}, 400
+        # Index schedules are rows of the Schedules module; the old route writes that row, for one more release
+        body, status = save_index_schedule(project_id, toolkit_id, index_meta_id, request.get_json(silent=True) or {})
+        return body, status, DEPRECATION_HEADERS
 
 
 class API(api_tools.APIBase):

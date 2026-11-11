@@ -9,6 +9,7 @@ from pylon.core.tools import log, web
 from sqlalchemy import func, select, text, update
 from tools import db, rpc_tools, this
 
+from ..utils.constants import LEGACY_INDEX_STEP_DEFAULT
 from ..utils.maintenance_gate import is_maintenance_active
 from ..utils.schedule_claim import (
     claim_schedule,
@@ -132,7 +133,8 @@ def _run_legacy_index_step(project_ids: list[int], yield_to_hub, settings: dict)
     After a pass that finds nothing the step sleeps for `LEGACY_RECHECK_SECONDS`; `legacy_index_step_enabled`
     false stops it.
     """
-    if not settings.get("legacy_index_step_enabled", True) or time.monotonic() < _legacy_index_idle["until"]:
+    step_on = settings.get("legacy_index_step_enabled", LEGACY_INDEX_STEP_DEFAULT)
+    if not step_on or time.monotonic() < _legacy_index_idle["until"]:
         return
     # Imported at call time: the tick loads without the migration's model graph
     from ..utils.legacy_index_schedule_migration import migrate_index_project
@@ -376,9 +378,7 @@ class RPC:
         """
         from ..utils.legacy_index_schedule_migration import index_restore_refusal, restore_index_schedules
         settings = this.module.descriptor.config.get("scheduler", {}).get("schedules", {})
-        # The step is on when the key is absent, so the refusal must see the default too
-        step_on = settings.get("legacy_index_step_enabled", True)
-        refusal = index_restore_refusal({**settings, "legacy_index_step_enabled": step_on})
+        refusal = index_restore_refusal(settings)
         if refusal:
             return {"error": refusal}
         report = restore_index_schedules(int(project_id))

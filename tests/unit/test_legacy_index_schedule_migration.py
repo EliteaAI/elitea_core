@@ -49,6 +49,7 @@ def migration(monkeypatch):
 
     _stub(monkeypatch, "plugins.elitea_core.utils.index_scheduling",
           resolve_credential_config_key=resolve_credential_config_key)
+    load("utils/constants.py")
     load("models/pd/index.py")
     load("models/pd/pipeline_trigger.py")
     load("utils/schedule_timing.py")

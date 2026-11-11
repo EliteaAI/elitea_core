@@ -29,8 +29,8 @@ class IndexWorld:
                 raise RuntimeError('lock wait timed out')
             return {'found': self.found.get(project_id, 0), 'errors': [], 'held': self.held.get(project_id, [])}
 
-        def index_restore_refusal(settings):
-            return RESTORE_REFUSED if (settings or {}).get('legacy_index_step_enabled') else None
+        def index_restore_refusal(settings):  # a missing key reads as off, like the real function
+            return RESTORE_REFUSED if (settings or {}).get('legacy_index_step_enabled', False) else None
 
         def restore_index_schedules(project_id):
             self.restored.append(project_id)
@@ -48,6 +48,7 @@ class IndexWorld:
         monkeypatch.setattr(tick, 'RUN_STARTERS', {'agent': print, 'pipeline': print, 'toolkit_index': print})
         monkeypatch.setattr(tick, 'time', types.SimpleNamespace(monotonic=lambda: self.now[0]))
         monkeypatch.setitem(tick._legacy_index_idle, 'until', 0.0)
+        world.settings['legacy_index_step_enabled'] = True  # the shipped default is off
 
     def wait(self, seconds):
         self.now[0] += seconds
@@ -170,9 +171,15 @@ def test_a_given_migration_and_retry_map_replace_the_pipeline_ones(world, index)
 def test_the_index_restore_rpc_refuses_while_the_index_step_is_on(world, index):
     rpc = world.module.RPC()
     assert RESTORE_REFUSED in rpc.schedules_restore_legacy_index_schedules(5)['error']
-    world.settings['legacy_index_step_enabled'] = True
-    assert RESTORE_REFUSED in rpc.schedules_restore_legacy_index_schedules(5)['error']
     assert index.restored == []
+
+
+def test_a_missing_index_step_setting_reads_as_off_in_the_tick_and_the_restore(world, index):
+    del world.settings['legacy_index_step_enabled']
+    world.tick()
+    assert index.migrated == []
+    assert world.module.RPC().schedules_restore_legacy_index_schedules(5)['restored'] == [1]
+    assert index.restored == [5]
 
 
 def test_the_index_restore_rpc_restores_once_the_index_step_is_off(world, index):

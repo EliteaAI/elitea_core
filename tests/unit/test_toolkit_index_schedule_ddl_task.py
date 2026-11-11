@@ -138,7 +138,47 @@ def test_toolkit_index_ddl_runs_in_the_project_schema_through_a_bound_search_pat
     schema_module.db = types.SimpleNamespace(get_session=lambda pid: Session())
     migrated, failed = schema_module.apply_toolkit_index_schedule_columns([3])
     assert (migrated, failed) == ([3], [])
-    assert executed[0][1] == {"path": "p_3"}
-    assert "set_config('search_path', :path, true)" in executed[0][0]
-    assert [sql for sql, _ in executed[1:]] == list(schema_module.toolkit_index_statements())
-    assert all(params is None for _, params in executed[1:])
+    schema_sets = [i for i, (sql, _) in enumerate(executed) if "set_config('search_path', :path, true)" in sql]
+    assert [executed[i][1] for i in schema_sets] == [{"path": "p_3"}, {"path": "p_3"}]
+    first, second = schema_sets
+    assert [sql for sql, _ in executed[first + 1:second]] == list(schema_module.toolkit_index_statements())
+    assert [sql for sql, _ in executed[second + 1:]] == list(schema_module.toolkit_index_validate_statements())
+    assert all(params is None for i, (_, params) in enumerate(executed) if i not in schema_sets)
+
+
+def test_toolkit_index_ddl_adds_both_checks_not_valid_and_validates_them_after_every_other_statement(schema_module):
+    statements = schema_module.toolkit_index_statements()
+    added = [sql for sql in statements if "ADD CONSTRAINT" in sql]
+    assert len(added) == 2 and all(sql.rstrip().endswith("NOT VALID; END IF; END $$") for sql in added)
+    validated = schema_module.toolkit_index_validate_statements()
+    assert [sql.split()[-1] for sql in validated] == [schema_module.TYPE_CHECK, schema_module.TARGET_CHECK]
+    assert all("VALIDATE CONSTRAINT" in sql for sql in validated)
+    assert not any("VALIDATE CONSTRAINT" in sql for sql in statements)
+
+
+def test_toolkit_index_ddl_a_failed_validation_is_reported_as_failed_after_the_columns_were_added(schema_module):
+    runs = []
+    schema_module.log = types.SimpleNamespace(exception=lambda *args: runs.append("logged"))
+
+    class Session:
+        def execute(self, statement, params=None):
+            if "VALIDATE CONSTRAINT" in str(statement):
+                raise RuntimeError("check violated")
+            runs.append(str(statement))
+
+        def commit(self):
+            runs.append("commit")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    schema_module.db = types.SimpleNamespace(get_session=lambda pid: Session())
+    assert schema_module.apply_toolkit_index_schedule_columns([3]) == ([], [3])
+    assert "commit" in runs and runs[-1] == "logged"
+
+
+def test_toolkit_index_ddl_pending_query_also_selects_schemas_with_an_unvalidated_check(schema_module):
+    assert "NOT v.convalidated" in str(schema_module._PENDING_QUERY)

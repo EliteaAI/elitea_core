@@ -56,7 +56,7 @@ scheduler:
     legacy_step_enabled: true
     toolkit_index_scheduling_enabled: true
     toolkit_index_min_interval_minutes: 1440
-    legacy_index_step_enabled: true
+    legacy_index_step_enabled: false
 
 # Optional badge and effect text of a sensitive tool, shown by the schedule risk review (EL-7011).
 # Badges: sends_messages, deletes_data, changes_data, runs_code, needs_approval (the default).

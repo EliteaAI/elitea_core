@@ -2559,14 +2559,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def restore_legacy_index_schedules(self, *args, **kwargs):
         """Admin task: write the moved index schedules back to the toolkit JSON and delete their rows.
 
-        Refused while `legacy_index_step_enabled` is on (the next tick would move them again). One project at a
-        time. `dry_run=false` is required to write; this task has no dry-run report, so a dry run only checks
-        the refusal and the project.
+        Refused while `legacy_index_step_enabled` is on (the next tick would move them again); a missing setting
+        counts as off. Each restored schedule is deleted with its run history. One project at a time.
+        `dry_run=false` is required to write; this task has no dry-run report, so a dry run only checks the
+        refusal and the project.
 
         Param format:
             "project_id=<N>[;dry_run=false]"
         """
-        from ..utils.legacy_index_schedule_migration import index_restore_refusal, restore_index_schedules
+        from ..utils.legacy_index_schedule_migration import (
+            RESTORE_HISTORY_WARNING, index_restore_refusal, restore_index_schedules,
+        )
         from ..utils.legacy_schedule_migration import parse_task_params
 
         try:
@@ -2581,7 +2584,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.error("restore_legacy_index_schedules: %s", refusal)
             return {"error": refusal}
         if dry_run:
-            return {"dry_run": True, "project_id": spec[1]}
+            return {"dry_run": True, "project_id": spec[1], "warning": RESTORE_HISTORY_WARNING}
         report = restore_index_schedules(spec[1])
         log.info("Exiting restore_legacy_index_schedules — project=%s restored=%s errors=%s",
                  spec[1], len(report["restored"]), len(report["errors"]))
