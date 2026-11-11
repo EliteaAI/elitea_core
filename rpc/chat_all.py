@@ -1042,7 +1042,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                     session, msg_group, predict_payload, participant_chat_settings.entity_settings,
                 )
             except SkillParticipantError as e:
-                raise PayloadGenerationError(str(e)) from e
+                raise PayloadGenerationError(str(e), code=e.code) from e
             result.update(skill_payload)
         case ParticipantTypes.toolkit:
             # Toolkit participant: generate payload for toolkit tool call

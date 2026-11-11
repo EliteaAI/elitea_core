@@ -33,7 +33,32 @@ SKILL_NOT_FOUND_ERROR = 'Skill not found'
 
 
 class SkillParticipantError(ValueError):
-    pass
+    code = None
+
+
+class SkillNotRunnableHereError(SkillParticipantError):
+    """The skill's invocation keys keep it from being run by messaging it in a chat."""
+    code = 'SKILL_NOT_RUNNABLE_HERE'
+
+
+def is_skill_page_run(conversation) -> bool:
+    """The skill page opens its Run/Test conversations with source 'skill'; those stay exempt from the keys."""
+    return getattr(conversation, 'source', None) == ParticipantTypes.skill.value
+
+
+def refuse_direct_run(target: SkillRunTarget, conversation=None) -> None:
+    """A manual-only skill is started with ~name, a model-only one by the agent; neither by messaging it in a chat."""
+    if is_skill_page_run(conversation):
+        return
+    if target.invocation_flags.get('disable_model_invocation'):
+        raise SkillNotRunnableHereError(
+            f'Skill "{target.skill_name}" can only be started by you: send ~{target.skill_name} '
+            'in a message to the agent or the model in this chat.'
+        )
+    if target.invocation_flags.get('user_invocable') is False:
+        raise SkillNotRunnableHereError(
+            f'Skill "{target.skill_name}" is used by the agent on its own and cannot be run by messaging it.'
+        )
 
 
 @dataclass(frozen=True)
@@ -125,6 +150,7 @@ def build_skill_participant_payload(session, msg_group, predict_payload, entity_
     source, target = load_pinned_skill_target(
         msg_group.sent_to.entity_meta, chat_project_id, entity_settings.get('version_id'),
     )
+    refuse_direct_run(target, getattr(msg_group, 'conversation', None))
     try:
         run = build_skill_run(
             caller_project_id=chat_project_id,

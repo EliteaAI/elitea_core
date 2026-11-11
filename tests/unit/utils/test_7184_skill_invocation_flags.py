@@ -360,6 +360,53 @@ class TestPredictPayloadKeepsResumedSkills:
         assert payload['invoked_skills'] == [] and payload['applied_skills'] == []
 
 
+class TestSkillParticipantDirectRun:
+    """Messaging a skill participant runs it; the two keys forbid that for manual-only and model-only skills."""
+
+    def _run(self, env, meta, source='elitea'):
+        env.schemas[CHAT_PROJECT_ID][0].versions[0].meta = meta
+        session, msg_group = _participants._harness.build_msg_group(CHAT_PROJECT_ID)
+        msg_group.conversation = types.SimpleNamespace(source=source)
+        return env.mod.build_skill_participant_payload(
+            session, msg_group, _participants._harness.FakePredictPayload(), {'version_id': 100},
+        )
+
+    def test_the_skill_pages_own_run_is_exempt_for_both_keys(self, env):
+        for meta in (USER_ONLY, MODEL_ONLY):
+            assert self._run(env, meta, source='skill')['entity_name'] == 'Reviewer'
+
+    def test_a_conversation_without_a_source_is_treated_as_a_chat(self, env):
+        env.schemas[CHAT_PROJECT_ID][0].versions[0].meta = USER_ONLY
+        session, msg_group = _participants._harness.build_msg_group(CHAT_PROJECT_ID)
+        with pytest.raises(env.mod.SkillNotRunnableHereError):
+            env.mod.build_skill_participant_payload(
+                session, msg_group, _participants._harness.FakePredictPayload(), {'version_id': 100},
+            )
+
+    def test_a_manual_only_participant_tells_the_user_to_send_the_mention(self, env):
+        with pytest.raises(env.mod.SkillNotRunnableHereError, match='send ~Reviewer') as error:
+            self._run(env, USER_ONLY)
+        assert error.value.code == 'SKILL_NOT_RUNNABLE_HERE'
+
+    def test_a_model_only_participant_cannot_be_messaged(self, env):
+        with pytest.raises(env.mod.SkillNotRunnableHereError, match='on its own'):
+            self._run(env, MODEL_ONLY)
+
+    def test_a_manual_only_skill_that_is_also_model_only_gets_the_mention_hint(self, env):
+        with pytest.raises(env.mod.SkillNotRunnableHereError, match='send ~Reviewer'):
+            self._run(env, {'frontmatter': {'disable-model-invocation': True, 'user-invocable': False}})
+
+    def test_an_unflagged_participant_still_runs(self, env):
+        payload = self._run(env, {'frontmatter': {'license': 'MIT'}})
+        assert payload['entity_name'] == 'Reviewer'
+
+    def test_the_mention_candidate_of_a_manual_only_participant_is_still_offered(self, env):
+        env.schemas[CHAT_PROJECT_ID][0].versions[0].meta = USER_ONLY
+        session = _participants.ParticipantRowsSession([_participants.participant_row(56, CHAT_PROJECT_ID, 100)])
+        [candidate] = env.mod.participant_skill_mention_candidates(session, 3, 55, CHAT_PROJECT_ID)
+        assert candidate['name'] == 'Reviewer' and candidate['disable_model_invocation'] is True
+
+
 class TestParticipantsAndMenu:
     def test_a_pinned_participant_version_reports_its_flags_to_the_menu(self, env):
         skill = FakeSkill(10, 'Reviewer', [FakeVersion(100, 'base', meta=MODEL_ONLY), FakeVersion(101, 'v2')])
