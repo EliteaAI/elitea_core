@@ -88,6 +88,7 @@ def world(monkeypatch):
             "start_schedule_run": lambda *a: world.started.append(a[2]) or True, "START_FAILED": "",
         },
         "utils.schedule_timing": {"compute_next_run": next_run},
+        "utils.constants": {"LEGACY_INDEX_STEP_DEFAULT": False},
         "utils.schedule_runs": {"record_skipped_run": quiet, "fail_stale_runs": lambda *a: 0,
                                 "expire_waiting_runs": lambda *a: 0},
         "models.entity_schedule": {"EntitySchedule": FakeEntitySchedule},

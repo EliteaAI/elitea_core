@@ -207,3 +207,37 @@ def test_a_restore_is_refused_while_the_legacy_index_step_is_on(migration):
     assert migration.index_restore_refusal({"legacy_index_step_enabled": True})
     assert migration.index_restore_refusal({}) is None
     assert migration.index_restore_refusal(None) is None
+
+
+def test_the_legacy_toolkit_query_loads_full_rows_only_for_toolkits_with_a_schedule(migration, monkeypatch):
+    import sqlalchemy as sa
+    from sqlalchemy import orm
+
+    class Base(orm.DeclarativeBase):
+        pass
+
+    class EliteATool(Base):
+        __tablename__ = "elitea_tools"
+        id = sa.Column(sa.Integer, primary_key=True)
+        meta = sa.Column(sa.JSON)
+
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.all", SimpleNamespace(EliteATool=EliteATool))
+    engine = sa.create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    scheduled = {"a": {"schedules": {"7": BODY}}}
+    with orm.Session(engine) as session:
+        session.add_all([
+            EliteATool(id=1, meta=None),
+            EliteATool(id=2, meta={"indexes_meta": {"a": {"schedules": {}}}}),
+            EliteATool(id=3, meta={"indexes_meta": scheduled}),
+            EliteATool(id=4, meta={"other": 1}),
+            EliteATool(id=5, meta={"indexes_meta": {"b": {"schedules": {"8": BODY}}}}),
+        ])
+        session.commit()
+        statements = []
+        sa.event.listen(engine, "before_cursor_execute",
+                        lambda conn, cursor, statement, *rest: statements.append(statement))
+        assert [found.id for found in migration._legacy_toolkits(session)] == [3, 5]
+    assert len(statements) == 2
+    assert "elitea_tools.id, elitea_tools.meta" not in statements[0]  # the first read takes the JSON element only
+    assert "elitea_tools.id, elitea_tools.meta" in statements[1]

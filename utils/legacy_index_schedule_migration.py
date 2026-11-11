@@ -156,12 +156,18 @@ def _enabled_count(session) -> int:
 def _legacy_toolkits(session) -> list:
     from ..models.all import EliteATool
 
-    toolkits = session.scalars(select(EliteATool).order_by(EliteATool.id)).all()
-    return [
-        toolkit for toolkit in toolkits
-        if any(isinstance(entry, dict) and entry.get('schedules')
-               for entry in ((toolkit.meta or {}).get('indexes_meta') or {}).values())
+    # Only the `indexes_meta` JSON of each toolkit is read; the whole row loads for the few that hold a schedule
+    rows = session.execute(
+        select(EliteATool.id, EliteATool.meta['indexes_meta']).where(EliteATool.meta['indexes_meta'].is_not(None))
+        .order_by(EliteATool.id)
+    ).all()
+    ids = [
+        toolkit_id for toolkit_id, indexes_meta in rows
+        if any(isinstance(entry, dict) and entry.get('schedules') for entry in (indexes_meta or {}).values())
     ]
+    if not ids:
+        return []
+    return list(session.scalars(select(EliteATool).where(EliteATool.id.in_(ids)).order_by(EliteATool.id)).all())
 
 
 def _write_index(session, toolkit_id: int, row: dict, index_name: str, keys: list[str]) -> bool:

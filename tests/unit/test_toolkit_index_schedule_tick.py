@@ -131,6 +131,66 @@ def test_a_held_index_project_does_not_hold_back_its_pipeline_migration(world, i
     assert world.migrated == [(1, False)]
 
 
+def test_the_index_step_takes_one_lock_for_the_whole_pass_and_frees_it(world, index):
+    world.tick()
+    key = world.key(world.module.INDEX_STEP_LOCK_ID)
+    assert [entry for entry in world.locks if entry[1] == key] == [('lock', key), ('unlock', key)]
+    assert world.connection.options == {'isolation_level': 'AUTOCOMMIT'}
+
+
+def test_a_replica_that_does_not_get_the_index_step_lock_skips_the_pass_and_does_not_sleep(world, index):
+    world.held = {world.key(world.module.INDEX_STEP_LOCK_ID)}
+    world.tick()
+    assert index.migrated == []
+    assert ('unlock', world.key(world.module.INDEX_STEP_LOCK_ID)) not in world.locks
+    assert world.module._legacy_index_idle['until'] == 0.0
+
+
+def test_a_failed_unlock_closes_the_lock_connection_so_the_server_frees_the_lock(world, index, monkeypatch):
+    connection = world.connection
+    execute = connection.execute
+    closed = []
+
+    def failing_unlock(statement, params):
+        if 'pg_advisory_unlock' in str(statement) and params['key'] == world.key(world.module.INDEX_STEP_LOCK_ID):
+            raise RuntimeError('connection lost')
+        return execute(statement, params)
+
+    monkeypatch.setattr(connection, 'execute', failing_unlock)
+    monkeypatch.setattr(connection, 'invalidate', lambda: closed.append(True), raising=False)
+    world.tick()  # the tick logs the failed step and goes on
+    assert closed == [True]
+
+
+def test_one_pass_migrates_a_capped_number_of_projects_and_the_next_tick_goes_on(world, index):
+    world.projects = list(range(1, 26))
+    index.found = {project: 1 for project in world.projects}
+    world.tick()
+    cap = world.module.INDEX_STEP_PROJECTS_PER_PASS
+    assert [project for project, _, _ in index.migrated] == list(range(1, cap + 1))
+    assert world.module._legacy_index_idle['until'] == 0.0  # work is left, so the step does not sleep
+    index.migrated.clear()
+    index.found = {}
+    world.tick()
+    assert sorted(project for project, _, _ in index.migrated) == world.projects  # the tick rotates the start
+
+
+def test_projects_without_schedules_do_not_use_up_the_cap(world, index):
+    world.projects = list(range(1, 31))
+    index.found = {30: 1}
+    world.tick()
+    assert sorted(project for project, _, _ in index.migrated) == world.projects
+
+
+def test_a_project_that_held_a_schedule_does_not_keep_the_index_step_busy(world, index):
+    index.held = {1: [7]}
+    world.tick()
+    index.migrated.clear()
+    index.wait(1)
+    world.tick()  # project 1 waits for its retry and the pass found nothing: the step sleeps
+    assert world.module._legacy_index_idle['until'] > index.now[0]
+
+
 def test_a_failed_index_migration_is_logged_and_the_other_projects_go_on(world, index):
     index.fail = {1}
     world.tick()

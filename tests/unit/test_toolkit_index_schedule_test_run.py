@@ -113,7 +113,7 @@ def index(harness, monkeypatch):
     harness.permissions.add('models.applications.index_meta.edit')  # the caller may edit indexes
     service = sys.modules[f'{PACKAGE}.utils.schedule_service']
     monkeypatch.setattr(service, 'read_index_configuration',
-                        lambda project_id, toolkit, index_name: state.configuration)
+                        lambda session, project_id, toolkit, index_name, user_id: state.configuration)
     harness.module.start_schedule_run = lambda *args: state.starts.append(args) or True
     harness.module.remove_trimmed_chats = lambda project_id, chats: None
     monkeypatch.setattr(harness.module, '_index_row_is_live', lambda project_id, toolkit, name: state.live)

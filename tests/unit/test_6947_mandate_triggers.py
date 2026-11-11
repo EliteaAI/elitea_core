@@ -935,8 +935,11 @@ def index_tick(ns, env, monkeypatch):
     ns.tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
         timeout=lambda seconds: types.SimpleNamespace(project_list=lambda filter_=None: [{"id": 1}]))))
     monkeypatch.setattr(module, "rpc_tools", ns.tools.rpc_tools)
+    scheduled = types.SimpleNamespace(keys=set())   # the (toolkit id, index name) pairs that hold a schedule row
+    read_keys = module._scheduled_index_keys
+    monkeypatch.setattr(module, "_scheduled_index_keys", lambda project_id: scheduled.keys)
     return types.SimpleNamespace(module=module, helpers=helpers, tools_module=tools_module, predict_utils=predict_utils,
-                                 toolkit=toolkit, session=session)
+                                 toolkit=toolkit, session=session, scheduled=scheduled, read_keys=read_keys)
 
 
 def run_index_tick(ns, env, index_tick, schedules, governed=True):
@@ -984,6 +987,42 @@ def test_flag_off_the_index_tick_goes_on_to_resolve_credentials_as_today(ns, env
     run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}}, governed=False)
     assert index_tick.helpers.resolve_credentials.call_count == 1   # the old path (its sentinel failure is the tick's own catch)
     assert index_tick.helpers.handle_failed_index_schedule.call_count == 0 and env.denied == []
+
+
+def test_an_index_with_a_schedule_row_is_left_to_that_row_by_the_old_tick(ns, env, index_tick):
+    index_tick.scheduled.keys = {(12, "idx")}
+    run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0
+    assert index_tick.helpers.stamp_schedule_last_run.call_count == 0
+    assert index_tick.tools_module.start_index_task.call_count == 0 and env.denied == []
+
+
+def test_an_index_of_another_toolkit_with_a_row_does_not_stop_this_one(ns, env, index_tick):
+    index_tick.scheduled.keys = {(13, "idx"), (12, "other")}
+    run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 1
+
+
+def test_a_project_whose_schedule_rows_cannot_be_read_is_skipped_by_the_old_tick(ns, env, index_tick, monkeypatch):
+    monkeypatch.setattr(index_tick.module, "_scheduled_index_keys", lambda project_id: index_tick.module._UNREADABLE)
+    run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0
+    assert index_tick.tools_module.start_index_task.call_count == 0
+
+
+def test_the_scheduled_index_read_returns_the_pairs_of_the_rows_and_fails_closed(ns, env, index_tick, monkeypatch):
+    import sqlalchemy as sa
+    monkeypatch.setitem(sys.modules, f"{PKG}.models.entity_schedule", stub(
+        f"{PKG}.models.entity_schedule", EntitySchedule=types.SimpleNamespace(
+            toolkit_id=sa.column("toolkit_id"), index_name=sa.column("index_name"))))
+    session = mock.MagicMock()
+    session.execute.return_value.all.return_value = [(12, "idx"), (13, "docs")]
+    scope = mock.MagicMock()
+    scope.__enter__.return_value = session
+    ns.tools.db.get_session = lambda project_id: scope
+    assert index_tick.read_keys(5) == {(12, "idx"), (13, "docs")}
+    session.execute.side_effect = RuntimeError("column toolkit_id does not exist")
+    assert index_tick.read_keys(5) is index_tick.module._UNREADABLE
 
 
 def test_the_governed_branch_sits_right_after_the_due_count_and_before_any_resolution():

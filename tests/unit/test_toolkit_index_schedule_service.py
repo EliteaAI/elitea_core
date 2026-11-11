@@ -113,12 +113,13 @@ def env(monkeypatch):
     env.configuration = SAVED
     env.lookups = []
 
-    def lookup(project_id, toolkit, index_name):
-        env.lookups.append(index_name)
+    def lookup(session, project_id, toolkit, index_name, user_id):
+        env.lookups.append((index_name, user_id))
         if isinstance(env.configuration, Exception):
             raise env.configuration
         return env.configuration
 
+    env.read_configuration = env.service.read_index_configuration  # the real function, for its own test
     env.service.read_index_configuration = create_autospec(env.service.read_index_configuration, side_effect=lookup)
     yield env
     for key in set(sys.modules) - set(original):
@@ -155,6 +156,36 @@ def test_agent_body_still_needs_application_and_version(env, missing):
 def test_check_entity_accepts_an_index_with_saved_settings(env):
     env.check()
     assert env.folder_calls == [(['toolkit', 'mcp'], 3, True)]
+
+
+def test_check_entity_reads_the_index_as_the_caller(env):
+    env.check()
+    assert env.lookups == [('docs', OWNER_ID)]
+
+
+def test_the_index_read_expands_the_settings_for_the_caller_after_it_ends_the_read_transaction(env, monkeypatch):
+    events = []
+
+    class Rpc:
+        def timeout(self, seconds):
+            return self
+
+        def configurations_expand(self, project_id, settings, user_id, unsecret):
+            events.append(('expand', user_id, unsecret))
+            return {}
+
+    rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=Rpc()))
+    monkeypatch.setattr(sys.modules['tools'], 'rpc_tools', rpc_tools, raising=False)
+    for name, attributes in (('application_tools', {'_get_pgvector_engine': None}),
+                             ('orphaned_index_schedules', {'pgvector_settings': lambda settings: settings})):
+        module = types.ModuleType(f'{PACKAGE}.utils.{name}')
+        vars(module).update(attributes)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    session = types.SimpleNamespace(rollback=lambda: events.append('rollback'))
+    toolkit = types.SimpleNamespace(id=3, settings={'pgvector_configuration': {}}, author_id=99)
+    with pytest.raises(ValueError):  # the stand-in answer has no connection string
+        env.read_configuration(session, PROJECT_ID, toolkit, 'docs', OWNER_ID)
+    assert events == ['rollback', ('expand', OWNER_ID, True)]
 
 
 def test_check_entity_refuses_an_unknown_toolkit(env):

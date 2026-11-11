@@ -154,9 +154,13 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
         raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
 
 
-def read_index_configuration(project_id: int, toolkit, index_name: str) -> dict | None:
+def read_index_configuration(session, project_id: int, toolkit, index_name: str, user_id: int) -> dict | None:
     """The saved settings of one index of the toolkit, read from the toolkit's own vector store; None when the
     store has no such index. Read-only: no schema or table is created for a store that has none yet.
+
+    The vector store configuration is expanded for `user_id`, the caller, so a configuration the caller cannot
+    read stays closed. The read transaction of `session` ends before the outside calls, so a slow store does not
+    hold a pooled connection; `toolkit` is read again from the session after this call.
 
     Raises:
         Exception: When the connection string cannot be resolved or the store cannot be read.
@@ -168,9 +172,10 @@ def read_index_configuration(project_id: int, toolkit, index_name: str) -> dict 
     from .orphaned_index_schedules import pgvector_settings
 
     schema = str(toolkit.id)
+    settings = pgvector_settings(toolkit.settings)
+    session.rollback()
     expanded = rpc_tools.RpcMixin().rpc.timeout(5).configurations_expand(
-        project_id=project_id, settings=pgvector_settings(toolkit.settings),
-        user_id=toolkit.author_id, unsecret=True,
+        project_id=project_id, settings=settings, user_id=user_id, unsecret=True,
     )
     connection_string = (expanded.get('pgvector_configuration') or {}).get('connection_string')
     if not connection_string:
@@ -222,9 +227,10 @@ def check_toolkit_index(session, project_id: int, toolkit_id: int | None, index_
     toolkit = session.get(EliteATool, toolkit_id)
     if toolkit is None:
         raise _field_error('toolkit_id', 'The toolkit is not in this project')
-    check_index_rights(project_id, toolkit_id, schedule_scope(project_id))
+    scope = schedule_scope(project_id)
+    check_index_rights(project_id, toolkit_id, scope)
     try:
-        configuration = read_index_configuration(project_id, toolkit, index_name)
+        configuration = read_index_configuration(session, project_id, toolkit, index_name, scope.user_id)
     except Exception as e:  # noqa: BLE001 -- an unreachable store is a retry for the caller, not a verdict
         log.error('Toolkit %s index check failed: %s', toolkit_id, type(e).__name__)
         raise ScheduleError('index_unavailable', INDEX_UNAVAILABLE, 503)

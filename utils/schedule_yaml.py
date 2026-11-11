@@ -347,7 +347,10 @@ def _save_index(session, project_id: int, scope, indexes: tuple, item, values: d
     """
     # late: the export loads without these modules
     from ..models.pd.entity_schedule import ScheduleCreate, ScheduleUpdate
-    from .schedule_service import INDEX_UNAVAILABLE, create_schedule, read_index_configuration, update_schedule
+    from .schedule_access import schedule_scope
+    from .schedule_service import (
+        INDEX_UNAVAILABLE, check_index_rights, create_schedule, read_index_configuration, update_schedule,
+    )
     by_key, _, seen_keys, by_index = indexes
     row = _match_index(by_key, by_index, seen_keys, item, toolkit.id)
     if row is not None and _unchanged(row, values, None, INDEX_UPDATE_FIELDS):
@@ -355,8 +358,10 @@ def _save_index(session, project_id: int, scope, indexes: tuple, item, values: d
     if row is not None:
         update_schedule(session, project_id, row, ScheduleUpdate(**{f: values[f] for f in INDEX_UPDATE_FIELDS}), scope)
         return 'updated', row
+    caller = schedule_scope(project_id)  # the importing admin as the request knows them, with the permissions
+    check_index_rights(project_id, toolkit.id, caller)  # before the store is read: a refusal costs no outside call
     try:
-        configuration = read_index_configuration(project_id, toolkit, item.index_name)
+        configuration = read_index_configuration(session, project_id, toolkit, item.index_name, caller.user_id)
     except Exception as e:  # noqa: BLE001 -- an unreachable store is a retry for the caller, not a verdict
         raise ScheduleError('index_unavailable', INDEX_UNAVAILABLE, 503) from e
     if configuration is None:

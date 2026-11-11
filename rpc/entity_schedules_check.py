@@ -29,6 +29,9 @@ INVALID_CRON_REASON = "invalid_cron"
 INVALID_CRON_NOTICE = "its cron or time zone is not valid"
 LEGACY_RECHECK_SECONDS = 3600
 MIGRATION_RETRY_SECONDS = 3600
+# No project has id 0, so its legacy lock key is free to guard the whole index step
+INDEX_STEP_LOCK_ID = 0
+INDEX_STEP_PROJECTS_PER_PASS = 20
 # One tick at a time in this process; other replicas stay apart through the claim compare-and-set
 _tick_lock = threading.Lock()
 # lean: in-process flag, so each replica re-checks once an hour; share it through the database if that cost matters
@@ -37,7 +40,8 @@ _legacy_idle_until = 0.0
 _legacy_index_idle = {"until": 0.0}
 # lean: in-process; a project that held or failed a version is not migrated again for an hour
 _migration_retry_at: dict[int, float] = {}
-# lean: in-process; a project whose index schedules were held or failed is not migrated again for an hour
+# lean: in-process; a project whose index schedules were held or failed is not migrated again for an hour.
+# Each replica keeps its own map, so a replica that takes the step lock later tries such a project once more
 _index_migration_retry_at: dict[int, float] = {}
 # lean: in-process counter; each replica rotates on its own, which is enough to stop one project starving
 _tick_counter = 0
@@ -126,25 +130,53 @@ def _run_legacy_step(project_ids: list[int], yield_to_hub, settings: dict) -> No
         _check_pipeline_scheduling_lock.release()
 
 
+def _migrate_index_projects(project_ids: list[int], yield_to_hub) -> bool:
+    """One pass of the index migration; True when it found nothing left to move.
+
+    A project in its retry hour is passed over and does not keep the step busy. At most
+    `INDEX_STEP_PROJECTS_PER_PASS` projects that held schedules are migrated; the rest wait for the next tick.
+    A project that found none is not counted, so a long clean list cannot starve the ones behind it.
+    """
+    # Imported at call time: the tick loads without the migration's model graph
+    from ..utils.legacy_index_schedule_migration import migrate_index_project
+    empty_pass, migrated = True, 0
+    for project_id in project_ids:
+        if time.monotonic() < _index_migration_retry_at.get(project_id, 0.0):
+            continue
+        if migrated >= INDEX_STEP_PROJECTS_PER_PASS:
+            return False
+        yield_to_hub()
+        end_ambient_transaction()
+        if not _migrate_legacy_triggers(project_id, migrate_index_project, _index_migration_retry_at):
+            empty_pass, migrated = False, migrated + 1
+    return empty_pass
+
+
 def _run_legacy_index_step(project_ids: list[int], yield_to_hub, settings: dict) -> None:
     """Move the legacy index schedules of each project into schedule rows, once in a while.
 
-    A schedule the migration cannot move (a failed lookup, a limit) is retried after `MIGRATION_RETRY_SECONDS`.
-    After a pass that finds nothing the step sleeps for `LEGACY_RECHECK_SECONDS`; `legacy_index_step_enabled`
-    false stops it.
+    One replica at a time runs the step, under a session advisory lock; the others skip the pass. A schedule the
+    migration cannot move (a failed lookup, a limit) is retried after `MIGRATION_RETRY_SECONDS`. After a pass that
+    finds nothing the step sleeps for `LEGACY_RECHECK_SECONDS`; `legacy_index_step_enabled` false stops it.
     """
     step_on = settings.get("legacy_index_step_enabled", LEGACY_INDEX_STEP_DEFAULT)
     if not step_on or time.monotonic() < _legacy_index_idle["until"]:
         return
-    # Imported at call time: the tick loads without the migration's model graph
-    from ..utils.legacy_index_schedule_migration import migrate_index_project
-    empty_pass = True
-    for project_id in project_ids:
-        yield_to_hub()
-        end_ambient_transaction()
-        empty_pass &= _migrate_legacy_triggers(project_id, migrate_index_project, _index_migration_retry_at)
-    if empty_pass:
-        _legacy_index_idle["until"] = time.monotonic() + LEGACY_RECHECK_SECONDS
+    key = {"key": legacy_lock_key(INDEX_STEP_LOCK_ID)}
+    # A session lock is freed only by the connection that took it; autocommit keeps no transaction open
+    with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        if not connection.execute(LEGACY_LOCK, key).scalar():
+            log.info("entity_schedules_check: another replica runs the legacy index step, skipping it this minute")
+            return
+        try:
+            if _migrate_index_projects(project_ids, yield_to_hub):
+                _legacy_index_idle["until"] = time.monotonic() + LEGACY_RECHECK_SECONDS
+        finally:
+            try:
+                connection.execute(LEGACY_UNLOCK, key)
+            except Exception:
+                connection.invalidate()  # closing the server session frees the lock for the next replica
+                raise
 
 
 def _database_now(project_id: int) -> datetime:

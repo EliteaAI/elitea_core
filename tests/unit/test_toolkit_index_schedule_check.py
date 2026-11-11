@@ -77,7 +77,7 @@ def env(harness, monkeypatch):
     harness.permissions.add('models.applications.index_meta.edit')  # the caller may edit indexes
     service = sys.modules[f'{PACKAGE}.utils.schedule_service']
     monkeypatch.setattr(service, 'read_index_configuration',
-                        lambda project_id, toolkit, index_name: state.configuration)
+                        lambda session, project_id, toolkit, index_name, user_id: state.configuration)
 
     application_tools = types.ModuleType(f'{PACKAGE}.utils.application_tools')
     application_tools.ConfigurationExpandError = ConfigurationExpandError

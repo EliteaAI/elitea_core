@@ -151,8 +151,8 @@ class ImportEnv:
     def folder_error(self, value):  # the folder rights stub reads it from the base environment
         self.base.folder_error = value
 
-    def read(self, project_id, toolkit, index_name):
-        self.reads.append((project_id, toolkit.id, index_name))
+    def read(self, session, project_id, toolkit, index_name, user_id):
+        self.reads.append((project_id, toolkit.id, index_name, user_id))
         if self.unreachable:
             raise ConnectionError('store down')
         return self.stored.get(index_name)
@@ -190,7 +190,7 @@ def test_import_creates_a_paused_index_schedule_owned_by_the_admin_with_the_tool
     assert (row.enabled, row.created_by, row.principal) == (False, ADMIN_ID, {'kind': 'delegation', 'ref': ADMIN_ID})
     assert (row.description, row.cron, row.timezone) == ('Nightly', '0 3 * * *', 'Europe/Berlin')
     assert row.expires_at is not None
-    assert env.reads[0] == (PROJECT_ID, TOOLKIT_ID, 'docs')
+    assert env.reads[0] == (PROJECT_ID, TOOLKIT_ID, 'docs', ADMIN_ID)  # read for the importing admin, not the author
 
 
 def test_import_keeps_the_key_of_a_new_index_schedule(env):
@@ -286,6 +286,7 @@ def test_import_fails_an_item_the_admin_may_not_write_with_the_service_refusal(e
     report = env.import_items(index_item(), schema_version=2)
     assert report['failed'] == [{'name': 'Docs refresh', 'reason': 'Toolkit not found'}]
     assert env.index_rows() == []
+    assert env.reads == []  # the rights come before any read of the store
 
 
 def test_import_fails_an_index_item_with_an_interval_below_the_index_floor(env):

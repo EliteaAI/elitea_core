@@ -72,6 +72,7 @@ def world(monkeypatch):
             "start_schedule_run": lambda *a: world.started.append(a) or True, "START_FAILED": "",
         },
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NOW},
+        "utils.constants": {"LEGACY_INDEX_STEP_DEFAULT": False},
         "utils.schedule_runs": {"record_skipped_run": world.record_skipped, "fail_stale_runs": world.fail_stale,
                                 "expire_waiting_runs": lambda *a: 0},
     }
