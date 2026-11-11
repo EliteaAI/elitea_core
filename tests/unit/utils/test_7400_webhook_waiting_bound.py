@@ -86,17 +86,46 @@ def test_the_waiting_limit_is_read_from_the_config(runs):
     assert runs.webhook_waiting_limit() == 10
 
 
-def test_the_second_pause_of_an_approved_webhook_run_is_bounded_too(runs, session, sent):
+def _approved_after_a_pause(runs, session, schedule):
+    run = _running(runs, session, schedule, 'webhook')
+    _pause_all(runs, session, [run])
+    runs.apply_schedule_decision(1, run.id, 'approve')
+    session.refresh(run)
+    assert run.status == 'running'
+    return run
+
+
+def test_a_second_pause_of_an_admitted_webhook_run_is_not_counted_against_the_bound_again(runs, session, sent):
     schedule = _webhook_row(runs, session)
-    approved = _running(runs, session, schedule, 'webhook')
-    _pause_all(runs, session, [approved])
-    runs.apply_schedule_decision(1, approved.id, 'approve')
-    session.refresh(approved)
-    assert approved.status == 'running'
+    approved = _approved_after_a_pause(runs, session, schedule)
     others = [_running(runs, session, schedule, 'webhook') for _ in range(2)]
     _pause_all(runs, session, others)
 
     _pause_all(runs, session, [approved])
 
     assert [row.status for row in others] == ['waiting_for_approval', 'waiting_for_approval']
-    assert (approved.status, approved.reason) == ('failed', 'too many runs waiting for approval')
+    assert (approved.status, approved.reason) == ('waiting_for_approval', None)
+
+
+def test_the_second_pause_of_an_admitted_webhook_run_arms_the_expiry_again(runs, session, sent):
+    schedule = _webhook_row(runs, session)
+    approved = _approved_after_a_pause(runs, session, schedule)
+    assert approved.approval_expires_at is None
+
+    _pause_all(runs, session, [approved])
+
+    assert approved.approval_expires_at is not None
+    assert approved.resumed_at is None
+
+
+def test_a_new_webhook_run_is_still_failed_over_the_bound_while_an_admitted_one_waits_again(runs, session, sent):
+    schedule = _webhook_row(runs, session)
+    approved = _approved_after_a_pause(runs, session, schedule)
+    waiting = [_running(runs, session, schedule, 'webhook') for _ in range(2)]
+    _pause_all(runs, session, waiting)
+    late = _running(runs, session, schedule, 'webhook')
+
+    _pause_all(runs, session, [approved, late])
+
+    assert approved.status == 'waiting_for_approval'
+    assert (late.status, late.reason) == ('failed', 'too many runs waiting for approval')

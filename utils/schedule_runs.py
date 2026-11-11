@@ -405,9 +405,13 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
 
 
 def _over_waiting_cap(project_id: int, session, run_id: int) -> bool:
-    """True when a webhook run would pass the waiting bound of its row (#7400); the project lock holds until the commit."""
+    """True when a webhook run would pass the waiting bound of its row (#7400); the project lock holds until the commit.
+
+    A run that was approved once (`resumed_at` is set; a pause clears it and an approve sets it) is already admitted:
+    its later pauses are not counted again, and only the expiry re-arms.
+    """
     run = session.get(EntityScheduleRun, run_id)
-    if run is None or run.schedule_id is None or run.trigger not in RUN_TRIGGERS:
+    if run is None or run.schedule_id is None or run.trigger not in RUN_TRIGGERS or run.resumed_at is not None:
         return False
     schedule = session.get(EntitySchedule, run.schedule_id)
     if schedule is None or schedule.trigger_kind != 'webhook':  # cron schedules are never bounded here
