@@ -256,6 +256,22 @@ def test_el_7011_r2_4_rest_keeps_400_for_other_errors(post):
     assert call() == ({'error': 'Redis connection error'}, 400)
 
 
+def test_rest_carries_the_code_and_field_of_a_refusal(post):
+    rpc, call = post
+    rpc.result = {
+        'error': 'This project does not allow "Run without asking", so all tools cannot be approved',
+        'field': 'approve_all', 'code': 'approve_all_off', 'status': 409,
+    }
+
+    body, status = call()
+
+    assert status == 409
+    assert body == {
+        'error': 'This project does not allow "Run without asking", so all tools cannot be approved',
+        'code': 'approve_all_off', 'field': 'approve_all',
+    }
+
+
 def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
     check, _, calls = _helpers({'schedule_run_id': RUN_ID})
 

@@ -118,8 +118,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if isinstance(result, dict) and ("error" in result or "stopped" in result or "task_id" in result):
             if "error" in result:
                 error_value = result["error"]
-                return {"error": error_value if isinstance(error_value, str) else str(error_value)}, \
-                    result.get("status", 400)
+                body = {"error": error_value if isinstance(error_value, str) else str(error_value)}
+                body.update({key: result[key] for key in ("code", "field") if key in result})
+                return body, result.get("status", 400)
             return result, 200
 
         # Blocking path: the resumed response message (message_id) is complete. Return it plus its
