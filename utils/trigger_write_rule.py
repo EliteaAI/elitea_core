@@ -17,11 +17,12 @@ def strip_trigger_secrets(settings: dict) -> dict:
 
 def sanitize_trigger_for_write(settings: dict, stored_trigger: dict | None) -> dict:
     """
-    Return the pipeline_settings to store, so no write adds a legacy schedule trigger.
+    Return the pipeline_settings to store, so no write adds a legacy schedule or webhook trigger.
 
     A stored schedule trigger is kept until the migration moves it; otherwise a body
-    schedule trigger is stored as chat_message. Settings without a trigger are returned
-    as is, so the save path keeps the stored trigger.
+    schedule trigger is stored as chat_message. A body webhook trigger is stored only on a
+    version that already stores one (#7402). Settings without a trigger are returned as is,
+    so the save path keeps the stored trigger.
 
     Args:
         settings: The pipeline_settings dict carried by the write
@@ -36,6 +37,7 @@ def sanitize_trigger_for_write(settings: dict, stored_trigger: dict | None) -> d
         settings = strip_trigger_secrets(settings)
     if (stored_trigger or {}).get("type") == "schedule":
         return {**settings, "trigger": stored_trigger}
-    if (settings["trigger"] or {}).get("type") == "schedule":
+    requested = (settings["trigger"] or {}).get("type")
+    if requested == "schedule" or (requested == "webhook" and (stored_trigger or {}).get("type") != "webhook"):
         return {**settings, "trigger": {"type": "chat_message"}}
     return dict(settings)

@@ -145,10 +145,10 @@ LEGACY_WEBHOOK = {"type": "webhook", "webhook_type": "gitlab", "gitlab_auth_meth
                   "webhook_signing_secret": "{{secret.webhook_signing_secret_v4}}"}
 
 
-def test_7398_copy_strips_legacy_webhook_secret_refs(rule):
+def test_7398_copy_drops_the_legacy_webhook_trigger(rule):
+    # Since #7402 a copy gets no legacy webhook at all, so no secret reference can travel with it
     out = rule.sanitize_trigger_for_write({"trigger": dict(LEGACY_WEBHOOK), "nodes": 1}, None)
-    assert out == {"trigger": {"type": "webhook", "webhook_type": "gitlab", "gitlab_auth_method": "signing_token",
-                               "created_by": 7}, "nodes": 1}
+    assert out == {"trigger": {"type": "chat_message"}, "nodes": 1}
 
 
 def test_7398_save_of_the_same_version_keeps_its_secret_refs(rule):

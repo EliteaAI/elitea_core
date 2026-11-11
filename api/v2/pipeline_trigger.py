@@ -187,6 +187,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if not version:
                     return {"ok": False, "error": f"Version {version_id} not found"}, 404
 
+                # Only a version that still stores a legacy webhook may edit it; new ones are webhook rows (#7402)
+                stored_type = get_trigger_from_pipeline_settings(version.pipeline_settings or {}).get("type")
+                if update_data.type == TriggerType.webhook.value and stored_type != TriggerType.webhook.value:
+                    return {
+                        "ok": False,
+                        "code": "webhooks_moved",
+                        "error": "Webhooks moved. Use the Webhooks API: "
+                                 f"/api/v2/elitea_core/schedules/prompt_lib/{project_id}",
+                    }, 400
+
                 # Get current user ID
                 current_user_id = auth.current_user().get("id")
 

@@ -567,6 +567,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.8",
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_legacy_pipeline_webhooks", self.migrate_legacy_pipeline_webhooks,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables,
                 group="R-2.0.8",
             )
@@ -1508,6 +1512,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_legacy_pipeline_webhooks", self.migrate_legacy_pipeline_webhooks
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables

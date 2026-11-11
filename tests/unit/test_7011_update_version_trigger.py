@@ -67,6 +67,7 @@ class TestEL7011UpdateVersionTrigger:
         assert stored == {"other": 1, "trigger": STORED_SCHEDULE}
 
     def test_r2_4_save_with_other_trigger_type_is_stored_as_sent(self):
-        # TC-US23-08
-        stored = _save({"trigger": CHAT}, {"trigger": WEBHOOK})
-        assert stored == {"trigger": WEBHOOK}
+        # TC-US23-08; a new legacy webhook is refused since #7402, a stored one is still editable
+        assert _save({"trigger": CHAT}, {"trigger": WEBHOOK}) == {"trigger": CHAT}
+        edited = {**WEBHOOK, "webhook_type": "github"}
+        assert _save({"trigger": WEBHOOK}, {"trigger": edited}) == {"trigger": edited}

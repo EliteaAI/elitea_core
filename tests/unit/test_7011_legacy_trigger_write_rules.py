@@ -45,10 +45,22 @@ class TestEL7011LegacyTriggerWriteRules:
         # TC-US23-05
         assert rule({"trigger": dict(SCHEDULE)}, WEBHOOK) == {"trigger": CHAT}
 
-    @pytest.mark.parametrize("trigger", [CHAT, WEBHOOK])
-    def test_r2_1_other_trigger_passes_through(self, rule, trigger):
+    def test_r2_1_chat_trigger_passes_through(self, rule):
         # TC-US23-06
-        assert rule({"trigger": dict(trigger)}, None) == {"trigger": trigger}
+        assert rule({"trigger": dict(CHAT)}, None) == {"trigger": CHAT}
+
+    @pytest.mark.parametrize("stored", [None, CHAT, SCHEDULE])
+    def test_7402_new_webhook_is_stored_as_chat_message(self, rule, stored):
+        # #7402: webhooks are webhook rows; only the schedule rule above keeps a stored schedule
+        expected = SCHEDULE if stored == SCHEDULE else CHAT
+        assert rule({"trigger": dict(WEBHOOK)}, stored) == {"trigger": expected}
+
+    def test_7402_stored_webhook_stays_editable(self, rule):
+        edited = {**WEBHOOK, "webhook_type": "github"}
+        assert rule({"trigger": dict(edited)}, WEBHOOK) == {"trigger": edited}
+
+    def test_7402_stored_webhook_can_be_switched_off(self, rule):
+        assert rule({"trigger": dict(CHAT)}, WEBHOOK) == {"trigger": CHAT}
 
     def test_r2_3_stored_schedule_is_kept_on_save(self, rule):
         # TC-US23-07: the body schedule does not replace the stored one
