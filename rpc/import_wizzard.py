@@ -5,7 +5,7 @@ from sqlalchemy import Integer
 
 from ..models.pd.import_wizard import IMPORT_MODEL_ENTITY_MAPPER, DEPRECATED_ENTITIES
 from ..models.pd.skill import SkillImportResultModel
-from ..utils.skill_utils import attach_skill_to_agent, SkillError
+from ..utils.skill_utils import attach_skill_to_agent, SkillError, SkillLimitExceededError
 from ..utils.export_import_utils import (
     ENTITY_IMPORT_MAPPER, _wrap_import_error,
     _wrap_import_result
@@ -259,8 +259,11 @@ def _resolve_and_attach_skill(
             skill_version_id=skill_version_id,
             session=session,
         )
+    except SkillLimitExceededError:
+        # Summarised once per agent version by the caller, not once per skill.
+        raise
     except SkillError as ex:
-        # Limit exceeded / already attached / not found -> non-fatal warning.
+        # Already attached / not found -> non-fatal warning.
         return (f"Skill not attached to agent '{agent_name}' version "
                 f"'{version_name}': {ex}")
     except Exception as ex:
@@ -296,12 +299,28 @@ def _attach_imported_skills(project_id, agents_with_skills, skill_id_mapper,
                     continue
                 _app_id, app_version_id = target
 
-                for skill_ref in skill_refs:
-                    err = _resolve_and_attach_skill(
-                        project_id, agent_name, version_name, app_version_id, skill_ref, skill_id_mapper, s,
-                    )
+                attached = 0
+                for ref_index, skill_ref in enumerate(skill_refs):
+                    try:
+                        err = _resolve_and_attach_skill(
+                            project_id, agent_name, version_name, app_version_id, skill_ref,
+                            skill_id_mapper, s,
+                        )
+                    except SkillLimitExceededError as ex:
+                        # Every remaining skill would hit the same limit: report once.
+                        not_attached = len(skill_refs) - ref_index
+                        errors['skills'].append(_wrap_import_error(
+                            item_index,
+                            f"Cannot attach all {len(skill_refs)} skills to agent '{agent_name}' "
+                            f"(version '{version_name}'): the project allows at most {ex.max_allowed} "
+                            f"skills per agent. {attached} attached, {not_attached} not attached. "
+                            f"Remove at least {not_attached} skills from the agent and try again."
+                        ))
+                        break
                     if err:
                         errors['skills'].append(_wrap_import_error(item_index, err))
+                    else:
+                        attached += 1
         s.commit()
 
 
