@@ -379,6 +379,9 @@ def reads(monkeypatch):
     module.tool_call_events = lambda session, conversation_id: []
     module.usage_summary = lambda session, project_id, run: (10, 0.5)
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    runs_module = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')
+    runs_module.can_approve_all = lambda session, project_id, run, caller_id: caller_id == OWNER_ID
+    monkeypatch.setitem(sys.modules, runs_module.__name__, runs_module)
 
 
 def read_runs(harness, application_id=1, **query):
@@ -476,6 +479,7 @@ def test_the_test_run_detail_has_the_body_of_the_run_detail_and_the_rule_of_the_
     assert body['summary']['tokens'] == 10 and body['summary']['cost_usd'] == 0.5
     assert body['approval_rule'] == 'pause_and_ask'
     assert {'events', 'status', 'conversation_id'} <= set(body)
+    assert body['can_approve_all'] is True
 
 
 def test_the_test_run_detail_is_404_for_a_foreign_a_saved_or_a_missing_run(harness, started, reads):

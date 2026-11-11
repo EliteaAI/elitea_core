@@ -38,14 +38,15 @@ FINISHED = {'at': '2026-10-01T00:00:38+00:00', 'kind': 'finished', 'text': 'Run 
 TOOL = {'at': '2026-10-01T00:00:10+00:00', 'kind': 'tool_call', 'text': 'Tool call: github · list_issues',
         'level': 'info', 'toolkit': 'github', 'tool': 'list_issues', 'duration_ms': 1200}
 DETAIL_FIELDS = (FIELDS - {'tokens', 'cost_usd'}) | {  # the detail has the figures in `summary`
-    'version_label', 'principal_label', 'risk_outcome', 'approval_rule', 'approval_expires_at', 'summary', 'events',
+    'version_label', 'principal_label', 'risk_outcome', 'approval_rule', 'approval_expires_at', 'can_approve_all',
+    'summary', 'events',
 }
 
 
 @pytest.fixture
 def reads(monkeypatch):
     """The read helpers the handler imports late; `usage` is what the usage store answers."""
-    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], tool_events=[TOOL])
+    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], tool_events=[TOOL], approve_all=False, callers=[])
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
     module.version_label = lambda session, version_id: {10: 'v3'}.get(version_id)
 
@@ -56,6 +57,14 @@ def reads(monkeypatch):
     module.tool_call_events = tool_call_events
     module.usage_summary = lambda session, project_id, run: state.usage
     monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    def can_approve_all(session, project_id, run, caller_id):
+        state.callers.append((project_id, run.id, caller_id))
+        return state.approve_all
+
+    runs_module = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')
+    runs_module.can_approve_all = can_approve_all
+    monkeypatch.setitem(sys.modules, runs_module.__name__, runs_module)
     return state
 
 
@@ -95,6 +104,18 @@ def test_cr_el7011_the_detail_has_the_run_version_account_risk_summary_and_event
     # The stored events and the tool calls of the conversation, in time order
     assert [event['kind'] for event in body['events']] == ['started', 'tool_call', 'finished']
     assert reads.conversations == [901]
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_the_detail_tells_whether_the_caller_may_approve_all_for_this_run(harness, reads, answer):
+    schedule_id = harness.seed(approval_rule='pause_and_ask')
+    run_id = seed_run(harness, schedule_id)
+    reads.approve_all = answer
+
+    body, status = call_run(harness, 'get', schedule_id, run_id)
+
+    assert (status, body['can_approve_all']) == (200, answer)
+    assert reads.callers == [(PROJECT_ID, run_id, harness.user_id)]
 
 
 def test_cr_el7011_the_merged_events_stay_at_the_event_limit_and_keep_the_last(harness, reads):

@@ -116,6 +116,7 @@ RUN_DETAIL_EXAMPLE = {
     "started_at": "2026-10-21T09:00:00+00:00", "finished_at": "2026-10-21T09:00:38+00:00", "version_id": 420,
     "duration_ms": 38000, "version_label": "v3", "principal_label": "Ann Smith (schedule owner)",
     "risk_outcome": "needs_approval", "approval_rule": "pause_and_ask", "approval_expires_at": None,
+    "can_approve_all": False,
     "summary": {"duration_ms": 38000, "tokens": 2140, "cost_usd": 0.03},
     "events": [
         {"at": "2026-10-21T09:00:00.120000+00:00", "kind": "started", "level": "info",
@@ -451,7 +452,7 @@ OPERATIONS = {
         "description": _text(
             "Answer one of the caller's own Test Runs for `application_id`, with the body of the run detail of a "
             "saved schedule: status, events, summary, conversation_id, version_label, tokens, cost_usd. "
-            "`approval_rule` is the one of the stored form.",
+            "`approval_rule` is the one of the stored form; `can_approve_all` is as for a run of a saved schedule.",
             "a project member with `schedules.run`; another owner's run, a run of a saved schedule and a run of "
             "another agent or pipeline are 404",
             "400 a missing `application_id`; 403 no permission; 404 `run_not_found`; "
@@ -520,7 +521,9 @@ OPERATIONS = {
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
             "agent_started, tool_call, paused, decision and finished. A `paused` event names every tool of the pause in "
             "`tools` (`toolkit`, `tool`). A `decision` event of an approve for the rest of the run has `approve_all` "
-            "true. Tool calls come from the run conversation; "
+            "true. `can_approve_all` is true when the run waits and the caller may choose \"approve all\" now: the caller "
+            "started the run and the project allows \"Run without asking\"; the UI shows the choice only then. "
+            "Tool calls come from the run conversation; "
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "

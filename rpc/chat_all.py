@@ -66,9 +66,10 @@ from ..utils.toolkit_authorization import (
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
-    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
-    apply_schedule_decision, approves_all, check_schedule_decision,
+    ScheduleApproveAllForbidden, ScheduleApproveAllOff, ScheduleDecisionForbidden, ScheduleDecisionInvalid,
+    ScheduleRunNotWaiting, apply_schedule_decision, approves_all, check_schedule_decision,
 )
+from ..utils.schedule_settings import is_run_without_asking_allowed
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
@@ -114,8 +115,11 @@ def _chat_trigger_kwargs(rpc_func: str) -> dict:
     return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
 
 
-def _approve_all_kwargs(session, conversation, rpc_func: str) -> dict:
+def _approve_all_kwargs(session, conversation, rpc_func: str, project_id: int) -> dict:
     """``auto_approve_sensitive_actions=True`` on a resume of a scheduled run whose owner chose "approve all".
+
+    Only while the project still allows "Run without asking": an admin may switch it off after the choice, and the
+    next resume then asks again.
 
     The server-side keyword is the only way in: ``predict_sio`` builds the worker payload again and ignores a payload key.
     The other predict RPCs take no such argument; a chat that is not a scheduled run gets nothing.
@@ -124,7 +128,7 @@ def _approve_all_kwargs(session, conversation, rpc_func: str) -> dict:
     if rpc_func != 'applications_predict_sio':
         return {}
     run_id = (getattr(conversation, 'meta', None) or {}).get('schedule_run_id')
-    if run_id is None or not approves_all(session, run_id):
+    if run_id is None or not approves_all(session, run_id) or not is_run_without_asking_allowed(project_id):
         return {}
     log.debug('Schedule run %s resumes with all sensitive tools approved by its owner', run_id)
     return {'auto_approve_sensitive_actions': True}
@@ -160,6 +164,14 @@ _SCHEDULE_REFUSALS = {
         "field": "hitl_action", "status": 400,
     },
     ScheduleRunNotWaiting: {"error": "This schedule run is not waiting for approval", "status": 409},
+    ScheduleApproveAllForbidden: {
+        "error": "Only the person who started this run can approve all its tools", "field": "approve_all",
+        "status": 403,
+    },
+    ScheduleApproveAllOff: {
+        "error": 'This project does not allow "Run without asking", so all tools cannot be approved',
+        "field": "approve_all", "status": 409,
+    },
 }
 _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field": "mcp_auth_action", "status": 400}
 
@@ -188,15 +200,17 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         answers = getattr(parsed, 'mcp_auth_decisions', None)
         actions = ([item.get('action') if isinstance(item, dict) else None for item in answers]
                    if answers else [parsed.mcp_auth_action])
+    # A sign-in answer never carries it; the checks refuse a request that may not choose it
+    approve_all = bool(getattr(parsed, 'approve_all', False)) and not sign_in
     try:
         decision = check_schedule_decision(
-            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in)
+            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
+            approve_all=approve_all)
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    approve_all = bool(getattr(parsed, 'approve_all', False)) and decision == 'approve' and not sign_in
-    return ((run_id, decision, approve_all) if decision else None), None
+    return ((run_id, decision, approve_all and decision == 'approve') if decision else None), None
 
 
 def _apply_schedule_decision(project_id, pending) -> dict | None:
@@ -2697,7 +2711,7 @@ class RPC:
                     **skill_rpc_kwargs,
                     **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
                     **_chat_trigger_kwargs(rpc_func),
-                    **_approve_all_kwargs(session, conversation, rpc_func),
+                    **_approve_all_kwargs(session, conversation, rpc_func, parsed.project_id),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout, project_id=parsed.project_id,

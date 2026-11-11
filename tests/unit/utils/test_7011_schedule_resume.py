@@ -5,6 +5,8 @@ ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting) on th
 in-memory SQLite.
 Cases: TC-US18-05, TC-US18-08, TC-US18-09, TC-US18-10.
 """
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -243,3 +245,139 @@ def test_a_paused_event_that_carries_the_flag_is_no_choice(runs, session, sent):
     session.flush()
 
     assert runs.approves_all(session, run.id) is False
+
+
+STRANGER = 77
+
+
+@pytest.fixture
+def allowed(monkeypatch):
+    """The "Run without asking" setting of the project, switched by `allowed.value`."""
+    state = types.SimpleNamespace(value=True, asked=[])
+
+    def is_run_without_asking_allowed(project_id):
+        state.asked.append(project_id)
+        return state.value
+
+    module = types.ModuleType("plugins.elitea_core.utils.schedule_settings")
+    module.is_run_without_asking_allowed = is_run_without_asking_allowed
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.schedule_settings", module)
+    return state
+
+
+def _started_by(runs, session, run, user_id):
+    run.requested_by = user_id
+    session.flush()
+
+
+def test_an_approve_all_of_the_owner_is_accepted_while_the_setting_is_on(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True) == "approve"
+    assert allowed.asked == [1]
+
+
+def test_an_approve_all_is_refused_while_the_setting_is_off_and_the_run_keeps_waiting(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    allowed.value = False
+
+    with pytest.raises(runs.ScheduleApproveAllOff):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+
+    session.refresh(run)
+    assert (run.status, run.resumed_at, _decision_events(session, run)) == ("waiting_for_approval", None, [])
+
+
+def test_a_plain_approve_still_works_while_the_setting_is_off(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    allowed.value = False
+
+    assert _decide(runs, run.id, OWNER, ["approve"]) == "approve"
+    assert allowed.asked == []
+    assert run.status == "running"
+
+
+def test_an_approve_all_of_the_owner_is_refused_when_someone_else_started_the_run(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    _started_by(runs, session, run, ADMIN)
+
+    # The owner still decides the run; the admin who started it is no decider on this base
+    with pytest.raises(runs.ScheduleApproveAllForbidden):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"]) == "approve"
+    session.refresh(run)
+    assert (run.status, _decision_events(session, run)) == ("waiting_for_approval", [])
+
+
+def test_a_non_actor_refusal_comes_before_the_setting_is_read(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    _started_by(runs, session, run, ADMIN)
+    allowed.value = False
+
+    with pytest.raises(runs.ScheduleApproveAllForbidden):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+
+    assert allowed.asked == []
+
+
+def test_a_user_who_is_not_the_decider_gets_the_decision_refusal_first(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+
+    with pytest.raises(runs.ScheduleDecisionForbidden):
+        runs.check_schedule_decision(1, run.id, STRANGER, ["approve"], approve_all=True)
+
+
+def test_the_requester_of_a_test_run_may_approve_all(runs, session, sent, allowed):
+    run = runs.EntityScheduleRun(schedule_id=None, trigger="test", status="waiting_for_approval", requested_by=OWNER)
+    session.add(run)
+    session.flush()
+
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True) == "approve"
+    assert runs.is_approve_all_actor(session, run, STRANGER) is False
+
+
+def test_a_reject_ignores_approve_all_and_the_setting(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    _started_by(runs, session, run, ADMIN)
+    allowed.value = False
+
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["reject"], approve_all=True) == "reject"
+    assert allowed.asked == []
+
+
+def test_a_run_that_does_not_wait_gets_the_not_waiting_refusal_before_the_approve_all_one(runs, session, sent, allowed):
+    schedule = _schedule(runs, session, created_by=OWNER)
+    run = _run(runs, session, schedule, status="running")
+    allowed.value = False
+
+    with pytest.raises(runs.ScheduleRunNotWaiting):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+
+
+def test_can_approve_all_is_true_for_the_actor_of_a_waiting_run_while_the_setting_is_on(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+
+    assert runs.can_approve_all(session, 1, run, OWNER) is True
+
+
+def test_can_approve_all_is_false_while_the_setting_is_off(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    allowed.value = False
+
+    assert runs.can_approve_all(session, 1, run, OWNER) is False
+
+
+def test_can_approve_all_is_false_for_a_caller_who_did_not_start_the_run(runs, session, sent, allowed):
+    _, run = _waiting(runs, session)
+    _started_by(runs, session, run, ADMIN)
+
+    assert runs.can_approve_all(session, 1, run, OWNER) is False
+
+
+def test_can_approve_all_is_false_for_a_run_that_does_not_wait_and_reads_no_setting(runs, session, sent, allowed):
+    schedule = _schedule(runs, session, created_by=OWNER)
+    run = _run(runs, session, schedule, status="running")
+
+    assert runs.can_approve_all(session, 1, run, OWNER) is False
+    assert allowed.asked == []

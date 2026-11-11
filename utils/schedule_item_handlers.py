@@ -230,10 +230,15 @@ def _run_filters(query: RunFilters) -> list:
     return where
 
 
-def _run_detail_body(session, project_id: int, run, approval_rule: str | None):
-    """The `(body, status)` of one run, with the approval rule of its schedule or of its Test Run form."""
-    # Late: only the detail routes read the conversation and the usage store
+def _run_detail_body(session, project_id: int, run, approval_rule: str | None, caller_id: int):
+    """The `(body, status)` of one run, with the approval rule of its schedule or of its Test Run form.
+
+    `can_approve_all` is true when `caller_id` may choose "approve all" on this waiting run now, so the UI shows the
+    choice only then.
+    """
+    # Late: only the detail routes read the conversation and the usage store, and the run models
     from .schedule_run_detail import tool_call_events, usage_summary, version_label
+    from .schedule_runs import can_approve_all
     row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
     tokens, cost_usd = usage_summary(session, project_id, run)
     events = [public_event(e) for e in merge_events(run.events, tool_call_events(session, run.conversation_id))]
@@ -244,6 +249,7 @@ def _run_detail_body(session, project_id: int, run, approval_rule: str | None):
         "risk_outcome": run.risk_outcome,
         "approval_rule": approval_rule,
         "approval_expires_at": _iso(run.approval_expires_at),
+        "can_approve_all": can_approve_all(session, project_id, run, caller_id),
         "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
         "events": events,
     }, 200
@@ -856,7 +862,7 @@ class ScheduleItemHandlers:
                 rule = form_of_test_run(session, run_id).get("approval_rule")
             except TestRunUnavailable:
                 return TEST_RUN_UNAVAILABLE
-            return _run_detail_body(session, project_id, run, rule)
+            return _run_detail_body(session, project_id, run, rule, scope.user_id)
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _runs(self, project_id: int, schedule_id: int):
@@ -902,7 +908,7 @@ class ScheduleItemHandlers:
                 EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule.id))
             if run is None:
                 return RUN_NOT_FOUND
-            return _run_detail_body(session, project_id, run, schedule.approval_rule)
+            return _run_detail_body(session, project_id, run, schedule.approval_rule, scope.user_id)
 
     @auth.decorators.check_api(schedule_check_spec("admin"))
     def _change_owner(self, project_id: int, schedule_id: int):

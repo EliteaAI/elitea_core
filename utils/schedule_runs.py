@@ -61,6 +61,14 @@ class ScheduleRunNotWaiting(Exception):
     """The run of an approve or reject is not waiting for approval (R2.4)."""
 
 
+class ScheduleApproveAllForbidden(Exception):
+    """"Approve all" was asked by someone but the person the run acts for."""
+
+
+class ScheduleApproveAllOff(Exception):
+    """"Approve all" was asked while the project does not allow "Run without asking"."""
+
+
 def approval_wait_hours() -> int:
     """The configured wait of a paused run; a missing, 0, negative or over-720 value is bounded here, as config.yml skips the admin schema."""
     from tools import this  # late: the writers load without the plugin handle
@@ -215,6 +223,38 @@ def run_owner_id(session, run) -> int | None:
     if run.schedule_id is None:
         return run.requested_by
     return session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
+
+
+def is_approve_all_actor(session, run, caller_id: int) -> bool:
+    """True for the one person who may choose "approve all" for a run: whoever started it by hand (Run now, Test Run),
+    else the schedule owner. The choice lets the run act without asking, so it stays with the person the run acts for."""
+    actor_id = run.requested_by if run.requested_by is not None else run_owner_id(session, run)
+    return actor_id == caller_id
+
+
+def check_approve_all(project_id: int, is_actor: bool) -> None:
+    """Refuse "approve all" unless the caller is the actor of the run and the project allows "Run without asking".
+
+    Raises `ScheduleApproveAllForbidden`, then `ScheduleApproveAllOff`. The setting is read at each call: an admin may
+    switch it off while the run waits. It takes no session, because the settings store opens its own connection.
+    """
+    # Late: the settings store stays off every other run writer
+    from .schedule_settings import is_run_without_asking_allowed
+    if not is_actor:
+        raise ScheduleApproveAllForbidden()
+    if not is_run_without_asking_allowed(project_id):
+        raise ScheduleApproveAllOff()
+
+
+def can_approve_all(session, project_id: int, run, caller_id: int) -> bool:
+    """True when the caller may choose "approve all" now: the run waits and `check_approve_all` passes."""
+    if run.status != 'waiting_for_approval':
+        return False
+    try:
+        check_approve_all(project_id, is_approve_all_actor(session, run, caller_id))
+    except (ScheduleApproveAllForbidden, ScheduleApproveAllOff):
+        return False
+    return True
 
 
 def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
@@ -421,7 +461,7 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
-                            fan_out: bool = False, sign_in: bool = False) -> str | None:
+                            fan_out: bool = False, sign_in: bool = False, approve_all: bool = False) -> str | None:
     """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
 
     Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
@@ -429,6 +469,8 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
     that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
     the sign-in answers (`authorize`, `skip`) and map to approve and reject.
+    `approve_all` with an approve is checked last (`check_approve_all`): `ScheduleApproveAllForbidden` or
+    `ScheduleApproveAllOff`, and the run keeps waiting. A reject ignores it.
     """
     if sign_in:  # an unknown answer stays in the list, so the check below refuses it
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
@@ -439,13 +481,18 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         if run_owner_id(session, run) != caller_id:
             raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
+        is_actor = is_approve_all_actor(session, run, caller_id)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
     if fan_out and status == 'running' and resumed_at is not None:
         return None
     if status != 'waiting_for_approval':
         raise ScheduleRunNotWaiting(run_id)
-    return 'reject' if 'reject' in actions else 'approve'
+    if 'reject' in actions:
+        return 'reject'
+    if approve_all:
+        check_approve_all(project_id, is_actor)
+    return 'approve'
 
 
 def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve_all: bool = False) -> None:

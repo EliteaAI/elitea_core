@@ -23,7 +23,8 @@ class ContinuePredictPayload(BaseModel):
         None, description="Per-child HITL decisions for a parallel sub-agent resume.")
     approve_all: bool = Field(
         False, description="Only for a scheduled run: with hitl_action approve, the run asks no more "
-                           "sensitive-tool approvals until it ends.")
+                           "sensitive-tool approvals until it ends. Only the person who started the run may send it, "
+                           "and only while the project allows Run without asking.")
     mcp_auth_resume: bool = Field(
         False, description="Whether this request resumes a durable Toolkit authorization interrupt.")
     mcp_auth_action: Optional[Literal["authorize", "skip"]] = Field(

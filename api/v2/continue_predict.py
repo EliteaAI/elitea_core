@@ -32,7 +32,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - edit — continue with `hitl_value` as the edited text.
         - block_with_comment — block and continue with `hitl_value` as the note.
 
-        approve_all: only for a schedule run; ignored outside a schedule run.
+        approve_all: only for a schedule run; ignored outside a schedule run. Refused (403) unless the caller is the
+        person who started the run, and refused (409) while the project does not allow "Run without asking".
 
         For an on-demand Toolkit authorization pause, send `mcp_auth_resume: true`,
         `mcp_auth_action: authorize|skip`, and the exact `authorization_request_id`

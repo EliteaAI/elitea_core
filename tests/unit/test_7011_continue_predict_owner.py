@@ -39,6 +39,14 @@ class NotWaiting(Exception):
     pass
 
 
+class NotActor(Exception):
+    pass
+
+
+class SettingOff(Exception):
+    pass
+
+
 def _helpers(meta, error=None, decision='approve', apply_error=None):
     """The real helpers on a fake conversation meta; `calls` records each schedule_runs call."""
     calls = []
@@ -73,6 +81,8 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
         'ScheduleDecisionForbidden': Forbidden,
         'ScheduleDecisionInvalid': Invalid,
         'ScheduleRunNotWaiting': NotWaiting,
+        'ScheduleApproveAllForbidden': NotActor,
+        'ScheduleApproveAllOff': SettingOff,
     }
     namespace = load_cut(nodes, namespace, 'chat_all.py')  # the real helpers cut out of rpc/chat_all.py
     return namespace['_check_schedule_decision'], namespace['_apply_schedule_decision'], calls
@@ -91,7 +101,7 @@ def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decisio
 
     pending, denied = check(_parsed(), OWNER)
     assert (pending, denied) == ((RUN_ID, 'approve', False), None)
-    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False})]
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False, 'sign_in': False, 'approve_all': False})]
 
     assert apply(PROJECT_ID, pending) is None
     assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve', False)
@@ -111,7 +121,7 @@ def test_el_7011_r2_4_a_fan_out_child_on_a_resumed_run_has_nothing_to_apply():
     pending, denied = check(_parsed(thread_id='child-1'), OWNER)
 
     assert (pending, denied) == (None, None)
-    assert calls[0][-1] == {'fan_out': True, 'sign_in': False}
+    assert calls[0][-1] == {'fan_out': True, 'sign_in': False, 'approve_all': False}
     assert apply(PROJECT_ID, pending) is None
     assert [call[0] for call in calls] == ['check']
 
@@ -252,7 +262,7 @@ def test_a_sign_in_answer_is_checked_as_a_schedule_decision():
     pending, denied = check(_parsed(hitl_resume=False, mcp_auth_resume=True, mcp_auth_action='authorize'), OWNER)
 
     assert (pending, denied) == ((RUN_ID, 'approve', False), None)
-    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True})]
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['authorize'], {'fan_out': False, 'sign_in': True, 'approve_all': False})]
 
 
 def test_one_skip_among_the_sign_in_answers_rejects_the_run():
@@ -302,6 +312,32 @@ def test_the_check_carries_approve_all_only_with_an_approve(decision, approve_al
     assert pending == (RUN_ID, decision, expected)
 
 
+@pytest.mark.parametrize('error, status, field', [
+    (NotActor(), 403, 'approve_all'),
+    (SettingOff(), 409, 'approve_all'),
+])
+def test_a_refused_approve_all_answers_its_status_and_names_the_field(error, status, field):
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, error)
+
+    pending, denied = check(_parsed(approve_all=True), OWNER)
+
+    assert pending is None
+    assert (denied['status'], denied['field']) == (status, field)
+
+
+@pytest.mark.parametrize('request_values, asked', [
+    ({'approve_all': True}, True),
+    ({'approve_all': False}, False),
+    ({'hitl_resume': False, 'mcp_auth_resume': True, 'mcp_auth_action': 'authorize', 'approve_all': True}, False),
+], ids=['asked', 'plain approve', 'sign-in answer'])
+def test_the_check_hands_the_approve_all_request_to_the_run_check(request_values, asked):
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(**request_values), OWNER)
+
+    assert calls[0][-1]['approve_all'] is asked
+
+
 def test_the_check_never_carries_approve_all_on_a_sign_in_answer():
     check, _, _ = _helpers({'schedule_run_id': RUN_ID})
 
@@ -319,8 +355,11 @@ def test_the_apply_passes_approve_all_to_the_run():
     assert calls == [('apply', PROJECT_ID, RUN_ID, 'approve', True)]
 
 
-def _kwargs_helper(approved_runs):
-    """`_approve_all_kwargs` cut out of rpc/chat_all.py; `asked` records the run ids it looked up."""
+def _kwargs_helper(approved_runs, allowed=True):
+    """`_approve_all_kwargs` cut out of rpc/chat_all.py; `asked` records the run ids it looked up.
+
+    `allowed` is the project setting "Allow Run without asking".
+    """
     asked = []
 
     def approves_all(session, run_id):
@@ -329,7 +368,8 @@ def _kwargs_helper(approved_runs):
 
     nodes = [node for node in ast.parse(CHAT_ALL).body if getattr(node, 'name', None) == '_approve_all_kwargs']
     namespace = load_cut(nodes, {
-        'approves_all': approves_all, 'log': types.SimpleNamespace(debug=lambda *_: None)}, 'chat_all.py')
+        'approves_all': approves_all, 'is_run_without_asking_allowed': lambda project_id: allowed,
+        'log': types.SimpleNamespace(debug=lambda *_: None)}, 'chat_all.py')
     return namespace['_approve_all_kwargs'], asked
 
 
@@ -337,15 +377,23 @@ def test_a_resume_of_an_approve_all_run_passes_the_auto_approve_keyword():
     helper, asked = _kwargs_helper({RUN_ID})
     conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
 
-    assert helper('session', conversation, 'applications_predict_sio') == {'auto_approve_sensitive_actions': True}
+    result = helper('session', conversation, 'applications_predict_sio', PROJECT_ID)
+    assert result == {'auto_approve_sensitive_actions': True}
     assert asked == [('session', RUN_ID)]
+
+
+def test_a_resume_after_the_setting_was_switched_off_passes_no_auto_approve_keyword():
+    helper, _ = _kwargs_helper({RUN_ID}, allowed=False)
+    conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
+
+    assert helper('session', conversation, 'applications_predict_sio', PROJECT_ID) == {}
 
 
 def test_a_resume_without_approve_all_passes_no_auto_approve_keyword():
     helper, _ = _kwargs_helper(set())
     conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
 
-    assert helper('session', conversation, 'applications_predict_sio') == {}
+    assert helper('session', conversation, 'applications_predict_sio', PROJECT_ID) == {}
 
 
 @pytest.mark.parametrize('rpc_func', ['llm_predict_sio', 'toolkits_predict_sio'])
@@ -353,7 +401,7 @@ def test_the_other_predict_rpcs_never_get_the_auto_approve_keyword(rpc_func):
     helper, asked = _kwargs_helper({RUN_ID})
     conversation = types.SimpleNamespace(meta={'schedule_run_id': RUN_ID})
 
-    assert helper('session', conversation, rpc_func) == {}
+    assert helper('session', conversation, rpc_func, PROJECT_ID) == {}
     assert asked == []
 
 
@@ -361,7 +409,7 @@ def test_the_other_predict_rpcs_never_get_the_auto_approve_keyword(rpc_func):
 def test_a_chat_that_is_not_a_schedule_run_never_gets_the_auto_approve_keyword(meta):
     helper, asked = _kwargs_helper({RUN_ID})
 
-    assert helper('session', types.SimpleNamespace(meta=meta), 'applications_predict_sio') == {}
+    assert helper('session', types.SimpleNamespace(meta=meta), 'applications_predict_sio', PROJECT_ID) == {}
     assert asked == []
 
 
@@ -370,7 +418,7 @@ def test_the_resume_call_adds_the_keyword_through_the_helper_for_every_resume_ki
     call = body[body.index('getattr(self.context.rpc_manager.call, rpc_func)('):]
     call = call[:call.index('self.finalize_timed_out_response(')]
 
-    assert '**_approve_all_kwargs(session, conversation, rpc_func)' in call
+    assert '**_approve_all_kwargs(session, conversation, rpc_func, parsed.project_id)' in call
     assert body.count('getattr(self.context.rpc_manager.call, rpc_func)(') == 1  # HITL and sign-in resumes share it
 
 
@@ -400,7 +448,7 @@ class _PredictCalls:
         return call
 
 
-def _continue_predict(schedule_meta, events, **request):
+def _continue_predict(schedule_meta, events, allowed=True, **request):
     """Run the real `continue_predict_sio` of rpc/chat_all.py; return the predict calls it made.
 
     Every name the method reads from the module is a MagicMock unless it is set here.
@@ -448,6 +496,7 @@ def _continue_predict(schedule_meta, events, **request):
         '_apply_schedule_decision': lambda *_: None,
         'CHAT_PREDICT_MAPPER': {'agent': 'applications_predict_sio'},
         'TriggerType': types.SimpleNamespace(CHAT='chat'),
+        'is_run_without_asking_allowed': lambda _project_id: allowed,
         'approves_all': lambda _session, run_id: any(
             item.get('kind') == 'decision' and item.get('approve_all') is True for item in events.get(run_id, [])),
         'EXECUTION_GENERATION_KEY': 'generation', 'INTERNAL_CONTINUE_TOKEN': object(),
@@ -499,5 +548,11 @@ def test_a_resumed_schedule_run_without_approve_all_predicts_without_the_keyword
 @pytest.mark.parametrize('meta', [None, {}, {'schedule_id': 3}])
 def test_a_resumed_chat_that_is_not_a_schedule_run_predicts_without_the_keyword(meta):
     ((_, kwargs),) = _continue_predict(meta, APPROVE_ALL_EVENTS, hitl_resume=True)
+
+    assert 'auto_approve_sensitive_actions' not in kwargs
+
+
+def test_a_resumed_approve_all_run_predicts_without_the_keyword_once_the_setting_is_off():
+    ((_, kwargs),) = _continue_predict({'schedule_run_id': RUN_ID}, APPROVE_ALL_EVENTS, allowed=False, hitl_resume=True)
 
     assert 'auto_approve_sensitive_actions' not in kwargs
