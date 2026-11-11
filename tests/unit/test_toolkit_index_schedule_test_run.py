@@ -142,6 +142,8 @@ def index(harness, monkeypatch):
     monkeypatch.setitem(sys.modules, reads.__name__, reads)
     deciders = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')  # a draft Test run is decided by its starter
     deciders.run_decider_id = lambda session, run: run.requested_by
+    # the run detail imports this name from the module, so the stub must carry it
+    deciders.can_approve_all = lambda session, project_id, run, caller_id: False
     monkeypatch.setitem(sys.modules, deciders.__name__, deciders)
     return state
 
