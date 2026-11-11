@@ -870,6 +870,40 @@
       "strict_type": true,
       "default": true
     },
+    "toolkit_index_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Toolkit Index Scheduling Enabled",
+      "description": "When disabled, toolkit index schedules are skipped and their next_run is unchanged. Agent and pipeline schedules still run.",
+      "path": "scheduler.schedules.toolkit_index_scheduling_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": true
+    },
+    "toolkit_index_min_interval_minutes": {
+      "type": "integer",
+      "title": "Toolkit Index Schedules Minimum Interval (minutes)",
+      "description": "Smallest allowed gap in minutes between two runs of one toolkit index schedule. Allowed range: 1–1440.",
+      "path": "scheduler.schedules.toolkit_index_min_interval_minutes",
+      "section": "runtime",
+      "default": 1440,
+      "minimum": 1,
+      "maximum": 1440,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1440
+      }
+    },
+    "legacy_index_step_enabled": {
+      "type": "boolean",
+      "title": "Legacy Index Schedule Migration Enabled",
+      "description": "When enabled, the scheduler tick moves per-index schedules of the toolkit settings to the Schedules page. Off by default: run the admin task migrate_legacy_index_schedules for each project first (dry run, then live), then switch this on. Disable it before restoring legacy index schedules.",
+      "path": "scheduler.schedules.legacy_index_step_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": false
+    },
     "schedules_dispatch_cap": {
       "type": "integer",
       "title": "Schedules Dispatch Cap",

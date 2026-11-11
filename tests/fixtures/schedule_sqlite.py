@@ -65,7 +65,7 @@ def package(name):
 
 
 def install_parent_models(plugin_package):
-    """Stub the plugin's model base and add the Application and ApplicationVersion tables; returns them."""
+    """Stub the plugin's model base and add the Application, ApplicationVersion and EliteATool tables; returns the first three."""
 
     class Base(orm.DeclarativeBase):
         pass
@@ -84,12 +84,24 @@ def install_parent_models(plugin_package):
         name = sa.Column(sa.String, default='base')
         agent_type = sa.Column(sa.String, default='openai')
 
+    class EliteATool(Base):
+        """The parent of entity_schedules.toolkit_id and the source of a Toolkit Index schedule's entity name."""
+        __tablename__ = 'elitea_tools'
+        __table_args__ = ({'schema': 'tenant'},)
+        id = sa.Column(sa.Integer, primary_key=True)
+        name = sa.Column(sa.String)
+        type = sa.Column(sa.String, default='artifact')
+        meta = sa.Column(sa.JSON, default=dict)
+        settings = sa.Column(sa.JSON, default=dict)
+        author_id = sa.Column(sa.Integer, default=0)
+
     models = sys.modules[f'{plugin_package}.models']
     models.db = types.SimpleNamespace(Base=Base)
     models.db_tools = types.SimpleNamespace(AbstractBaseMixin=type('Mixin', (), {}))
     models.config = types.SimpleNamespace(POSTGRES_TENANT_SCHEMA='tenant')
     all_models = types.ModuleType(f'{plugin_package}.models.all')
     all_models.Application, all_models.ApplicationVersion = Application, ApplicationVersion
+    all_models.EliteATool = EliteATool
     sys.modules[all_models.__name__] = all_models
     sys.modules['pylon.core.tools'] = types.SimpleNamespace(
         log=types.SimpleNamespace(debug=print, info=print, warning=print, error=print, exception=print),

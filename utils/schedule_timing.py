@@ -9,6 +9,7 @@ from tools import this
 
 DEFAULT_MIN_INTERVAL_MINUTES = 5
 DEFAULT_MAX_ENABLED_PER_PROJECT = 50
+DEFAULT_TOOLKIT_INDEX_MIN_INTERVAL_MINUTES = 1440
 MAX_MIN_INTERVAL_MINUTES = 1440
 MAX_ENABLED_PER_PROJECT_LIMIT = 1000
 DEFAULT_WEBHOOK_MAX_RUNS = 3
@@ -67,6 +68,15 @@ def webhook_limits() -> WebhookLimits:
                      WEBHOOK_LIMIT_CEILING),
         at_least_one(section, 'webhook_max_waiting_runs', DEFAULT_WEBHOOK_MAX_WAITING, WEBHOOK_LIMIT_CEILING),
     )
+
+
+def min_interval_minutes_for(entity_type: str | None) -> int:
+    """The smallest gap between two runs of this kind of schedule; toolkit indexes have their own floor."""
+    section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
+    if entity_type == 'toolkit_index':
+        return at_least_one(section, 'toolkit_index_min_interval_minutes',
+                            DEFAULT_TOOLKIT_INDEX_MIN_INTERVAL_MINUTES, MAX_MIN_INTERVAL_MINUTES)
+    return schedule_limits().min_interval_minutes
 
 
 def compute_next_run(cron: str, timezone_name: str, after: datetime) -> datetime:

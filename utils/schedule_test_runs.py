@@ -1,14 +1,15 @@
 """Test Runs: a run of the unsaved Save form, stored as one run row that has no schedule.
 
 The row has `schedule_id` NULL, `trigger` `test`, `requested_by` the caller, and the form and the agent or pipeline
-in the unmapped columns `form` and `application_id`. No schedule row is written, so the schedule list, Last Run,
-Next Run, the tick and the export never see a Test Run. Every read of a Test Run goes through `test_run_scope`.
+in the unmapped columns `form` and `application_id`. A Toolkit Index Test Run has no `application_id`: its form names
+the toolkit and the index. No schedule row is written, so the schedule list, Last Run, Next Run, the tick and the
+export never see a Test Run. Every read of a Test Run goes through `test_run_scope`.
 """
 from collections import namedtuple
 from contextlib import contextmanager
 
 from pylon.core.tools import log
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, select
 from sqlalchemy.exc import DBAPIError
 
 from ..models.entity_schedule import ACTIVE_STATUSES, RUN_APPLICATION_ID, RUN_FORM, EntityScheduleRun
@@ -50,14 +51,31 @@ def old_schema_guard():
         raise
 
 
-def test_run_scope(user_id: int, application_id: int | None = None) -> list:
-    """The conditions that pick the Test Runs of one owner, of one agent or pipeline when `application_id` is given."""
+def index_test_run_scope(toolkit_id: int, index_name: str) -> list:
+    """The conditions that pick the Test Runs of one Toolkit Index, of any owner: no application, the form names the pair."""
+    return [
+        RUN_APPLICATION_ID.is_(None),
+        # Cast on both dialects: SQLite returns the number itself, Postgres the text
+        cast(RUN_FORM['toolkit_id'].as_string(), String) == str(toolkit_id),
+        RUN_FORM['index_name'].as_string() == index_name,
+    ]
+
+
+def test_run_scope(user_id: int, application_id: int | None = None, toolkit_id: int | None = None,
+                   index_name: str | None = None) -> list:
+    """The conditions that pick the Test Runs of one owner: of one Toolkit Index when the pair is given, of one agent or
+    pipeline when `application_id` is given. Without either, only the agent and pipeline runs: an index Test Run never
+    shows in a list that did not ask for it."""
     scope = [
         EntityScheduleRun.schedule_id.is_(None), EntityScheduleRun.trigger == 'test',
         EntityScheduleRun.requested_by == user_id,
     ]
-    if application_id is not None:
+    if toolkit_id is not None and index_name is not None:
+        scope.extend(index_test_run_scope(toolkit_id, index_name))
+    elif application_id is not None:
         scope.append(RUN_APPLICATION_ID == application_id)
+    else:
+        scope.append(RUN_APPLICATION_ID.isnot(None))
     return scope
 
 
@@ -83,18 +101,34 @@ def insert_test_run(session, user_id: int, body: ScheduleCreate) -> int | None:
         raise
 
 
-def active_test_run_id(session, user_id: int, application_id: int) -> int | None:
+def active_test_run_id(session, user_id: int, application_id: int | None = None, toolkit_id: int | None = None,
+                       index_name: str | None = None) -> int | None:
     with old_schema_guard():
         return session.scalar(select(EntityScheduleRun.id).where(
-            *test_run_scope(user_id, application_id), EntityScheduleRun.status.in_(ACTIVE_STATUSES)))
+            *test_run_scope(user_id, application_id, toolkit_id, index_name),
+            EntityScheduleRun.status.in_(ACTIVE_STATUSES)))
 
 
-def load_test_run(session, user_id: int, run_id: int, application_id: int | None = None) -> EntityScheduleRun | None:
-    """The Test Run of this owner (of this agent or pipeline, when given); None for another owner, a saved run or
+def active_index_test_run_id(session, toolkit_id: int, index_name: str) -> int | None:
+    """The id of an active Test Run of the index, whoever started it; None when there is none.
+
+    The unique index of the active Test Run keys on `application_id`, which an index Test Run does not have, so this
+    read is the guard.
+    """
+    with old_schema_guard():
+        return session.scalar(select(EntityScheduleRun.id).where(
+            EntityScheduleRun.schedule_id.is_(None), EntityScheduleRun.trigger == 'test',
+            *index_test_run_scope(toolkit_id, index_name), EntityScheduleRun.status.in_(ACTIVE_STATUSES)).limit(1))
+
+
+def load_test_run(session, user_id: int, run_id: int, application_id: int | None = None, toolkit_id: int | None = None,
+                  index_name: str | None = None) -> EntityScheduleRun | None:
+    """The Test Run of this owner (of this agent, pipeline or index, when given); None for another owner, a saved run or
     another entity, so the route answers 404 for each of them alike."""
     with old_schema_guard():
         return session.scalars(select(EntityScheduleRun).where(
-            EntityScheduleRun.id == run_id, *test_run_scope(user_id, application_id))).one_or_none()
+            EntityScheduleRun.id == run_id, *test_run_scope(user_id, application_id, toolkit_id, index_name),
+        )).one_or_none()
 
 
 def form_of_test_run(session, run_id: int) -> dict:
@@ -102,13 +136,15 @@ def form_of_test_run(session, run_id: int) -> dict:
     return session.scalar(select(RUN_FORM).where(EntityScheduleRun.id == run_id)) or {}
 
 
-def trim_test_runs(session, user_id: int, application_id: int) -> list[TrimmedChat]:
-    """Delete the Test Runs of the owner and the agent beyond the newest `KEEP_TEST_RUNS`, and the chats of those runs.
+def trim_test_runs(session, user_id: int, application_id: int | None = None, toolkit_id: int | None = None,
+                   index_name: str | None = None) -> list[TrimmedChat]:
+    """Delete the Test Runs of the owner and the agent, pipeline or index beyond the newest `KEEP_TEST_RUNS`, and the
+    chats of those runs (an index Test Run has none).
 
     An active run stays. The chats go in the same transaction. The caller passes the returned chats to
     `remove_trimmed_chats` after the commit: a bucket or a checkpoint cannot be rolled back.
     """
-    scope = test_run_scope(user_id, application_id)
+    scope = test_run_scope(user_id, application_id, toolkit_id, index_name)
     old = (select(EntityScheduleRun.id).where(*scope)
            .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc()).offset(KEEP_TEST_RUNS))
     doomed = session.execute(select(EntityScheduleRun.id, EntityScheduleRun.conversation_id).where(

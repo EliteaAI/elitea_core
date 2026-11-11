@@ -14,7 +14,7 @@ from ..models.pd.entity_schedule import (
     WebhookSecretAction,
 )
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
-from ..models.pd.schedule_list import MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
+from ..models.pd.schedule_list import INDEX_NAME_MAX, MAX_DB_ID, EntityType, RunStatus, RunTrigger, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
@@ -46,10 +46,12 @@ LIST_QUERY_PARAMS = [
     {"name": "owner_ids", "in": "query", "schema": {"type": "array", "items": {"type": "integer"}},
      "description": "Only schedules of these owners, repeated or comma-separated; schedules admin only"},
     {"name": "entity_id", "in": "query", "schema": {"type": "integer"},
-     "description": "Only schedules of this agent or pipeline"},
+     "description": "Only schedules of this agent or pipeline; with `entity_type=toolkit_index`, of this toolkit"},
+    {"name": "index_name", "in": "query", "schema": {"type": "string", "maxLength": INDEX_NAME_MAX},
+     "description": "Only the schedule of this index name (Toolkit Index schedules)"},
     {"name": "version_id", "in": "query", "schema": {"type": "integer"},
      "description": "Only schedules that run this version"},
-    {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule or entity name"},
+    {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule, entity, toolkit or index name"},
     {"name": "trigger_kind", "in": "query", "schema": {"type": "string", "enum": ["cron", "webhook"], "default": "cron"},
      "description": "Row kind; the default lists schedules only"},
     {"name": "webhook_type", "in": "query", "schema": {"type": "string", "enum": ["github", "gitlab", "custom"]},
@@ -178,7 +180,8 @@ CHECK_EXAMPLE = {
 SAVE_CONFLICTS = (
     ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed` (the body has the findings and "
      "the `fingerprint`), `connections_not_ready` for a webhook whose toolkit cannot run unattended (the body "
-     "has the `rows` of the Connections check), or the project limit of active schedules"), {
+     "has the `rows` of the Connections check), `index_scheduled` (this toolkit index already has a schedule), "
+     "or the project limit of active schedules"), {
         "code": "risk_confirmation_required",
         "error": "Review the sensitive tools, then save again with `risk_ack` and this fingerprint",
         "blocking": [], "sensitive": [SENSITIVE_FINDING], "notices": [], "fingerprint": FINGERPRINT,
@@ -300,7 +303,9 @@ OPERATIONS = {
         "name": "Create a schedule",
         "summary": "Create a schedule",
         "description": _text(
-            "Create a schedule for an agent or a pipeline version. The caller becomes the owner; "
+            "Create a schedule for an agent or a pipeline version, or for a toolkit index (`entity_type=toolkit_index` "
+            "with `toolkit_id` and `index_name`; it has no version, prompt or risk review, and runs the saved index "
+            "settings; its cron has a longer minimum interval). The caller becomes the owner; "
             "the body never sets the owner. The answer has the findings of the risk review as `warnings`. "
             + RISK_REVIEW_TEXT,
             "a project member with `schedules.create`",
@@ -437,13 +442,16 @@ OPERATIONS = {
             "delivery path. The run acts as the caller. An admin's run always pauses before a sensitive action, and "
             "the owner of the schedule approves or rejects that pause.",
             "the owner or a holder of `schedules.admin`, with `schedules.run`",
-            "400 an invalid trigger or payload; 403 no permission; 404 not found, or a schedule outside the caller's scope; "
-            "409 the version is deleted or a run is active (`active_run_id`); 500 the run could not start"),
+            "400 an invalid trigger or payload; 403 no permission; 404 not found, or a schedule outside the caller's "
+            "scope; 409 the version is deleted, or a run is active (`run_active`); `active_run_id` is the id of the "
+            "active run, or null when that run belongs to another user or is an index run that has no run row; "
+            "500 the run could not start"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleRunRequest,
         "responses": _responses(202, "The run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: "No permission", 404: None,
-            409: ("The version is deleted, or a run is active", {
+            409: ("The version is deleted, or a run is active. `active_run_id` is null when the active run "
+                  "belongs to another user or is an index run", {
                 "error": "A run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start"}),
     },
@@ -459,14 +467,16 @@ OPERATIONS = {
             "run and its chat are deleted.",
             "a project member with `schedules.run`",
             "400 an invalid field (the Save rules) or `approval_rule_not_allowed`; 403 no permission; "
-            "404 the agent or pipeline is not visible; 409 `run_active` (`active_run_id`); "
+            "404 the agent or pipeline is not visible; 409 `run_active`: `active_run_id` is the id of the "
+            "active run, or null when that run belongs to another user or is an index run that has no run row; "
             "500 `run_start_failed`; 503 `test_run_unavailable` (the admin task `migrate_schedule_test_runs` "
             "did not run)"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleCreate,
         "responses": _responses(202, "The test run started", {"run_id": 77, "application_id": 12}, {
             400: None, 403: None, 404: None,
-            409: ("A test run of this agent or pipeline is active", {
+            409: ("A test run of this agent or pipeline is active. `active_run_id` is null when the active run "
+                  "belongs to another user or is an index run", {
                 "error": "A test run of this schedule is active", "active_run_id": 76}),
             500: "The run could not start", 503: TEST_RUN_UNAVAILABLE_TEXT}),
     },

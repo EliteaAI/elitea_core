@@ -131,6 +131,7 @@ def world(monkeypatch):
             "_check_project_pipelines": world.check_project, "_check_pipeline_scheduling_lock": world.legacy_lock,
         },
         "utils.legacy_schedule_migration": {"migrate_project": world.migrate},
+        "utils.constants": {"LEGACY_INDEX_STEP_DEFAULT": False},
     }
     for dotted, names in stubs.items():
         name = "plugins.elitea_core." + dotted

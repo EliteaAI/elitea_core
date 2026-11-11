@@ -388,6 +388,18 @@ def tables(ns, env, monkeypatch):
         id = sa.Column(sa.Integer, primary_key=True)
         meta = sa.Column(ns.postgresql.JSONB, nullable=False)
 
+    class EntitySchedule(base):   # the columns the index query reads; no row, so only the legacy schedules are listed
+        __tablename__ = "entity_schedules"
+        id = sa.Column(sa.Integer, primary_key=True)
+        entity_type = sa.Column(sa.String, nullable=False)
+        toolkit_id = sa.Column(sa.Integer, nullable=True)
+        index_name = sa.Column(sa.String, nullable=True)
+        enabled = sa.Column(sa.Boolean, nullable=False, default=True)
+        created_by = sa.Column(sa.Integer, nullable=False)
+
+    schedule_models = types.ModuleType(f"{mandate_env.admission_env.PKG}.models.entity_schedule")
+    schedule_models.EntitySchedule = EntitySchedule
+    monkeypatch.setitem(sys.modules, schedule_models.__name__, schedule_models)
     models_all = sys.modules[f"{mandate_env.admission_env.PKG}.models.all"]
     monkeypatch.setattr(models_all, "Application", Application, raising=False)
     monkeypatch.setattr(models_all, "ApplicationVersion", ApplicationVersion)

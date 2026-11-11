@@ -78,15 +78,20 @@ def endpoint():
                            ('.models.pd', PLUGIN_ROOT / 'models' / 'pd')):
         _module(PKG + pkg_name).__path__ = [str(path)] if path else []
 
-    def build(template, current, roster, timezone, locked_entity=None):
-        state.seen.update(current=current, roster=roster, timezone=timezone, locked=locked_entity)
+    def build(template, current, roster, timezone, locked_entity=None, index_roster=None):
+        state.seen.update(current=current, roster=roster, timezone=timezone, locked=locked_entity,
+                          build_index_roster=index_roster)
         return f'{template} current={json.dumps(current)}'
 
     def roster_of(project_id, user_id):
         state.seen['roster_user'] = user_id
         return ROSTER
 
-    def validate(project_id, raw, locked_entity, roster=None, *, owner_id):
+    def index_roster_of(project_id, user_id, template, locked_entity):
+        state.seen['index_roster_args'] = (project_id, user_id, template, locked_entity)
+        return None
+
+    def validate(project_id, raw, locked_entity, roster=None, *, owner_id, index_roster=None):
         if state.validate_error:
             raise state.validate_error
         state.seen.update(raw=raw, validate_roster=roster, owner_id=owner_id)
@@ -133,7 +138,7 @@ def endpoint():
             schedule_check_spec=lambda action: {'permissions': [f'models.applications.schedules.{action}']})
     schedule_models = _load_real('models.pd.generate_schedule_draft', 'models/pd/generate_schedule_draft.py')
     _module(f'{PKG}.utils.schedule_draft_utils', schedule_roster=roster_of,
-            build_schedule_draft_prompt=build, validate_schedule_draft=validate)
+            index_roster_for=index_roster_of, build_schedule_draft_prompt=build, validate_schedule_draft=validate)
     _load_real('utils.error_text', 'utils/error_text.py')  # draft_llm_utils imports it
     _load_real('utils.draft_llm_utils', 'utils/draft_llm_utils.py')
     state.module = _load_real('utils.schedule_draft_handler', 'utils/schedule_draft_handler.py')

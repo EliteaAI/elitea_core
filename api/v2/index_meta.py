@@ -1,21 +1,14 @@
 import json
-from datetime import datetime, UTC
 
 from flask import request
-from pydantic import ValidationError
 from pylon.core.tools import log
-from sqlalchemy import cast, inspect, Numeric, nullslast, text
+from sqlalchemy import cast, inspect, Numeric, nullslast, select, text
 from sqlalchemy.exc import NoResultFound, OperationalError, ProgrammingError
-from sqlalchemy.orm.attributes import flag_modified
 
 from tools import api_tools, auth, config as c, serialize, db, VaultClient
 from ...models.elitea_tools import EliteATool
+from ...models.entity_schedule import EntitySchedule
 from ...models.indexer import EmbeddingStore, IndexRun
-from ...models.pd.index import (
-    UpdateIndexingSchedule,
-    ToolkitIndexingSchedule,
-    compute_schedule_expiration,
-)
 from ...utils.application_tools import (
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
@@ -30,9 +23,67 @@ from ...utils.application_tools import (
     _get_pgvector_engine,
     _is_undefined_table_error,
 )
-from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
+from ...utils.index_schedule_compat import save_index_schedule
 from ...utils.predict_utils import get_toolkit_config
 from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
+
+
+def _scheduled_index_names(project_id: int, toolkit_id: int) -> set:
+    """Names of the indexes of the toolkit that a schedule row or the old settings key already schedules.
+
+    A project whose schema has no schedule columns yet answers from the settings key alone.
+    """
+    with db.get_session(project_id) as session:
+        meta = session.scalar(select(EliteATool.meta).where(EliteATool.id == toolkit_id)) or {}
+        names = {
+            name for name, entry in (meta.get("indexes_meta") or {}).items()
+            if isinstance(entry, dict) and entry.get("schedules")
+        }
+        try:
+            names.update(session.scalars(
+                select(EntitySchedule.index_name).where(EntitySchedule.toolkit_id == toolkit_id)
+            ).all())
+        except Exception as error:  # noqa: BLE001 -- a schema older than the schedule columns
+            session.rollback()
+            log.warning("Scheduled indexes of toolkit %s read from the settings only: %s", toolkit_id, type(error).__name__)
+    return names
+
+
+def _has_saved_settings(configuration) -> bool:
+    """True when the index row holds settings a run can send; the column may hold JSON text or a decoded object."""
+    if isinstance(configuration, str):
+        try:
+            configuration = json.loads(configuration)
+        except (TypeError, json.JSONDecodeError):
+            return False
+    return bool(configuration) and isinstance(configuration, dict)
+
+
+def _index_summary(project_id: int, toolkit_id: int, connection_string: str, schema: str):
+    """The picker list: per index only its name, state, update time, and whether it is scheduled or schedulable.
+
+    Reads three small keys of the row; the full list also carries history and report, which a picker never shows.
+    """
+    scheduled = _scheduled_index_names(project_id, toolkit_id)
+    with get_session_for_schema(connection_string, schema) as session:
+        rows = session.query(
+            EmbeddingStore.cmetadata['collection'].astext,
+            EmbeddingStore.cmetadata['state'].astext,
+            EmbeddingStore.cmetadata['updated_on'],
+            EmbeddingStore.cmetadata['index_configuration'],
+        ).filter(
+            EmbeddingStore.cmetadata['type'].astext == 'index_meta'
+        ).order_by(
+            nullslast(cast(EmbeddingStore.cmetadata['updated_on'].astext, Numeric).desc())
+        ).all()
+    return [
+        {
+            "name": name, "state": state, "updated_on": updated_on,
+            "scheduled": name in scheduled, "schedulable": _has_saved_settings(configuration),
+        }
+        for name, state, updated_on, configuration in rows
+    ]
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -56,6 +107,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not table_exists:
             log.warning(f"Table {toolkit_name_id}.langchain_pg_embedding does not exist. Probably no data has been indexed yet.")
             return [], 200
+        #
+        if request.args.get("summary", "false").lower() == "true":
+            try:
+                return serialize(_index_summary(project_id, toolkit_id, connection_string, toolkit_name_id)), 200
+            except Exception as e:
+                log.error(f"Error occurred while fetching the index summary: {e}")
+                return {"ok": False, "error": "Error occurred while fetching index_meta"}, 400
         #
         try:
             with get_session_for_schema(connection_string, toolkit_name_id) as session:
@@ -207,70 +265,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def patch(self, project_id: int, toolkit_id: int, index_meta_id: str):
-        payload = dict(request.json)
-
-        try:
-            update_data = UpdateIndexingSchedule.parse_obj(payload)
-        except ValidationError as e:
-            log.error(f"Validation error on index schedule update: {e.errors()}")
-            return {"ok": False, "error": f"Validation error on index schedule update: {e.errors()}"}, 400
-
-        try:
-            with db.get_session(project_id) as session:
-                toolkit = session.query(EliteATool).filter(
-                    EliteATool.id == toolkit_id
-                ).first()
-                if not toolkit:
-                    return {"ok": False, "error": "Toolkit not found"}, 404
-
-                private_configuration = toolkit.settings['pgvector_configuration']['private']
-
-                if update_data.user_id == -1 and private_configuration:
-                    update_data.user_id = auth.current_user().get("id")
-
-                meta = toolkit.meta or {}
-                indexes_meta = meta.get("indexes_meta", {})
-
-                # Structure: indexes_meta[index_meta_id]["schedules"][user_id] = {cron, enabled}
-                index_entry = indexes_meta.get(index_meta_id, {})
-                if "schedules" not in index_entry:
-                    index_entry["schedules"] = {}
-
-                current_user_id = auth.current_user().get("id")
-
-                saved_at = datetime.now(UTC)
-
-                # Build and validate toolkit schedule model separately so field errors (e.g. cron) surface as 400
-                schedule_model = ToolkitIndexingSchedule(
-                    cron=update_data.cron,
-                    enabled=update_data.enabled,
-                    credentials=update_data.credentials,
-                    created_by=current_user_id,
-                    timezone=update_data.timezone,
-                    last_run=saved_at,
-                    # Every save is a renewal, so the deadline is recomputed here rather than
-                    # carried over, and the fresh model starts with no warnings sent. That is
-                    # the whole of "rescheduling resets the timer" — including the enable
-                    # toggle, which is the one click that revives an expired schedule.
-                    # Deliberately not read from the payload: the client round-trips the
-                    # stored schedule back on every edit, so an accepted expires_at would let
-                    # a caller grant itself an unlimited window.
-                    expires_at=compute_schedule_expiration(update_data.cron, saved_at),
-                )
-
-                # Update or add user-specific scheduling using validated data
-                index_entry["schedules"][update_data.user_id] = schedule_model.dict()
-                indexes_meta[index_meta_id] = index_entry
-                toolkit.meta["indexes_meta"] = indexes_meta
-
-                flag_modified(toolkit, "meta")
-                session.commit()
-
-                return serialize(indexes_meta), 200
-        except Exception as e:
-            session.rollback()
-            log.error(f"Error occurred while updating index_meta {index_meta_id}: {e}")
-            return {"ok": False, "error": "Error occurred while updating index_meta"}, 400
+        # Index schedules are rows of the Schedules module; the old route writes that row, for one more release
+        body, status = save_index_schedule(project_id, toolkit_id, index_meta_id, request.get_json(silent=True) or {})
+        return body, status, DEPRECATION_HEADERS
 
 
 class API(api_tools.APIBase):

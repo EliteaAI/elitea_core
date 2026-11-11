@@ -8,7 +8,7 @@ from pydantic import ValidationError
 MODULE = pathlib.Path(__file__).resolve().parents[2] / 'models' / 'pd' / 'generate_schedule_draft.py'
 
 DRAFT_FIELDS = {
-    'name', 'description', 'entity_type', 'application_id', 'version_id', 'run_mode',
+    'name', 'description', 'entity_type', 'application_id', 'toolkit_id', 'index_name', 'version_id', 'run_mode',
     'prompt', 'variables', 'cron', 'timezone', 'expires_at', 'approval_rule',
 }
 

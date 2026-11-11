@@ -2,11 +2,12 @@ from flask import request
 from sqlalchemy.orm.attributes import flag_modified
 from pylon.core.tools import log
 
-from tools import api_tools, auth, config as c, serialize, db
+from tools import api_tools, auth, config as c, db
 
 from ...models.elitea_tools import EliteATool
-from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
 from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
+from ...utils.schedule_access import schedule_scope
 
 _ADMIN_ROLES = {
     c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -24,14 +25,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def delete(self, project_id: int, toolkit_id: int, index_name: str):
         current_user_id = str(auth.current_user().get("id"))
 
-        # Optional: admins/editors may pass ?user_id= to delete another user's
-        # schedule (including shared/team schedules stored under key "-1").
-        target_user_id = request.args.get("user_id", current_user_id)
-        target_user_id = str(target_user_id)
-
-        # Only the owner can delete their own schedule unless the caller has
-        # admin/editor rights (already enforced by check_api above, so any
-        # authenticated editor can delete any entry when they pass user_id).
+        # Another user's key, or the shared key "-1", is removed only by a holder of the schedule admin right.
+        target_user_id = str(request.args.get("user_id", current_user_id))
 
         try:
             with db.get_session(project_id) as session:
@@ -49,7 +44,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     return {"ok": False, "error": f"No schedule found for index '{index_name}'"}, 404
 
                 schedules = index_entry.get("schedules", {})
-                if target_user_id not in schedules:
+                if target_user_id not in schedules or (
+                        target_user_id != current_user_id and not schedule_scope(project_id).is_admin):
                     return {"ok": False, "error": f"No schedule found for user '{target_user_id}'"}, 404
 
                 del schedules[target_user_id]
@@ -60,7 +56,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 flag_modified(toolkit, "meta")
                 session.commit()
 
-                return serialize(indexes_meta), 200
+                return {"ok": True}, 200, DEPRECATION_HEADERS
         except Exception as e:
             log.error(f"Error deleting schedule for index '{index_name}' in toolkit {toolkit_id}: {e}")
             return {"ok": False, "error": "Error occurred while deleting index schedule"}, 400

@@ -2,17 +2,18 @@
 
 The import updates the schedule an item matches, by key or else by natural key, through the update path of the
 schedule service; an unmatched item is created disabled, through the create path."""
+from collections.abc import Callable
 from datetime import UTC
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from tools import db
 from yaml import AliasEvent, YAMLError, parse
 
-from ..models.all import Application, ApplicationVersion
+from ..models.all import Application, ApplicationVersion, EliteATool
 from ..models.entity_schedule import EntitySchedule
 from .pipeline_utils import from_str_to_yaml, validate_yaml_from_str
 from .schedule_service import ScheduleError
@@ -31,9 +32,18 @@ OTHER_ENTITY = 'The key belongs to a schedule of another agent or pipeline'
 WEBHOOK_KEY = 'The key belongs to a webhook; webhooks are not imported'
 UNCONFIRMED_NOTE = ('Sensitive tools need a confirmation in the schedule form, or some tools could not be '
                     'checked; saved as Pause and ask me')
+OTHER_INDEX_ENTITY = 'The key belongs to a schedule of another index, agent or pipeline'
 UPDATE_FIELDS = (
     'description', 'run_mode', 'prompt', 'variables', 'cron', 'timezone', 'expires_at', 'approval_rule',
 )  # never enabled or name: an update keeps them (R5.1)
+# A Toolkit Index has no version, run input or tool approval; the file names it by toolkit name and index name
+TOOLKIT_INDEX = 'toolkit_index'  # the value of schedule_service.TOOLKIT_INDEX; the export test loads this file without it
+INDEX_UPDATE_FIELDS = ('description', 'cron', 'timezone', 'expires_at')
+
+
+def _stop_day(row: EntitySchedule):
+    """Stored as the end of the local stop day in UTC; the local date makes the import keep the day."""
+    return row.expires_at and row.expires_at.astimezone(ZoneInfo(row.timezone)).date()
 
 
 def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> dict:
@@ -51,19 +61,34 @@ def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> di
         'timezone': row.timezone,
         'prompt': None if is_entry_point else row.prompt,
         'variables': [] if is_entry_point else [{'name': v['name'], 'value': v['value']} for v in row.variables],
-        # Stored as the end of the local stop day in UTC; the local date makes the import keep the day
-        'expires_at': row.expires_at and row.expires_at.astimezone(ZoneInfo(row.timezone)).date(),
+        'expires_at': _stop_day(row),
         'approval_rule': row.approval_rule,
+    }
+
+
+def _index_item(row: EntitySchedule, toolkit_name: str) -> dict:
+    """One Toolkit Index item: the toolkit and the index by name, no ids, and none of the run fields."""
+    return {
+        'key': str(row.uuid),
+        'name': row.name,
+        'description': row.description,
+        'entity_type': row.entity_type,
+        'entity_name': toolkit_name,
+        'index_name': row.index_name,
+        'cron': row.cron,
+        'timezone': row.timezone,
+        'expires_at': _stop_day(row),
     }
 
 
 def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
     """The YAML file text of every schedule of the project, or of `ids`; unknown ids raise a 400."""
     query = (
-        select(EntitySchedule, Application.name, ApplicationVersion.name)
-        .join(Application, Application.id == EntitySchedule.application_id)
+        select(EntitySchedule, func.coalesce(Application.name, EliteATool.name), ApplicationVersion.name)
+        .outerjoin(Application, Application.id == EntitySchedule.application_id)
+        .outerjoin(EliteATool, EliteATool.id == EntitySchedule.toolkit_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == EntitySchedule.version_id)
-        .where(EntitySchedule.trigger_kind == 'cron')
+        .where(EntitySchedule.trigger_kind == 'cron', or_(Application.id.isnot(None), EliteATool.id.isnot(None)))
         .order_by(EntitySchedule.id)
     )
     if ids is not None:
@@ -78,7 +103,10 @@ def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
     return from_str_to_yaml({
         'kind': FILE_KIND,
         'schema_version': SCHEMA_VERSION,
-        'schedules': [_item(*columns) for columns in found],
+        'schedules': [
+            _index_item(row, entity_name) if row.entity_type == TOOLKIT_INDEX else _item(row, entity_name, version_name)
+            for row, entity_name, version_name in found
+        ],
     })
 
 
@@ -162,8 +190,28 @@ def _resolve(index: dict, item) -> tuple[int, int]:
     return matches[0]
 
 
-def _schedule_index(session, file) -> tuple[dict, dict]:
-    """Map the uuid, and the (application_id, version_id, name), to the stored schedules the file can match; one query."""
+def _toolkit_index(session, names: set) -> dict:
+    """Map a toolkit name to the toolkits of the project that bear it; one query."""
+    toolkits = {}
+    if names:
+        for toolkit in session.scalars(select(EliteATool).where(EliteATool.name.in_(names))):
+            toolkits.setdefault(toolkit.name, []).append(toolkit)
+    return toolkits
+
+
+def _resolve_toolkit(toolkits: dict, item):
+    """Return the one toolkit the Toolkit Index item names, or raise _Skipped."""
+    found = toolkits.get(item.entity_name, [])
+    if not found:
+        raise _Skipped(f"Toolkit '{item.entity_name}' not found in this project")
+    if len(found) > 1:
+        raise _Skipped(f"Toolkit '{item.entity_name}' found more than once")
+    return found[0]
+
+
+def _schedule_index(session, file, toolkit_ids: set) -> tuple[dict, dict, dict]:
+    """Map the uuid, the (application_id, version_id, name) and the (toolkit_id, index_name) to the stored
+    schedules the file can match; one query."""
     keys, names = set(), set()
     for raw in file.schedules:
         try:
@@ -172,43 +220,65 @@ def _schedule_index(session, file) -> tuple[dict, dict]:
             pass  # no key or a bad one; the item model reports a bad key
         if isinstance(raw.get('name'), str):
             names.add(raw['name'])
-    by_key, by_name = {}, {}
-    for row in session.scalars(
-            select(EntitySchedule).where(or_(EntitySchedule.uuid.in_(keys), EntitySchedule.name.in_(names)))
-    ):
+    by_key, by_name, by_index = {}, {}, {}
+    for row in session.scalars(select(EntitySchedule).where(or_(
+            EntitySchedule.uuid.in_(keys), EntitySchedule.name.in_(names), EntitySchedule.toolkit_id.in_(toolkit_ids),
+    ))):
         by_key[row.uuid] = row
         if row.trigger_kind != 'cron':
             continue
+        if row.entity_type == TOOLKIT_INDEX:
+            by_index[(row.toolkit_id, row.index_name)] = row
+            continue
         by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)
-    return by_key, by_name
+    return by_key, by_name, by_index
+
+
+def _row_by_key(by_key: dict, seen_keys: set, key: UUID, belongs: Callable, other_text: str):
+    """Return the stored schedule of the item key, or None; refuse a repeated key, a webhook and a foreign target."""
+    if key in seen_keys:
+        raise ScheduleError('repeated_key', REPEATED_KEY)
+    seen_keys.add(key)
+    row = by_key.get(key)
+    if row is not None and row.trigger_kind != 'cron':
+        raise ScheduleError('webhook_key', WEBHOOK_KEY)
+    if row is not None and not belongs(row):
+        raise ScheduleError('other_entity', other_text)
+    return row
 
 
 def _match(by_key: dict, by_name: dict, seen_keys: set, item, application_id: int, version_id: int):
     """Return the stored schedule the item updates, or None; raise _Skipped or ScheduleError when it cannot."""
     if item.key is not None:
-        if item.key in seen_keys:
-            raise ScheduleError('repeated_key', REPEATED_KEY)
-        seen_keys.add(item.key)
-        row = by_key.get(item.key)
-        if row is not None and row.trigger_kind != 'cron':
-            raise ScheduleError('webhook_key', WEBHOOK_KEY)
-        if row is not None and (row.application_id, row.entity_type) != (application_id, item.entity_type):
-            raise ScheduleError('other_entity', OTHER_ENTITY)
-        return row
+        return _row_by_key(
+            by_key, seen_keys, item.key,
+            lambda row: (row.application_id, row.entity_type) == (application_id, item.entity_type), OTHER_ENTITY,
+        )
     rows = by_name.get((application_id, version_id, item.name), [])
     if len(rows) > 1:
         raise _Skipped(f"Schedule '{item.name}' found more than once")
     return rows[0] if rows else None
 
 
-def _unchanged(row: EntitySchedule, values: dict, version_id: int) -> bool:
+def _match_index(by_key: dict, by_index: dict, seen_keys: set, item, toolkit_id: int):
+    """Return the stored schedule of the item key, else of its index (one row per index), or None."""
+    if item.key is not None:
+        return _row_by_key(
+            by_key, seen_keys, item.key,
+            lambda row: (row.entity_type, row.toolkit_id, row.index_name) == (TOOLKIT_INDEX, toolkit_id, item.index_name),
+            OTHER_INDEX_ENTITY,
+        )
+    return by_index.get((toolkit_id, item.index_name))
+
+
+def _unchanged(row: EntitySchedule, values: dict, version_id: int | None, fields: tuple = UPDATE_FIELDS) -> bool:
     """True when the update would store what the row holds: the stop date as the service stores it."""
     expires_at = values['expires_at'] and end_of_day(values['expires_at'], values['timezone'])
     stored = row.expires_at
     if stored is not None and stored.tzinfo is None:  # a driver without time zones returns naive UTC
         stored = stored.replace(tzinfo=UTC)
     return row.version_id == version_id and stored == expires_at and all(
-        getattr(row, field) == values[field] for field in UPDATE_FIELDS if field != 'expires_at'
+        getattr(row, field) == values[field] for field in fields if field != 'expires_at'
     )
 
 
@@ -248,9 +318,9 @@ def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, i
     # late: the export loads without these modules
     from ..models.pd.entity_schedule import ScheduleCreate, ScheduleUpdate
     from .schedule_service import create_schedule, update_schedule
-    by_key, by_name, _ = indexes
+    by_key, by_name, seen_keys, _ = indexes
     application_id, version_id = ids
-    row = _match(*indexes, item, *ids)
+    row = _match(by_key, by_name, seen_keys, item, *ids)
     note = _review_item(project_id, scope.user_id if row is None else row.created_by, version_id, values, reviews)
     if row is not None and _unchanged(row, values, version_id):
         return 'updated', row, note  # no write, so no admin-edit notice and no new updated_by or next_run (R5.5)
@@ -267,6 +337,40 @@ def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, i
     by_key[row.uuid] = row  # a later item of the file then updates this row
     by_name.setdefault((application_id, version_id, row.name), []).append(row)
     return 'created', row, note
+
+
+def _save_index(session, project_id: int, scope, indexes: tuple, item, values: dict, toolkit):
+    """Update the Toolkit Index schedule the item matches, else create a disabled one; return (group, row).
+
+    No risk review: an index runs saved settings, not tools. A new row needs the index in the toolkit's own store
+    (a skip with the reason); the service then checks the toolkit folder rights and the one-schedule-per-index rule.
+    """
+    # late: the export loads without these modules
+    from ..models.pd.entity_schedule import ScheduleCreate, ScheduleUpdate
+    from .schedule_access import schedule_scope
+    from .schedule_service import (
+        INDEX_UNAVAILABLE, check_index_rights, create_schedule, read_index_configuration, update_schedule,
+    )
+    by_key, _, seen_keys, by_index = indexes
+    row = _match_index(by_key, by_index, seen_keys, item, toolkit.id)
+    if row is not None and _unchanged(row, values, None, INDEX_UPDATE_FIELDS):
+        return 'updated', row  # no write, so no admin-edit notice and no new updated_by or next_run
+    if row is not None:
+        update_schedule(session, project_id, row, ScheduleUpdate(**{f: values[f] for f in INDEX_UPDATE_FIELDS}), scope)
+        return 'updated', row
+    caller = schedule_scope(project_id)  # the importing admin as the request knows them, with the permissions
+    check_index_rights(project_id, toolkit.id, caller)  # before the store is read: a refusal costs no outside call
+    try:
+        configuration = read_index_configuration(session, project_id, toolkit, item.index_name, caller.user_id)
+    except Exception as e:  # noqa: BLE001 -- an unreachable store is a retry for the caller, not a verdict
+        raise ScheduleError('index_unavailable', INDEX_UNAVAILABLE, 503) from e
+    if configuration is None:
+        raise _Skipped(f"Index '{item.index_name}' not found in toolkit '{toolkit.name}'")
+    body = ScheduleCreate(**values, toolkit_id=toolkit.id, enabled=False)
+    row = create_schedule(session, project_id, body, scope, key=item.key)
+    by_key[row.uuid] = row  # a later item of the file then updates this row
+    by_index[(toolkit.id, row.index_name)] = row
+    return 'created', row
 
 
 def import_schedules(project_id: int, admin_id: int, file) -> dict:
@@ -292,20 +396,32 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
     may_run_without_asking = is_run_without_asking_allowed(project_id)
     report = {'created': [], 'updated': [], 'skipped': [], 'failed': []}
     reviews = {}
-    names = {raw['entity_name'] for raw in file.schedules if isinstance(raw.get('entity_name'), str)}
+    names = {raw['entity_name'] for raw in file.schedules
+             if isinstance(raw.get('entity_name'), str) and raw.get('entity_type') != TOOLKIT_INDEX}
+    toolkit_names = {raw['entity_name'] for raw in file.schedules
+                     if isinstance(raw.get('entity_name'), str) and raw.get('entity_type') == TOOLKIT_INDEX}
     with db.get_session(project_id) as session:
         index = _entity_index(session, names)
-        indexes = (*_schedule_index(session, file), set())  # by uuid, by natural key, keys seen in the file
+        toolkits = _toolkit_index(session, toolkit_names)
+        by_key, by_name, by_index = _schedule_index(
+            session, file, {toolkit.id for found in toolkits.values() for toolkit in found})
+        indexes = (by_key, by_name, set(), by_index)  # by uuid, by natural key, keys seen in the file, by index
         for raw in file.schedules:
             entry = {'name': raw.get('name')}
             try:
                 item = ScheduleFileItem.model_validate(raw)
-                ids = _resolve(index, item)
-                values = item.model_dump(exclude={'key', 'entity_name', 'version_name'})
-                if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
-                    values['approval_rule'] = 'pause_and_ask'
-                    entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
-                group, row, note = _save(session, project_id, scope, indexes, item, values, ids, reviews)
+                if item.entity_type == TOOLKIT_INDEX:
+                    values = item.model_dump(include={'name', 'entity_type', 'index_name', *INDEX_UPDATE_FIELDS})
+                    group, row = _save_index(session, project_id, scope, indexes, item, values,
+                                             _resolve_toolkit(toolkits, item))
+                    note = None
+                else:
+                    ids = _resolve(index, item)
+                    values = item.model_dump(exclude={'key', 'entity_name', 'version_name', 'index_name'})
+                    if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
+                        values['approval_rule'] = 'pause_and_ask'
+                        entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
+                    group, row, note = _save(session, project_id, scope, indexes, item, values, ids, reviews)
                 if note:
                     entry['note'] = note
                 entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name

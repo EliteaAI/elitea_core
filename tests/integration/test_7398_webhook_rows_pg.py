@@ -82,7 +82,7 @@ def world(monkeypatch, request):
     class Base(orm.DeclarativeBase):
         pass
 
-    for parent in ("applications", "application_versions"):
+    for parent in ("applications", "application_versions", "elitea_tools"):
         sa.Table(parent, Base.metadata, sa.Column("id", sa.Integer, primary_key=True), schema="tenant")
 
     @contextlib.contextmanager

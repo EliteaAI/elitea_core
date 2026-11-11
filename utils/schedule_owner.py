@@ -11,15 +11,17 @@ CANNOT_USE_SCHEDULES = 'the new owner cannot use schedules'
 
 
 def validate_new_owner(project_id: int, owner_id: int, entity_type: str | None = None,
-                       application_id: int | None = None) -> str | None:
+                       entity_id: int | None = None) -> str | None:
     """None when the new owner is an active member who may list and run schedules and open the entity.
+
+    `entity_id` is the application id, or the toolkit id for a Toolkit Index schedule.
 
     ACCESS_CHECK_UNAVAILABLE means the auth check itself failed: the caller answers 503, never 400.
     """
     access = check_owner_access(project_id, owner_id)
     if access is not None:
         return NOT_ACTIVE_MEMBER if access == OWNER_LOST_ACCESS else ACCESS_CHECK_UNAVAILABLE
-    rights = check_owner_rights(project_id, owner_id, entity_type, application_id, verbs=('list', 'run'))
+    rights = check_owner_rights(project_id, owner_id, entity_type, entity_id, verbs=('list', 'run'))
     if rights is None:
         return None
     return CANNOT_USE_SCHEDULES if rights == OWNER_LOST_ACCESS else ACCESS_CHECK_UNAVAILABLE

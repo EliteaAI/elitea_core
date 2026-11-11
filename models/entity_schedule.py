@@ -1,4 +1,5 @@
-"""Schedule tables (EL-7011); webhook rows (#7398) ship via the `ensure_webhook_trigger_columns` admin task."""
+"""Schedule tables; webhook rows ship via the `ensure_webhook_trigger_columns` admin task, toolkit index rows via
+`ensure_toolkit_index_schedule_columns`."""
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -31,13 +32,24 @@ ONE_ACTIVE_RUN = f"{ACTIVE_RUN_STATUSES} AND trigger <> 'webhook'"
 
 
 class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
-    """One trigger of an agent or pipeline version, owned by `created_by`: a cron schedule or a webhook.
+    """One trigger of an agent or pipeline version, or one cron schedule of a toolkit index, owned by `created_by`.
 
-    Webhook rows (`trigger_kind='webhook'`) have no `cron`, `timezone` or `next_run`.
+    Webhook rows (`trigger_kind='webhook'`) have no `cron`, `timezone` or `next_run`. A toolkit index row
+    (`entity_type='toolkit_index'`) names a toolkit and an index and has no application, version or run input.
     """
     __tablename__ = 'entity_schedules'
     __table_args__ = (
-        CheckConstraint("entity_type IN ('agent', 'pipeline')", name='ck_entity_schedules_entity_type'),
+        CheckConstraint(
+            "entity_type IN ('agent', 'pipeline', 'toolkit_index')", name='ck_entity_schedules_entity_type'
+        ),
+        CheckConstraint(
+            "(entity_type <> 'toolkit_index' AND application_id IS NOT NULL AND toolkit_id IS NULL"
+            " AND index_name IS NULL)"
+            " OR (entity_type = 'toolkit_index' AND toolkit_id IS NOT NULL AND index_name IS NOT NULL"
+            " AND application_id IS NULL AND version_id IS NULL AND run_mode IS NULL AND prompt IS NULL"
+            " AND trigger_kind = 'cron')",
+            name='ck_entity_schedules_target',
+        ),
         CheckConstraint(
             "run_mode IS NULL OR run_mode IN ('entry_point', 'prompt')", name='ck_entity_schedules_run_mode'
         ),
@@ -58,6 +70,11 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
             "trigger_kind <> 'webhook' OR next_run IS NULL", name='ck_entity_schedules_webhook_no_next_run'
         ),
         Index('uq_entity_schedules_uuid', 'uuid', unique=True),
+        # One schedule per index: the Schedules page replaces the per-index schedules of the toolkit settings
+        Index(
+            'uq_entity_schedules_toolkit_index', 'toolkit_id', 'index_name', unique=True,
+            postgresql_where=text('toolkit_id IS NOT NULL'),
+        ),
         Index(
             'uq_entity_schedules_legacy_version', 'legacy_version_id', unique=True,
             postgresql_where=text('legacy_version_id IS NOT NULL'),
@@ -74,9 +91,14 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     # The stable key of the YAML file; the SQL backfill uses gen_random_uuid()
     uuid: Mapped[UUID] = mapped_column(Uuid, nullable=False, default=uuid4)
     entity_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    application_id: Mapped[int] = mapped_column(
-        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.applications.id', ondelete='CASCADE'), nullable=False
+    # NULL on a toolkit index row, which names `toolkit_id` and `index_name` instead
+    application_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.applications.id', ondelete='CASCADE'), nullable=True
     )
+    toolkit_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.elitea_tools.id', ondelete='CASCADE'), nullable=True
+    )
+    index_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     version_id: Mapped[int | None] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.application_versions.id', ondelete='SET NULL'), nullable=True
     )

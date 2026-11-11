@@ -5,9 +5,10 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, field_validator
 
 MAX_DB_ID = 2**31 - 1  # the database integer range
+INDEX_NAME_MAX = 256  # the entity_schedules.index_name column width
 DbId = Annotated[int, Field(ge=1, le=MAX_DB_ID)]
 # The values the list and runs options accept; Swagger reads them with typing.get_args (US-55 D3)
-EntityType = Literal['agent', 'pipeline']
+EntityType = Literal['agent', 'pipeline', 'toolkit_index']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
 RunTrigger = Literal['cron', 'manual', 'test', 'webhook']
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled', 'last_delivery_at']
@@ -31,9 +32,12 @@ class ScheduleListFilters(BaseModel):
     enabled: bool | None = Field(None, description='True: active, false: paused', examples=[True])
     owner_ids: list[DbId] | None = Field(None, description='Only schedules of these owners; schedules admin only',
                                          examples=[[3, 7]])
-    entity_id: DbId | None = Field(None, description='Only schedules of this agent or pipeline', examples=[12])
+    entity_id: DbId | None = Field(None, description='Only schedules of this agent or pipeline; with entity_type '
+                                   'toolkit_index, of this toolkit', examples=[12])
+    index_name: str | None = Field(None, max_length=INDEX_NAME_MAX, description='Only schedules of this index name',
+                                   examples=['docs'])
     version_id: DbId | None = Field(None, description='Only schedules that run this version', examples=[31])
-    search: str | None = Field(None, description='Match on schedule or entity name', examples=['daily report'])
+    search: str | None = Field(None, description='Match on schedule name, entity name or index name', examples=['daily report'])
     limit: int = Field(default=20, ge=1, le=100, description='Rows per page', examples=[20])
     offset: int = Field(default=0, ge=0, le=MAX_DB_ID, description='Rows to skip', examples=[0])
     trigger_kind: Literal['cron', 'webhook'] = Field(
@@ -65,10 +69,12 @@ class ScheduleListItem(BaseModel):
     id: int = Field(description='Schedule id')
     name: str = Field(description='Schedule name')
     description: str | None = Field(None, description='Schedule description')
-    entity_type: str = Field(description='Kind of the scheduled entity: agent or pipeline')
+    entity_type: str = Field(description='Kind of the scheduled entity: agent, pipeline or toolkit_index')
     run_mode: str | None = Field(None, description='How a run starts: entry_point or prompt')
-    application_id: int = Field(description='Id of the agent or pipeline')
-    entity_name: str = Field(description='Name of the agent or pipeline')
+    application_id: DbId | None = Field(None, description='Id of the agent or pipeline; null on a Toolkit Index')
+    toolkit_id: DbId | None = Field(None, description='Toolkit of a Toolkit Index schedule; null on other kinds')
+    index_name: str | None = Field(None, description='Index of a Toolkit Index schedule; null on other kinds')
+    entity_name: str | None = Field(None, description='Name of the agent, pipeline or toolkit')
     version_id: int | None = Field(None, description='Version that runs; null when the version is deleted')  # US-01
     version_name: str | None = Field(None, description='Name of the version that runs')
     cron: str | None = Field(None, description='Cron with 5 parts, read in `timezone`; null on webhooks')
