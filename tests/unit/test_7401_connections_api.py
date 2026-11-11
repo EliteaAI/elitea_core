@@ -87,7 +87,8 @@ def test_7401_the_route_answers_the_rows_and_blocks_a_webhook_only(harness):
     webhook, status = harness.call('_check_connections', {**CHECK, 'trigger_kind': 'webhook'}, suffix='/connections')
     cron, _ = harness.call('_check_connections', CHECK, suffix='/connections')
 
-    assert status == 200 and webhook == {'rows': [OK, REMOTE_MCP], 'all_ok': False, 'blocking': True}
+    assert status == 200 and webhook == {'rows': [OK, REMOTE_MCP], 'all_ok': False, 'blocking': True,
+                                         'lost_login': False}
     assert cron['blocking'] is False and cron['all_ok'] is False
     assert harness.switched_off == []  # no schedule_id: nothing is switched off or written
 
@@ -99,7 +100,7 @@ def test_7401_the_owners_check_of_a_trigger_saves_refs_and_switches_off_on_a_los
 
     body, status = api.call('_check_connections', {**CHECK, 'schedule_id': schedule_id}, suffix='/connections')
 
-    assert status == 200 and body['blocking'] is True
+    assert status == 200 and body['blocking'] is True and body['lost_login'] is True
     assert api.switched_off == [(OWNER_ID, 'uuid-o')]
     assert row(api, schedule_id).credential_refs == ['uuid-o']
 
@@ -164,5 +165,5 @@ def test_7401_an_admins_check_of_a_members_trigger_writes_and_switches_nothing(a
 
     body, status = api.call('_check_connections', {**CHECK, 'schedule_id': schedule_id}, suffix='/connections')
 
-    assert status == 200 and body['blocking'] is True
+    assert status == 200 and body['blocking'] is True and body['lost_login'] is False
     assert api.switched_off == []

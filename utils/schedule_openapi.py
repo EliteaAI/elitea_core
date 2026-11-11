@@ -233,7 +233,7 @@ CONNECTIONS_EXAMPLE = {"rows": [
      "credential_type": "outlook", "credential_title": "team_outlook", "private": False, "login": "ok"},
     {"toolkit": "Remote tools", "toolkit_type": "mcp", "status": "unsupported",
      "reason": "Webhooks cannot wait for a sign-in; use a toolkit with a saved login."}],
-    "all_ok": False, "blocking": True}
+    "all_ok": False, "blocking": True, "lost_login": False}
 
 
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
@@ -347,7 +347,7 @@ OPERATIONS = {
             "`unsupported`. `blocking` is true for a webhook with any row that is not ok: its save is refused. "
             "With `schedule_id` the check runs as the trigger's owner; when the caller is the owner it saves the "
             "credential references, and an expired or removed saved login switches off every trigger of the owner "
-            "using that credential.",
+            "using that credential (`lost_login` is true when it did).",
             "a project member with `schedules.create`, as for the risk check",
             "400 an invalid field; 403 no permission; 404 the agent or pipeline, or the `schedule_id`, is not visible"),
         "parameters": PROJECT_PARAMS,

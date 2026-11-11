@@ -631,9 +631,11 @@ class ScheduleItemHandlers:
             except ScheduleError as e:
                 return e.response
         result = _connections(project_id, body.application_id, body.version_id, owner_id)
+        lost_login = False
         if row_id is not None and caller_id == owner_id:
             for lost in {item["credential_uuid"]: item for item in lost_logins(result)}.values():
                 switch_off_for_login(project_id, owner_id, lost)
+                lost_login = True
             if result["credential_refs"] is not None:
                 with db.get_session(project_id) as session:  # only if the row still has this owner and version
                     session.execute(update(EntitySchedule).where(
@@ -641,7 +643,8 @@ class ScheduleItemHandlers:
                         EntitySchedule.version_id == body.version_id).values(credential_refs=result["credential_refs"]))
                     session.commit()
         ready = connections_ready(result)
-        return {"rows": result["rows"], "all_ok": ready, "blocking": kind == "webhook" and not ready}, 200
+        return {"rows": result["rows"], "all_ok": ready, "blocking": kind == "webhook" and not ready,
+                "lost_login": lost_login}, 200
 
     @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):
