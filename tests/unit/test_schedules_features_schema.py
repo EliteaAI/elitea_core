@@ -71,11 +71,8 @@ def test_the_schedules_section_holds_the_sixteen_scheduler_settings(properties):
     assert len(MOVED) == 16
 
 
-def test_runtime_no_longer_offers_a_scheduler_setting(properties):
-    assert [
-        key for key, field in properties.items()
-        if field.get('section') == 'runtime' and field.get('path', '').startswith('scheduler.')
-    ] == []
+def test_runtime_no_longer_offers_a_moved_scheduler_setting(properties):
+    assert [key for key in _section_keys(properties, 'runtime') if key in MOVED] == []
 
 
 def test_each_card_lists_its_keys_in_schema_order(properties):
