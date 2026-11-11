@@ -169,7 +169,13 @@ def test_7404_details_answer_the_webhook_actions(api):
     schedule_id, _ = seed_hook(api)
     api.request_as(ADMIN_ID, ADMIN)
     detail, _ = api.call('_read', schedule_id=schedule_id)
-    assert detail['allowed_actions'] == ['pause', 'rotate_secret', 'delete', 'change_owner']
+    assert detail['allowed_actions'] == ['run', 'pause', 'rotate_secret', 'delete', 'change_owner']
+
+
+def test_details_answer_the_webhook_actions_of_the_owner(api):
+    schedule_id, _ = seed_hook(api)
+    detail, _ = api.call('_read', schedule_id=schedule_id)
+    assert detail['allowed_actions'][:2] == ['run', 'edit']
 
 
 # --- AC 4: rotate and regenerate

@@ -66,8 +66,9 @@ from ..utils.toolkit_authorization import (
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
-    ScheduleApproveAllForbidden, ScheduleApproveAllOff, ScheduleApproveAllWebhook, ScheduleDecisionForbidden,
-    ScheduleDecisionInvalid, ScheduleRunNotWaiting, apply_schedule_decision, approves_all, check_schedule_decision,
+    DECISION_REFUSED, ScheduleApproveAllForbidden, ScheduleApproveAllOff, ScheduleApproveAllWebhook,
+    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting, apply_schedule_decision,
+    approves_all, check_schedule_decision, schedule_run_actor_id,
 )
 from ..utils.schedule_settings import is_run_without_asking_allowed
 from ..utils.internal_tools import (
@@ -158,7 +159,7 @@ def _get_agent_type(
 
 # The answer of each refused schedule decision (EL-7011)
 _SCHEDULE_REFUSALS = {
-    ScheduleDecisionForbidden: {"error": "Only the schedule owner can approve or reject this run", "status": 403},
+    ScheduleDecisionForbidden: {"error": DECISION_REFUSED, "status": 403},
     ScheduleDecisionInvalid: {
         "error": "hitl_action must be approve, edit, answer, block_with_comment or reject",
         "field": "hitl_action", "status": 400,
@@ -184,12 +185,17 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
     The (run id, decision, approve all) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    The decision is None for a fan-out child of a pause that was resumed already: the caller passed the check, nothing
+    is written. Only the decider of the run decides it (`run_decider_id`), and the run must be linked to this chat.
+    "Approve all" also needs the caller to be the actor of the run (`run_actor_id`).
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
         return None, None
     with db.get_session(parsed.project_id) as session:
-        meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
+        chat = session.query(Conversation.id, Conversation.meta).where(
+            Conversation.uuid == parsed.conversation_uuid).first()
+    conversation_id, meta = (chat.id, chat.meta) if chat else (None, None)
     run_id = (meta or {}).get('schedule_run_id')
     if run_id is None:
         return None, None
@@ -206,20 +212,91 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
                    if answers else [parsed.mcp_auth_action])
     # A sign-in answer never carries it; the checks refuse a request that may not choose it
     approve_all = bool(getattr(parsed, 'approve_all', False)) and not sign_in
-    try:
+    try:  # the run id in the meta is client-written: the run must be linked to this chat
         decision = check_schedule_decision(
             parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
-            approve_all=approve_all)
+            conversation_id=conversation_id, approve_all=approve_all)
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    return ((run_id, decision, approve_all and decision == 'approve') if decision else None), None
+    return (run_id, decision, approve_all and decision == 'approve'), None
+
+
+def _resume_user_id(project_id, pending, caller_id) -> int:
+    """The user a chat resume runs as: the user a decided schedule run acts as, else the caller.
+
+    The schedule owner decides, but the tools of the run use the identity and credentials of the user it started as.
+    """
+    if pending is None:
+        return caller_id
+    return schedule_run_actor_id(project_id, pending[0]) or caller_id
+
+
+# When the schedule owner decides a run another user started, only a plain answer passes (see `_bare_decision_refusal`)
+_BARE_HITL_ACTIONS = ('approve', 'reject')
+_BARE_SIGN_IN_ACTIONS = ('authorize', 'skip')
+# What a decision item may carry: the action and the identity of the card it answers; `value` only when empty
+_BARE_ITEM_KEYS = frozenset({
+    'action', 'value', 'interrupt_id', 'decision_id', 'tool_call_id', 'thread_id', 'child_thread_id',
+    'root_thread_id', 'authorization_request_id',
+})
+# The continue fields a plain answer may carry. The caller's own tokens, server lists, model settings and attachments are
+# cleared by `_drop_caller_inputs`; any other field that is set and truthy changes what runs as the actor, so it is refused
+_BARE_PAYLOAD_FIELDS = frozenset({
+    'project_id', 'conversation_uuid', 'message_id', 'thread_id', 'should_continue', 'hitl_resume', 'hitl_action',
+    'hitl_value', 'hitl_decisions', 'mcp_auth_resume', 'mcp_auth_action', 'mcp_auth_decisions',
+    'authorization_request_id', 'interaction_uuid', 'question_id', 'user_input', 'mcp_tokens', 'ignored_mcp_servers',
+    'user_declined_mcp_servers', 'llm_settings', 'attachments_info',
+})
+_BARE_REFUSAL = {
+    "error": "This run acts as another user: only a plain approve or reject (authorize or skip for a sign-in) is accepted",
+    "field": "hitl_action", "status": 400,
+}
+
+
+def _bare_decision_refusal(parsed) -> dict | None:
+    """The 400 dict unless the answer is a plain approve or reject (authorize or skip for a sign-in), else None.
+
+    The schedule owner may decide a run an admin started, but the run resumes as the admin: an edit, a typed answer,
+    a note, a filled item value, a typed message or any other field of the payload (such as an approve-all switch)
+    would be run with the admin's rights, so none of them passes.
+    """
+    def plain(action, allowed) -> bool:  # an action of another type is no action, never a TypeError
+        return action is None or (isinstance(action, str) and action in allowed)
+
+    def plain_items(items, allowed) -> bool:
+        return all(
+            isinstance(item, dict) and set(item) <= _BARE_ITEM_KEYS and item.get('value') in (None, '')
+            and isinstance(item.get('action'), str) and item['action'] in allowed
+            for item in items or []
+        )
+
+    if not (
+        plain(parsed.hitl_action, _BARE_HITL_ACTIONS) and plain(parsed.mcp_auth_action, _BARE_SIGN_IN_ACTIONS)
+        and plain_items(parsed.hitl_decisions, _BARE_HITL_ACTIONS)
+        and plain_items(parsed.mcp_auth_decisions, _BARE_SIGN_IN_ACTIONS)
+        and parsed.hitl_value in (None, '') and not parsed.user_input
+        and not any(getattr(parsed, name, None) for name in parsed.model_fields_set - _BARE_PAYLOAD_FIELDS)
+    ):
+        return _BARE_REFUSAL
+    return None
+
+
+def _drop_caller_inputs(parsed) -> None:
+    """Clear what the deciding user sent along: their tokens, server choices, model settings and attachments belong to
+    them, not to the run that resumes as another user."""
+    parsed.llm_settings = None
+    parsed.attachments_info = None
+    parsed.mcp_tokens = {}
+    parsed.ignored_mcp_servers = []
+    parsed.user_declined_mcp_servers = None
+    parsed.user_input = None
 
 
 def _apply_schedule_decision(project_id, pending) -> dict | None:
     """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
-    if pending is None:
+    if pending is None or pending[1] is None:
         return None
     try:
         apply_schedule_decision(project_id, *pending)
@@ -2178,12 +2255,19 @@ class RPC:
         else:
             current_user = auth.current_user()
 
-        # Owner check of a scheduled run before any resume (EL-7011); an internal replay was checked already
+        # Owner check of a scheduled run before any resume; an internal replay was checked already
         schedule_decision = None
         if _internal_token is not INTERNAL_CONTINUE_TOKEN:
             schedule_decision, denied = _check_schedule_decision(parsed, current_user['id'])
             if denied:
                 return self._refuse_schedule_decision(sid, parsed, denied)
+        # The owner decides, but the run resumes as the user it started as; the run log keeps who decided
+        resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])
+        if resume_user_id != current_user['id']:
+            denied = _bare_decision_refusal(parsed)
+            if denied:
+                return self._refuse_schedule_decision(sid, parsed, denied)
+            _drop_caller_inputs(parsed)
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
@@ -2235,7 +2319,7 @@ class RPC:
         # the approval belongs to the child's own agent identity + checkpoint.
         # The child resumes on its own thread; on completion it fires `stopped`
         # and the reconcile gate wakes the parent.
-        child_resume = self._continue_child_resume(sid, parsed, current_user)
+        child_resume = self._continue_child_resume(sid, parsed, current_user, decided=schedule_decision is not None)
         if child_resume is not None:
             # lean: the write follows the child start, so a decision that came too late is only logged;
             # move it into _continue_child_resume when a schedule run must refuse a parked child
@@ -2704,12 +2788,14 @@ class RPC:
                     'question_id': str(msg_group.uuid),
                 })
                 record_skill_run(session, response_msg, start_event_content)
+                # With a socket the predict RPC takes the user and the stream room of that socket, over `user_id`: a run
+                # that resumes as another user gets neither the decider's socket nor the decider as its user
                 result = getattr(self.context.rpc_manager.call, rpc_func)(
-                    sid, payload, SioEvents.chat_predict.value,
+                    sid if resume_user_id == current_user['id'] else None, payload, SioEvents.chat_predict.value,
                     start_event_content=start_event_content,
                     chat_project_id=parsed.project_id,
                     await_task_timeout=await_task_timeout,
-                    user_id=current_user['id'],
+                    user_id=resume_user_id,
                     routing_projection=payload.pop('_routing_projection', None),
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
@@ -2792,7 +2878,7 @@ class RPC:
         return denied
 
     @web.method()
-    def _continue_child_resume(self, sid, parsed, current_user):
+    def _continue_child_resume(self, sid, parsed, current_user, decided=False):
         """Resume a parked-fan-out child on its own thread, or None if N/A.
 
         A parallel sub-agent child pauses for HITL on its OWN thread_id and emits
@@ -2802,6 +2888,9 @@ class RPC:
         linkage meta so the child's eventual completion wakes the parent gate.
         Returns the start_task result dict, or None when thread_id is not a known
         child (caller then falls through to the normal parent continue flow).
+
+        `decided`: the schedule decision check passed for this caller, so the schedule owner may answer the card of
+        a run an admin started, though the owner is neither the author nor a participant of that chat.
         """
         thread_id = getattr(parsed, 'thread_id', None)
         if not thread_id:
@@ -2849,6 +2938,7 @@ class RPC:
                 or (
                     conversation.author_id != current_user['id']
                     and not user_is_participant
+                    and not decided
                 )
             ):
                 raise SioValidationError(

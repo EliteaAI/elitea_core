@@ -376,12 +376,13 @@ def reads(monkeypatch):
     module.conversation_uuids = lambda session, ids: {i: f'uuid-{i}' for i in ids if i is not None}
     module.usage_summaries = lambda project_id, rows: {row.id: (10, 0.5) for row in rows}
     module.version_label = lambda session, version_id: 'v3'
-    module.tool_call_events = lambda session, conversation_id: []
+    module.tool_call_events = lambda session, conversation_id, with_output=True: []
     module.usage_summary = lambda session, project_id, run: (10, 0.5)
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    runs_module = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')
-    runs_module.can_approve_all = lambda session, project_id, run, caller_id: caller_id == OWNER_ID
-    monkeypatch.setitem(sys.modules, runs_module.__name__, runs_module)
+    runs = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')  # a draft Test run is decided by its starter
+    runs.run_decider_id = lambda session, run: run.requested_by
+    runs.can_approve_all = lambda session, project_id, run, viewer_id: viewer_id == OWNER_ID
+    monkeypatch.setitem(sys.modules, runs.__name__, runs)
 
 
 def read_runs(harness, application_id=1, **query):
@@ -478,6 +479,7 @@ def test_the_test_run_detail_has_the_body_of_the_run_detail_and_the_rule_of_the_
     assert (body['id'], body['trigger'], body['version_label']) == (run_id, 'test', 'v3')
     assert body['summary']['tokens'] == 10 and body['summary']['cost_usd'] == 0.5
     assert body['approval_rule'] == 'pause_and_ask'
+    assert body['decider_id'] == OWNER_ID
     assert {'events', 'status', 'conversation_id'} <= set(body)
     assert body['can_approve_all'] is True
 

@@ -27,7 +27,7 @@ CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a sch
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 DEFAULT_APPROVAL_WAIT_HOURS = 24
 MAX_APPROVAL_WAIT_HOURS = 720
-REJECT_REASON = 'rejected by the owner'
+REJECT_REASON = 'rejected'
 TOO_MANY_WAITING = 'too many runs waiting for approval'
 SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and this schedule does not ask the owner"
 WEBHOOK_SIGN_IN_REASON = "the toolkit '{}' needs a sign-in and a webhook cannot wait for one; use a saved login"
@@ -51,8 +51,12 @@ PRERUN_REFUSED = 'prerun_refused'
 PAUSED_AFTER_PRERUN = '{count} runs in a row could not start or were refused (last: {reason}). Fix it and resume.'
 
 
+# One refusal text for the REST route and the chat: the decider is the schedule owner at the start of the run
+DECISION_REFUSED = 'Only the owner of this schedule can approve or reject this run'
+
+
 class ScheduleDecisionForbidden(Exception):
-    """The caller of an approve or reject is not the schedule owner; an admin included (R2.3)."""
+    """The caller of an approve or reject is not the decider of the run (`run_decider_id`); an admin included."""
 
 
 class ScheduleDecisionInvalid(Exception):
@@ -255,11 +259,47 @@ def run_owner_id(session, run) -> int | None:
     return session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
 
 
-def is_approve_all_actor(session, run, caller_id: int) -> bool:
-    """True for the one person who may choose "approve all" for a run: whoever started it by hand (Run now, Test Run),
-    else the schedule owner. The choice lets the run act without asking, so it stays with the person the run acts for."""
-    actor_id = run.requested_by if run.requested_by is not None else run_owner_id(session, run)
-    return actor_id == caller_id
+def _owner_at_start(session, run) -> int | None:
+    """The schedule owner when the run started: `owner_id` of the start line of the run log, else the live owner.
+
+    A run with no such line (made before it was written, or when the log write failed) falls back to the live owner.
+    """
+    started = next((event for event in run.events or []
+                    if isinstance(event, dict) and event.get('kind') == 'started'), None)
+    owner_id = (started or {}).get('owner_id')
+    return owner_id if isinstance(owner_id, int) and not isinstance(owner_id, bool) else run_owner_id(session, run)
+
+
+def run_actor_id(session, run) -> int | None:
+    """The user a run acts as: the person who pressed Run now or Test run, else the owner it had at its start.
+
+    An admin who runs another user's schedule now acts as the admin, never as the owner. After a Change owner a
+    waiting cron or webhook run keeps acting as the owner it started under; new runs act as the new owner.
+    The actor is who the run uses credentials of; `run_decider_id` is who answers its pause.
+    """
+    if run.trigger in ('manual', 'test') and run.requested_by is not None:
+        return run.requested_by
+    return _owner_at_start(session, run)
+
+
+def run_decider_id(session, run) -> int | None:
+    """The user who approves, rejects or signs in for a run: the schedule owner at the start of the run.
+
+    A Change owner moves later runs to the new owner; a run that waits stays with the owner it started under, the
+    start line of the run log keeps that id. A run with no such line (made before it was written, or when the log
+    write failed) falls back to the live owner. A Test Run has no schedule: its starter decides it.
+    An admin's Run now acts as the admin (`run_actor_id`) and is still decided by the owner.
+    """
+    if run.schedule_id is None:
+        return run.requested_by
+    return _owner_at_start(session, run)
+
+
+def schedule_run_actor_id(project_id: int, run_id: int) -> int | None:
+    """The user a run acts as (`run_actor_id`), read in its own session; None when the run is gone."""
+    with db.get_session(project_id) as session:
+        run = session.get(EntityScheduleRun, run_id)
+        return run_actor_id(session, run) if run is not None else None
 
 
 def is_webhook_run(session, run) -> bool:
@@ -288,11 +328,12 @@ def check_approve_all(project_id: int, is_actor: bool, is_webhook: bool = False)
 
 
 def can_approve_all(session, project_id: int, run, caller_id: int) -> bool:
-    """True when the caller may choose "approve all" now: the run waits and `check_approve_all` passes."""
-    if run.status != 'waiting_for_approval':
+    """True when the caller may choose "approve all" now: the run waits, the caller decides it and
+    `check_approve_all` passes. The decider and the actor are two users for an admin's Run now, so nobody has the choice."""
+    if run.status != 'waiting_for_approval' or run_decider_id(session, run) != caller_id:
         return False
     try:
-        check_approve_all(project_id, is_approve_all_actor(session, run, caller_id), is_webhook_run(session, run))
+        check_approve_all(project_id, run_actor_id(session, run) == caller_id, is_webhook_run(session, run))
     except (ScheduleApproveAllForbidden, ScheduleApproveAllWebhook, ScheduleApproveAllOff):
         return False
     return True
@@ -398,7 +439,9 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
         if run.schedule_id is None:  # a Test Run has no schedule page to link a notice to
             return True
         schedule = session.get(EntitySchedule, run.schedule_id)
-        notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
+        # The notice goes to who must answer: an admin's Run now acts as the admin, and the owner still decides it
+        recipient = run_decider_id(session, run) or schedule.created_by
+        notify_schedule_event(project_id, recipient, 'schedule_approval_needed', schedule, run)
     except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it
         log.exception('Schedule run %s: cannot send the approval notice', run_id)
     return True
@@ -522,12 +565,16 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
-                            fan_out: bool = False, sign_in: bool = False, approve_all: bool = False) -> str | None:
-    """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
+                            fan_out: bool = False, sign_in: bool = False, conversation_id: int | None = None,
+                            approve_all: bool = False) -> str | None:
+    """Check the decision on a waiting run without changing it; `reject` or `approve`.
 
-    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
-    included (R2.3); then `ScheduleDecisionInvalid` for an empty or unknown action; then
-    `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
+    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but the decider of the run
+    (`run_decider_id`), an admin included; the run still uses the credentials of the user it acts as
+    (`run_actor_id`), which the caller of the resume picks. A chat passes its
+    `conversation_id`, and the run must be linked to that chat, else `ScheduleRunNotWaiting`, because the run id in
+    the conversation meta is written by the client. Then `ScheduleDecisionInvalid` for an empty or unknown action;
+    then `ScheduleRunNotWaiting` when the run is not waiting. None when a fan-out child decides a run
     that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
     the sign-in answers (`authorize`, `skip`) and map to approve and reject.
     `approve_all` with an approve is checked last (`check_approve_all`): `ScheduleApproveAllForbidden`,
@@ -537,12 +584,12 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
-        if run is None:
+        if run is None or (conversation_id is not None and run.conversation_id != conversation_id):
             raise ScheduleRunNotWaiting(run_id)
-        if run_owner_id(session, run) != caller_id:
+        if run_decider_id(session, run) != caller_id:
             raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
-        is_actor = is_approve_all_actor(session, run, caller_id)
+        is_actor = run_actor_id(session, run) == caller_id
         is_webhook = approve_all and is_webhook_run(session, run)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
@@ -561,7 +608,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
-    The run log gets the decision; only the owner decides (the check), so the owner is who decided.
+    The run log gets the decision; only the decider passes the check, so that user is who decided.
     `approve_all` with an approve sets the flag `approves_all` reads, and is written into the decision event for the
     log: the run asks no more tool approvals.
     """
@@ -575,13 +622,13 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
         )
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
-        owner_id = run_owner_id(session, run)
         approved = decision == 'approve'
+        decider_id = run_decider_id(session, run)
         if approved and approve_all:
-            event = run_event('decision', APPROVE_ALL_TEXT, 'info', action=decision, by=owner_id, approve_all=True)
+            event = run_event('decision', APPROVE_ALL_TEXT, 'info', action=decision, by=decider_id, approve_all=True)
         else:
             event = run_event('decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
-                              'info' if approved else 'warning', action=decision, by=owner_id)
+                              'info' if approved else 'warning', action=decision, by=decider_id)
         append_run_events(session, run_id, event)
         if approved and approve_all:
             _set_approve_all(session, run_id)
@@ -591,7 +638,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
             _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
-        else:  # no notice: the owner made this end (R2.2)
+        else:  # no notice: the decider made this end
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
             conversation_id = run.conversation_id
@@ -732,9 +779,10 @@ def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTIC
         schedule = session.get(EntitySchedule, run.schedule_id)
         # One failed notice must not leave the other runs of a batch without theirs
         try:
-            notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
+            recipient = run_actor_id(session, run) or schedule.created_by  # the chat of an admin's run is the admin's
+            notify_schedule_event(project_id, recipient, event, schedule, run)
             if schedule.entity_type == 'agent':
                 emit_schedule_run_finished(
-                    schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
+                    recipient, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
         except Exception:  # noqa: BLE001 - the run already ended; only its notice is lost
             log.exception('Schedule run %s: cannot send the %s notice', run_id, event)
