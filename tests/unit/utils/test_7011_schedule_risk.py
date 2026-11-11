@@ -257,10 +257,9 @@ DELEGATED = {
     'dataverse': DATAVERSE,
     'outlook': {'oauth_discovery_endpoint': ENTRA},
     'teams': {'oauth_discovery_endpoint': ENTRA},
-    'ms_graph': {'oauth_discovery_endpoint': ENTRA},
     'sharepoint': {'oauth_discovery_endpoint': ENTRA},
 }
-NEW_TYPES = ['dataverse', 'outlook', 'teams', 'ms_graph']
+NEW_TYPES = ['dataverse', 'outlook', 'teams']
 
 
 def _stored_login_scan(scan, type_, credential, refresh_token='unset'):
@@ -294,7 +293,7 @@ class TestStoredLoginSignIn:
         assert scan.run() == []
 
     @pytest.mark.parametrize('type_, credential', [
-        ('outlook', {'client_id': 'x'}), ('teams', {'client_id': 'x'}), ('ms_graph', {'client_id': 'x'}),
+        ('outlook', {'client_id': 'x'}), ('teams', {'client_id': 'x'}),
         ('dataverse', {'url': 'https://org.crm4.dynamics.com'}),
         ('dataverse', {'tenant_id': 'tenant-1', 'url': 'https://example.com'}),
     ])
@@ -454,8 +453,7 @@ class TestEL7011CrPersonalCredential:
     """Owner decision 2026-10-21: a personal credential is "warn and confirm", not silent and not blocked."""
 
     @pytest.mark.parametrize('type_, name, label', [
-        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence'),
-        ('ms_graph', 'Graph', 'MS Graph')])
+        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence')])
     def test_el7011_cr_a_personal_credential_is_a_sensitive_item(self, scan, type_, name, label):
         scan.version = _version(tools=[_personal(type_, name)])
         review = scan.review()
@@ -465,12 +463,6 @@ class TestEL7011CrPersonalCredential:
             'toolkit': name, 'toolkit_type': type_, 'tool': None, 'risk_level': 'needs_approval',
             'badge': 'personal_credential', 'effect': f"Runs with the owner's personal {label} credential.",
         }]
-
-    def test_a_personal_ms_graph_credential_with_a_saved_login_is_named_ms_graph(self, scan):
-        scan.version = _version(tools=[_personal('ms_graph', 'Graph')])
-        scan.expanded['ms_graph'] = {'ms_graph_configuration': {'oauth_discovery_endpoint': ENTRA, 'refresh_token': 'r'}}
-        [item] = scan.review()['sensitive']
-        assert item['code'] == 'personal_credential' and 'MS Graph' in item['message']
 
     def test_el7011_cr_a_shared_credential_adds_nothing(self, scan):
         scan.version = _version(tools=[_personal(private=False)])
