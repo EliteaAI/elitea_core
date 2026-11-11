@@ -13,7 +13,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
-        """Platform skill limits, readable before an agent version exists (e.g. in the import dialog)."""
+        """Platform skill limits, readable before an agent version exists (e.g. in the import dialog).
+
+        project_id only scopes the permission check: the limit is platform-wide today. The route keeps
+        the project in its path so the limit can become per-project without changing clients.
+        """
         return {'max_skills_per_agent': get_max_skills_per_agent()}, 200
 
 
