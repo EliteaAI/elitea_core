@@ -47,6 +47,10 @@ class SettingOff(Exception):
     pass
 
 
+class WebhookRun(Exception):
+    pass
+
+
 def _helpers(meta, error=None, decision='approve', apply_error=None):
     """The real helpers on a fake conversation meta; `calls` records each schedule_runs call."""
     calls = []
@@ -82,6 +86,7 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
         'ScheduleDecisionInvalid': Invalid,
         'ScheduleRunNotWaiting': NotWaiting,
         'ScheduleApproveAllForbidden': NotActor,
+        'ScheduleApproveAllWebhook': WebhookRun,
         'ScheduleApproveAllOff': SettingOff,
     }
     namespace = load_cut(nodes, namespace, 'chat_all.py')  # the real helpers cut out of rpc/chat_all.py
@@ -352,6 +357,30 @@ def test_the_approve_all_refusal_of_the_setting_has_a_code_that_tells_it_from_a_
     }
     _, not_waiting = _helpers({'schedule_run_id': RUN_ID}, NotWaiting())[0](_parsed(approve_all=True), OWNER)
     assert (not_waiting['status'], 'code' in not_waiting) == (409, False)
+
+
+def test_the_approve_all_refusal_of_a_webhook_run_is_a_403_with_a_code_and_the_field():
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, WebhookRun())
+
+    pending, denied = check(_parsed(approve_all=True), OWNER)
+
+    assert pending is None
+    assert denied == {
+        'error': 'A run started by a webhook cannot approve all its tools', 'field': 'approve_all',
+        'code': 'approve_all_webhook', 'status': 403,
+    }
+
+
+def test_rest_carries_the_code_and_field_of_the_webhook_refusal(post):
+    rpc, call = post
+    rpc.result = {
+        'error': 'A run started by a webhook cannot approve all its tools', 'field': 'approve_all',
+        'code': 'approve_all_webhook', 'status': 403,
+    }
+
+    assert call() == (
+        {'error': 'A run started by a webhook cannot approve all its tools', 'code': 'approve_all_webhook',
+         'field': 'approve_all'}, 403)
 
 
 @pytest.mark.parametrize('request_values, asked', [

@@ -67,6 +67,10 @@ class ScheduleApproveAllForbidden(Exception):
     """"Approve all" was asked by someone but the person the run acts for."""
 
 
+class ScheduleApproveAllWebhook(Exception):
+    """"Approve all" was asked on a run of a webhook: nobody is at hand to own the choice for a delivery."""
+
+
 class ScheduleApproveAllOff(Exception):
     """"Approve all" was asked while the project does not allow "Run without asking"."""
 
@@ -258,16 +262,27 @@ def is_approve_all_actor(session, run, caller_id: int) -> bool:
     return actor_id == caller_id
 
 
-def check_approve_all(project_id: int, is_actor: bool) -> None:
-    """Refuse "approve all" unless the caller is the actor of the run and the project allows "Run without asking".
+def is_webhook_run(session, run) -> bool:
+    """True for a run of a webhook row, a sample run included; the trigger kind is the one `_sign_in_policy` reads."""
+    if run.schedule_id is None:
+        return False
+    return session.scalar(select(EntitySchedule.trigger_kind).where(EntitySchedule.id == run.schedule_id)) == 'webhook'
 
-    Raises `ScheduleApproveAllForbidden`, then `ScheduleApproveAllOff`. The setting is read at each call: an admin may
-    switch it off while the run waits. It takes no session, because the settings store opens its own connection.
+
+def check_approve_all(project_id: int, is_actor: bool, is_webhook: bool = False) -> None:
+    """Refuse "approve all" unless the caller is the actor of a run that is not a webhook run and the project allows
+    "Run without asking".
+
+    Raises `ScheduleApproveAllForbidden`, then `ScheduleApproveAllWebhook`, then `ScheduleApproveAllOff`. The setting is
+    read at each call: an admin may switch it off while the run waits. It takes no session, because the settings store
+    opens its own connection.
     """
     # Late: the settings store stays off every other run writer
     from .schedule_settings import is_run_without_asking_allowed
     if not is_actor:
         raise ScheduleApproveAllForbidden()
+    if is_webhook:
+        raise ScheduleApproveAllWebhook()
     if not is_run_without_asking_allowed(project_id):
         raise ScheduleApproveAllOff()
 
@@ -277,8 +292,8 @@ def can_approve_all(session, project_id: int, run, caller_id: int) -> bool:
     if run.status != 'waiting_for_approval':
         return False
     try:
-        check_approve_all(project_id, is_approve_all_actor(session, run, caller_id))
-    except (ScheduleApproveAllForbidden, ScheduleApproveAllOff):
+        check_approve_all(project_id, is_approve_all_actor(session, run, caller_id), is_webhook_run(session, run))
+    except (ScheduleApproveAllForbidden, ScheduleApproveAllWebhook, ScheduleApproveAllOff):
         return False
     return True
 
@@ -511,8 +526,8 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
     that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
     the sign-in answers (`authorize`, `skip`) and map to approve and reject.
-    `approve_all` with an approve is checked last (`check_approve_all`): `ScheduleApproveAllForbidden` or
-    `ScheduleApproveAllOff`, and the run keeps waiting. A reject ignores it.
+    `approve_all` with an approve is checked last (`check_approve_all`): `ScheduleApproveAllForbidden`,
+    `ScheduleApproveAllWebhook` or `ScheduleApproveAllOff`, and the run keeps waiting. A reject ignores it.
     """
     if sign_in:  # an unknown answer stays in the list, so the check below refuses it
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
@@ -524,6 +539,7 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
             raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
         is_actor = is_approve_all_actor(session, run, caller_id)
+        is_webhook = approve_all and is_webhook_run(session, run)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
     if fan_out and status == 'running' and resumed_at is not None:
@@ -533,7 +549,7 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     if 'reject' in actions:
         return 'reject'
     if approve_all:
-        check_approve_all(project_id, is_actor)
+        check_approve_all(project_id, is_actor, is_webhook)
     return 'approve'
 
 

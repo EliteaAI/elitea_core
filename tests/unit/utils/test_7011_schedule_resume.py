@@ -437,6 +437,67 @@ def test_can_approve_all_is_false_for_a_caller_who_did_not_start_the_run(runs, s
     assert runs.can_approve_all(session, 1, run, OWNER) is False
 
 
+WEBHOOK_ROW = {"trigger_kind": "webhook", "webhook_type": "custom", "cron": None, "timezone": None}
+
+
+def test_an_approve_all_on_a_webhook_run_is_refused_and_the_run_keeps_waiting(runs, session, sent, allowed):
+    _, run = _waiting(runs, session, **WEBHOOK_ROW)
+
+    with pytest.raises(runs.ScheduleApproveAllWebhook):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+
+    session.refresh(run)
+    assert (run.status, run.resumed_at, _decision_events(session, run)) == ("waiting_for_approval", None, [])
+    assert runs.approves_all(session, run.id) is False
+
+
+def test_the_webhook_refusal_comes_after_the_actor_refusal_and_before_the_setting_is_read(runs, session, sent, allowed):
+    _, run = _waiting(runs, session, **WEBHOOK_ROW)
+    allowed.value = False
+
+    with pytest.raises(runs.ScheduleApproveAllWebhook):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+    assert allowed.asked == []
+
+    _started_by(runs, session, run, ADMIN)
+    with pytest.raises(runs.ScheduleApproveAllForbidden):
+        runs.check_schedule_decision(1, run.id, OWNER, ["approve"], approve_all=True)
+
+
+def test_a_plain_approve_and_a_reject_of_a_webhook_run_still_work(runs, session, sent, allowed):
+    _, run = _waiting(runs, session, **WEBHOOK_ROW)
+    assert runs.check_schedule_decision(1, run.id, OWNER, ["reject"], approve_all=True) == "reject"
+
+    assert _decide(runs, run.id, OWNER, ["approve"]) == "approve"
+    assert run.status == "running"
+
+
+def test_a_sample_run_of_a_webhook_row_counts_as_a_webhook_run(runs, session, sent, allowed):
+    schedule = _schedule(runs, session, created_by=OWNER, **WEBHOOK_ROW)
+    run = runs.EntityScheduleRun(schedule_id=schedule.id, trigger="test", status="waiting_for_approval")
+    session.add(run)
+    session.flush()
+
+    assert runs.is_webhook_run(session, run) is True
+    assert runs.can_approve_all(session, 1, run, OWNER) is False
+
+
+def test_can_approve_all_is_false_for_a_webhook_run_and_true_for_a_cron_run_of_the_same_owner(runs, session, sent, allowed):
+    _, webhook_run = _waiting(runs, session, **WEBHOOK_ROW)
+    _, cron_run = _waiting(runs, session)
+
+    assert runs.can_approve_all(session, 1, webhook_run, OWNER) is False
+    assert runs.can_approve_all(session, 1, cron_run, OWNER) is True
+
+
+def test_a_run_without_a_schedule_is_no_webhook_run(runs, session, sent, allowed):
+    run = runs.EntityScheduleRun(schedule_id=None, trigger="test", status="waiting_for_approval", requested_by=OWNER)
+    session.add(run)
+    session.flush()
+
+    assert runs.is_webhook_run(session, run) is False
+
+
 def test_can_approve_all_is_false_for_a_run_that_does_not_wait_and_reads_no_setting(runs, session, sent, allowed):
     schedule = _schedule(runs, session, created_by=OWNER)
     run = _run(runs, session, schedule, status="running")

@@ -66,8 +66,8 @@ from ..utils.toolkit_authorization import (
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
-    ScheduleApproveAllForbidden, ScheduleApproveAllOff, ScheduleDecisionForbidden, ScheduleDecisionInvalid,
-    ScheduleRunNotWaiting, apply_schedule_decision, approves_all, check_schedule_decision,
+    ScheduleApproveAllForbidden, ScheduleApproveAllOff, ScheduleApproveAllWebhook, ScheduleDecisionForbidden,
+    ScheduleDecisionInvalid, ScheduleRunNotWaiting, apply_schedule_decision, approves_all, check_schedule_decision,
 )
 from ..utils.schedule_settings import is_run_without_asking_allowed
 from ..utils.internal_tools import (
@@ -167,6 +167,10 @@ _SCHEDULE_REFUSALS = {
     ScheduleApproveAllForbidden: {
         "error": "Only the person who started this run can approve all its tools", "field": "approve_all",
         "status": 403,
+    },
+    ScheduleApproveAllWebhook: {
+        "error": "A run started by a webhook cannot approve all its tools", "field": "approve_all",
+        "code": "approve_all_webhook", "status": 403,
     },
     ScheduleApproveAllOff: {
         "error": 'This project does not allow "Run without asking", so all tools cannot be approved',
