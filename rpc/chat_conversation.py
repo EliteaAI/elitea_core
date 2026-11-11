@@ -3,7 +3,7 @@ import time
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, and_, or_, func, select
+from sqlalchemy import desc, asc, Integer, String, and_, or_, cast, func, select
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
@@ -45,8 +45,8 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
     """The run record of each run row, keyed by conversation id (CR-22, US-38 D6).
 
     One query bounded by the page's run ids (at most LIST_CONVERSATIONS_MAX_LIMIT); the schedule name is read live,
-    so a rename shows at once. A row whose meta has no integer run id, whose run is gone, or whose run belongs
-    to another conversation, gets no entry.
+    so a rename shows at once. A second bounded query reads the form name of the runs without a schedule. A row
+    whose meta has no integer run id, whose run is gone, or whose run belongs to another conversation, gets no entry.
     """
     run_of = {}
     for conv in conversations:
@@ -56,20 +56,31 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
     if not run_of:
         return {}
     # Meta is user-writable: a run counts only when its own conversation_id names this conversation
-    runs = {
-        (run_id, conversation_id): ScheduleRunRef(
-            id=run_id, schedule_id=schedule_id, schedule_name=name, status=status, trigger=trigger,
-        ).model_dump()
-        for run_id, conversation_id, schedule_id, name, status, trigger in (
-            session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
-                          func.coalesce(EntitySchedule.name, RUN_FORM['name'].astext),
-                          EntityScheduleRun.status, EntityScheduleRun.trigger)
-            # A Test Run has no schedule row: its name comes from the saved form
-            .outerjoin(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
-            .filter(EntityScheduleRun.id.in_(set(run_of.values())),
-                    EntityScheduleRun.conversation_id.in_(list(run_of)))
+    run_rows = (
+        session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
+                      EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
+        .outerjoin(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+        .filter(EntityScheduleRun.id.in_(set(run_of.values())),
+                EntityScheduleRun.conversation_id.in_(list(run_of)))
+        .all()
+    )
+    # A Test Run has no schedule row: its name comes from the saved form. The form column exists only after
+    # the admin task ran, so it is read in its own query, and only when a run without a schedule is on the page.
+    form_names = {}
+    test_run_ids = [row[0] for row in run_rows if row[2] is None]
+    if test_run_ids:
+        form_names = dict(
+            session.query(EntityScheduleRun.id, RUN_FORM['name'].astext)
+            .filter(EntityScheduleRun.id.in_(test_run_ids))
             .all()
         )
+    runs = {
+        (run_id, conversation_id): ScheduleRunRef(
+            id=run_id, schedule_id=schedule_id,
+            schedule_name=name if schedule_id is not None else form_names.get(run_id),
+            status=status, trigger=trigger,
+        ).model_dump()
+        for run_id, conversation_id, schedule_id, name, status, trigger in run_rows
     }
     return {conv_id: runs[(run_id, conv_id)] for conv_id, run_id in run_of.items() if (run_id, conv_id) in runs}
 
@@ -499,7 +510,9 @@ class RPC:
             if participant_id is not None:
                 filters = [
                     Conversation.meta.has_key('single_participant'),
-                    Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
+                    # Meta is user-writable: a text compare never raises on a stored id that is not an integer
+                    cast(Conversation.meta['single_participant']['entity_meta']['id'].astext, String)
+                    == str(participant_id),
                 ]
                 if entity_name:
                     filters.append(
@@ -507,8 +520,8 @@ class RPC:
                     )
                 if is_skill_history and entity_project_id is not None:
                     filters.append(
-                        Conversation.meta['single_participant']['entity_meta']['project_id'].astext.cast(Integer)
-                        == entity_project_id,
+                        cast(Conversation.meta['single_participant']['entity_meta']['project_id'].astext, String)
+                        == str(entity_project_id),
                     )
                 run_filters.extend(filters)
 

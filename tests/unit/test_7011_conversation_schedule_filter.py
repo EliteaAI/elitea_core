@@ -210,6 +210,31 @@ def test_7011_r2_2_rpc_keeps_participant_and_private_filters(rpc_module, is_admi
     assert any('chat_conversations.is_private = false' in q.sql() for q in session.queries)
 
 
+def _skill_list(rpc_module, participant_id, entity_project_id):
+    # The skill branch reads two helpers that live in another module; they only need to be valid SQL parts
+    rpc_module.ParticipantTypes = types.SimpleNamespace(skill=types.SimpleNamespace(value='skill'),
+                                                        user=types.SimpleNamespace(value='user'))
+    rpc_module.openable_skill_chat_ids = lambda session, participant_id, entity_project_id, user_id: select(
+        Conversation.id)
+    rpc_module.skill_run_started_at = lambda session, participant_id, entity_project_id: Conversation.created_at
+    session = _list(rpc_module, participant_id=participant_id, entity_name='skill',
+                    entity_project_id=entity_project_id)
+    return ' '.join(session.base.sql().split())
+
+
+def test_the_participant_filter_compares_the_meta_id_as_text(rpc_module):
+    sql = ' '.join(_list(rpc_module, participant_id=70, entity_name='application').base.sql().split())
+    assert "->> 'id') AS VARCHAR) = '70'" in sql
+    assert 'AS INTEGER' not in sql
+
+
+def test_the_skill_owner_project_filter_compares_as_text(rpc_module):
+    sql = _skill_list(rpc_module, participant_id=70, entity_project_id=9)
+    assert "->> 'project_id') AS VARCHAR) = '9'" in sql
+    assert "->> 'id') AS VARCHAR) = '70'" in sql
+    assert 'AS INTEGER' not in sql
+
+
 class Args(dict):
     """The part of the Werkzeug query-args API the endpoint uses."""
 
@@ -315,8 +340,8 @@ def test_the_old_trigger_type_names_are_gone(rpc_module, api):
 class RecordingRunQuery:
     """Query for the run records: it keeps the columns and the join kind, and returns fixed rows."""
 
-    def __init__(self, rows):
-        self.rows, self.outer = rows, None
+    def __init__(self, columns, rows):
+        self.columns, self.rows, self.outer = columns, rows, None
 
     def outerjoin(self, *args):
         self.outer = True
@@ -332,6 +357,21 @@ class RecordingRunQuery:
     def all(self):
         return self.rows
 
+    def selected_sql(self):
+        return ' '.join(str(c.compile(dialect=postgresql.dialect())) for c in self.columns)
+
+
+class RunSession:
+    """Session for `_schedule_runs`: the run query has six columns, the form-name query has two."""
+
+    def __init__(self, run_rows, form_rows):
+        self.run_rows, self.form_rows, self.queries = run_rows, form_rows, []
+
+    def query(self, *columns):
+        rows = self.run_rows if len(columns) == 6 else self.form_rows
+        self.queries.append(RecordingRunQuery(columns, rows))
+        return self.queries[-1]
+
 
 class RunRef(BaseModel):
     id: int
@@ -344,12 +384,33 @@ class RunRef(BaseModel):
 def test_a_run_without_a_schedule_is_listed_with_the_name_of_its_form(rpc_module):
     rpc_module.ScheduleRunRef = RunRef
     conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
-    query = RecordingRunQuery([(9, 4, None, 'Draft form name', 'success', 'test')])
-    session = types.SimpleNamespace(query=lambda *columns: query)
+    session = RunSession([(9, 4, None, 'Draft form name', 'success', 'test')], [(9, 'Draft form name')])
     runs = rpc_module._schedule_runs(session, [conversation])
-    assert query.outer is True
+    assert session.queries[0].outer is True
     assert runs == {4: {'id': 9, 'schedule_id': None, 'schedule_name': 'Draft form name', 'status': 'success',
                         'trigger': 'test'}}
+
+
+def test_the_run_read_names_no_form_column_when_no_run_is_a_test_run(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, 5, 'Nightly', 'success', 'cron')], [])
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert len(session.queries) == 1
+    assert 'form' not in session.queries[0].selected_sql()
+    assert runs[4]['schedule_name'] == 'Nightly'
+
+
+def test_the_form_name_query_reads_only_the_runs_without_a_schedule(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversations = [types.SimpleNamespace(id=4, meta={'schedule_run_id': 9}),
+                     types.SimpleNamespace(id=5, meta={'schedule_run_id': 10})]
+    session = RunSession([(9, 4, 5, 'Nightly', 'success', 'cron'), (10, 5, None, None, 'success', 'test')],
+                         [(10, 'Draft form name')])
+    runs = rpc_module._schedule_runs(session, conversations)
+    assert len(session.queries) == 2
+    assert 'form' in session.queries[1].selected_sql()
+    assert [runs[4]['schedule_name'], runs[5]['schedule_name']] == ['Nightly', 'Draft form name']
 
 
 def test_a_list_without_run_options_adds_no_run_filter(rpc_module):
