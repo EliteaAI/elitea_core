@@ -135,8 +135,12 @@ def check_caps(running: dict[int, int], row_id: int, row_cap: int, project_cap: 
     return None
 
 
-def admit_webhook_run(session, project_id: int, row_id: int, trigger: str = 'webhook') -> int | Capped | None:
-    """Count and insert under the project lock: a run id, `Capped` over a cap, None when the active-run index refuses."""
+def admit_webhook_run(session, project_id: int, row_id: int, trigger: str = 'webhook',
+                      requested_by: int | None = None) -> int | Capped | None:
+    """Count and insert under the project lock: a run id, `Capped` over a cap, None when the active-run index refuses.
+
+    `requested_by` is the user who sent a sample body (`test`); a delivery has none.
+    """
     from .schedule_settings import project_webhook_cap  # late: the door tests load without the settings RPC
     from .schedule_timing import webhook_limits
     limits = webhook_limits()
@@ -145,7 +149,7 @@ def admit_webhook_run(session, project_id: int, row_id: int, trigger: str = 'web
     capped = check_caps(running_webhook_runs(session), row_id, row_cap, limits.per_project)
     if capped is not None:
         return capped
-    return insert_run(session, row_id, trigger)
+    return insert_run(session, row_id, trigger, requested_by)
 
 
 def _skipped_event(count: int) -> dict:
