@@ -15,7 +15,18 @@ LOCK_SECONDS = 30
 LOCK_WAIT_SECONDS = 5
 LOCK_POLL_SECONDS = 0.25
 EXPIRY_MARGIN_SECONDS = 120
-GRAPH_CONFIGURATION_KEYS = ("sharepoint_configuration", "outlook_configuration", "teams_configuration")
+GRAPH_CONFIGURATION_KEYS = ("sharepoint_configuration", "outlook_configuration", "teams_configuration",
+                            "ms_graph_configuration")
+# The login can never be refreshed again (revoked, expired, or its app is gone); anything else is transient
+EXPIRED_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+
+class StoredLoginExpired(Exception):
+    """The saved login of a credential was refused for good: the owner must sign in again."""
+
+    def __init__(self, configuration_uuid: str, error: str):
+        super().__init__(f"stored login of {configuration_uuid} expired: {error}")
+        self.configuration_uuid, self.error = configuration_uuid, error
 
 
 def _graph_login(config: dict) -> Optional[dict]:
@@ -41,6 +52,8 @@ def _dataverse_login(config: dict) -> Optional[dict]:
 
 
 LOGIN_RESOLVERS = {**{key: _graph_login for key in GRAPH_CONFIGURATION_KEYS}, "dataverse_configuration": _dataverse_login}
+# Only these toolkits save a login that Main can refresh; add a type when it implements the same flow
+UNATTENDED_LOGIN_TYPES = frozenset(LOGIN_RESOLVERS)
 
 
 def iter_credential_refs(tools: list):
@@ -62,7 +75,7 @@ def _login_fingerprint(config: dict, login: dict) -> str:
 
 
 def get_access_token(redis, config: dict, login: dict, refresh_fn: Callable, sleep: Callable = time.sleep) -> Optional[str]:
-    """Cached access token for the stored login, refreshing it at most once per lifetime."""
+    """Cached access token for the stored login, refreshing it at most once per lifetime; None on a transient error."""
     suffix = f"{config['configuration_uuid']}:{_login_fingerprint(config, login)}"
     cache_key, lock_key = f"{CACHE_PREFIX}{suffix}", f"{LOCK_PREFIX}{suffix}"
     cached = redis.get(cache_key)
@@ -95,6 +108,8 @@ def get_access_token(redis, config: dict, login: dict, refresh_fn: Callable, sle
             redis.setex(cache_key, ttl, token)
         return token
     except Exception as e:  # pylint: disable=W0703
+        if getattr(e, "error", None) in EXPIRED_ERRORS:
+            raise StoredLoginExpired(config["configuration_uuid"], e.error) from None
         log.warning("Stored OAuth login refresh failed for credential %s: %s",
                     config.get("configuration_uuid"), type(e).__name__)
         return None
@@ -128,7 +143,11 @@ def inject_stored_oauth_tokens(payload: dict, redis, refresh_fn: Callable, load_
         token_key = f"{configuration_uuid}:{login['token_key']}"
         if token_key in tokens:
             continue
-        token = get_access_token(redis, config, login, refresh_fn)
+        try:
+            token = get_access_token(redis, config, login, refresh_fn)
+        except StoredLoginExpired:
+            log.warning("Stored OAuth login of credential %s expired", configuration_uuid)
+            continue
         if token:
             tokens[token_key] = {"access_token": token}
             added += 1

@@ -4,6 +4,7 @@ Uses the shared schedule resource harness (real handler, claim insert and SQLite
 replaced, so a test sees exactly what the starter was given: the sample body as bytes and no owner ticket,
 because a sample run is admitted like a delivery (webhook governance), not as the owner's own Run now.
 """
+import collections
 import pathlib
 import sys
 
@@ -24,8 +25,9 @@ def harness(_crud_harness):
     # The door module itself pulls the signing stack, which the door tests cover.
     door = types.ModuleType(f'{PACKAGE}.utils.webhook_door')
     insert_run = sys.modules[f'{PACKAGE}.utils.schedule_claim'].insert_run
-    door.admitted = []
-    door.admit_webhook_run = lambda session, row_id, trigger='webhook': (
+    door.admitted, door.capped = [], None
+    door.Capped = collections.namedtuple('Capped', 'code running cap')
+    door.admit_webhook_run = lambda session, project_id, row_id, trigger='webhook': door.capped or (
         door.admitted.append(trigger) or insert_run(session, row_id, trigger))
     sys.modules[door.__name__] = door
     _crud_harness.door = door
@@ -168,3 +170,11 @@ def test_run_without_asking_on_a_webhook_is_refused_when_the_project_setting_is_
     hook = _hook(harness)
     answer, status = harness.call('put', {'approval_rule': 'run_without_asking'}, hook)
     assert (status, answer.get('code')) == (400, 'approval_rule_not_allowed')
+
+
+def test_a_sample_run_over_a_cap_is_429_and_inserts_nothing(harness, started):
+    hook = _hook(harness)
+    harness.door.capped = harness.door.Capped('webhook_cap_reached', 3, 3)  # #7400
+    answer, status = _run(harness, hook, payload='{}')
+    assert (status, answer['code'], answer['running'], answer['cap']) == (429, 'webhook_cap_reached', 3, 3)
+    assert runs(harness) == [] and started == []

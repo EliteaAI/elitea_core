@@ -17,6 +17,7 @@ def schema(monkeypatch):
     package.apply_project_statements = lambda project_ids, statements: (list(project_ids), [])
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.skill_publish_schema", package)
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.schedule_test_run_schema", None)
+    load("utils/admin_task_params.py", fresh=True)
     return load("utils/schedule_test_run_schema.py", fresh=True)
 
 

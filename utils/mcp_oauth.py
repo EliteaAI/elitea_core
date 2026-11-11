@@ -30,7 +30,16 @@ OAUTH_CONFIGURATION_KEYS = (
     'openapi_configuration',
     'teams_configuration',
     'outlook_configuration',
+    'ms_graph_configuration',
 )
+
+
+class TokenRefreshError(ValueError):
+    """A refresh refused by the token endpoint; `error` is the OAuth error code, when it sent one."""
+
+    def __init__(self, message: str, error: Optional[str] = None, status: Optional[int] = None):
+        super().__init__(message)
+        self.error, self.status = error, status
 
 
 def get_oauth_configurations(settings: dict) -> list:
@@ -197,7 +206,8 @@ def refresh_token(
         return token_data
     else:
         error_msg = token_data.get("error_description") or token_data.get("error") or response.text
-        raise ValueError(f"Token refresh failed: {error_msg}")
+        error = token_data.get("error") if isinstance(token_data.get("error"), str) else None
+        raise TokenRefreshError(f"Token refresh failed: {error_msg}", error, response.status_code)
 
 
 def register_dynamic_client(

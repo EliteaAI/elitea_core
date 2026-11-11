@@ -2,6 +2,12 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.9 — Keep chat runs going when switching chats (EL-7385)
+# End the response rows left "streaming" for over a day: sends that broke before their run started, and runs whose
+# task died without a stream end (dry run first):
+Run admin task close_stuck_chat_runs with param: project_id=all
+Run admin task close_stuck_chat_runs with param: project_id=all;dry_run=false
+
 # R-2.0.8 — Schedules (EL-7011)
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
 # New projects get the tables via create_all() on project creation.
