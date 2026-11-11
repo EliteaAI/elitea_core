@@ -11,8 +11,9 @@ from ..models.all import EliteATool
 from ..models.entity_schedule import EntitySchedule
 from ..models.pd.entity_schedule import NAME_MAX, ScheduleCreate, ScheduleUpdate
 from ..models.pd.index import UpdateIndexingSchedule
-from .schedule_access import schedule_scope
+from .schedule_access import SCHEDULE_PERMISSIONS, schedule_scope
 from .schedule_service import (
+    INDEX_READ_ONLY,
     TOOLKIT_INDEX,
     ScheduleError,
     create_schedule,
@@ -55,6 +56,9 @@ def save_index_schedule(project_id: int, toolkit_id: int, index_name: str, paylo
             return refusal('not_found', 'Toolkit not found', 404)
         row_id = session.scalar(select(EntitySchedule.id).where(
             EntitySchedule.toolkit_id == toolkit_id, EntitySchedule.index_name == index_name).limit(1))
+        needed = 'create' if row_id is None else 'update'  # the Schedules routes check these rights; the shim sits behind another one
+        if SCHEDULE_PERMISSIONS[needed] not in scope.permissions:
+            return refusal('read_only', INDEX_READ_ONLY, 403)
         try:
             if row_id is None:
                 row = create_schedule(session, project_id, ScheduleCreate(

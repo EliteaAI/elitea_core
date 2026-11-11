@@ -33,7 +33,10 @@ def passthrough(*args, **kwargs):
 
 @pytest.fixture
 def api(env):
-    return load_api(env)
+    loaded = load_api(env)
+    rights = loaded.access.SCHEDULE_PERMISSIONS
+    loaded.permissions = {service_env.INDEX_EDIT, rights["create"], rights["update"]}
+    return loaded
 
 
 def load_api(env):
@@ -157,11 +160,12 @@ def test_deleting_a_settings_schedule_removes_the_key_of_the_caller(api):
     body, status, headers = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
     assert (status, headers) == (200, DEPRECATED)
     assert set(legacy_schedules(api)) == {"-1"}
-    assert set(body["docs"]["schedules"]) == {"-1"}
+    assert body == {"ok": True}
 
 
 def test_deleting_the_team_key_needs_the_user_id_argument(api):
     set_legacy_schedules(api, {"42": {"cron": DAILY}, "-1": {"cron": DAILY}})
+    api.permissions = {service_env.INDEX_EDIT, api.access.SCHEDULE_PERMISSIONS["admin"]}
     api.request.args = {"user_id": "-1"}
     assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs")[1] == 200
     assert set(legacy_schedules(api)) == {"42"}
@@ -178,3 +182,50 @@ def test_deleting_leaves_the_schedule_rows_alone(api):
     set_legacy_schedules(api, {"42": {"cron": DAILY}})
     api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
     assert [row.index_name for row in schedule_rows(api)] == ["docs"]
+
+
+@pytest.mark.parametrize("target", ["43", "-1"])
+def test_deleting_another_users_key_without_the_schedule_admin_right_changes_nothing(api, target):
+    set_legacy_schedules(api, {"42": {"cron": DAILY}, target: {"cron": DAILY}})
+    api.request.args = {"user_id": target}
+    body, status = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
+    assert (status, body["error"]) == (404, f"No schedule found for user '{target}'")
+    assert set(legacy_schedules(api)) == {"42", target}
+
+
+def test_deleting_a_missing_key_answers_like_a_key_of_another_user(api):
+    set_legacy_schedules(api, {"42": {"cron": DAILY}})
+    api.request.args = {"user_id": "43"}
+    missing = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
+    assert missing == ({"ok": False, "error": "No schedule found for user '43'"}, 404)
+
+
+def test_the_schedule_admin_deletes_the_key_of_another_user(api):
+    set_legacy_schedules(api, {"42": {"cron": DAILY}, "43": {"cron": DAILY}})
+    api.permissions = {service_env.INDEX_EDIT, api.access.SCHEDULE_PERMISSIONS["admin"]}
+    api.request.args = {"user_id": "43"}
+    body, status, _ = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
+    assert (status, body) == (200, {"ok": True})
+    assert set(legacy_schedules(api)) == {"42"}
+
+
+def test_patching_to_create_a_row_needs_the_schedule_create_right(api):
+    api.permissions = {service_env.INDEX_EDIT}
+    body, status, _ = patch(api, BODY)
+    assert (status, body["code"]) == (403, "read_only")
+    assert schedule_rows(api) == []
+
+
+def test_patching_to_change_a_row_needs_the_schedule_update_right(api):
+    row_id = api.seed_index("docs")
+    api.permissions = {service_env.INDEX_EDIT, api.access.SCHEDULE_PERMISSIONS["create"]}
+    body, status, _ = patch(api, {**BODY, "cron": "0 4 * * *"})
+    assert (status, body["code"]) == (403, "read_only")
+    [row] = schedule_rows(api)
+    assert (row.id, row.cron) == (row_id, DAILY)
+
+
+def test_patching_with_the_create_right_creates_the_row(api):
+    api.permissions = {service_env.INDEX_EDIT, api.access.SCHEDULE_PERMISSIONS["create"]}
+    assert patch(api, BODY)[1] == 200
+    assert len(schedule_rows(api)) == 1
