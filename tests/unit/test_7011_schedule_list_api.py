@@ -291,12 +291,12 @@ def test_status_running_reaches_the_query_filters(env):
 
 
 # R4.1 (TC-US05-14)
-def test_r4_1_el7011_admin_gets_run_only_on_own_row_and_change_owner(env):
+def test_admin_gets_run_and_change_owner_on_any_row(env):
     env.grant(9, "list", "admin", "run")
     env.rows = [make_row(1, 9), make_row(2, 5)]
     own, other = ok(env)["rows"]
     assert "run" in own["allowed_actions"]
-    assert "run" not in other["allowed_actions"] and "change_owner" in other["allowed_actions"]
+    assert "run" in other["allowed_actions"] and "change_owner" in other["allowed_actions"]
 
 
 # R4.1 (TC-US05-15)

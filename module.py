@@ -627,6 +627,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_sharepoint_site_url_to_toolkit", self.migrate_sharepoint_site_url_to_toolkit,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "close_stuck_chat_runs", self.close_stuck_chat_runs,
                 group="R-2.0.9",
             )
@@ -1477,6 +1481,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_sharepoint_site_url_to_toolkit", self.migrate_sharepoint_site_url_to_toolkit
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_llm_model", self.migrate_llm_model

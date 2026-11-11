@@ -178,10 +178,12 @@ def test_run_now_over_an_active_run_of_the_row_answers_409_with_that_run(harness
     assert index.starts == []
 
 
-def test_run_now_of_an_index_is_refused_for_an_admin_who_is_not_the_owner(harness, index):
+def test_run_now_of_an_index_by_an_admin_who_is_not_the_owner_runs_as_the_admin(harness, index):
     harness.request_as(OTHER_ID, ADMIN)
-    assert_refusal(index.run(), 403, code='not_owner')
-    assert index.runs() == []
+    body, status = index.run()
+    assert status == 202
+    assert index.runs() == [(body['run_id'], index.schedule_id, 'manual', 'running')]
+    assert index.starts == [('toolkit_index', PROJECT_ID, index.schedule_id, body['run_id'], None)]
 
 
 def test_run_now_of_an_index_is_refused_for_an_owner_without_the_index_edit_permission(harness, index):

@@ -124,6 +124,11 @@ def test_the_started_event_names_trigger_type_and_delivery(world):
     assert "trigger: webhook · type: github · delivery gh-1" in started["text"]
 
 
+def test_the_started_event_of_a_delivery_keeps_the_schedule_owner(world):
+    _deliver(world)
+    assert world.events[0]["owner_id"] == OWNER
+
+
 def test_a_delivery_without_an_id_says_none(world):
     _deliver(world, delivery=None)
     assert "delivery none" in world.events[0]["text"]
@@ -201,6 +206,12 @@ def test_a_sample_run_log_says_sample_body_by_the_owner(world):
     started = world.events[0]
     assert "Sample body by the owner" in started["text"] and "delivery" not in started["text"]
     assert (started["trigger"], started["sample"]) == ("test", True)
+
+
+def test_a_sample_run_log_names_the_admin_when_the_run_acts_as_one(world):
+    world.run.trigger, world.run.requested_by = "test", OWNER + 1
+    _sample(world)
+    assert "Sample body by an admin" in world.events[0]["text"]
 
 
 def test_an_admitted_sample_run_ends_the_refusal_streak_as_a_delivery_does(world):

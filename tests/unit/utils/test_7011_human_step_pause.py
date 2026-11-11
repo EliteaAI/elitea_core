@@ -134,7 +134,7 @@ def test_skipping_a_sign_in_ends_the_run_as_rejected_by_the_owner(runs, session,
     runs.apply_schedule_decision(1, run.id, decision)
     session.refresh(run)
 
-    assert (decision, run.status, run.reason) == ("reject", "failed", "rejected by the owner")
+    assert (decision, run.status, run.reason) == ("reject", "failed", "rejected")
 
 
 def test_only_the_owner_answers_a_sign_in(runs, session, sent):
@@ -253,7 +253,7 @@ def test_the_owner_rejects_a_credential_wait_and_the_run_fails(runs, session, se
     runs.apply_schedule_decision(1, run.id, "reject")
     session.refresh(run)
 
-    assert (run.status, run.reason) == ("failed", "rejected by the owner")
+    assert (run.status, run.reason) == ("failed", "rejected")
 
 
 def _webhook(runs, session, rule):

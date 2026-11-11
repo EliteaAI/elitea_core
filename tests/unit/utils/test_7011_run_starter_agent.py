@@ -15,6 +15,17 @@ PKG = "plugins.elitea_core"
 PROJECT_ID, SCHEDULE_ID, RUN_ID, OWNER, AGENT_ID, VERSION_ID = 34, 7, 31, 12, 5, 9
 CONVERSATION_ID = 77
 PROMPT = "Summarize open bugs"
+NEW_OWNER = 99
+
+
+def _actor_of(world):
+    """What the real run_actor_id returns: the starter of Run now, else the stored start owner, else the live owner."""
+    def actor(_session, run):
+        if getattr(run, "trigger", "cron") in ("manual", "test") and getattr(run, "requested_by", None) is not None:
+            return run.requested_by
+        return next((e["owner_id"] for e in getattr(run, "events", None) or []
+                     if e.get("kind") == "started" and "owner_id" in e), world.schedule.created_by)
+    return actor
 
 
 class Row(SimpleNamespace):
@@ -83,6 +94,7 @@ def world(monkeypatch):
 
     def prerun(project_id, schedule, run_id):
         state.calls.append(("prerun", project_id, schedule.id, schedule.created_by, run_id))
+        state.checked = schedule
         return SimpleNamespace(ok=state.prerun_ok, owner_id=OWNER if state.prerun_ok else None)
 
     def create(**kwargs):
@@ -109,6 +121,7 @@ def world(monkeypatch):
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
             "finish_schedule_run": lambda *args: state.calls.append(("finish", *args)),
             "run_failure_reason": str,
+            "run_actor_id": _actor_of(state),
             "count_refusal": lambda *args: state.calls.append(("refused", *args)),  # #7254 has its own tests
             "end_refusal_streak": lambda *args: state.calls.append(("streak_end", *args)),
             "record_run_events": lambda *args, **kwargs: None,  # the run log has its own tests
@@ -119,7 +132,7 @@ def world(monkeypatch):
             "scan_complete": lambda review: True},
         "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
         "utils.pipeline_execution": {
-            "TriggerType": SimpleNamespace(SCHEDULED="scheduled"),
+            "TriggerType": SimpleNamespace(SCHEDULED="scheduled", SCHEDULE_MANUAL="schedule_manual"),
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
             "finish_trigger_run_with_error": lambda *args: state.calls.append(("finish_error", *args)),
@@ -201,6 +214,52 @@ def test_7011_r3_1_cron_run_sends_trigger_source_scheduled(world):
     assert world.call("predict")[1]["trigger_source"] == "scheduled"
 
 
+@pytest.mark.parametrize(("trigger", "requested_by", "acts_as"), [
+    ("manual", OWNER + 1, OWNER + 1),   # Run now by another user acts as that user
+    ("test", OWNER + 1, OWNER + 1),
+    ("manual", OWNER, OWNER),
+    ("cron", OWNER + 1, OWNER),         # a scheduled tick always acts as the owner
+])
+def test_the_run_acts_as_the_user_who_pressed_run_now(world, trigger, requested_by, acts_as):
+    world.run.trigger, world.run.requested_by = trigger, requested_by
+    _run(world)
+    assert world.call("prerun")[3] == acts_as
+
+
+@pytest.mark.parametrize(("trigger", "requested_by", "as_caller"), [
+    ("manual", OWNER + 1, True),
+    ("test", OWNER + 1, True),
+    ("manual", OWNER, False),
+    ("cron", OWNER + 1, False),
+])
+def test_a_run_now_of_another_user_is_checked_as_that_user_and_marked_so(world, trigger, requested_by, as_caller):
+    world.run.trigger, world.run.requested_by = trigger, requested_by
+    _run(world)
+    checked = world.checked
+    assert checked.run_as_caller is as_caller
+    assert checked.principal == ({"kind": "delegation", "ref": requested_by} if as_caller else {})
+
+
+def test_the_account_line_names_an_admin_run_as_admin_and_other_runs_as_schedule_owner(world, monkeypatch):
+    roles = []
+    monkeypatch.setattr(world.module, "_owner_label", lambda owner_id, role: roles.append(role) or "label")
+    for trigger, requested_by in (("manual", OWNER + 1), ("manual", OWNER), ("cron", None)):
+        world.run.trigger, world.run.requested_by = trigger, requested_by
+        world.run.conversation_id = None
+        _run(world)
+    assert roles == ["admin", "schedule owner", "schedule owner"]
+
+
+def test_the_cached_name_gets_the_role_of_each_run(world, monkeypatch):
+    asked = []
+    authors = SimpleNamespace(get_authors_data=lambda ids: asked.append(list(ids)) or [{"id": OWNER, "name": "Ann Smith"}])
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.authors", authors)
+    world.module._OWNER_LABELS.clear()   # pylint: disable=W0212
+    assert world.module._owner_label(OWNER, "admin") == "Ann Smith (admin)"   # pylint: disable=W0212
+    assert world.module._owner_label(OWNER) == "Ann Smith (schedule owner)"   # pylint: disable=W0212
+    assert asked == [[OWNER]]
+
+
 def test_7011_r2_5_predict_error_ends_the_run_message_with_the_error(world):
     error = RuntimeError("rpc down")
     world.predict_error = error
@@ -262,6 +321,17 @@ def test_a_first_start_writes_the_started_event(world):
     assert _started_events(world) == ["started"]
 
 
+@pytest.mark.parametrize(("trigger", "requested_by"), [("cron", None), ("manual", OWNER + 1), ("manual", OWNER)])
+def test_the_started_event_keeps_the_schedule_owner_whoever_the_run_acts_as(world, trigger, requested_by):
+    world.run.trigger, world.run.requested_by = trigger, requested_by
+    fields = []
+    world.module.run_event = lambda kind, text, *args, **kwargs: fields.append((kind, kwargs)) or kind
+
+    _run(world)
+
+    assert [item["owner_id"] for kind, item in fields if kind == "started"] == [OWNER]
+
+
 def test_a_restart_of_an_approved_parked_run_writes_no_second_started_event(world):
     world.run.resumed_at = "2026-01-01"
     assert _started_events(world) == []
@@ -314,3 +384,29 @@ def test_the_runtime_tool_name_is_an_alias_key_the_risk_scan_matches(world, monk
     assert runtime == "create_pull_request"
     assert security.is_tool_sensitive("github", spelled) is True
     assert security.is_tool_sensitive("github", runtime) is True
+
+
+@pytest.mark.parametrize("trigger", ["cron", "webhook"])
+def test_a_waiting_run_restarts_as_the_owner_it_started_under_after_a_change_of_owner(world, trigger):
+    world.schedule.created_by = NEW_OWNER
+    world.run.trigger, world.run.resumed_at = trigger, "2026-11-10"
+    world.run.events = [{"kind": "started", "owner_id": OWNER}]
+    _run(world)
+    checked = world.checked
+    assert world.call("prerun")[3] == OWNER
+    assert checked.created_by == OWNER and checked.principal == {"kind": "delegation", "ref": OWNER}
+    assert checked.keeps_started_owner is True and checked.run_as_caller is False
+
+
+def test_a_run_without_a_stored_start_owner_restarts_as_the_live_owner(world):
+    world.schedule.created_by = NEW_OWNER
+    world.run.trigger, world.run.events = "cron", [{"kind": "risk_check"}]
+    _run(world)
+    assert world.call("prerun")[3] == NEW_OWNER and world.checked.keeps_started_owner is False
+
+
+def test_a_run_started_by_the_current_owner_is_not_marked_as_a_former_owner(world):
+    world.schedule.created_by = NEW_OWNER
+    world.run.trigger, world.run.events = "cron", [{"kind": "started", "owner_id": NEW_OWNER}]
+    _run(world)
+    assert world.call("prerun")[3] == NEW_OWNER and world.checked.keeps_started_owner is False

@@ -137,9 +137,12 @@ def index(harness, monkeypatch):
     reads.conversation_uuids = lambda session, ids: {i: f'uuid-{i}' for i in ids if i is not None}
     reads.usage_summaries = lambda project_id, rows: {row.id: (10, 0.5) for row in rows}
     reads.version_label = lambda session, version_id: 'v3'
-    reads.tool_call_events = lambda session, conversation_id: []
+    reads.tool_call_events = lambda session, conversation_id, with_output=True: []
     reads.usage_summary = lambda session, project_id, run: (10, 0.5)
     monkeypatch.setitem(sys.modules, reads.__name__, reads)
+    deciders = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')  # a draft Test run is decided by its starter
+    deciders.run_decider_id = lambda session, run: run.requested_by
+    monkeypatch.setitem(sys.modules, deciders.__name__, deciders)
     return state
 
 

@@ -101,6 +101,8 @@ EntityType = Annotated[Literal['agent', 'pipeline', 'toolkit_index'],
                        Field(description='Kind of the scheduled entity', examples=['agent'])]
 ApplicationId = Annotated[int, Field(description='Id of the agent or pipeline', examples=[12])]
 VersionId = Annotated[int, Field(description=VERSION_TEXT, examples=[34])]
+# The upper bound (the database integer range) is checked in the handler: this module loads without `schedule_list`
+RunId = Annotated[int, Field(ge=1, description='Id of a run of `schedule_id`', examples=[41])]
 INDEX_NAME_MAX = 256  # the entity_schedules.index_name column width
 TOOLKIT_ID_TEXT = 'Id of the toolkit whose index runs; Toolkit Index rows only'
 INDEX_NAME_TEXT = 'Name of the index of that toolkit; Toolkit Index rows only'
@@ -117,6 +119,9 @@ class ScheduleRiskCheck(BaseModel):
     schedule_id: int | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
+    run_id: RunId | None = Field(
+        default=None, description='Id of a run of `schedule_id`: the scan runs as the user the run acts as, '
+        'not as the schedule owner. Needs `schedule_id`')
     approval_rule: ApprovalRule | None = Field(
         None, description='The rule to check under. With `pause_and_ask`, a missing credential or a personal '
         'sign-in is a notice, not a block. Without it, an edit uses the rule of the stored schedule',
@@ -124,6 +129,13 @@ class ScheduleRiskCheck(BaseModel):
     trigger_kind: TriggerKind | None = Field(
         None, description='The trigger to check for. A `webhook` never waits for a sign-in, so those findings block '
         'under both rules. Without it, an edit uses the kind of the stored schedule', examples=['webhook'])
+
+    @field_validator('run_id')
+    @classmethod
+    def validate_run_needs_schedule(cls, v: int | None, info: ValidationInfo) -> int | None:
+        if v is not None and info.data.get('schedule_id') is None:
+            raise ValueError('run_id needs schedule_id')
+        return v
 
 
 class ScheduleConnectionsCheck(BaseModel):

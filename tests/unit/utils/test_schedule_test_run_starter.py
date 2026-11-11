@@ -120,6 +120,44 @@ def test_a_failed_prerun_of_a_run_with_no_schedule_fails_the_run_and_does_not_di
     assert [call[0] for call in calls] == ["fail"]
 
 
+@pytest.mark.parametrize("trigger_kind, reason_name, keeps_started_owner, written", [
+    ("cron", "OWNER_LOST_ACCESS", True, ["fail"]),
+    ("webhook", "OWNER_LOST_ACCESS", True, ["fail"]),
+    ("cron", "NO_TOKEN", True, ["fail"]),
+    ("webhook", "NO_TOKEN", True, ["fail"]),
+    # controls: the owner's own run still switches the schedule off, tells the owner and counts the refusal
+    ("cron", "OWNER_LOST_ACCESS", False, ["fail", "disable", "notify"]),
+    ("webhook", "OWNER_LOST_ACCESS", False, ["fail", "disable", "notify"]),
+    ("cron", "NO_TOKEN", False, ["fail", "notify"]),
+    ("webhook", "NO_TOKEN", False, ["fail", "notify", "refused"]),
+])
+def test_a_failed_prerun_of_a_former_owners_run_leaves_the_schedule_of_the_current_owner_alone(
+        monkeypatch, trigger_kind, reason_name, keeps_started_owner, written):
+    prerun = load("utils/schedule_prerun.py", fresh=True)
+    calls = []
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_runs", types.SimpleNamespace(
+        fail_schedule_run=lambda *a: calls.append(("fail", *a)),
+        disable_schedule=lambda *a: calls.append(("disable", *a)),
+        count_refusal=lambda *a, **k: calls.append(("refused", *a)),
+        park_for_credentials=lambda *a, **k: False,
+        PAUSED_AFTER_PRERUN="paused", PRERUN_REFUSED="refused"))
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_notifications", types.SimpleNamespace(
+        notify_schedule_event=lambda *a, **k: calls.append(("notify", *a))))
+    monkeypatch.setitem(sys.modules, f"{PKG}.models.enums.all", types.SimpleNamespace(
+        NotificationEventTypes=types.SimpleNamespace(schedule_disabled="d", schedule_run_failed="f")))
+    monkeypatch.setattr(prerun, "check_principal", lambda s: None)
+    reason = getattr(prerun, reason_name)
+    monkeypatch.setattr(prerun, "check_owner_access", lambda *a: reason)
+    schedule = types.SimpleNamespace(
+        id=7, created_by=OWNER, entity_type="agent", application_id=3, version_id=4, trigger_kind=trigger_kind,
+        run_as_caller=False, keeps_started_owner=keeps_started_owner)
+
+    result = prerun.run_prerun_check(34, schedule, 90)
+
+    assert (result.ok, result.reason) == (False, reason)
+    assert [call[0] for call in calls] == written
+
+
 FORM = {"name": "Try", "entity_type": "agent", "application_id": 3, "version_id": 4, "run_mode": "prompt",
         "prompt": "Go {{ x }}", "variables": [{"name": "x", "value": "1"}], "approval_rule": "run_without_asking"}
 
@@ -184,3 +222,14 @@ def test_run_without_asking_never_holds_for_a_form_even_with_the_project_setting
     assert auto_approve is False
     outcome, _ = starter._risk_check(review, schedule.approval_rule, auto_approve)
     assert outcome == "needs_approval"
+
+
+@pytest.mark.parametrize("run_created_by, expected", [(OWNER, True), (OWNER + 1, False)])
+def test_run_without_asking_holds_for_the_owner_but_never_for_an_admin_who_acts_as_themselves(
+        starter, monkeypatch, run_created_by, expected):
+    schedule = types.SimpleNamespace(approval_rule="run_without_asking", approval_fingerprint="fp-1",
+                                     approval_confirmed_by=OWNER, created_by=run_created_by)
+    monkeypatch.setattr(starter, "_setting_allows_auto_approve", lambda project_id: True)
+    review = {**clean_review(), "sensitive": [SENSITIVE]}
+
+    assert starter._may_auto_approve(34, schedule, review) is expected
