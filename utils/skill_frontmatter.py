@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 SPEC_MAX_COMPATIBILITY_LENGTH = 500
 SPEC_OPTIONAL_KEYS = ('license', 'compatibility', 'allowed-tools')
@@ -9,7 +9,11 @@ ELITEA_METADATA_PREFIX = 'elitea-'
 LEGACY_RUN_SETTINGS_KEY = 'elitea_run_settings'
 LEGACY_VERSION_KEY = 'elitea_version'
 ELITEA_OWNED_KEYS = frozenset({'name', 'description', 'tags', LEGACY_VERSION_KEY, LEGACY_RUN_SETTINGS_KEY})
-KEYS_SHOWN_BY_ELITEA = frozenset({'license'})
+MODEL_INVOCATION_KEY = 'disable-model-invocation'
+USER_INVOCATION_KEY = 'user-invocable'
+INVOCATION_KEYS = (MODEL_INVOCATION_KEY, USER_INVOCATION_KEY)
+KEYS_SHOWN_BY_ELITEA = frozenset({'license', *INVOCATION_KEYS})
+INVOCATION_FLAG_KEYS = ('disable_model_invocation', 'user_invocable')
 
 
 def _drop_elitea_metadata(metadata: dict) -> dict:
@@ -36,6 +40,27 @@ def _validate_spec_fields(frontmatter: dict) -> None:
     metadata = frontmatter.get('metadata')
     if metadata is not None and not isinstance(metadata, dict):
         raise ValueError('Field "metadata" must be a mapping')
+
+    for key in INVOCATION_KEYS:
+        value = frontmatter.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f'Field "{key}" must be true or false')
+
+
+def invocation_flags(version_meta: Optional[dict]) -> Dict[str, bool]:
+    """The two Claude invocation keys of a version, as payload keys, only when set."""
+    frontmatter = (version_meta or {}).get(FRONTMATTER_META_KEY) or {}
+    flags = {}
+    if frontmatter.get(MODEL_INVOCATION_KEY) is True:
+        flags['disable_model_invocation'] = True
+    if frontmatter.get(USER_INVOCATION_KEY) is False:
+        flags['user_invocable'] = False
+    return flags
+
+
+def carried_invocation_flags(entry: dict) -> Dict[str, bool]:
+    """The invocation payload keys already present on a skill entry, so a rebuilt entry keeps them."""
+    return {key: entry[key] for key in INVOCATION_FLAG_KEYS if key in entry}
 
 
 def _to_jsonb_safe(value: Any) -> Any:

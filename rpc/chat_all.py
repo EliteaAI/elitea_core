@@ -1057,7 +1057,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
 
     # Continue flow can provide explicit user_input (e.g., a custom continue note).
     # Fall back to the original message-group content when absent.
-    if getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None:
+    continues_with_own_text = getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None
+    if continues_with_own_text:
         result['user_input'] = predict_payload.user_input
     else:
         result['user_input'] = generate_user_input(msg_group)
@@ -1074,6 +1075,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     try:
         apply_participant_skill_mentions(
             session, msg_group, result, predict_payload.project_id, strict_mentions=strict_skill_mentions,
+            mention_source=generate_user_input(msg_group) if continues_with_own_text else None,
         )
     except SkillInvocationLimitError as e:
         raise PayloadGenerationError(str(e), code=e.code) from e
