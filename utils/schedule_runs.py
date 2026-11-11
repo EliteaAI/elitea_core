@@ -20,6 +20,7 @@ NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 MORE_RESERVE = len(' (+999 more)')
 PAUSE_LIST_LIMIT = 50  # tools named in one pause line; the rest are counted. lean: raise it when a real run shows more
 APPROVE_ALL_TEXT = 'Approved; this run asks no more approvals'
+APPROVE_ALL_KEY = 'approve_all'  # the flag in the `form` column of the run row; the decision event is for display only
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
@@ -541,7 +542,8 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
     The run log gets the decision; only the owner decides (the check), so the owner is who decided.
-    `approve_all` with an approve is written into the decision event: the run asks no more tool approvals.
+    `approve_all` with an approve sets the flag `approves_all` reads, and is written into the decision event for the
+    log: the run asks no more tool approvals.
     """
     conversation_id = None
     with db.get_session(project_id) as session:
@@ -561,6 +563,8 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
             event = run_event('decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
                               'info' if approved else 'warning', action=decision, by=owner_id)
         append_run_events(session, run_id, event)
+        if approved and approve_all:
+            _set_approve_all(session, run_id)
         if approved:
             session.execute(
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
@@ -575,20 +579,25 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve
     delete_run_checkpoints(project_id, conversation_id)
 
 
+def _set_approve_all(session, run_id: int) -> None:
+    """Set the approve-all flag in the `form` of the run, next to what the form already holds; the caller holds the row lock."""
+    table = EntityScheduleRun.__table__
+    form = session.scalar(select(RUN_FORM).where(table.c.id == run_id)) or {}
+    session.execute(update(table).where(table.c.id == run_id).values({RUN_FORM: {**form, APPROVE_ALL_KEY: True}}))
+
+
 def approves_all(session, run_id: int) -> bool:
     """True when the owner approved all sensitive tools for the rest of this run, and the run is not over.
 
-    The choice is a `decision` event with `approve_all`. It ends with the run: a Continue on the chat after the run
-    ended gets the normal approval again. It takes the caller's session, because the continue flow holds one open.
-    lean: 200 events; move the choice to a column when a run needs more. The event list keeps the first 199 events
-    and each newer event replaces the last one, so a very long approval loop can lose the choice and the next
-    sensitive call pauses again.
+    The choice is a flag in the `form` column of the run row, set by `apply_schedule_decision`; the run log is capped at
+    `EVENT_LIMIT` events and holds the choice for display only. It ends with the run: a Continue on the chat after the
+    run ended gets the normal approval again. It takes the caller's session, because the continue flow holds one open.
+    `form` is the column of the Test Run admin task; `_approval_rule` and the conversation list read it already.
     """
-    row = session.execute(
-        select(EntityScheduleRun.status, EntityScheduleRun.events).where(EntityScheduleRun.id == run_id)).first()
-    if row is None or row.status not in ACTIVE_STATUSES:
+    row = session.execute(select(EntityScheduleRun.status, RUN_FORM).where(EntityScheduleRun.id == run_id)).first()
+    if row is None or row[0] not in ACTIVE_STATUSES:
         return False
-    return any(event.get('kind') == 'decision' and event.get('approve_all') is True for event in row.events or [])
+    return (row[1] or {}).get(APPROVE_ALL_KEY) is True
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:

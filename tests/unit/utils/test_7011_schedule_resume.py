@@ -251,12 +251,62 @@ def test_approves_all_is_false_for_an_unknown_run_and_a_run_without_events(runs,
     assert runs.approves_all(session, 999) is False
 
 
-def test_a_paused_event_that_carries_the_flag_is_no_choice(runs, session, sent):
+def test_a_decision_event_alone_is_no_choice(runs, session, sent):
     _, run = _waiting(runs, session)
-    run.events = [{"kind": "paused", "text": "x", "approve_all": True}]
+    run.events = [{"kind": "decision", "text": "x", "approve_all": True}]
     session.flush()
 
     assert runs.approves_all(session, run.id) is False
+
+
+def _event_limit():
+    return sys.modules["plugins.elitea_core.utils.schedule_claim"].EVENT_LIMIT
+
+
+def _form_of(runs, session, run):
+    return session.scalar(runs.select(runs.RUN_FORM).where(runs.EntityScheduleRun.id == run.id))
+
+
+def _tool_events(count):
+    return [{"at": f"2026-01-01T00:00:{n % 60:02d}+00:00", "kind": "tool_call", "text": "t", "level": "info"}
+            for n in range(count)]
+
+
+def test_the_choice_survives_more_events_than_the_run_log_keeps(runs, session, sent):
+    _, run = _waiting(runs, session)
+    run.events = _tool_events(_event_limit() - 1)  # the decision event takes the last place of the log
+    session.flush()
+    runs.apply_schedule_decision(1, run.id, "approve", approve_all=True)
+    assert len(_decision_events(session, run)) == 1
+
+    runs.append_run_events(session, run.id, *_tool_events(50))
+
+    session.flush()
+    session.refresh(run)
+    assert len(run.events) == _event_limit()
+    assert _decision_events(session, run) == []  # the log lost the event; the flag does not
+    assert runs.approves_all(session, run.id) is True
+
+
+def test_the_flag_is_set_next_to_the_form_of_a_test_run(runs, session, sent):
+    run = runs.EntityScheduleRun(schedule_id=None, trigger="test", status="waiting_for_approval", requested_by=OWNER)
+    session.add(run)
+    session.flush()
+    session.execute(runs.update(runs.EntityScheduleRun.__table__).where(runs.EntityScheduleRun.__table__.c.id == run.id)
+                    .values({runs.RUN_FORM: {"name": "T1", "approval_rule": "pause_and_ask"}}))
+
+    runs.apply_schedule_decision(1, run.id, "approve", approve_all=True)
+
+    assert _form_of(runs, session, run) == {"name": "T1", "approval_rule": "pause_and_ask", "approve_all": True}
+    assert runs.approves_all(session, run.id) is True
+
+
+def test_a_plain_approve_leaves_the_form_without_the_flag(runs, session, sent):
+    _, run = _waiting(runs, session)
+
+    runs.apply_schedule_decision(1, run.id, "approve")
+
+    assert _form_of(runs, session, run) is None
 
 
 STRANGER = 77
