@@ -557,7 +557,9 @@ OPERATIONS = {
         "summary": "Read a run with its event log",
         "description": _text(
             "Answer one run for the Test schedule panel: the run fields, the version and its name, the account "
-            "(`principal_label`), the risk check outcome, a `summary` (duration, tokens, cost) and `events`. "
+            "(`principal_label`), the risk check outcome (`risk_outcome`: ok, blocked, needs_approval, unknown or "
+            "needs_signin, the last when a toolkit has no saved login and its owner must sign in), a `summary` "
+            "(duration, tokens, cost) and `events`. "
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
             "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "

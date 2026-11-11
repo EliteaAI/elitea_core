@@ -24,7 +24,14 @@ from pylon.core.tools import log
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
-from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oauth_setting, refresh_token
+from ...utils.mcp_oauth import (
+    dataverse_token_endpoint,
+    exchange_token,
+    get_oauth_configurations,
+    is_same_endpoint,
+    pick_oauth_setting,
+    refresh_token,
+)
 from ....configurations.utils import expand_configuration
 
 
@@ -47,6 +54,8 @@ def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sou
     """token_endpoint is caller-supplied: only send a stored secret to the endpoint the toolkit
     declares, or for callers who can edit toolkits anyway."""
     stored_endpoint = pick_oauth_setting(credential_sources, 'token_endpoint', 'token_url')
+    # A Dataverse credential saves no endpoint: its tenant gives the one it may use (the first source is the toolkit settings)
+    stored_endpoint = stored_endpoint or (credential_sources and dataverse_token_endpoint(credential_sources[0]))
     if stored_endpoint and stored_endpoint.rstrip('/') == (token_endpoint or '').rstrip('/'):
         return True
     user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
@@ -163,6 +172,14 @@ class ProjectAPI(api_tools.APIModeHandler):
                                 log.error(f"MCP OAuth proxy: failed to expand configuration '{config_title}' - {e}")
 
                     credential_sources = [settings, *oauth_configs]
+
+                    # A Dataverse credential can be shared with every toolkit editor, so its secret never
+                    # leaves for a caller-chosen host: only the Entra endpoint of its own tenant is served.
+                    dataverse_endpoint = dataverse_token_endpoint(settings)
+                    if dataverse_endpoint is not None and not is_same_endpoint(dataverse_endpoint, data.token_endpoint):
+                        log.warning(f"MCP OAuth proxy: token_endpoint refused for Dataverse toolkit {data.toolkit_id}")
+                        return {"error": "access_denied",
+                                "error_description": "token_endpoint does not match the Dataverse credential"}, 403
 
                     # FE always sends the DCR client_id in the same request, so the guard below
                     # is not hit in practice, but is included for symmetry with the secret guard
