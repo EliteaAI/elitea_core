@@ -1,4 +1,4 @@
-"""The Configuration → Runtime section owns these two schedules.
+"""Features → Schedules owns these two schedules.
 
 The elitea_core config is re-pushed onto the `schedule` rows at every boot and
 reconfig, so the Admin Portal's Schedules tab must show them as read-only. The
@@ -71,6 +71,12 @@ def test_both_scheduler_rows_are_declared(bindings):
         "index_scheduling",
         "pipeline_scheduling",
     }
+
+
+def test_both_managed_schedules_name_the_schedules_section(bindings):
+    assert {
+        name: binding["section"] for name, binding in bindings.SCHEDULER_CONFIG_BINDINGS.items()
+    } == {"index_scheduling": "schedules", "pipeline_scheduling": "schedules"}
 
 
 def test_every_declared_field_exists_in_the_admin_schema(bindings, admin_schema):
@@ -1025,7 +1031,7 @@ def test_an_unusable_cron_names_the_field_and_the_fallback(bindings, logged, nam
     bindings.build_scheduler_sync_plan({name: {"cron": "9 *"}})
     line = _only(logged, "error")
     assert "unusable cron" in line.template
-    assert "Configuration -> Runtime" in line.template
+    assert "Features -> Schedules" in line.template
     assert line.args == (name, bindings.SCHEDULER_CONFIG_DEFAULTS[name]["cron"])
     assert other not in line.rendered
 
@@ -1036,7 +1042,7 @@ def test_a_non_boolean_flag_names_the_field_and_the_fallback(bindings, logged, n
     bindings.build_scheduler_sync_plan({name: {"enabled": "false"}})
     line = _only(logged, "error")
     assert "non-boolean enabled flag" in line.template
-    assert "Configuration -> Runtime" in line.template
+    assert "Features -> Schedules" in line.template
     assert line.args == (name, bindings.SCHEDULER_CONFIG_DEFAULTS[name]["enabled"])
     assert other not in line.rendered
 

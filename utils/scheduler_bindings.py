@@ -6,11 +6,11 @@ from pylon.core.tools import log
 
 SCHEDULER_CONFIG_BINDINGS = {
     'index_scheduling': {
-        'section': 'runtime',
+        'section': 'schedules',
         'fields': ['index_scheduling_enabled', 'index_scheduling_cron'],
     },
     'pipeline_scheduling': {
-        'section': 'runtime',
+        'section': 'schedules',
         'fields': ['pipeline_scheduling_enabled', 'pipeline_scheduling_cron'],
     },
 }
@@ -49,7 +49,7 @@ def _usable_cron(name, cron, default):
         return cron
     log.error(
         "scheduler config for %s holds an unusable cron; "
-        "falling back to %r until it is corrected in Configuration -> Runtime",
+        "falling back to %r until it is corrected in Features -> Schedules",
         name, default,
     )
     return default
@@ -62,7 +62,7 @@ def _usable_flag(name, enabled, default):
         return enabled
     log.error(
         "scheduler config for %s holds a non-boolean enabled flag; "
-        "falling back to %r until it is corrected in Configuration -> Runtime",
+        "falling back to %r until it is corrected in Features -> Schedules",
         name, default,
     )
     return default
