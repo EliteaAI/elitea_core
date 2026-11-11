@@ -33,6 +33,7 @@ from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
 from ..models.pd.tool import ToolValidatedDetails
 from ..models.pd.skill_file import describe_runtime_files
+from .skill_frontmatter import invocation_flags
 from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
 from .trigger_write_rule import sanitize_trigger_for_write
@@ -148,6 +149,7 @@ def build_skill_mappings_list(skill_mappings, skill_project_id=None) -> list:
             'version_name': version.name if version else None,
             'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
             'instructions': version.instructions if version else None,
+            **(invocation_flags(version.meta) if version else {}),
         }
         if skill_project_id is not None:
             entry['skill_project_id'] = skill_project_id

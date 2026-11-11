@@ -13,8 +13,9 @@ from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTa
 from .project_skills import build_project_skill_catalog, is_project_skills_in_chat_enabled, \
     resolve_mentioned_project_skills
 from .skill_llm_override import select_llm_override
+from .skill_frontmatter import invocation_flags
 from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
-from .skill_utils import consume_message_skills, validate_message_skill_limit
+from .skill_utils import consume_message_skills, merge_invoked_skills, model_only_names, validate_message_skill_limit
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -32,7 +33,32 @@ SKILL_NOT_FOUND_ERROR = 'Skill not found'
 
 
 class SkillParticipantError(ValueError):
-    pass
+    code = None
+
+
+class SkillNotRunnableHereError(SkillParticipantError):
+    """The skill's invocation keys keep it from being run by messaging it in a chat."""
+    code = 'SKILL_NOT_RUNNABLE_HERE'
+
+
+def is_skill_page_run(conversation) -> bool:
+    """The skill page opens its Run/Test conversations with source 'skill'; those stay exempt from the keys."""
+    return getattr(conversation, 'source', None) == ParticipantTypes.skill.value
+
+
+def refuse_direct_run(target: SkillRunTarget, conversation=None) -> None:
+    """A manual-only skill is started with ~name, a model-only one by the agent; neither by messaging it in a chat."""
+    if is_skill_page_run(conversation):
+        return
+    if target.invocation_flags.get('disable_model_invocation'):
+        raise SkillNotRunnableHereError(
+            f'Skill "{target.skill_name}" can only be started by you: send ~{target.skill_name} '
+            'in a message to the agent or the model in this chat.'
+        )
+    if target.invocation_flags.get('user_invocable') is False:
+        raise SkillNotRunnableHereError(
+            f'Skill "{target.skill_name}" is used by the agent on its own and cannot be run by messaging it.'
+        )
 
 
 @dataclass(frozen=True)
@@ -124,6 +150,7 @@ def build_skill_participant_payload(session, msg_group, predict_payload, entity_
     source, target = load_pinned_skill_target(
         msg_group.sent_to.entity_meta, chat_project_id, entity_settings.get('version_id'),
     )
+    refuse_direct_run(target, getattr(msg_group, 'conversation', None))
     try:
         run = build_skill_run(
             caller_project_id=chat_project_id,
@@ -207,6 +234,7 @@ def describe_pinned_version(skill, version_id: Optional[int], published_only: bo
         'icon_meta': skill_icon_meta(version),
         'version_name': version.name,
         'is_available': bool((version.instructions or '').strip()),
+        **invocation_flags(version.meta),
     }
 
 
@@ -248,10 +276,22 @@ def mention_candidate(target: SkillRunTarget, skill_project_id: int) -> dict:
         'version_name': target.version_name,
         'icon_meta': target.icon_meta,
         'instructions': target.instructions,
+        **target.invocation_flags,
     }
     if target.files:
         candidate['files'] = list(target.files)
     return candidate
+
+
+def mention_blocks(*texts) -> list:
+    """Every text (a string or a list of content blocks) as one list of text blocks, so one scan covers them all."""
+    blocks = []
+    for text in texts:
+        if isinstance(text, str):
+            blocks.append({'type': 'text', 'text': text})
+        elif isinstance(text, list):
+            blocks.extend(block for block in text if isinstance(block, dict))
+    return blocks
 
 
 def has_skill_mention(user_input) -> bool:
@@ -317,13 +357,16 @@ def collect_project_skill_candidates(recipient, sender_id, conversation, user_in
     if not catalog or not has_skill_mention(user_input):
         return catalog
     known_names = {skill.get('name') for skill in agent_skills} | {candidate.get('name') for candidate in participant_candidates}
-    mentioned = resolve_mentioned_project_skills(user_input, known_names, catalog, chat_project_id, strict=strict_mentions)
+    hidden_names = model_only_names(merge_mention_candidates(agent_skills, participant_candidates, catalog))
+    mentioned = resolve_mentioned_project_skills(
+        user_input, known_names, catalog, chat_project_id, strict=strict_mentions, hidden_names=hidden_names,
+    )
     loaded = {(skill['skill_project_id'], skill['skill_id']): skill for skill in mentioned}
     return [loaded.get((entry['skill_project_id'], entry['skill_id']), entry) for entry in catalog]
 
 
 def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int,
-                                     strict_mentions: bool = False) -> None:
+                                     strict_mentions: bool = False, mention_source=None) -> None:
     participant = msg_group.sent_to
     is_dummy = participant.entity_name == ParticipantTypes.dummy
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
@@ -334,20 +377,33 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
     agent_skills = (result.get('version_details') or {}).get('skills') or []
     project_skills = collect_project_skill_candidates(
         participant, (msg_group.author_participant.entity_meta or {}).get('id'), msg_group.conversation,
-        result.get('user_input'), agent_skills, candidates, chat_project_id, strict_mentions,
+        mention_blocks(mention_source, result.get('user_input')), agent_skills, candidates, chat_project_id,
+        strict_mentions and mention_source is None,
     )
     if candidates:
         result[CHAT_SKILLS_KEY] = candidates
     if project_skills:
         result[PROJECT_SKILLS_KEY] = project_skills
+    resumed_skills = []
+    if mention_source is not None:
+        # A resume (approve, reject, edit, continue) sends its decision as the text; the skills the user
+        # started with ~name in the message being resumed stay active alongside any the decision names.
+        _, resumed_skills = consume_message_skills(
+            mention_source, merge_mention_candidates([] if is_dummy else agent_skills, candidates, project_skills),
+        )
     if not has_skill_mention(result.get('user_input')):
+        if resumed_skills:
+            result[INVOKED_SKILLS_KEY] = resumed_skills
         return
     if not is_dummy:
         validate_message_skill_limit(result['user_input'], merge_mention_candidates(agent_skills, candidates, project_skills))
+        if resumed_skills:
+            result[INVOKED_SKILLS_KEY] = resumed_skills
     elif candidates or project_skills:
-        result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(
+        result['user_input'], message_skills = consume_message_skills(
             result['user_input'], merge_mention_candidates([], candidates, project_skills),
         )
+        result[INVOKED_SKILLS_KEY] = merge_invoked_skills(message_skills, resumed_skills)
 
 
 def validate_turn_skill_limit(

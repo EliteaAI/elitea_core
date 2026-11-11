@@ -18,7 +18,9 @@ from .skill_run_settings import portable_run_settings
 from .skill_file_store import delete_contents
 from .skill_frontmatter import (
     FRONTMATTER_META_KEY,
+    carried_invocation_flags,
     extract_non_elitea_frontmatter,
+    invocation_flags,
 )
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping, SkillVersionFile
 from ..models.all import Tag, ApplicationVersion, Application
@@ -1762,6 +1764,7 @@ def get_available_skills_for_agent(
                     'version_name': version.name if version else 'unknown',
                     'version_missing': version is None,
                     'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
+                    **(invocation_flags(version.meta) if version else {}),
                 })
 
         return skills
@@ -1908,6 +1911,34 @@ def consume_invoked_skills(
     return cleaned_text, invoked
 
 
+def model_only_names(candidates: List[dict]) -> set:
+    """Lower-cased names whose winning candidate (first in precedence order) is not user-invocable."""
+    winners: dict = {}
+    for skill in candidates:
+        key = (skill.get('name') or '').strip().lower()
+        if key and key not in winners:
+            winners[key] = skill
+    return {key for key, skill in winners.items() if skill.get('user_invocable') is False}
+
+
+def drop_model_only_candidates(candidates: List[dict]) -> List[dict]:
+    hidden = model_only_names(candidates)
+    return [skill for skill in candidates if (skill.get('name') or '').strip().lower() not in hidden]
+
+
+def merge_invoked_skills(message_skills: List[dict], resumed_skills: Optional[List[dict]]) -> List[dict]:
+    """The message's own skills first, then the resumed ones it does not repeat, within the per-turn cap."""
+    seen = {(s.get('skill_project_id'), s.get('skill_id')) for s in message_skills}
+    merged = list(message_skills)
+    for skill in resumed_skills or []:
+        key = (skill.get('skill_project_id'), skill.get('skill_id'))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(skill)
+    return _validate_invocation_limit(merged)
+
+
 def _validate_invocation_limit(message_skills: List[dict]) -> List[dict]:
     max_allowed = get_max_invoked_skills_per_turn()
     if len(message_skills) > max_allowed:
@@ -1916,6 +1947,7 @@ def _validate_invocation_limit(message_skills: List[dict]) -> List[dict]:
 
 
 def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
+    candidates = drop_model_only_candidates(candidates)
     if isinstance(message_content, str):
         cleaned_message, message_skills = consume_invoked_skills(message_content, candidates)
         return cleaned_message or 'continue', _validate_invocation_limit(message_skills)
@@ -2004,6 +2036,7 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             'instruction_referenced': s.get('skill_id') in referenced_ids,
             'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
+            **carried_invocation_flags(s),
         }
         if s.get('skill_project_id') is not None:
             entry['skill_project_id'] = s['skill_project_id']

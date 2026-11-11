@@ -179,6 +179,7 @@ def env(isolated_sys_modules):
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
                  'skill_run_settings'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
+    _load('utils/skill_frontmatter.py', f'{PACKAGE}.utils.skill_frontmatter')
     module = _load('utils/skill_run_utils.py', f'{PACKAGE}.utils.skill_run_utils')
     return types.SimpleNamespace(mod=module, schemas=schemas, project_context=project_context, routing=routing)
 

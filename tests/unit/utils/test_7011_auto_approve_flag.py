@@ -47,7 +47,7 @@ def build(models_path):
         'next_input_suggestion_config': lambda *a: {'enabled': False},
         'serialize': lambda value: value,
         'resolve_application_name': lambda p: 'fixture',
-        'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []),
+        'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []), 'merge_invoked_skills': lambda message, resumed: [*message, *(resumed or [])],
         'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
         'merge_disclosable_skills': lambda own, chat: [*own, *chat],
         'dedupe_internal_mcp_tools': lambda tools: None,

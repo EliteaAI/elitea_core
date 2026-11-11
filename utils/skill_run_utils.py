@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 from uuid import uuid4
 
@@ -14,6 +14,7 @@ from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 from .predict_utils import get_project_context
 from .project_context_utils import prepare_project_context_delivery
 from .sio_utils import SioEvents, SioValidationError
+from .skill_frontmatter import invocation_flags
 from .skill_run_settings import is_requested_model_usable, selection_mode, without_model_binding
 from .usage_attribution import skill_attribution
 from ..models.enums.all import PublishStatus
@@ -51,6 +52,7 @@ class SkillRunTarget:
     run_settings: dict
     description: Optional[str] = None
     files: tuple = ()
+    invocation_flags: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,7 @@ def build_skill_run_target(skill, version_id: Optional[int], published_only: boo
         run_settings=saved_run_settings(version),
         description=skill.description,
         files=tuple(describe_runtime_files(version.files)),
+        invocation_flags=invocation_flags(version.meta),
     )
 
 
