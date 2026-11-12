@@ -173,9 +173,10 @@ def rpc_module(isolated_sys_modules):
     sys.modules[f'{PACKAGE}.models.folder'] = types.SimpleNamespace(ConversationFolder=mock.MagicMock())
     sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
         EntitySchedule=EntitySchedule, EntityScheduleRun=EntityScheduleRun,
-        RUN_FORM=EntityScheduleRun.__table__.c.form)
-    sys.modules[f'{PACKAGE}.utils.schedule_test_runs'] = types.SimpleNamespace(
-        UNDEFINED_COLUMN='42703', error_code=lambda error: getattr(error.orig, 'pgcode', None))
+        RUN_FORM=EntityScheduleRun.__table__.c.form, RUN_APPLICATION_ID=None, ACTIVE_STATUSES=())
+    _fuzzy(f'{PACKAGE}.models.pd.entity_schedule')
+    # The real module, so the error-code tests below break when its psycopg3 `sqlstate` branch goes
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_test_runs.py', f'{PACKAGE}.utils.schedule_test_runs')
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
@@ -439,6 +440,40 @@ class DbOrig(Exception):
 
 def _db_error(error_class, pgcode):
     return error_class('SELECT form', {}, DbOrig(pgcode))
+
+
+class SqlstateOnly(Exception):
+    """A psycopg3 error: it has `sqlstate` and no `pgcode`."""
+
+    def __init__(self, sqlstate):
+        super().__init__(sqlstate)
+        self.sqlstate = sqlstate
+
+
+def _real_error_code(rpc_module):
+    return sys.modules[f'{PACKAGE}.utils.schedule_test_runs'].error_code
+
+
+def test_error_code_reads_the_sqlstate_of_a_psycopg3_error(rpc_module):
+    assert _real_error_code(rpc_module)(ProgrammingError('SELECT form', {}, SqlstateOnly('42703'))) == '42703'
+
+
+def test_error_code_reads_the_pgcode_of_a_psycopg2_error(rpc_module):
+    assert _real_error_code(rpc_module)(_db_error(ProgrammingError, '42703')) == '42703'
+
+
+def test_error_code_is_none_when_the_error_has_no_code(rpc_module):
+    assert _real_error_code(rpc_module)(ProgrammingError('SELECT form', {}, Exception('no code'))) is None
+
+
+def test_a_psycopg3_missing_form_column_lists_the_test_run_without_a_name(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, None, 'success', 'test')], [],
+                         form_error=ProgrammingError('SELECT form', {}, SqlstateOnly('42703')))
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert runs[4]['schedule_name'] is None
+    assert session.savepoints == ['rolled back']
 
 
 def test_a_missing_form_column_lists_the_test_run_without_a_name_and_logs_once(rpc_module):
