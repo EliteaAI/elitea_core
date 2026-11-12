@@ -118,6 +118,46 @@ def test_a_vault_reference_for_a_dataverse_toolkit_is_not_resolved_for_another_e
     assert status == 403 and toolkits.proxy.posted == []
 
 
+@pytest.fixture
+def vault(toolkits, monkeypatch):
+    """The vault resolves ``{{secret.shared}}`` to a real value."""
+    resolve = lambda value: 'vault-secret' if value == '{{secret.shared}}' else value
+    monkeypatch.setattr(toolkits.proxy.handler, 'VaultClient',
+                        lambda project_id: types.SimpleNamespace(unsecret=resolve))
+
+
+def test_a_member_without_the_edit_right_gets_the_stored_secret_at_the_own_endpoint(toolkits):
+    toolkits.settings = {'dataverse_configuration': dict(DATAVERSE)}
+    toolkits.permissions = []
+
+    _, status = _sign_in(toolkits, OWN_ENDPOINT)
+
+    assert status == 200
+    (_, form), = toolkits.proxy.posted
+    assert form['client_secret'] == 'real-secret'
+
+
+def test_a_member_without_the_edit_right_gets_no_vault_secret_even_at_the_own_endpoint(toolkits, vault):
+    toolkits.settings = {'dataverse_configuration': dict(DATAVERSE)}
+    toolkits.permissions = []
+
+    body, status = _sign_in(toolkits, OWN_ENDPOINT, client_secret='{{secret.shared}}')
+
+    assert (status, body['error']) == (403, 'access_denied')
+    assert toolkits.proxy.posted == []
+
+
+def test_a_toolkit_editor_resolves_a_vault_reference_at_the_own_endpoint(toolkits, vault):
+    toolkits.settings = {'dataverse_configuration': dict(DATAVERSE)}
+    toolkits.permissions = [PATCH]
+
+    _, status = _sign_in(toolkits, OWN_ENDPOINT, client_secret='{{secret.shared}}')
+
+    assert status == 200
+    (_, form), = toolkits.proxy.posted
+    assert form['client_secret'] == 'vault-secret'
+
+
 def test_another_sign_in_type_keeps_the_saved_endpoint_or_toolkit_edit_rule(toolkits):
     saved = 'https://login.microsoftonline.com/org-tenant/oauth2/v2.0/token'
     toolkits.settings = {'teams_configuration': {'client_id': 'cid', 'client_secret': 'real-secret',

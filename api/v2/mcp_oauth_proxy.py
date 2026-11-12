@@ -50,12 +50,20 @@ def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_typ
     return app['client_id'], app['client_secret'], app['token_endpoint'], ' '.join(scopes)
 
 
-def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list) -> bool:
+def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list,
+                            dataverse_own_endpoint: bool = True) -> bool:
     """token_endpoint is caller-supplied: only send a stored secret to the endpoint the toolkit
-    declares, or for callers who can edit toolkits anyway."""
+    declares, or for callers who can edit toolkits anyway.
+
+    dataverse_own_endpoint: a Dataverse credential saves no endpoint, so its tenant endpoint counts as
+    the declared one. A schedule owner may lack the edit right but must still sign in, and the stored
+    secret goes only to the tenant of its own credential. A vault reference sent by the caller is not
+    that stored secret: it keeps the edit-right rule, so pass False there.
+    """
     stored_endpoint = pick_oauth_setting(credential_sources, 'token_endpoint', 'token_url')
-    # A Dataverse credential saves no endpoint: its tenant gives the one it may use (the first source is the toolkit settings)
-    stored_endpoint = stored_endpoint or (credential_sources and dataverse_token_endpoint(credential_sources[0]))
+    if not stored_endpoint and dataverse_own_endpoint and credential_sources:
+        # the first source is the toolkit settings
+        stored_endpoint = dataverse_token_endpoint(credential_sources[0])
     if stored_endpoint and stored_endpoint.rstrip('/') == (token_endpoint or '').rstrip('/'):
         return True
     user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
@@ -216,7 +224,7 @@ class ProjectAPI(api_tools.APIModeHandler):
         if client_secret and data.client_secret and client_secret == data.client_secret and not data.oauth_app_id:
             resolved_secret = vault_client.unsecret(client_secret)
             if resolved_secret != client_secret and not _may_send_stored_secret(
-                    project_id, data.token_endpoint, credential_sources):
+                    project_id, data.token_endpoint, credential_sources, dataverse_own_endpoint=False):
                 return {"error": "access_denied",
                         "error_description": "Vault secret references require toolkit edit permission"}, 403
             client_secret = resolved_secret
