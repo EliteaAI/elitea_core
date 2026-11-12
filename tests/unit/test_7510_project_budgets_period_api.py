@@ -1,9 +1,8 @@
 """Admin budgets listing for a chosen month (api/v2/project_budgets.py, #7510).
 
-The rule under test: a past month reports the limit and source recorded for that month and
-never today's. Where nothing was recorded the row says so (limit_available false) instead of
-borrowing the current limit, and "unlimited" stays distinct from "not recorded". Spend that
-could not be read is null, not $0.00.
+The rule under test: a past month reports spend only. Limits are not kept per month, so a
+past row carries no limit, used or source, and today's limit is never applied to old spend.
+Spend that could not be read is null, not $0.00. The current month is unchanged.
 
 Run standalone: python3 tests/unit/test_7510_project_budgets_period_api.py
 """
@@ -98,8 +97,7 @@ def _restore(saved):
 class FakeRpc:
     """Answers the calls the listing makes and records which ones it made."""
 
-    def __init__(self, snapshots=None, period_spend=None, current_spend=None, current_limits=None):
-        self.snapshots = snapshots or {}
+    def __init__(self, period_spend=None, current_spend=None, current_limits=None):
         self.period_spend = period_spend if period_spend is not None else {
             "available": True, "spend": {}, "earliest_period": "202601",
         }
@@ -134,10 +132,6 @@ class FakeRpc:
         self.called.append("elitea_core_get_effective_project_limits")
         return self.current_limits
 
-    def elitea_core_list_project_budget_periods(self, **kwargs):
-        self.called.append("elitea_core_list_project_budget_periods")
-        return self.snapshots
-
 
 def _call(args, rpc):
     request = FakeRequest()
@@ -169,10 +163,18 @@ class TestCurrentMonthUnchanged(unittest.TestCase):
         self.assertEqual(row["effective_limit"], 999.0)
         self.assertEqual(row["limit_source"], "explicit")
         self.assertEqual(row["spend"], 12.5)
-        self.assertTrue(row["limit_available"])
         self.assertEqual(row["percent_used"], round(12.5 / 999.0 * 100, 2))
         self.assertNotIn("elitea_core_list_project_budget_periods", rpc.called)
         self.assertNotIn("usage_get_projects_period_spend", rpc.called)
+
+    def test_a_current_row_has_exactly_the_fields_it_had_before_this_change(self):
+        row = _rows(_call({}, FakeRpc(current_limits={1: 999.0}))[0])[1]
+        #
+        self.assertEqual(set(row), {
+            "project_id", "name", "display_name", "owner_name", "owner_email", "is_personal",
+            "monthly_limit", "member_default_limit", "effective_limit", "limit_source", "currency",
+            "enabled", "spend", "remaining", "percent_used",
+        })
 
     def test_an_explicit_current_period_behaves_like_none(self):
         rpc = FakeRpc(current_limits={1: 999.0})
@@ -188,83 +190,52 @@ class TestCurrentMonthUnchanged(unittest.TestCase):
         self.assertTrue(row["enabled"])
 
 
-class TestPastMonthUsesTheRecord(unittest.TestCase):
-    def test_limit_and_source_come_from_the_snapshot_not_from_today(self):
-        # Today the project is capped at 999 explicitly; in LAST it was a 25 default
-        rpc = FakeRpc(
-            snapshots={1: {"effective_limit": 25.0, "limit_source": "default", "currency": "USD"}},
-            period_spend={"available": True, "spend": {1: 10.0}, "earliest_period": "202601"},
-            current_limits={1: 999.0},
-        )
+class TestPastMonthIsSpendOnly(unittest.TestCase):
+    SPEND = {"available": True, "spend": {1: 10.0, 2: 0.0}, "earliest_period": "202601"}
+
+    def test_a_row_has_spend_and_none_of_the_limit_fields(self):
+        rpc = FakeRpc(period_spend=self.SPEND, current_limits={1: 999.0})
         payload, status = _call({"period": LAST}, rpc)
         row = _rows(payload)[1]
         #
         self.assertEqual(status, 200)
         self.assertFalse(payload["is_current"])
-        self.assertEqual(row["effective_limit"], 25.0)
-        self.assertEqual(row["limit_source"], "default")
-        self.assertEqual(row["percent_used"], 40.0)
-        self.assertTrue(row["limit_available"])
-        self.assertNotIn("elitea_core_get_effective_project_limits", rpc.called)
-
-    def test_a_project_with_no_snapshot_is_not_available_not_unlimited(self):
-        rpc = FakeRpc(
-            snapshots={},
-            period_spend={"available": True, "spend": {1: 10.0}, "earliest_period": "202601"},
-            current_limits={1: 999.0},
-        )
-        row = _rows(_call({"period": LAST}, rpc)[0])[1]
-        #
-        self.assertFalse(row["limit_available"])
-        self.assertIsNone(row["effective_limit"])
-        self.assertIsNone(row["limit_source"])
-        self.assertIsNone(row["percent_used"])
-        # Spend was recorded, so it is still shown
         self.assertEqual(row["spend"], 10.0)
+        self.assertTrue(row["spend_available"])
+        for field in ("effective_limit", "limit_source", "percent_used", "remaining",
+                      "monthly_limit", "member_default_limit", "enabled", "limit_available"):
+            self.assertNotIn(field, row, field)
 
-    def test_a_recorded_unlimited_month_stays_distinct_from_not_recorded(self):
-        rpc = FakeRpc(snapshots={
-            1: {"effective_limit": None, "limit_source": "unlimited", "currency": "USD"},
-        })
-        rows = _rows(_call({"period": LAST}, rpc)[0])
+    def test_todays_limits_and_budgets_are_never_read_for_a_past_month(self):
+        rpc = FakeRpc(period_spend=self.SPEND, current_limits={1: 999.0})
         #
-        self.assertTrue(rows[1]["limit_available"])
-        self.assertIsNone(rows[1]["effective_limit"])
-        self.assertEqual(rows[1]["limit_source"], "unlimited")
-        self.assertFalse(rows[2]["limit_available"])
-
-    def test_a_zero_limit_month_is_a_real_limit(self):
-        rpc = FakeRpc(
-            snapshots={1: {"effective_limit": 0.0, "limit_source": "explicit", "currency": "USD"}},
-            period_spend={"available": True, "spend": {1: 3.0}, "earliest_period": "202601"},
-        )
-        row = _rows(_call({"period": LAST}, rpc)[0])[1]
-        # 0 is a limit of zero, not "no limit"; used% has no meaningful value against it
-        self.assertEqual(row["effective_limit"], 0.0)
-        self.assertTrue(row["limit_available"])
-        self.assertIsNone(row["percent_used"])
-
-    def test_todays_editable_settings_are_not_shown_for_a_past_month(self):
-        rpc = FakeRpc()
-        row = _rows(_call({"period": LAST}, rpc)[0])[1]
+        _call({"period": LAST}, rpc)
         #
-        self.assertIsNone(row["monthly_limit"])
-        self.assertIsNone(row["member_default_limit"])
-        self.assertIsNone(row["enabled"])
+        self.assertNotIn("elitea_core_get_effective_project_limits", rpc.called)
+        self.assertNotIn("usage_get_projects_spend", rpc.called)
+        self.assertIn("usage_get_projects_period_spend", rpc.called)
+
+    def test_genuine_zero_spend_is_zero_and_available(self):
+        row = _rows(_call({"period": LAST}, FakeRpc(period_spend=self.SPEND))[0])[2]
+        #
+        self.assertEqual(row["spend"], 0.0)
+        self.assertTrue(row["spend_available"])
+
+    def test_the_listing_still_pages_and_counts(self):
+        payload, _ = _call({"period": LAST}, FakeRpc(period_spend=self.SPEND))
+        #
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual(payload["counts"], {"team": 2, "personal": 0})
+        self.assertEqual([row["name"] for row in payload["rows"]], ["alpha", "beta"])
 
 
 class TestSpendAvailability(unittest.TestCase):
     def test_unreadable_spend_is_null_not_zero(self):
-        rpc = FakeRpc(
-            snapshots={1: {"effective_limit": 25.0, "limit_source": "default", "currency": "USD"}},
-            period_spend={"available": False, "spend": {}, "earliest_period": None},
-        )
+        rpc = FakeRpc(period_spend={"available": False, "spend": {}, "earliest_period": None})
         row = _rows(_call({"period": LAST}, rpc)[0])[1]
         #
         self.assertFalse(row["spend_available"])
         self.assertIsNone(row["spend"])
-        self.assertIsNone(row["percent_used"])
-        self.assertIsNone(row["remaining"])
 
     def test_a_failing_spend_call_is_treated_as_unavailable(self):
         class Broken(FakeRpc):
@@ -274,16 +245,6 @@ class TestSpendAvailability(unittest.TestCase):
         row = _rows(_call({"period": LAST}, Broken())[0])[1]
         self.assertFalse(row["spend_available"])
         self.assertIsNone(row["spend"])
-
-    def test_genuine_zero_spend_is_zero_and_available(self):
-        rpc = FakeRpc(
-            snapshots={1: {"effective_limit": 25.0, "limit_source": "default", "currency": "USD"}},
-            period_spend={"available": True, "spend": {1: 0.0}, "earliest_period": "202601"},
-        )
-        row = _rows(_call({"period": LAST}, rpc)[0])[1]
-        self.assertTrue(row["spend_available"])
-        self.assertEqual(row["spend"], 0.0)
-        self.assertEqual(row["percent_used"], 0.0)
 
 
 class TestPeriodValidation(unittest.TestCase):

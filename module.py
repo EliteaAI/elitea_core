@@ -417,7 +417,6 @@ class Module(module.ModuleModel):
         self._register_managed_schedules()
         self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
-        self._register_budget_period_snapshot()
 
         # ORM create_all() creates missing tenant tables but never expands an
         # existing one. Apply the transactionally committed compatibility guard
@@ -1257,7 +1256,6 @@ class Module(module.ModuleModel):
         self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget, feature_budget, user_feature_budget
-        from .models import project_budget_period  # noqa: F401 — register the monthly budget history table
         from .models import evaluation, eval_platform_dimension
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
@@ -1816,25 +1814,6 @@ class Module(module.ModuleModel):
             'rpc_func': 'mcp_servers_handler'
         }
         self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists(schedule_data)
-
-    def _register_budget_period_snapshot(self):
-        """Hourly job that records the month's effective project limits (#7510).
-
-        Kept apart from the platform schedule inventory: it is not a configurable platform
-        schedule, and a missing scheduling plugin must only skip this job.
-        """
-        try:
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'elitea_core_snapshot_all_project_budgets',
-                'rpc_kwargs': {},
-                'name': 'project_budget_period_snapshot',
-                'cron': '17 * * * *',
-                'active': True,
-            })
-        except Empty:
-            log.warning('No scheduling plugin responded: name=project_budget_period_snapshot')
-        except Exception:  # pylint: disable=W0703
-            log.exception('Failed to create schedule: name=project_budget_period_snapshot')
 
     # Provider Hub Methods
     def provider_hub_init(self):

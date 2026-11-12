@@ -58,6 +58,51 @@ def _limit_source(row: dict, effective, project_default=None):
     return "default"
 
 
+def _past_month_rows(rpc, projects, owner_map, period):
+    """Rows of a finished month: spend only.
+
+    Limits are not stored per month, and applying today's limit to old spend would be wrong,
+    so a past row carries no limit, used or source. Spend that could not be read is None, not
+    0.0, so a failed read never looks like a month in which nothing was spent.
+    """
+    project_ids = [project["id"] for project in projects]
+    #
+    try:
+        answer = rpc.timeout(30).usage_get_projects_period_spend(
+            project_ids=project_ids, period=period,
+        ) or {}
+    except Exception:  # pylint: disable=W0703
+        answer = {}
+    #
+    available = bool(answer.get("available"))
+    spend_map = answer.get("spend") or {}
+    rows = []
+    #
+    for project in projects:
+        project_id = project["id"]
+        project_name = project.get("name") or ""
+        is_personal = project_name.startswith("project_user_")
+        owner = owner_map.get(project.get("owner_id")) or {}
+        owner_label = owner.get("email") or owner.get("name")
+        #
+        rows.append({
+            "project_id": project_id,
+            "name": project_name,
+            "display_name": owner_label if (is_personal and owner_label) else project_name,
+            "owner_name": owner.get("name") or owner.get("email"),
+            "owner_email": owner.get("email"),
+            "is_personal": is_personal,
+            "currency": "USD",
+            "spend": (
+                float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
+                if available else None
+            ),
+            "spend_available": available,
+        })
+    #
+    return rows
+
+
 class AdminAPI(api_tools.APIModeHandler):
     """Platform-admin listing of every project's budget and current-month spend."""
 
@@ -66,6 +111,8 @@ class AdminAPI(api_tools.APIModeHandler):
         description=(
             "Paginated list of projects with their effective budget and spend for a month "
             "(the current one by default). Backs Admin -> Budgets.\n\n"
+            "A past month returns spend only: limits are not kept per month, so the limit, "
+            "used and source fields are not part of those rows.\n\n"
             "Only name and id can be ordered. Limit, spend and usage are derived after the "
             "query - from stored budgets, configured defaults and the LLM proxy - so "
             "ordering by them would sort only the returned page; an unsupported sort_by "
@@ -108,9 +155,7 @@ class AdminAPI(api_tools.APIModeHandler):
                 "schema": {"type": "string", "pattern": "^[0-9]{6}$"},
                 "description": (
                     "Month to report, YYYYMM (UTC): the current month or one of the three "
-                    "before it. Defaults to the current month. Past months return the "
-                    "limit and source recorded for that month; where none was recorded "
-                    "limit_available is false rather than today's limit being applied."
+                    "before it. Defaults to the current month. A past month returns spend only."
                 ),
                 "example": "202610",
             },
@@ -158,8 +203,6 @@ class AdminAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, **kwargs):
-        from ...utils import budget_periods  # pylint: disable=C0415
-        #
         rpc = rpc_tools.RpcMixin().rpc
         #
         limit = int(request.args.get("limit", 20))
@@ -168,11 +211,13 @@ class AdminAPI(api_tools.APIModeHandler):
         project_type = request.args.get("project_type") or None
         sort_order = request.args.get("sort_order", "asc")
         #
+        from ...utils import budget_periods  # pylint: disable=C0415
         try:
             period = budget_periods.validate_period(request.args.get("period"))
         except ValueError as error:
             return {"error": str(error)}, 400
         is_current = period == budget_periods.current_period()
+        period_start, period_end = budget_periods.period_range(period)
         #
         sort_by = _safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD))
         # A Tool Spend feature reads its own tables and counters; without one this is the LLM listing
@@ -183,8 +228,8 @@ class AdminAPI(api_tools.APIModeHandler):
                 validate_feature_period(feature, "month")
             except ValueError as error:
                 return {"error": str(error)}, 400
-        if feature and not is_current:
-            return {"error": "Tool Spend limits have no monthly history"}, 400
+            if not is_current:
+                return {"error": "Tool Spend limits can only be listed for the current month"}, 400
         spend_scope = {"model_name": feature} if feature else {}
         #
         # Owner ids are OR'd into the project search, so resolve them only for personal
@@ -204,7 +249,7 @@ class AdminAPI(api_tools.APIModeHandler):
         projects = listing.get("rows") or []
         project_ids = [p["id"] for p in projects]
         #
-        budgets = (
+        budgets = {} if not is_current else (
             rpc.timeout(10).elitea_core_list_project_feature_budgets(feature=feature) if feature
             else rpc.timeout(10).elitea_core_list_project_budgets()
         ) or {}
@@ -220,50 +265,35 @@ class AdminAPI(api_tools.APIModeHandler):
         #
         owner_map = {int(user["id"]): user for user in owners or []}
         #
-        # One spend call for the whole page rather than one per row. A past month goes
-        # through the call that says whether the answer can be trusted, because the plain
-        # one reports a failed read as $0.00 and an admin would read that as "spent nothing"
-        spend_available = True
-        #
-        if is_current:
-            try:
-                spend_map = rpc.timeout(30).usage_get_projects_spend(
-                    project_ids=project_ids, **spend_scope,
-                ) or {}
-            except Exception:  # pylint: disable=W0703
-                spend_map = {}
-        else:
-            try:
-                answer = rpc.timeout(30).usage_get_projects_period_spend(
-                    project_ids=project_ids, period=period,
-                ) or {}
-            except Exception:  # pylint: disable=W0703
-                answer = {}
-            spend_available = bool(answer.get("available"))
-            spend_map = answer.get("spend") or {}
-        #
-        # Past months read what was recorded then; today's limits would be applied
-        # retrospectively to old spend, which is the one thing this view must not do
-        snapshots = {}
         if not is_current:
-            try:
-                snapshots = rpc.timeout(20).elitea_core_list_project_budget_periods(
-                    period=period, project_ids=project_ids,
-                ) or {}
-            except Exception:  # pylint: disable=W0703
-                snapshots = {}
+            return {
+                "rows": _past_month_rows(rpc, projects, owner_map, period),
+                "total": listing.get("total", len(projects)),
+                "counts": listing.get("counts") or {},
+                "period": period,
+                "period_start": period_start,
+                "period_end": period_end,
+                "is_current": False,
+            }, 200
+        #
+        # One spend call for the whole page rather than one per row
+        try:
+            spend_map = rpc.timeout(30).usage_get_projects_spend(
+                project_ids=project_ids, **spend_scope,
+            ) or {}
+        except Exception:  # pylint: disable=W0703
+            spend_map = {}
+        #
+        try:
+            limit_map = (
+                rpc.timeout(20).elitea_core_get_effective_feature_project_limits(
+                    project_ids=project_ids, feature=feature,
+                ) if feature else rpc.timeout(20).elitea_core_get_effective_project_limits(
+                    project_ids=project_ids,
+                )
+            ) or {}
+        except Exception:  # pylint: disable=W0703
             limit_map = {}
-        else:
-            try:
-                limit_map = (
-                    rpc.timeout(20).elitea_core_get_effective_feature_project_limits(
-                        project_ids=project_ids, feature=feature,
-                    ) if feature else rpc.timeout(20).elitea_core_get_effective_project_limits(
-                        project_ids=project_ids,
-                    )
-                ) or {}
-            except Exception:  # pylint: disable=W0703
-                limit_map = {}
         #
         rows = []
         #
@@ -271,23 +301,8 @@ class AdminAPI(api_tools.APIModeHandler):
             project_id = project["id"]
             row = budgets.get(project_id) or budgets.get(str(project_id)) or {}
             #
-            snapshot = snapshots.get(project_id) or snapshots.get(str(project_id))
-            #
-            if is_current:
-                effective = limit_map.get(project_id, limit_map.get(str(project_id)))
-                source = _limit_source(row, effective)
-                limit_available = True
-            else:
-                # Not recorded is not unlimited: effective stays None but limit_available says why
-                limit_available = snapshot is not None
-                effective = snapshot["effective_limit"] if snapshot else None
-                source = snapshot["limit_source"] if snapshot else None
-            #
-            currency = (snapshot or {}).get("currency") or row.get("currency", "USD")
-            #
-            # None, not 0.0, when the month's spend could not be read
-            spend = float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0) \
-                if spend_available else None
+            effective = limit_map.get(project_id, limit_map.get(str(project_id)))
+            spend = float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
             #
             project_name = project.get("name") or ""
             is_personal = project_name.startswith("project_user_")
@@ -303,25 +318,18 @@ class AdminAPI(api_tools.APIModeHandler):
                 "owner_name": owner.get("name") or owner.get("email"),
                 "owner_email": owner.get("email"),
                 "is_personal": is_personal,
-                # Today's editable settings: meaningless for a closed month, so not carried there
-                "monthly_limit": row.get("monthly_limit") if is_current else None,
+                "monthly_limit": row.get("monthly_limit"),
                 # Carried so the edit dialog can prefill it without a second read
-                "member_default_limit": row.get("member_default_limit") if is_current else None,
+                "member_default_limit": row.get("member_default_limit"),
                 "effective_limit": effective,
-                "limit_source": source,
-                "limit_available": limit_available,
-                "currency": currency,
-                "enabled": row.get("enabled", False) if is_current else None,
+                "limit_source": _limit_source(row, effective),
+                "currency": row.get("currency", "USD"),
+                "enabled": row.get("enabled", False),
                 "spend": spend,
-                "spend_available": spend_available,
-                "remaining": None if effective is None or spend is None else max(0.0, effective - spend),
-                "percent_used": (
-                    None if not effective or spend is None else round(spend / effective * 100, 2)
-                ),
+                "remaining": None if effective is None else max(0.0, effective - spend),
+                "percent_used": None if not effective else round(spend / effective * 100, 2),
                 **({"feature": feature, "feature_enabled": row.get("feature_enabled")} if feature else {}),
             })
-        #
-        period_start, period_end = budget_periods.period_range(period)
         #
         return {
             "rows": rows,
@@ -330,7 +338,7 @@ class AdminAPI(api_tools.APIModeHandler):
             "period": period,
             "period_start": period_start,
             "period_end": period_end,
-            "is_current": is_current,
+            "is_current": True,
         }, 200
 
 

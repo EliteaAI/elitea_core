@@ -1,9 +1,7 @@
-"""Unit tests for the monthly budget history helpers (utils/budget_periods.py, #7510).
+"""Unit tests for the month helpers of the admin budgets listing (utils/budget_periods.py, #7510).
 
 The admin Budgets page can show a past month, so these pin the rules it depends on: which
-months are selectable, how a bad period is refused, the reporting range, and what a snapshot
-records. The snapshot rules are the point of the feature: a closed month must keep the limit
-and source it had, and "nothing recorded" must never read as "unlimited".
+months are selectable, how a bad period is refused, and the reporting range.
 
 Run standalone: python3 tests/unit/test_7510_budget_periods.py
 """
@@ -98,76 +96,6 @@ class TestPeriodRange(unittest.TestCase):
         self.assertEqual(
             periods.period_range("202612", utc(2027, 1, 5)), ("2026-12-01", "2026-12-31"),
         )
-
-
-class TestLimitSource(unittest.TestCase):
-    def test_a_stored_limit_is_explicit(self):
-        self.assertEqual(periods.limit_source({"monthly_limit": 50.0, "enabled": True}, 50.0), "explicit")
-
-    def test_no_row_with_a_default_is_default(self):
-        self.assertEqual(periods.limit_source({}, 20.0), "default")
-
-    def test_no_limit_at_all_is_unlimited(self):
-        self.assertEqual(periods.limit_source({}, None), "unlimited")
-
-    def test_an_exempt_row_does_not_read_as_explicit(self):
-        # enabled=false means deliberately exempt; the stored number does not apply
-        self.assertEqual(
-            periods.limit_source({"monthly_limit": 50.0, "enabled": False}, None), "unlimited",
-        )
-
-    def test_zero_is_a_real_explicit_limit(self):
-        self.assertEqual(periods.limit_source({"monthly_limit": 0.0, "enabled": True}, 0.0), "explicit")
-
-
-class TestDesiredSnapshots(unittest.TestCase):
-    def test_every_requested_project_gets_a_snapshot(self):
-        desired = periods.desired_snapshots(
-            [1, 2, 3],
-            {1: {"monthly_limit": 50.0, "enabled": True, "currency": "USD"}},
-            {1: 50.0, 2: 20.0, 3: None},
-        )
-        self.assertEqual(desired[1]["limit_source"], "explicit")
-        self.assertEqual(desired[2]["limit_source"], "default")
-        self.assertEqual(desired[3]["limit_source"], "unlimited")
-        self.assertIsNone(desired[3]["effective_limit"])
-
-    def test_string_keys_from_rpc_serialization_still_match(self):
-        desired = periods.desired_snapshots(
-            [1], {"1": {"monthly_limit": 9.0, "enabled": True}}, {"1": 9.0},
-        )
-        self.assertEqual(desired[1]["effective_limit"], 9.0)
-        self.assertEqual(desired[1]["limit_source"], "explicit")
-
-    def test_currency_defaults_to_usd(self):
-        self.assertEqual(periods.desired_snapshots([1], {}, {1: None})[1]["currency"], "USD")
-
-
-class TestChangedSnapshots(unittest.TestCase):
-    WANT = {"effective_limit": 50.0, "limit_source": "explicit", "currency": "USD"}
-
-    def test_an_identical_snapshot_is_not_rewritten(self):
-        existing = {1: {"project_id": 1, "period": "202611", **self.WANT}}
-        self.assertEqual(periods.changed_snapshots(existing, {1: dict(self.WANT)}), {})
-
-    def test_a_missing_snapshot_is_written(self):
-        self.assertEqual(periods.changed_snapshots({}, {1: dict(self.WANT)}), {1: self.WANT})
-
-    def test_a_changed_limit_is_written(self):
-        existing = {1: {"project_id": 1, "period": "202611", **self.WANT, "effective_limit": 10.0}}
-        self.assertEqual(periods.changed_snapshots(existing, {1: dict(self.WANT)}), {1: self.WANT})
-
-    def test_a_changed_source_alone_is_written(self):
-        # Same number, different reason: an admin deleting an explicit limit that equals the default
-        existing = {1: {"project_id": 1, "period": "202611", **self.WANT, "limit_source": "default"}}
-        self.assertEqual(periods.changed_snapshots(existing, {1: dict(self.WANT)}), {1: self.WANT})
-
-    def test_unlimited_is_distinct_from_missing(self):
-        unlimited = {"effective_limit": None, "limit_source": "unlimited", "currency": "USD"}
-        existing = {1: {"project_id": 1, "period": "202611", **unlimited}}
-        # stored as unlimited: nothing to write; absent: must be written
-        self.assertEqual(periods.changed_snapshots(existing, {1: dict(unlimited)}), {})
-        self.assertEqual(periods.changed_snapshots({}, {1: dict(unlimited)}), {1: unlimited})
 
 
 if __name__ == "__main__":

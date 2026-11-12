@@ -1,5 +1,4 @@
 from flask import request
-from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
@@ -239,18 +238,10 @@ class AdminAPI(api_tools.APIModeHandler):
         except (TypeError, ValueError) as error:
             return {"error": str(error)}, 400
         #
-        rpc = rpc_tools.RpcMixin().rpc
-        rpc.timeout(20).elitea_core_set_project_budget(
+        rpc_tools.RpcMixin().rpc.timeout(20).elitea_core_set_project_budget(
             project_id=project_id,
             **payload,
         )
-        #
-        # History of the month (#7510). After the save and never fatal: the budget is already
-        # stored, and a failed history write must not turn that into an error for the admin
-        try:
-            rpc.timeout(10).elitea_core_snapshot_project_budget(project_id=project_id)
-        except Exception:  # pylint: disable=W0703
-            log.exception("Failed to record the budget history of project %s", project_id)
         #
         return _budget_state(project_id), 200
 
