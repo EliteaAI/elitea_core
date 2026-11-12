@@ -110,7 +110,10 @@ class FakeRpc:
 
     def project_list_paginated(self, **kwargs):
         self.called.append("project_list_paginated")
-        projects = [{"id": 1, "name": "alpha", "owner_id": 9}, {"id": 2, "name": "beta", "owner_id": 9}]
+        projects = [
+            {"id": 1, "name": "alpha", "owner_id": 9},
+            {"id": 2, "name": "project_user_9", "owner_id": 9},
+        ]
         return {"rows": projects, "total": 2, "counts": {"team": 2, "personal": 0}}
 
     def elitea_core_list_project_budgets(self):
@@ -118,7 +121,7 @@ class FakeRpc:
         return {1: {"monthly_limit": 999.0, "enabled": True, "currency": "USD", "member_default_limit": 5.0}}
 
     def auth_list_users(self, user_ids):
-        return []
+        return [{"id": 9, "name": "Ada Lovelace", "email": "ada@example.com"}]
 
     def usage_get_projects_spend(self, **kwargs):
         self.called.append("usage_get_projects_spend")
@@ -226,7 +229,48 @@ class TestPastMonthIsSpendOnly(unittest.TestCase):
         #
         self.assertEqual(payload["total"], 2)
         self.assertEqual(payload["counts"], {"team": 2, "personal": 0})
-        self.assertEqual([row["name"] for row in payload["rows"]], ["alpha", "beta"])
+        self.assertEqual([row["name"] for row in payload["rows"]], ["alpha", "project_user_9"])
+
+
+class TestIdentityIsTheSameInBothListings(unittest.TestCase):
+    """Both listings label a project through one helper, so they cannot drift apart."""
+
+    IDENTITY = ("project_id", "name", "display_name", "owner_name", "owner_email", "is_personal")
+
+    def test_a_current_row_and_a_past_row_carry_identical_identity_fields(self):
+        past = _rows(_call({"period": LAST}, FakeRpc(period_spend=TestPastMonthIsSpendOnly.SPEND))[0])
+        current = _rows(_call({}, FakeRpc(current_limits={1: 10.0, 2: 10.0}))[0])
+        #
+        for project_id in (1, 2):
+            self.assertEqual(
+                {field: past[project_id][field] for field in self.IDENTITY},
+                {field: current[project_id][field] for field in self.IDENTITY},
+            )
+
+    def test_a_personal_project_is_labelled_by_its_owner(self):
+        row = _rows(_call({"period": LAST}, FakeRpc(period_spend=TestPastMonthIsSpendOnly.SPEND))[0])[2]
+        #
+        self.assertTrue(row["is_personal"])
+        self.assertEqual(row["display_name"], "ada@example.com")
+        self.assertEqual(row["owner_name"], "Ada Lovelace")
+
+    def test_a_team_project_keeps_its_own_name(self):
+        row = _rows(_call({"period": LAST}, FakeRpc(period_spend=TestPastMonthIsSpendOnly.SPEND))[0])[1]
+        #
+        self.assertFalse(row["is_personal"])
+        self.assertEqual(row["display_name"], "alpha")
+
+
+class TestPastMonthCurrency(unittest.TestCase):
+    def test_spend_is_reported_in_usd_whatever_the_stored_budget_says(self):
+        # The stored currency labels a budget; spend itself is metered in USD
+        class Eur(FakeRpc):
+            def elitea_core_list_project_budgets(self):
+                return {1: {"monthly_limit": 5.0, "enabled": True, "currency": "EUR"}}
+        #
+        row = _rows(_call({"period": LAST}, Eur(period_spend=TestPastMonthIsSpendOnly.SPEND))[0])[1]
+        #
+        self.assertEqual(row["currency"], "USD")
 
 
 class TestSpendAvailability(unittest.TestCase):

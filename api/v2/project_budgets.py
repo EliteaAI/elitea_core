@@ -58,6 +58,29 @@ def _limit_source(row: dict, effective, project_default=None):
     return "default"
 
 
+def _project_identity(project, owner_map):
+    """Who a row is about, shared by the current-month and past-month listings.
+
+    A personal project is really that user's own budget, so it is labelled by the owner's
+    identity rather than the opaque project_user_N name.
+    """
+    project_name = project.get("name") or ""
+    is_personal = project_name.startswith("project_user_")
+    owner = owner_map.get(project.get("owner_id")) or {}
+    owner_label = owner.get("email") or owner.get("name")
+    #
+    return {
+        "project_id": project["id"],
+        "name": project_name,
+        "display_name": owner_label if (is_personal and owner_label) else project_name,
+        # Falls back to email so the owner column is never blank; the two differ
+        # only where the identity provider supplies a real display name.
+        "owner_name": owner.get("name") or owner.get("email"),
+        "owner_email": owner.get("email"),
+        "is_personal": is_personal,
+    }
+
+
 def _past_month_rows(rpc, projects, owner_map, period):
     """Rows of a finished month: spend only.
 
@@ -80,18 +103,11 @@ def _past_month_rows(rpc, projects, owner_map, period):
     #
     for project in projects:
         project_id = project["id"]
-        project_name = project.get("name") or ""
-        is_personal = project_name.startswith("project_user_")
-        owner = owner_map.get(project.get("owner_id")) or {}
-        owner_label = owner.get("email") or owner.get("name")
         #
         rows.append({
-            "project_id": project_id,
-            "name": project_name,
-            "display_name": owner_label if (is_personal and owner_label) else project_name,
-            "owner_name": owner.get("name") or owner.get("email"),
-            "owner_email": owner.get("email"),
-            "is_personal": is_personal,
+            **_project_identity(project, owner_map),
+            # Spend is metered in USD (usage_counter holds cost_nano_usd), and no budget row is
+            # read for a finished month, so there is no other currency to report
             "currency": "USD",
             "spend": (
                 float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
@@ -304,20 +320,8 @@ class AdminAPI(api_tools.APIModeHandler):
             effective = limit_map.get(project_id, limit_map.get(str(project_id)))
             spend = float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
             #
-            project_name = project.get("name") or ""
-            is_personal = project_name.startswith("project_user_")
-            owner = owner_map.get(project.get("owner_id")) or {}
-            owner_label = owner.get("email") or owner.get("name")
-            #
             rows.append({
-                "project_id": project_id,
-                "name": project_name,
-                "display_name": owner_label if (is_personal and owner_label) else project_name,
-                # Falls back to email so the owner column is never blank; the two differ
-                # only where the identity provider supplies a real display name.
-                "owner_name": owner.get("name") or owner.get("email"),
-                "owner_email": owner.get("email"),
-                "is_personal": is_personal,
+                **_project_identity(project, owner_map),
                 "monthly_limit": row.get("monthly_limit"),
                 # Carried so the edit dialog can prefill it without a second read
                 "member_default_limit": row.get("member_default_limit"),
