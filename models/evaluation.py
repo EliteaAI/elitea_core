@@ -76,6 +76,8 @@ class EvalCaseSource:
 class EvalRunTrigger:
     offline_batch = 'offline_batch'
     on_demand = 'on_demand'
+    # Launched by the environment-wide scheduled evaluation; the snapshot is an offline batch.
+    scheduled = 'scheduled'
 
 
 class EvalRunStatus:

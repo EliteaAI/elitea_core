@@ -22,6 +22,8 @@ Stdlib only, no ORM: the seed task, the projection and the tests share it.
 from typing import Optional, Tuple
 
 TRAJECTORY_SCOPE = {'structure': False, 'input': False, 'output': False, 'trajectory': True}
+# The scheduled health check's configuration checks read only the pinned version's structure.
+STRUCTURE_SCOPE = {'structure': True, 'input': False, 'output': False, 'trajectory': False}
 
 # Shared head of every script. ``try/except NameError`` because the screen blocks ``globals()``:
 # the prelude only defines ``expected_trajectory`` when the case has one.
@@ -252,6 +254,36 @@ else:
 '''
 
 
+# Configuration checks: the ``structure`` variable is ``agent_structure_snapshot`` of the version.
+_STRUCTURE = '''
+try:
+    _struct = structure
+except NameError:
+    _struct = None
+if not isinstance(_struct, dict):
+    _struct = None
+'''
+
+_INSTRUCTIONS = _STRUCTURE + '''
+if _struct is None:
+    result = 'na'
+else:
+    text = (_struct.get('instructions') or '').strip()
+    print(f'{len(text)} characters of instructions')
+    result = bool(text)
+'''
+
+_MODEL = _STRUCTURE + '''
+if _struct is None:
+    result = 'na'
+else:
+    llm = _struct.get('llm_settings') or {}
+    name = llm.get('model_name') if isinstance(llm, dict) else None
+    print(f'model: {name or "none"}')
+    result = bool(name)
+'''
+
+
 def _count(name: str, description: str, body: str) -> dict:
     """A lower-is-better counter: informational (weight 0) with a "none at all" target."""
     return {
@@ -334,6 +366,16 @@ CHECKS = {
         "Duration of the agent's last model call, the one that wrote the answer, as a share of "
         "the suite's case time limit, 0-1. A case that reached the limit scores 1 (exceeded). "
         'Informational; target: under half the limit.', _FINAL_ANSWER),
+    'structure.instructions_present': {
+        **_flag('structure.instructions_present',
+                'Whether the agent version has instructions. Pass/fail; weighted 1.', _INSTRUCTIONS, 1.0),
+        'scope': STRUCTURE_SCOPE,
+    },
+    'structure.model_resolvable': {
+        **_flag('structure.model_resolvable',
+                'Whether the agent version names a model to run on. Pass/fail; weighted 1.', _MODEL, 1.0),
+        'scope': STRUCTURE_SCOPE,
+    },
 }
 
 # Why a built-in check skipped a case, shown on the result card. A case with no trajectory at all is
@@ -348,6 +390,8 @@ SKIP_NOTES = {
     'trajectory.guardrail_events': 'Skipped: no trajectory was recorded for this case.',
     'performance.latency': 'Skipped: no latency or case time limit was recorded for this case.',
     'performance.final_answer_time': 'Skipped: no final model call or case time limit was recorded for this case.',
+    'structure.instructions_present': 'Skipped: the agent structure was not recorded for this case.',
+    'structure.model_resolvable': 'Skipped: the agent structure was not recorded for this case.',
 }
 
 # Checks a timed-out case is scored on (worst value, "exceeded") rather than skipped.
@@ -384,6 +428,7 @@ def registry_seed() -> list:
             'description': check['description'],
             'allowed_engines': ['code'],
             **{field: check[field] for field in _SCALE_FIELDS},
-            'meta': {'builtin_check': key, 'default_evidence_scope': dict(TRAJECTORY_SCOPE)},
+            'meta': {'builtin_check': key,
+                     'default_evidence_scope': dict(check.get('scope', TRAJECTORY_SCOPE))},
         })
     return rows

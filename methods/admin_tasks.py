@@ -1247,7 +1247,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         Seven code-scored platform dimensions (trajectory.tool_match, .forbidden_tools,
         .tool_errors, .redundant_calls, .step_budget, .step_limit_hit, .guardrail_events; #6809
         item 5), plus the two latency dimensions performance.latency and .final_answer_time
-        (performance design §3.3). Their scripts ship with the plugin
+        (performance design §3.3), and the two structure checks of the scheduled evaluation's
+        health check. Their scripts ship with the plugin
         (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
         carry only the definition and meta.builtin_check.
 
@@ -1298,6 +1299,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                   "conflicts": conflicts, "resync_failures": resync_failures}
         log.info("seed_eval_trajectory_dimensions: %s", result)
         return result
+
+    @web.method("seed_eval_health_check")
+    def seed_eval_health_check(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add the scheduled evaluation's platform probes and dimensions.
+
+        The probes an agent with no dataset of its own is run on, the two structure checks and
+        the three AI-judged health dimensions. Also run at startup; idempotent, so a re-run only
+        refreshes the plugin's own wording and resyncs the dimensions it refreshed.
+        """
+        from ..utils.eval_auto_service import seed_platform_health_check  # pylint: disable=C0415
+        try:
+            return seed_platform_health_check()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("seed_eval_health_check: failed")
+            return {"ok": False, "error": str(exc)}
 
     @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):

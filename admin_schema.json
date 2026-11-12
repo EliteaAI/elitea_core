@@ -829,6 +829,25 @@
       "default": "* * * * *",
       "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
     },
+    "eval_auto_run_enabled": {
+      "type": "boolean",
+      "title": "Scheduled Agent Evaluation Enabled",
+      "description": "Starts the environment-wide agent evaluation on the cron below. Which projects and agents it covers, and its limits, are set on the Agent Evaluation admin page (or the elitea_core_eval_auto_set_config RPC).",
+      "path": "scheduler.eval_auto_run.enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": false
+    },
+    "eval_auto_run_cron": {
+      "type": "string",
+      "title": "Scheduled Agent Evaluation Cron",
+      "description": "When the environment-wide agent evaluation starts. Standard 5-field cron expression (e.g. '17 2 * * 0' = Sundays at 02:17). Agents unchanged since their last result are not re-run.",
+      "path": "scheduler.eval_auto_run.cron",
+      "section": "runtime",
+      "format": "cron",
+      "default": "17 2 * * 0",
+      "visible_when": { "field": "eval_auto_run_enabled", "value": true }
+    },
     "schedules_min_interval_minutes": {
       "type": "integer",
       "title": "Schedules Minimum Interval (minutes)",
