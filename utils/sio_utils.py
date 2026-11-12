@@ -96,9 +96,10 @@ SOCKET_UNAUTHENTICATED_MESSAGE = (
 SEND_FAILED_MESSAGE = 'The request could not be started. Please try again.'
 
 
-def refusal_frame(event, error, stream_id, message_id, code=None) -> dict:
+def refusal_frame(event, error, stream_id, message_id, code=None, details=None) -> dict:
     """The ``socket_validation_error`` frame the client settles a reply placeholder with."""
     frame = {
+        **(details or {}),
         'event': event,
         'content': error,
         'type': 'error',
@@ -128,7 +129,7 @@ def emit_refusal(sio, sid, room, event, error, stream_id, message_id) -> None:
 class SioValidationError(Exception):
     def __init__(
         self, sio, sid: str | None, event: str, error, stream_id: str = '',
-        message_id: str | None = None, code: str | None = None,
+        message_id: str | None = None, code: str | None = None, details: dict | None = None,
     ):
         self.sio = sio
         self.type = 'error'
@@ -138,6 +139,7 @@ class SioValidationError(Exception):
         self.sid = sid
         self.message_id = message_id
         self.code = code
+        self.details = details
         # self.room = get_event_room(
         #     event_name=event,
         #     room_id=stream_id
@@ -153,7 +155,7 @@ class SioValidationError(Exception):
     def emit_error(self) -> None:
         self.sio.emit(
             event=SioEvents.socket_validation_error.value,
-            data=refusal_frame(self.event, self.error, self.stream_id, self.message_id, self.code),
+            data=refusal_frame(self.event, self.error, self.stream_id, self.message_id, self.code, self.details),
             to=self.sid,
         )
 

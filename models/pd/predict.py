@@ -56,6 +56,7 @@ class SioPredictModel(BaseModel):
     project_id: int
     participant_id: Optional[int] = None
     user_ids: Optional[list] = []
+    mentioned_user_ids: List[int] = Field(default_factory=list)
     conversation_uuid: UUID | str
     user_input: Optional[str] = None
     tool_call_input: Optional[ToolkitToolCallPayload] = None
