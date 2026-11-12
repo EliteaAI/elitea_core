@@ -67,6 +67,10 @@ class RPC:
             session.commit()
             result = budget.to_json()
         #
+        # History of the month (#7510). Outside the transaction above and non-raising: the
+        # budget is already saved, and a failed history write must not undo or fail it
+        self.snapshot_project_budget(project_id)
+        #
         return result
 
     @web.rpc("elitea_core_list_project_budgets", "list_project_budgets")

@@ -1256,6 +1256,7 @@ class Module(module.ModuleModel):
         self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget, feature_budget, user_feature_budget
+        from .models import project_budget_period  # noqa: F401 — register the monthly budget history table
         from .models import evaluation, eval_platform_dimension
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
@@ -1587,6 +1588,14 @@ class Module(module.ModuleModel):
         self.mcp_category_name = mcp_config.get('category_name') or 'MCP'
         log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
         self._init_publishing_guardrail()
+        # A changed platform default has no database event; record it now instead of at the
+        # next hourly run (#7510). Off the config thread: it resolves every project
+        try:
+            Thread(
+                target=self.snapshot_all_project_budgets, name='budget_period_snapshot', daemon=True,
+            ).start()
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to start the budget period snapshot')
 
     def _bootstrap_platform_schedules(self):
         """Create the platform schedule rows and reconcile them with config."""
@@ -1646,6 +1655,14 @@ class Module(module.ModuleModel):
                     'rpc_kwargs': {'idle_days': 30},
                     'name': 'skill_scratch_sweep',
                     'cron': '0 4 * * *',
+                    'active': True,
+                },
+                {
+                    # Month-by-month history of the effective project limit (#7510)
+                    'rpc_func': 'elitea_core_snapshot_all_project_budgets',
+                    'rpc_kwargs': {},
+                    'name': 'project_budget_period_snapshot',
+                    'cron': '17 * * * *',
                     'active': True,
                 },
                 {
