@@ -58,14 +58,77 @@ def _limit_source(row: dict, effective, project_default=None):
     return "default"
 
 
+def _project_identity(project, owner_map):
+    """Who a row is about, shared by the current-month and past-month listings.
+
+    A personal project is really that user's own budget, so it is labelled by the owner's
+    identity rather than the opaque project_user_N name.
+    """
+    project_name = project.get("name") or ""
+    is_personal = project_name.startswith("project_user_")
+    owner = owner_map.get(project.get("owner_id")) or {}
+    owner_label = owner.get("email") or owner.get("name")
+    #
+    return {
+        "project_id": project["id"],
+        "name": project_name,
+        "display_name": owner_label if (is_personal and owner_label) else project_name,
+        # Falls back to email so the owner column is never blank; the two differ
+        # only where the identity provider supplies a real display name.
+        "owner_name": owner.get("name") or owner.get("email"),
+        "owner_email": owner.get("email"),
+        "is_personal": is_personal,
+    }
+
+
+def _past_month_rows(rpc, projects, owner_map, period):
+    """Rows of a finished month: spend only.
+
+    Limits are not stored per month, and applying today's limit to old spend would be wrong,
+    so a past row carries no limit, used or source. Spend that could not be read is None, not
+    0.0, so a failed read never looks like a month in which nothing was spent.
+    """
+    project_ids = [project["id"] for project in projects]
+    #
+    try:
+        answer = rpc.timeout(30).usage_get_projects_period_spend(
+            project_ids=project_ids, period=period,
+        ) or {}
+    except Exception:  # pylint: disable=W0703
+        answer = {}
+    #
+    available = bool(answer.get("available"))
+    spend_map = answer.get("spend") or {}
+    rows = []
+    #
+    for project in projects:
+        project_id = project["id"]
+        #
+        rows.append({
+            **_project_identity(project, owner_map),
+            # Spend is metered in USD (usage_counter holds cost_nano_usd), and no budget row is
+            # read for a finished month, so there is no other currency to report
+            "currency": "USD",
+            "spend": (
+                float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
+                if available else None
+            ),
+            "spend_available": available,
+        })
+    #
+    return rows
+
+
 class AdminAPI(api_tools.APIModeHandler):
     """Platform-admin listing of every project's budget and current-month spend."""
 
     @register_openapi(
         name="List Project Budgets (Admin)",
         description=(
-            "Paginated list of projects with their effective budget and current-month "
-            "spend. Backs Admin -> Budgets.\n\n"
+            "Paginated list of projects with their effective budget and spend for a month "
+            "(the current one by default). Backs Admin -> Budgets.\n\n"
+            "A past month returns spend only: limits are not kept per month, so the limit, "
+            "used and source fields are not part of those rows.\n\n"
             "Only name and id can be ordered. Limit, spend and usage are derived after the "
             "query - from stored budgets, configured defaults and the LLM proxy - so "
             "ordering by them would sort only the returned page; an unsupported sort_by "
@@ -100,6 +163,17 @@ class AdminAPI(api_tools.APIModeHandler):
                     "name and email."
                 ),
                 "example": "analytics",
+            },
+            {
+                "name": "period",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "pattern": "^[0-9]{6}$"},
+                "description": (
+                    "Month to report, YYYYMM (UTC): the current month or one of the three "
+                    "before it. Defaults to the current month. A past month returns spend only."
+                ),
+                "example": "202610",
             },
             {
                 "name": "project_type",
@@ -153,6 +227,14 @@ class AdminAPI(api_tools.APIModeHandler):
         project_type = request.args.get("project_type") or None
         sort_order = request.args.get("sort_order", "asc")
         #
+        from ...utils import budget_periods  # pylint: disable=C0415
+        try:
+            period = budget_periods.validate_period(request.args.get("period"))
+        except ValueError as error:
+            return {"error": str(error)}, 400
+        is_current = period == budget_periods.current_period()
+        period_start, period_end = budget_periods.period_range(period)
+        #
         sort_by = _safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD))
         # A Tool Spend feature reads its own tables and counters; without one this is the LLM listing
         feature = request.args.get("feature") or None
@@ -162,6 +244,8 @@ class AdminAPI(api_tools.APIModeHandler):
                 validate_feature_period(feature, "month")
             except ValueError as error:
                 return {"error": str(error)}, 400
+            if not is_current:
+                return {"error": "Tool Spend limits can only be listed for the current month"}, 400
         spend_scope = {"model_name": feature} if feature else {}
         #
         # Owner ids are OR'd into the project search, so resolve them only for personal
@@ -181,7 +265,7 @@ class AdminAPI(api_tools.APIModeHandler):
         projects = listing.get("rows") or []
         project_ids = [p["id"] for p in projects]
         #
-        budgets = (
+        budgets = {} if not is_current else (
             rpc.timeout(10).elitea_core_list_project_feature_budgets(feature=feature) if feature
             else rpc.timeout(10).elitea_core_list_project_budgets()
         ) or {}
@@ -196,6 +280,17 @@ class AdminAPI(api_tools.APIModeHandler):
             owners = []
         #
         owner_map = {int(user["id"]): user for user in owners or []}
+        #
+        if not is_current:
+            return {
+                "rows": _past_month_rows(rpc, projects, owner_map, period),
+                "total": listing.get("total", len(projects)),
+                "counts": listing.get("counts") or {},
+                "period": period,
+                "period_start": period_start,
+                "period_end": period_end,
+                "is_current": False,
+            }, 200
         #
         # One spend call for the whole page rather than one per row
         try:
@@ -225,20 +320,8 @@ class AdminAPI(api_tools.APIModeHandler):
             effective = limit_map.get(project_id, limit_map.get(str(project_id)))
             spend = float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
             #
-            project_name = project.get("name") or ""
-            is_personal = project_name.startswith("project_user_")
-            owner = owner_map.get(project.get("owner_id")) or {}
-            owner_label = owner.get("email") or owner.get("name")
-            #
             rows.append({
-                "project_id": project_id,
-                "name": project_name,
-                "display_name": owner_label if (is_personal and owner_label) else project_name,
-                # Falls back to email so the owner column is never blank; the two differ
-                # only where the identity provider supplies a real display name.
-                "owner_name": owner.get("name") or owner.get("email"),
-                "owner_email": owner.get("email"),
-                "is_personal": is_personal,
+                **_project_identity(project, owner_map),
                 "monthly_limit": row.get("monthly_limit"),
                 # Carried so the edit dialog can prefill it without a second read
                 "member_default_limit": row.get("member_default_limit"),
@@ -256,6 +339,10 @@ class AdminAPI(api_tools.APIModeHandler):
             "rows": rows,
             "total": listing.get("total", len(rows)),
             "counts": listing.get("counts") or {},
+            "period": period,
+            "period_start": period_start,
+            "period_end": period_end,
+            "is_current": True,
         }, 200
 
 
