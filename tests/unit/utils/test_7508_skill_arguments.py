@@ -196,7 +196,8 @@ class TestArgumentHint:
         (['x', {'default': 'y'}], '[x, default: y]'),
         ({'optional': 'z'}, 'optional: z'),
         (42, '42'),
-        ('', None), (None, None), ([], None), ({}, None),
+        (['x', None], '[x]'), (['x', '', []], '[x]'), ({'a': None, 'b': 'y'}, 'b: y'),
+        ('', None), (None, None), ([], None), ({}, None), ([None], None), ([[]], None), ({'a': None}, None),
     ])
     def test_every_stored_shape_renders_as_one_line(self, frontmatter, value, expected):
         assert frontmatter.argument_hint_text({'frontmatter': {'argument-hint': value}}) == expected
