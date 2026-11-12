@@ -275,6 +275,9 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
                 if requested.get('type') == 'schedule' and value['trigger'] != requested:
                     warning = 'A schedule trigger is not saved on a version. Create the schedule in Schedules.'
                     log.warning('applications_update_version: schedule trigger of version %s not stored', version.id)
+                elif requested.get('type') == 'webhook' and value['trigger'] != requested:
+                    warning = 'A webhook trigger is not saved on a version. Create the webhook in Settings → Webhooks.'
+                    log.warning('applications_update_version: webhook trigger of version %s not stored', version.id)
             elif existing_trigger:
                 value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)

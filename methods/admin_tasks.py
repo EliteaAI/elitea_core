@@ -2651,6 +2651,49 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def migrate_legacy_pipeline_webhooks(self, *args, **kwargs):
+        """Admin task: move legacy pipeline webhook triggers to webhook rows, one way (#7402).
+
+        A dry run by default: only dry_run=false writes. Idempotent: a migrated version is skipped.
+        A version that cannot move keeps its legacy trigger and is logged; a failing project is reported.
+
+        Param format:
+            "project_id=<all|N>[;dry_run=false]"
+        """
+        # Imported here: the module needs the running plugin (database, vault, auth RPC)
+        from ..utils.legacy_webhook_migration import migrate_project, parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            project_ids = resolve_target_project_ids(spec)
+        except ValueError as exc:
+            log.error("migrate_legacy_pipeline_webhooks: %s", exc)
+            return {"error": str(exc)}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("%sStarting migrate_legacy_pipeline_webhooks (projects=%s)", prefix, len(project_ids))
+        report = {"dry_run": dry_run, "projects": [], "errors": []}
+        for project_id in project_ids:
+            try:
+                project = migrate_project(project_id, dry_run)
+            except Exception as exc:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("migrate_legacy_pipeline_webhooks: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": type(exc).__name__})
+                continue
+            if project["found"]:
+                report["projects"].append(project)
+        counts = [
+            (p["project_id"], p["found"], len(p["migrated"]), len(p["skipped"]), len(p["failed"]))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting migrate_legacy_pipeline_webhooks — (project, found, migrated, skipped, failed)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
+        return report
+
+    @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
         """Admin task: rename legacy conversation source values to 'elitea'.
 
