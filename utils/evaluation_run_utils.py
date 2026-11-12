@@ -202,13 +202,21 @@ def create_batch_run(
     application_version_id: Optional[int] = None,
     judge_model: Optional[dict] = None,
     owner_id: int,
+    trigger_type: Optional[str] = None,
+    meta: Optional[dict] = None,
+    max_cases: Optional[int] = None,
     session=None,
 ):
     """Freeze a full offline-batch run over a stored dataset and persist it ``created`` (§14.2).
     ``dataset_id`` overrides the suite's own dataset; the D3 version pin is resolved from the
     bindings unless ``application_version_id`` overrides it. Every binding runs (batch is not
-    reference-gated at assembly time — §17.5 gating is per-case inside H5)."""
+    reference-gated at assembly time — §17.5 gating is per-case inside H5).
+
+    ``trigger_type`` only labels the row (the scheduled evaluation passes ``scheduled``); the
+    snapshot stays an offline batch, which is what makes the agent run live over each case.
+    ``max_cases`` keeps a stable sample of the dataset (``eval_auto_rules.stable_case_sample``)."""
     from ..models.evaluation import EvalRun, EvalDataset, EvalRunStatus, EvalRunTrigger
+    from .eval_auto_rules import stable_case_sample
 
     with _session(session, project_id) as s:
         suite, bindings, dimensions = _load_suite_config(
@@ -232,6 +240,10 @@ def create_batch_run(
                 raise EvalRunConfigError(
                     'every case of this suite\'s dataset is excluded; nothing to run')
             cases = [_case_dict(c) for c in effective_cases(dataset.cases, excluded)]
+            if max_cases is not None:
+                kept = set(stable_case_sample([case['id'] for case in cases], max_cases,
+                                              salt=f'{project_id}:{suite.application_id}'))
+                cases = [case for case in cases if case['id'] in kept]
 
         version_id = _resolve_version(bindings, application_version_id)
         _assert_version_in_application(s, version_id, suite.application_id)
@@ -246,9 +258,9 @@ def create_batch_run(
         run = EvalRun(
             suite_id=suite_id, application_id=suite.application_id,
             application_version_id=version_id, dataset_id=ds_id,
-            trigger_type=EvalRunTrigger.offline_batch, status=EvalRunStatus.created,
+            trigger_type=trigger_type or EvalRunTrigger.offline_batch, status=EvalRunStatus.created,
             snapshot=snapshot, progress={'done': 0, 'total': len(cases)},
-            owner_id=owner_id, meta={},
+            owner_id=owner_id, meta=dict(meta or {}),
         )
         s.add(run)
         s.flush()
@@ -437,7 +449,10 @@ def execute_run_task(module, project_id: int, run_id: int,
         # Read off the descriptor rather than shipped in the task kwargs: it is a deployment
         # capacity setting (judge rate limit + code pool headroom), not a property of the run, so
         # the value in force must be the one the executing pylon is configured for.
+        # A caller with its own capacity budget (the scheduled evaluation) may lower it per run.
         concurrency = module.descriptor.config.get('eval_case_concurrency', 1)
+        if task_kwargs.get('case_concurrency'):
+            concurrency = min(concurrency, int(task_kwargs['case_concurrency']))
         budget = module.descriptor.config.get(
             'eval_run_time_budget_seconds', RUN_TIME_BUDGET_SECONDS)
         # Progress push. This is the layer that has `module`, so it owns the transport and
@@ -463,7 +478,8 @@ def execute_run_task(module, project_id: int, run_id: int,
 
 
 def launch_run(project_id: int, run_id: int, *, eval_task_node,
-               judge_llm_settings: Optional[dict] = None) -> Optional[str]:
+               judge_llm_settings: Optional[dict] = None,
+               case_concurrency: Optional[int] = None) -> Optional[str]:
     """Submit the run to the eval pool. Returns the task id, or ``None`` if it was not accepted.
 
     Replaces a bare ``threading.Thread``: the pool's ``task_limit`` bounds how many runs execute
@@ -477,14 +493,13 @@ def launch_run(project_id: int, run_id: int, *, eval_task_node,
     """
     from .exceptions import MaintenanceInProgressError
 
+    kwargs = {'project_id': project_id, 'run_id': run_id, 'judge_llm_settings': judge_llm_settings}
+    if case_concurrency:
+        kwargs['case_concurrency'] = case_concurrency
     try:
         task_id = eval_task_node.start_task(
             EVAL_RUN_TASK_NAME,
-            kwargs={
-                'project_id': project_id,
-                'run_id': run_id,
-                'judge_llm_settings': judge_llm_settings,
-            },
+            kwargs=kwargs,
             pool=EVAL_RUN_POOL,
             meta={'task': EVAL_RUN_TASK_NAME, 'project_id': project_id, 'run_id': run_id},
         )

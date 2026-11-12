@@ -13,12 +13,17 @@ SCHEDULER_CONFIG_BINDINGS = {
         'section': 'schedules',
         'fields': ['pipeline_scheduling_enabled', 'pipeline_scheduling_cron'],
     },
+    'eval_auto_run': {
+        'section': 'runtime',
+        'fields': ['eval_auto_run_enabled', 'eval_auto_run_cron'],
+    },
 }
 
 
 SCHEDULER_CONFIG_DEFAULTS = {
     'index_scheduling': {'cron': '* * * * *', 'enabled': True},
     'pipeline_scheduling': {'cron': '* * * * *', 'enabled': True},
+    'eval_auto_run': {'cron': '17 2 * * 0', 'enabled': False},
 }
 
 
@@ -27,6 +32,7 @@ SCHEDULER_CONFIG_DEFAULTS = {
 SCHEDULER_CONFIG_RPC_FUNCS = {
     'index_scheduling': 'applications_check_index_scheduling',
     'pipeline_scheduling': 'pipelines_check_scheduling',
+    'eval_auto_run': 'elitea_core_eval_auto_tick',
 }
 
 

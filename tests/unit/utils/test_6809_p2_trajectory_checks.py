@@ -246,7 +246,7 @@ def _snapshot():
                         'polarity': check['polarity'], 'code': code, 'return_contract': contract,
                         'builtin_check': key}
         bindings.append({'dimension_id': i, 'engine': 'code', 'weight': check['default_weight'],
-                         'evidence_scope': dict(checks.TRAJECTORY_SCOPE)})
+                         'evidence_scope': dict(check.get('scope', checks.TRAJECTORY_SCOPE))})
     return {'dimensions': dims, 'bindings': bindings}
 
 
@@ -257,6 +257,7 @@ def _case(expected=None):
     trajectory['steps'].append({'kind': 'llm', 'model': 'm', 'duration_ms': 6000})
     metrics = trajectory.pop('metrics')
     case = {'id': 7, 'input': 'i', 'output': 'o',
+            'structure': {'instructions': 'Answer politely.', 'llm_settings': {'model_name': 'm'}},
             '_execution': {'trajectory_state': 'recorded', 'trajectory': trajectory,
                            'metrics': metrics, 'case_index': 0}}
     if expected:
@@ -280,6 +281,8 @@ def test_orchestrated_rows_score_and_skip(orch):
     assert by_name['performance.latency']['native_score'] == 0.25
     assert by_name['performance.latency']['normalized_score'] == 75.0
     assert by_name['performance.final_answer_time']['native_score'] == 0.05
+    assert by_name['structure.instructions_present']['normalized_score'] == 100.0
+    assert by_name['structure.model_resolvable']['normalized_score'] == 100.0
     for key in ('trajectory.tool_match', 'trajectory.forbidden_tools', 'trajectory.step_budget'):
         assert by_name[key]['status'] == 'skipped', key
         # The card shows why: the reference this check needs and the case lacks.
@@ -302,11 +305,15 @@ def test_registry_seed_shape():
     rows = checks.registry_seed()
     assert [r['name'] for r in rows] == list(checks.CHECKS)
     weighted = {r['name'] for r in rows if r['default_weight']}
-    assert weighted == {'trajectory.tool_match', 'trajectory.forbidden_tools'}
+    assert weighted == {'trajectory.tool_match', 'trajectory.forbidden_tools',
+                        'structure.instructions_present', 'structure.model_resolvable'}
     for row in rows:
         assert row['allowed_engines'] == ['code']
         assert checks.builtin_key(row['meta']) == row['name']
-        assert row['meta']['default_evidence_scope']['trajectory'] is True
+        # Configuration checks read the version's structure; every other check its trajectory.
+        reads = 'structure' if row['name'].startswith('structure.') else 'trajectory'
+        assert row['meta']['default_evidence_scope'] == {
+            **{key: False for key in checks.TRAJECTORY_SCOPE}, reads: True}
         if not row['default_weight']:
             assert row['default_target'] is not None and row['default_target_operator']
 

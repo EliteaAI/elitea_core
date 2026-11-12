@@ -606,3 +606,9 @@ Run admin task sweep_skill_files with param: project_id=all
 # Idempotent: safe to run multiple times.
 Run admin task migrate_eval_dataset_columns with param: project_id=all;dry_run
 Run admin task migrate_eval_dataset_columns with param: project_id=all
+
+# Scheduled agent evaluation: the shared tables eval_auto_config, eval_auto_job, eval_auto_item, eval_platform_dataset
+# and eval_platform_dataset_case come from create_all at boot; no tenant migration. The platform health check
+# (probes, the two structure checks and the three health dimensions) is seeded at startup; the admin task re-seeds it
+# and is idempotent. It is off until Runtime config eval_auto_run_enabled is turned on.
+Run admin task seed_eval_health_check
