@@ -20,7 +20,8 @@ KEEP_TEST_RUNS = 50
 UNIQUE_VIOLATION = '23505'
 # The schema has not got the Test Run columns yet (the admin task `migrate_schedule_test_runs` did not run): a missing
 # column, or a schedule id that still cannot be NULL
-OLD_SCHEMA = ('23502', '42703')  # not-null violation, undefined column
+UNDEFINED_COLUMN = '42703'
+OLD_SCHEMA = ('23502', UNDEFINED_COLUMN)  # not-null violation, undefined column
 # SQLite (the unit tests) names the same errors without a pgcode
 SQLITE_CODES = {'SQLITE_CONSTRAINT_UNIQUE': UNIQUE_VIOLATION, 'SQLITE_CONSTRAINT_NOTNULL': '23502'}
 
@@ -36,7 +37,9 @@ class TestRunUnavailable(Exception):
 
 def error_code(error: DBAPIError) -> str | None:
     orig = getattr(error, 'orig', None)
-    return getattr(orig, 'pgcode', None) or SQLITE_CODES.get(getattr(orig, 'sqlite_errorname', None))
+    # psycopg2 exposes `pgcode`, psycopg3 exposes `sqlstate`
+    return (getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)
+            or SQLITE_CODES.get(getattr(orig, 'sqlite_errorname', None)))
 
 
 @contextmanager

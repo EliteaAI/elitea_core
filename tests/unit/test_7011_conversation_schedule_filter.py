@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel
 from fixtures.helpers import load_module_with_stubs
 from sqlalchemy import Boolean, Integer, String, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -173,6 +174,8 @@ def rpc_module(isolated_sys_modules):
     sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
         EntitySchedule=EntitySchedule, EntityScheduleRun=EntityScheduleRun,
         RUN_FORM=EntityScheduleRun.__table__.c.form)
+    sys.modules[f'{PACKAGE}.utils.schedule_test_runs'] = types.SimpleNamespace(
+        UNDEFINED_COLUMN='42703', error_code=lambda error: getattr(error.orig, 'pgcode', None))
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
@@ -340,8 +343,8 @@ def test_the_old_trigger_type_names_are_gone(rpc_module, api):
 class RecordingRunQuery:
     """Query for the run records: it keeps the columns and the join kind, and returns fixed rows."""
 
-    def __init__(self, columns, rows):
-        self.columns, self.rows, self.outer = columns, rows, None
+    def __init__(self, columns, rows, error=None):
+        self.columns, self.rows, self.error, self.outer = columns, rows, error, None
 
     def outerjoin(self, *args):
         self.outer = True
@@ -355,6 +358,8 @@ class RecordingRunQuery:
         return self
 
     def all(self):
+        if self.error:
+            raise self.error
         return self.rows
 
     def selected_sql(self):
@@ -364,12 +369,25 @@ class RecordingRunQuery:
 class RunSession:
     """Session for `_schedule_runs`: the run query has six columns, the form-name query has two."""
 
-    def __init__(self, run_rows, form_rows):
-        self.run_rows, self.form_rows, self.queries = run_rows, form_rows, []
+    def __init__(self, run_rows, form_rows, form_error=None):
+        self.run_rows, self.form_rows, self.form_error, self.queries = run_rows, form_rows, form_error, []
+        self.savepoints = []
+
+    @contextlib.contextmanager
+    def begin_nested(self):
+        self.savepoints.append('open')
+        try:
+            yield
+        except BaseException:
+            self.savepoints[-1] = 'rolled back'
+            raise
+        self.savepoints[-1] = 'released'
 
     def query(self, *columns):
-        rows = self.run_rows if len(columns) == 6 else self.form_rows
-        self.queries.append(RecordingRunQuery(columns, rows))
+        if len(columns) == 6:
+            self.queries.append(RecordingRunQuery(columns, self.run_rows))
+        else:
+            self.queries.append(RecordingRunQuery(columns, self.form_rows, self.form_error))
         return self.queries[-1]
 
 
@@ -411,6 +429,42 @@ def test_the_form_name_query_reads_only_the_runs_without_a_schedule(rpc_module):
     assert len(session.queries) == 2
     assert 'form' in session.queries[1].selected_sql()
     assert [runs[4]['schedule_name'], runs[5]['schedule_name']] == ['Nightly', 'Draft form name']
+
+
+class DbOrig(Exception):
+    def __init__(self, pgcode):
+        super().__init__(pgcode)
+        self.pgcode = pgcode
+
+
+def _db_error(error_class, pgcode):
+    return error_class('SELECT form', {}, DbOrig(pgcode))
+
+
+def test_a_missing_form_column_lists_the_test_run_without_a_name_and_logs_once(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversations = [types.SimpleNamespace(id=4, meta={'schedule_run_id': 9}),
+                     types.SimpleNamespace(id=5, meta={'schedule_run_id': 10}),
+                     types.SimpleNamespace(id=6, meta={'schedule_run_id': 11})]
+    session = RunSession([(9, 4, None, None, 'success', 'test'), (10, 5, 5, 'Nightly', 'success', 'cron'),
+                          (11, 6, None, None, 'failed', 'test')], [],
+                         form_error=_db_error(ProgrammingError, '42703'))
+    runs = rpc_module._schedule_runs(session, conversations)
+    assert [runs[4]['schedule_name'], runs[5]['schedule_name'], runs[6]['schedule_name']] == [None, 'Nightly', None]
+    assert [runs[4]['status'], runs[6]['status']] == ['success', 'failed']
+    assert session.savepoints == ['rolled back']
+    rpc_module.log.warning.assert_called_once()
+
+
+@pytest.mark.parametrize('error', [_db_error(ProgrammingError, '42P01'), _db_error(OperationalError, '42703'),
+                                   RuntimeError('boom')])
+def test_another_error_of_the_form_name_query_still_raises(rpc_module, error):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, None, 'success', 'test')], [], form_error=error)
+    with pytest.raises(type(error)):
+        rpc_module._schedule_runs(session, [conversation])
+    rpc_module.log.warning.assert_not_called()
 
 
 def test_a_list_without_run_options_adds_no_run_filter(rpc_module):

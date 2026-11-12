@@ -4,6 +4,7 @@ from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
 from sqlalchemy import desc, asc, Integer, String, and_, or_, cast, func, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
@@ -17,6 +18,7 @@ from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..utils.running_conversations import running_conversation_ids
+from ..utils.schedule_test_runs import UNDEFINED_COLUMN, error_code
 from ..utils.conversation_utils import (
     get_conversation_details,
     calculate_conversation_durations_batch,
@@ -69,11 +71,20 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
     form_names = {}
     test_run_ids = [row[0] for row in run_rows if row[2] is None]
     if test_run_ids:
-        form_names = dict(
-            session.query(EntityScheduleRun.id, RUN_FORM['name'].astext)
-            .filter(EntityScheduleRun.id.in_(test_run_ids))
-            .all()
-        )
+        try:
+            # A failed SELECT aborts the PostgreSQL transaction and every later read of the request would fail
+            # with it: the savepoint rolls back only this query.
+            with session.begin_nested():
+                form_names = dict(
+                    session.query(EntityScheduleRun.id, RUN_FORM['name'].astext)
+                    .filter(EntityScheduleRun.id.in_(test_run_ids))
+                    .all()
+                )
+        except ProgrammingError as e:
+            if error_code(e) != UNDEFINED_COLUMN:
+                raise
+            log.warning('Run History: the form column of entity_schedule_runs is missing, '
+                        'Test Runs are listed without a name')
     runs = {
         (run_id, conversation_id): ScheduleRunRef(
             id=run_id, schedule_id=schedule_id,
