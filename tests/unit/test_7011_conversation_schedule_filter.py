@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel
 from fixtures.helpers import load_module_with_stubs
 from sqlalchemy import Boolean, Integer, String, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -172,7 +173,10 @@ def rpc_module(isolated_sys_modules):
     sys.modules[f'{PACKAGE}.models.folder'] = types.SimpleNamespace(ConversationFolder=mock.MagicMock())
     sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
         EntitySchedule=EntitySchedule, EntityScheduleRun=EntityScheduleRun,
-        RUN_FORM=EntityScheduleRun.__table__.c.form)
+        RUN_FORM=EntityScheduleRun.__table__.c.form, RUN_APPLICATION_ID=None, ACTIVE_STATUSES=())
+    _fuzzy(f'{PACKAGE}.models.pd.entity_schedule')
+    # The real module, so the error-code tests below break when its psycopg3 `sqlstate` branch goes
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_test_runs.py', f'{PACKAGE}.utils.schedule_test_runs')
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
@@ -208,6 +212,31 @@ def test_7011_r2_2_rpc_keeps_participant_and_private_filters(rpc_module, is_admi
     participant = session.participant_query.sql()
     assert ('= 42' in participant) is not is_admin
     assert any('chat_conversations.is_private = false' in q.sql() for q in session.queries)
+
+
+def _skill_list(rpc_module, participant_id, entity_project_id):
+    # The skill branch reads two helpers that live in another module; they only need to be valid SQL parts
+    rpc_module.ParticipantTypes = types.SimpleNamespace(skill=types.SimpleNamespace(value='skill'),
+                                                        user=types.SimpleNamespace(value='user'))
+    rpc_module.openable_skill_chat_ids = lambda session, participant_id, entity_project_id, user_id: select(
+        Conversation.id)
+    rpc_module.skill_run_started_at = lambda session, participant_id, entity_project_id: Conversation.created_at
+    session = _list(rpc_module, participant_id=participant_id, entity_name='skill',
+                    entity_project_id=entity_project_id)
+    return ' '.join(session.base.sql().split())
+
+
+def test_the_participant_filter_compares_the_meta_id_as_text(rpc_module):
+    sql = ' '.join(_list(rpc_module, participant_id=70, entity_name='application').base.sql().split())
+    assert "->> 'id') AS VARCHAR) = '70'" in sql
+    assert 'AS INTEGER' not in sql
+
+
+def test_the_skill_owner_project_filter_compares_as_text(rpc_module):
+    sql = _skill_list(rpc_module, participant_id=70, entity_project_id=9)
+    assert "->> 'project_id') AS VARCHAR) = '9'" in sql
+    assert "->> 'id') AS VARCHAR) = '70'" in sql
+    assert 'AS INTEGER' not in sql
 
 
 class Args(dict):
@@ -315,8 +344,8 @@ def test_the_old_trigger_type_names_are_gone(rpc_module, api):
 class RecordingRunQuery:
     """Query for the run records: it keeps the columns and the join kind, and returns fixed rows."""
 
-    def __init__(self, rows):
-        self.rows, self.outer = rows, None
+    def __init__(self, columns, rows, error=None):
+        self.columns, self.rows, self.error, self.outer = columns, rows, error, None
 
     def outerjoin(self, *args):
         self.outer = True
@@ -330,7 +359,37 @@ class RecordingRunQuery:
         return self
 
     def all(self):
+        if self.error:
+            raise self.error
         return self.rows
+
+    def selected_sql(self):
+        return ' '.join(str(c.compile(dialect=postgresql.dialect())) for c in self.columns)
+
+
+class RunSession:
+    """Session for `_schedule_runs`: the run query has six columns, the form-name query has two."""
+
+    def __init__(self, run_rows, form_rows, form_error=None):
+        self.run_rows, self.form_rows, self.form_error, self.queries = run_rows, form_rows, form_error, []
+        self.savepoints = []
+
+    @contextlib.contextmanager
+    def begin_nested(self):
+        self.savepoints.append('open')
+        try:
+            yield
+        except BaseException:
+            self.savepoints[-1] = 'rolled back'
+            raise
+        self.savepoints[-1] = 'released'
+
+    def query(self, *columns):
+        if len(columns) == 6:
+            self.queries.append(RecordingRunQuery(columns, self.run_rows))
+        else:
+            self.queries.append(RecordingRunQuery(columns, self.form_rows, self.form_error))
+        return self.queries[-1]
 
 
 class RunRef(BaseModel):
@@ -344,12 +403,103 @@ class RunRef(BaseModel):
 def test_a_run_without_a_schedule_is_listed_with_the_name_of_its_form(rpc_module):
     rpc_module.ScheduleRunRef = RunRef
     conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
-    query = RecordingRunQuery([(9, 4, None, 'Draft form name', 'success', 'test')])
-    session = types.SimpleNamespace(query=lambda *columns: query)
+    session = RunSession([(9, 4, None, 'Draft form name', 'success', 'test')], [(9, 'Draft form name')])
     runs = rpc_module._schedule_runs(session, [conversation])
-    assert query.outer is True
+    assert session.queries[0].outer is True
     assert runs == {4: {'id': 9, 'schedule_id': None, 'schedule_name': 'Draft form name', 'status': 'success',
                         'trigger': 'test'}}
+
+
+def test_the_run_read_names_no_form_column_when_no_run_is_a_test_run(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, 5, 'Nightly', 'success', 'cron')], [])
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert len(session.queries) == 1
+    assert 'form' not in session.queries[0].selected_sql()
+    assert runs[4]['schedule_name'] == 'Nightly'
+
+
+def test_the_form_name_query_reads_only_the_runs_without_a_schedule(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversations = [types.SimpleNamespace(id=4, meta={'schedule_run_id': 9}),
+                     types.SimpleNamespace(id=5, meta={'schedule_run_id': 10})]
+    session = RunSession([(9, 4, 5, 'Nightly', 'success', 'cron'), (10, 5, None, None, 'success', 'test')],
+                         [(10, 'Draft form name')])
+    runs = rpc_module._schedule_runs(session, conversations)
+    assert len(session.queries) == 2
+    assert 'form' in session.queries[1].selected_sql()
+    assert [runs[4]['schedule_name'], runs[5]['schedule_name']] == ['Nightly', 'Draft form name']
+
+
+class DbOrig(Exception):
+    def __init__(self, pgcode):
+        super().__init__(pgcode)
+        self.pgcode = pgcode
+
+
+def _db_error(error_class, pgcode):
+    return error_class('SELECT form', {}, DbOrig(pgcode))
+
+
+class SqlstateOnly(Exception):
+    """A psycopg3 error: it has `sqlstate` and no `pgcode`."""
+
+    def __init__(self, sqlstate):
+        super().__init__(sqlstate)
+        self.sqlstate = sqlstate
+
+
+def _real_error_code(rpc_module):
+    return sys.modules[f'{PACKAGE}.utils.schedule_test_runs'].error_code
+
+
+def test_error_code_reads_the_sqlstate_of_a_psycopg3_error(rpc_module):
+    assert _real_error_code(rpc_module)(ProgrammingError('SELECT form', {}, SqlstateOnly('42703'))) == '42703'
+
+
+def test_error_code_reads_the_pgcode_of_a_psycopg2_error(rpc_module):
+    assert _real_error_code(rpc_module)(_db_error(ProgrammingError, '42703')) == '42703'
+
+
+def test_error_code_is_none_when_the_error_has_no_code(rpc_module):
+    assert _real_error_code(rpc_module)(ProgrammingError('SELECT form', {}, Exception('no code'))) is None
+
+
+def test_a_psycopg3_missing_form_column_lists_the_test_run_without_a_name(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, None, 'success', 'test')], [],
+                         form_error=ProgrammingError('SELECT form', {}, SqlstateOnly('42703')))
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert runs[4]['schedule_name'] is None
+    assert session.savepoints == ['rolled back']
+
+
+def test_a_missing_form_column_lists_the_test_run_without_a_name_and_logs_once(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversations = [types.SimpleNamespace(id=4, meta={'schedule_run_id': 9}),
+                     types.SimpleNamespace(id=5, meta={'schedule_run_id': 10}),
+                     types.SimpleNamespace(id=6, meta={'schedule_run_id': 11})]
+    session = RunSession([(9, 4, None, None, 'success', 'test'), (10, 5, 5, 'Nightly', 'success', 'cron'),
+                          (11, 6, None, None, 'failed', 'test')], [],
+                         form_error=_db_error(ProgrammingError, '42703'))
+    runs = rpc_module._schedule_runs(session, conversations)
+    assert [runs[4]['schedule_name'], runs[5]['schedule_name'], runs[6]['schedule_name']] == [None, 'Nightly', None]
+    assert [runs[4]['status'], runs[6]['status']] == ['success', 'failed']
+    assert session.savepoints == ['rolled back']
+    rpc_module.log.warning.assert_called_once()
+
+
+@pytest.mark.parametrize('error', [_db_error(ProgrammingError, '42P01'), _db_error(OperationalError, '42703'),
+                                   RuntimeError('boom')])
+def test_another_error_of_the_form_name_query_still_raises(rpc_module, error):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, None, 'success', 'test')], [], form_error=error)
+    with pytest.raises(type(error)):
+        rpc_module._schedule_runs(session, [conversation])
+    rpc_module.log.warning.assert_not_called()
 
 
 def test_a_list_without_run_options_adds_no_run_filter(rpc_module):
