@@ -151,11 +151,10 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
             ))
     application = payload.get('application') or {}
     version_details = application.get('version_details') or {}
+    argument = _recipient_argument(payload)
     for owner in (application, version_details, payload):
         if isinstance(owner, dict) and isinstance(owner.get('instructions'), str):
-            slots.append(_Slot(
-                'instructions', owner['instructions'], lambda text, o=owner: o.__setitem__('instructions', text),
-            ))
+            slots.append(_instructions_slot(owner, argument))
     # Variable values are rendered into the system prompt: the request's own values are
     # the caller's input for this turn, the version's stored defaults are the owner's
     # Stored defaults are merged into the request's values too, so one equal to its
@@ -169,6 +168,59 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
     ]))
     slots.extend(_variable_slots('instructions', stored))
     return [s for s in slots if s.text]
+
+
+ARGUMENT_MARK = '[skill argument]'
+
+
+def _recipient_argument(payload: Dict[str, Any]) -> Optional[str]:
+    argument = payload.get('skill_argument')
+    return argument if isinstance(argument, str) and argument else None
+
+
+def _instructions_slot(owner: Dict[str, Any], argument: Optional[str]) -> _Slot:
+    """The owner's instructions as its own text, with the one placed argument masked; any other count is inspected whole."""
+    text = owner['instructions']
+    if argument and text.count(argument) == 1:
+        return _Slot('instructions', text.replace(argument, ARGUMENT_MARK),
+                     lambda redacted, o=owner, a=argument: o.__setitem__('instructions', redacted.replace(ARGUMENT_MARK, a)))
+    return _Slot('instructions', text, lambda redacted, o=owner: o.__setitem__('instructions', redacted))
+
+
+def _rewrite_skill_argument(skill: Dict[str, Any], text: str) -> None:
+    skill['instructions'] = skill['instructions'].replace(skill['argument'], text)
+    skill['argument'] = text
+
+
+def _rewrite_recipient_argument(payload: Dict[str, Any], text: str) -> None:
+    argument = payload['skill_argument']
+    application = payload.get('application') or {}
+    for owner in (application, application.get('version_details') or {}, payload):
+        if isinstance(owner, dict) and isinstance(owner.get('instructions'), str):
+            owner['instructions'] = owner['instructions'].replace(argument, text)
+    payload['skill_argument'] = text
+
+
+def _argument_slots(payload: Dict[str, Any]) -> List[_Slot]:
+    slots = [
+        _Slot('current_turn', skill['argument'], lambda text, s=skill: _rewrite_skill_argument(s, text))
+        for skill in payload.get('invoked_skills') or []
+        if isinstance(skill, dict) and isinstance(skill.get('argument'), str) and skill['argument']
+    ]
+    if _recipient_argument(payload):
+        slots.append(_Slot('current_turn', payload['skill_argument'], lambda text: _rewrite_recipient_argument(payload, text)))
+    return slots
+
+
+def _redact_skill_arguments(payload: Dict[str, Any], policy: Policy) -> None:
+    """Carry a redaction of a typed skill argument into the body copy, outside the verdict, as it also sits in user_input."""
+    for slot in _argument_slots(payload):
+        result = inspect([Segment(slot.kind, 0, slot.text)], policy)
+        if effective_action(result, policy) == 'block':
+            raise _blocked(summary(result, policy))
+        redacted = result.redacted.get((slot.kind, 0))
+        if redacted is not None:
+            slot.write(redacted)
 
 
 def _variable_slots(kind: str, variables: Iterable) -> List[_Slot]:
@@ -530,6 +582,15 @@ def apply_input_guardrail(call_kwargs: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
     if action == 'block':
         raise _blocked(result_summary)
+    try:
+        if todo:
+            _redact_skill_arguments(payload, policy)
+    except InputGuardrailBlockedError:
+        raise
+    except Exception:  # pylint: disable=W0703
+        log.warning('[INPUT_GUARDRAIL] skill argument check failed (on_error=%s)', policy.on_error)
+        if policy.on_error == 'fail_closed':
+            raise InputGuardrailBlockedError(categories=['error'], rules=[], segments=[])
     payload[INSPECTED_PAYLOAD_KEY] = sorted(already | {segment_hash(s.text) for s in slots})
     if result_summary and (result_summary['detection_count'] or result_summary['error']):
         verdict = verdict_meta(result_summary)

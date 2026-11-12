@@ -392,6 +392,7 @@ class RPC:
                     invoked_skills: Optional[list] = None,
                     project_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
+                    skill_argument: Optional[str] = None,
                     sid_project_id: Optional[int] = None,
                     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
                     mandate_ticket: Optional[str] = None,
@@ -553,6 +554,7 @@ class RPC:
                 chat_skills=chat_skills,
                 invoked_skills=invoked_skills,
                 project_skills=project_skills,
+                skill_argument=skill_argument,
                 auto_approve_sensitive_actions=auto_approve_sensitive_actions,
             )
             if routing_projection is not None:

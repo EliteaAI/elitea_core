@@ -146,7 +146,7 @@ class TestImportKeepsForeignKeys:
             'compatibility': 'Requires GitHub access',
             'metadata': {'author': 'platform-team', 'version': '2.0'},
         }
-        assert result['unused_frontmatter_keys'] == ['allowed-tools', 'argument-hint', 'compatibility', 'metadata']
+        assert result['unused_frontmatter_keys'] == ['allowed-tools', 'compatibility', 'metadata']
 
     def test_a_skill_with_only_elitea_keys_stores_no_frontmatter(self, md):
         _, _, version = imported_version(md, '---\nname: plain\ndescription: d\ntags: [a]\n---\nBody')

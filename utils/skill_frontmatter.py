@@ -12,7 +12,8 @@ ELITEA_OWNED_KEYS = frozenset({'name', 'description', 'tags', LEGACY_VERSION_KEY
 MODEL_INVOCATION_KEY = 'disable-model-invocation'
 USER_INVOCATION_KEY = 'user-invocable'
 INVOCATION_KEYS = (MODEL_INVOCATION_KEY, USER_INVOCATION_KEY)
-KEYS_SHOWN_BY_ELITEA = frozenset({'license', *INVOCATION_KEYS})
+ARGUMENT_HINT_KEY = 'argument-hint'
+KEYS_SHOWN_BY_ELITEA = frozenset({'license', ARGUMENT_HINT_KEY, *INVOCATION_KEYS})
 INVOCATION_FLAG_KEYS = ('disable_model_invocation', 'user_invocable')
 
 
@@ -56,6 +57,29 @@ def invocation_flags(version_meta: Optional[dict]) -> Dict[str, bool]:
     if frontmatter.get(USER_INVOCATION_KEY) is False:
         flags['user_invocable'] = False
     return flags
+
+
+def _hint_as_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, list):
+        items = [item for item in (_hint_as_text(item) for item in value) if item]
+        return '[' + ', '.join(items) + ']' if items else ''
+    if isinstance(value, dict):
+        pairs = ((key, _hint_as_text(item)) for key, item in value.items())
+        return ', '.join(f'{key}: {item}' for key, item in pairs if item)
+    return str(value).strip()
+
+
+def argument_hint_text(version_meta: Optional[dict]) -> Optional[str]:
+    """The version's argument-hint as one line, with the brackets the author typed restored around a YAML list."""
+    return _hint_as_text(((version_meta or {}).get(FRONTMATTER_META_KEY) or {}).get(ARGUMENT_HINT_KEY)) or None
+
+
+def argument_hint_payload(version_meta: Optional[dict]) -> Dict[str, str]:
+    """The hint as a payload key for the ~ menu, only when the version has one."""
+    text = argument_hint_text(version_meta)
+    return {'argument_hint': text} if text else {}
 
 
 def carried_invocation_flags(entry: dict) -> Dict[str, bool]:

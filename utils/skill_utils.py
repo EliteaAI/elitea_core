@@ -18,6 +18,7 @@ from .skill_run_settings import portable_run_settings
 from .skill_file_store import delete_contents
 from .skill_frontmatter import (
     FRONTMATTER_META_KEY,
+    argument_hint_payload,
     carried_invocation_flags,
     extract_non_elitea_frontmatter,
     invocation_flags,
@@ -1765,12 +1766,102 @@ def get_available_skills_for_agent(
                     'version_missing': version is None,
                     'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
                     **(invocation_flags(version.meta) if version else {}),
+                    **(argument_hint_payload(version.meta) if version else {}),
                 })
 
         return skills
 
 
 _NAME_BOUNDARY_CHARS = re.compile(r'[0-9A-Za-z\-]')
+ARGUMENTS_PLACEHOLDER = re.compile(r'(?<!\\)\$ARGUMENTS(?![\[\w])')
+ARGUMENTS_LINE = 'ARGUMENTS: '
+_TAG_OPENING = re.compile(r'<(?=[/A-Za-z!?])')
+_SHELL_LINE_MARKERS = re.compile(r'^([ \t]*)(```!|!`)', re.MULTILINE)
+
+
+def escape_skill_argument(text: str) -> str:
+    """User text made inert inside the skill block: it can neither open a tag nor start a shell line."""
+    text = _TAG_OPENING.sub('&lt;', text)
+    return _SHELL_LINE_MARKERS.sub(lambda match: f'{match.group(1)}{match.group(2)[:-1]} {match.group(2)[-1]}', text)
+
+
+def fill_skill_arguments(instructions: str, argument: str) -> str:
+    """The body with the escaped argument in place of every $ARGUMENTS, or on a final ARGUMENTS: line when it has none."""
+    if ARGUMENTS_PLACEHOLDER.search(instructions):
+        return ARGUMENTS_PLACEHOLDER.sub(lambda _match: argument, instructions)
+    if not argument:
+        return instructions
+    return f'{instructions.rstrip()}\n\n{ARGUMENTS_LINE}{argument}'
+
+
+JINJA_RAW_OPEN = '{% raw %}'
+JINJA_RAW_CLOSE = '{% endraw %}'
+
+
+def consume_recipient_skill_argument(message_content, name: str, other_names: List[str]) -> Tuple[object, Optional[str]]:
+    """The message with a leading ``~name`` of the answering skill de-sigiled, and the escaped text after it, or None."""
+    if isinstance(message_content, str):
+        return _consume_leading_own_mention(message_content, name, other_names)
+    if not isinstance(message_content, list):
+        return message_content, None
+    for index, block in enumerate(message_content):
+        if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
+            cleaned, argument = _consume_leading_own_mention(block['text'], name, other_names)
+            if argument is None:
+                return message_content, None
+            rebuilt = list(message_content)
+            rebuilt[index] = {**block, 'text': cleaned}
+            return rebuilt, argument
+    return message_content, None
+
+
+def _consume_leading_own_mention(text: str, name: str, other_names: List[str]) -> Tuple[str, Optional[str]]:
+    if not text or not name or '~' not in text:
+        return text, None
+    spans = _find_skill_mention_spans(text, [name, *other_names])
+    if not spans or spans[0][2].lower() != name.lower():
+        return text, None
+    argument = _leading_argument(text, spans)
+    if argument is None:
+        return text, None
+    start, end, canonical = spans[0]
+    return f'{text[:start]}{canonical}{text[end:]}', escape_skill_argument(argument)
+
+
+def fill_recipient_instructions(instructions: str, argument: str) -> Tuple[str, str]:
+    """The answering skill's body with the argument filled, and the exact text placed in it, inert for the SDK's Jinja2 pass."""
+    filled = fill_skill_arguments(instructions, argument)
+    if not argument or '{{' not in filled:
+        return filled, argument
+    inert = f"{JINJA_RAW_OPEN}{argument.replace('{%', '{ %')}{JINJA_RAW_CLOSE}"
+    return fill_skill_arguments(instructions, inert), inert
+
+
+SKILL_ARGUMENT_KEY = 'skill_argument'
+
+
+def apply_recipient_skill_argument(result: dict, mention_source, other_names: list) -> None:
+    """Fill the answering skill's own $ARGUMENTS from a leading ~name in the message, or in the message being resumed."""
+    source = mention_source if mention_source is not None else result.get('user_input')
+    cleaned, argument = consume_recipient_skill_argument(source, result.get('entity_name') or '', other_names)
+    if argument is None:
+        return
+    if mention_source is None:
+        result['user_input'] = cleaned
+    version_details = result.get('version_details') or {}
+    version_details['instructions'], placed = fill_recipient_instructions(version_details.get('instructions') or '', argument)
+    result['version_details'] = version_details
+    if placed:
+        result[SKILL_ARGUMENT_KEY] = placed
+
+
+def _leading_argument(text: str, spans: List[Tuple[int, int, str]]) -> Optional[str]:
+    """The text after a message-leading mention up to the next mention, or None when the message does not start with one."""
+    start, end, _name = spans[0]
+    if text[:start].strip():
+        return None
+    next_start = spans[1][0] if len(spans) > 1 else len(text)
+    return text[end:next_start].strip()
 
 
 def _find_skill_mention_spans(
@@ -1846,8 +1937,9 @@ def _find_skill_mention_spans(
 def consume_invoked_skills(
     text: Optional[str],
     attached_skills: List[dict],
+    with_arguments: bool = False,
 ) -> Tuple[Optional[str], List[dict]]:
-    """Resolve ``~skill`` control tokens AND consume them from ``text``."""
+    """Resolve ``~skill`` control tokens AND consume them from ``text``; with_arguments fills the leading skill's body."""
     # Fast path: the overwhelming majority of turns/instructions contain no
     # ``~`` token, so return the original text object unchanged (identity).
     if not text or not attached_skills or '~' not in text:
@@ -1870,6 +1962,8 @@ def consume_invoked_skills(
         cursor = end
     pieces.append(text[cursor:])
     cleaned_text = ''.join(pieces)
+    argument = _leading_argument(text, spans) if with_arguments else None
+    leading_key = spans[0][2].lower()
 
     # Resolve: dedup by name (document order), skip blank bodies.
     by_name: dict = {}
@@ -1904,6 +1998,11 @@ def consume_invoked_skills(
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         }
+        if key == leading_key and argument is not None:
+            escaped = escape_skill_argument(argument)
+            entry['instructions'] = fill_skill_arguments(instructions, escaped)
+            if escaped:
+                entry['argument'] = escaped
         if skill.get('files'):
             entry['files'] = skill['files']
         invoked.append(entry)
@@ -1946,19 +2045,23 @@ def _validate_invocation_limit(message_skills: List[dict]) -> List[dict]:
     return message_skills
 
 
-def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
+def consume_message_skills(
+    message_content, candidates: List[dict], with_arguments: bool = True,
+) -> Tuple[object, List[dict]]:
     candidates = drop_model_only_candidates(candidates)
     if isinstance(message_content, str):
-        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates)
+        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates, with_arguments)
         return cleaned_message or 'continue', _validate_invocation_limit(message_skills)
     if not isinstance(message_content, list):
         return message_content, []
 
     message_skills: List[dict] = []
     rebuilt_blocks: list = []
+    first_text_block = True
     for block in message_content:
         if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
-            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates)
+            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates, with_arguments and first_text_block)
+            first_text_block = False
             for skill in block_skills:
                 if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
                     message_skills.append(skill)
@@ -1975,7 +2078,7 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
 
 
 def validate_message_skill_limit(message_content, candidates: List[dict]) -> None:
-    consume_message_skills(message_content, candidates)
+    consume_message_skills(message_content, candidates, with_arguments=False)
 
 
 def apply_runtime_skills(version_details: dict) -> None:

@@ -191,6 +191,8 @@ def env(isolated_sys_modules):
           validate_message_skill_limit=lambda content, candidates: None,
           model_only_names=model_only_names,
           merge_invoked_skills=lambda message, resumed: [*message, *(resumed or [])],
+          apply_recipient_skill_argument=lambda result, source, names: None,
+          SKILL_ARGUMENT_KEY='skill_argument',
           SkillInvocationLimitError=SkillInvocationLimitError)
     _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
           build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)
@@ -331,6 +333,14 @@ class TestPayload:
 
 
 class TestDispatch:
+    def test_dispatch_carries_the_answering_skills_argument_out_of_the_request_data(self, env):
+        session, msg_group = build_msg_group(PUBLIC_PROJECT_ID)
+        payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {})
+        payload['skill_argument'] = 'Anna'
+        rpc_kwargs, _start_event = env.mod.pop_skill_dispatch(payload, {})
+        assert rpc_kwargs['skill_argument'] == 'Anna'
+        assert 'skill_argument' not in payload
+
     def test_non_skill_payload_dispatches_unchanged(self, env):
         payload = {'user_input': 'hi'}
         start = {'participant_id': 1}
