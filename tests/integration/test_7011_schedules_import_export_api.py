@@ -2,7 +2,8 @@
 
 The routes, the file module, the create service, the access helper and the schedule table are real.
 Flask, the check_api decorator and the plugin package around them are stubbed. The check_api stub
-answers 403 when the spec permissions are not all granted, as the platform does.
+answers 403 when none of the spec permissions is granted, as the platform does. The owner of a personal
+project and a project admin pass the handler test through a fake role and personal-project lookup.
 
 Run via:
     python tests/run_tests.py -m integration -v integration/test_7011_schedules_import_export_api.py
@@ -45,6 +46,26 @@ class FakeResponse:
         self.text, self.mimetype, self.headers = response, mimetype, headers or {}
 
 
+class FakeRpc:
+    """The role and personal-project lookups of `project_settings_access`."""
+
+    def __init__(self):
+        self.roles = []
+        self.personal_project_id = None
+        self.error = None
+        self.timeout = lambda _seconds: self
+
+    def admin_get_user_roles(self, project_id, user_id):
+        if self.error:
+            raise self.error
+        return [{'name': name} for name in self.roles]
+
+    def projects_get_personal_project_id(self, user_id):
+        if self.error:
+            raise self.error
+        return self.personal_project_id
+
+
 class Env:
     permissions = frozenset()
 
@@ -81,6 +102,7 @@ def _stream(data):
 @pytest.fixture
 def env(monkeypatch):
     env = Env()
+    env.rpc = FakeRpc()
     packages = (f'{PACKAGE}.api', f'{PACKAGE}.api.v2')
     with sandbox(monkeypatch, env, packages) as (Base, engine):
         yield from _install(env, Base, engine)
@@ -92,7 +114,7 @@ def _install(env, Base, engine):
     def check_api(spec):
         def decorator(func):
             def wrapper(*args, **kwargs):
-                if not set(spec['permissions']) <= env.permissions:
+                if not set(spec['permissions']) & env.permissions:  # any-of, as the platform's has_access
                     return {'error': 'forbidden'}, 403
                 return func(*args, **kwargs)
             return wrapper
@@ -105,6 +127,7 @@ def _install(env, Base, engine):
             with_modes=list,
         ),
         register_openapi=lambda **meta: (lambda func: func),
+        rpc_tools=types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=env.rpc)),
         auth=types.SimpleNamespace(
             decorators=types.SimpleNamespace(check_api=check_api),
             current_user=lambda: {'id': ADMIN_ID},
@@ -133,6 +156,8 @@ def _install(env, Base, engine):
     for path, name in (
         ('models/pd/schedule_list.py', 'models.pd.schedule_list'), ('utils/constants.py', 'utils.constants'), ('utils/schedule_timing.py', 'utils.schedule_timing'),
         ('utils/schedule_access.py', 'utils.schedule_access'), ('utils/pipeline_utils.py', 'utils.pipeline_utils'),
+        ('utils/project_settings_access.py', 'utils.project_settings_access'),
+        ('utils/schedule_admin_access.py', 'utils.schedule_admin_access'),
         ('utils/export_import_utils.py', 'utils.export_import_utils'), ('models/pd/index.py', 'models.pd.index'),
         ('models/pd/entity_schedule.py', 'models.pd.entity_schedule'),
         ('models/pd/schedule_yaml.py', 'models.pd.schedule_yaml'),
@@ -199,6 +224,50 @@ def test_7011_r3_3_export_without_the_export_permission_answers_403(env, verbs):
     env.grant(*verbs)
     env.seed('First')
     assert env.export()[1] == 403
+
+
+def _as_personal_owner(env):
+    env.grant('update')  # an editor: the role of the owner in their own personal project
+    env.rpc.roles = ['editor', 'viewer']
+    env.rpc.personal_project_id = PROJECT_ID
+
+
+def _as_team_editor(env):
+    env.grant('update')
+    env.rpc.roles = ['editor', 'viewer']
+    env.rpc.personal_project_id = PROJECT_ID + 1  # their personal project is another one
+
+
+def test_the_owner_of_a_personal_project_may_export_and_import_without_the_admin_permissions(env):
+    _as_personal_owner(env)
+    env.seed('First')
+    assert yaml.safe_load(env.export().text)['schedules'][0]['name'] == 'First'
+    assert env.import_file(file_text(item()))[1] == 200
+
+
+def test_an_editor_of_a_team_project_is_refused_export_and_import(env):
+    _as_team_editor(env)
+    env.seed('First')
+    assert env.export()[0]['error'] == 'access_denied'
+    assert env.export()[1] == 403
+    assert env.import_file(file_text(item()))[1] == 403
+    assert len(env.rows()) == 1  # only the seeded row
+
+
+def test_a_project_admin_role_may_export_and_import_without_the_admin_permissions(env):
+    env.grant('update')
+    env.rpc.roles = ['admin']
+    env.seed('First')
+    assert env.export().text
+    assert env.import_file(file_text(item()))[1] == 200
+
+
+def test_a_failing_role_and_personal_project_lookup_refuses_export_and_import(env):
+    env.grant('update')
+    env.rpc.error = RuntimeError('rpc unavailable')
+    assert env.export()[1] == 403
+    assert env.import_file(file_text(item()))[1] == 403
+    assert env.rows() == []
 
 
 def test_7011_r3_3_a_caller_with_only_export_is_not_blocked_by_the_list_permission(env):

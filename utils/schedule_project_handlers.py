@@ -12,13 +12,8 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.pd.schedule_list import ScheduleListFilters, ScheduleListItem
 from .authors import get_authors_data
 from .error_text import public_reason
-from .schedule_access import (
-    SCHEDULE_PERMISSIONS,
-    allowed_actions,
-    row_webhook_url,
-    schedule_check_spec,
-    schedule_scope,
-)
+from .schedule_access import allowed_actions, row_webhook_url, schedule_check_spec, schedule_scope
+from .schedule_admin_access import admin_action_spec, admin_refusal
 from .schedule_queries import list_schedules
 
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
@@ -35,8 +30,6 @@ UNDEFINED_COLUMN = "42703"
 SCHEDULES_UNAVAILABLE = {"code": "schedules_unavailable",
                          "error": "Schedules are not available yet: the administrator must run the admin tasks "
                                   "ensure_webhook_trigger_columns and ensure_toolkit_index_schedule_columns"}
-# The body `check_api` answers, so a refusal inside the handler looks the same to the client
-SETTINGS_DENIED = {"ok": False, "error": "access_denied", "required": [SCHEDULE_PERMISSIONS["admin"]]}
 SETTINGS_UNAVAILABLE = {"code": "settings_unavailable", "error": "The project settings store is unavailable; try again later"}
 
 
@@ -126,13 +119,16 @@ class ScheduleProjectHandlers:
         from .schedule_settings import is_run_without_asking_allowed
         return {"total": total, "rows": items, "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}, 200
 
-    @auth.decorators.check_api(schedule_check_spec("export"))
+    @auth.decorators.check_api(admin_action_spec("export"))
     def _export(self, project_id: int):
         """Answer the YAML file of every schedule of the project, or of `?ids=1,2` (R1.1, R1.2, R1.4).
 
-        Who may call: a schedules admin only.
+        Who may call: a schedules admin (`schedules.export`), a project admin, or the owner of their own personal project.
         Errors: 400 invalid or unknown ids; 403.
         """
+        refusal_answer = admin_refusal(project_id, "export", schedule_scope(project_id))
+        if refusal_answer:
+            return refusal_answer
         from flask import Response  # late: the list unit test fakes flask without it
 
         from .export_import_utils import content_disposition_attachment
@@ -150,13 +146,17 @@ class ScheduleProjectHandlers:
             "Content-Disposition": content_disposition_attachment(f"schedules_{project_id}.yaml"),
         })
 
-    @auth.decorators.check_api(schedule_check_spec("import"))
+    @auth.decorators.check_api(admin_action_spec("import"))
     def _import(self, project_id: int):
         """Update or create a schedule per item of the uploaded file and answer the report (R2.6, R3.1, R4).
 
-        Who may call: a schedules admin only.
+        Who may call: a schedules admin (`schedules.import`), a project admin, or the owner of their own personal project.
         Errors: 400 no file, a file over 1 MB, or not a schedule file; 403.
         """
+        scope = schedule_scope(project_id)
+        refusal_answer = admin_refusal(project_id, "import", scope)
+        if refusal_answer:
+            return refusal_answer
         from .schedule_yaml import (
             MAX_FILE_BYTES,
             NOT_YAML,
@@ -176,7 +176,7 @@ class ScheduleProjectHandlers:
             return _bad_file(NOT_YAML)
         except ValueError as e:
             return _bad_file(str(e))
-        return import_schedules(project_id, schedule_scope(project_id).user_id, file), 200
+        return import_schedules(project_id, scope.user_id, file), 200
 
     @auth.decorators.check_api(schedule_check_spec("list"))
     def _get_preferences(self, project_id: int):
@@ -230,20 +230,18 @@ class ScheduleProjectHandlers:
                 "webhook_max_concurrent_runs_default": limits.per_webhook,
                 "webhook_max_concurrent_runs_limit": limits.per_webhook_limit}, 200
 
-    # The decorator lets editors in; the owner of a personal project holds no admin role, so the admin test is below
-    @auth.decorators.check_api(schedule_check_spec("update"))
+    @auth.decorators.check_api(admin_action_spec("admin"))
     def _save_settings(self, project_id: int):
         """Allow or forbid "Run without asking", or set the project's per-webhook running cap; a key left out keeps its value.
         Saved schedules keep their rule; while "Run without asking" is off, their runs pause and ask.
 
-        Who may call: a project admin or a schedules admin (`schedules.admin`), or the owner of their own personal
+        Who may call: a schedules admin (`schedules.admin`), a project admin, or the owner of their own personal
         project; an editor of a team project may not.
         Errors: 400 an unknown key or a value that is not true or false, with `field`; 403; 503 the store fails.
         """
-        from .project_settings_access import can_manage_project_settings  # late: the other handler tests load this module without it
-        if not (schedule_scope(project_id).is_admin
-                or can_manage_project_settings(project_id, auth.current_user().get("id"))):
-            return SETTINGS_DENIED, 403
+        refusal_answer = admin_refusal(project_id, "admin", schedule_scope(project_id))
+        if refusal_answer:
+            return refusal_answer
         from .schedule_settings import ScheduleProjectSettings, read_saved_settings, save_schedule_settings
         body = request.get_json(silent=True)
         # Each control saves only its own key: the others come from one read, and a failed read writes nothing

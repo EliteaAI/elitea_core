@@ -141,6 +141,7 @@ def env(monkeypatch):
         resolve_permissions=lambda **kwargs: set(env.permissions),
     )
     tools.db = types.SimpleNamespace(get_session=lambda project_id: Session())
+    tools.rpc_tools = types.SimpleNamespace()  # the list route asks no role lookup
     tools.register_openapi = lambda **meta: (lambda func: func)
     tools.serialize = lambda data: data
     _register(monkeypatch, "tools", tools)
@@ -158,6 +159,8 @@ def env(monkeypatch):
     _load(monkeypatch, "models/pd/schedule_list.py", f"{PKG}.models.pd.schedule_list")
     _load(monkeypatch, "utils/constants.py", f"{PKG}.utils.constants")
     _load(monkeypatch, "utils/schedule_access.py", f"{PKG}.utils.schedule_access")
+    _load(monkeypatch, "utils/project_settings_access.py", f"{PKG}.utils.project_settings_access")
+    _load(monkeypatch, "utils/schedule_admin_access.py", f"{PKG}.utils.schedule_admin_access")
 
     def get_authors_data(author_ids):
         env.author_calls.append(list(author_ids))

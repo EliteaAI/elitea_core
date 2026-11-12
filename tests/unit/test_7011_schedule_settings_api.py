@@ -147,6 +147,7 @@ def harness(isolated_sys_modules):
     _load('utils/constants.py', f'{PACKAGE}.utils.constants')
     _load('utils/schedule_access.py', f'{PACKAGE}.utils.schedule_access')
     _load('utils/project_settings_access.py', f'{PACKAGE}.utils.project_settings_access')
+    _load('utils/schedule_admin_access.py', f'{PACKAGE}.utils.schedule_admin_access')
     _load('utils/schedule_project_handlers.py', f'{PACKAGE}.utils.schedule_project_handlers')
     sys.modules.update(handler_stubs(PACKAGE, real='schedule_project_handlers'))
     harness.routes = _load('api/v2/schedules.py', f'{PACKAGE}.api.v2.schedules')
@@ -207,19 +208,19 @@ def test_put_answers_503_when_configurations_has_no_owned_types(harness):
     assert status == 503
 
 
-def test_el7011_cr_get_needs_schedules_list_and_put_needs_schedules_admin(harness):
+def test_get_needs_schedules_list_and_put_lets_update_or_admin_in(harness):
     assert harness.specs['_get_settings'] == [LIST_PERMISSION]
-    assert harness.specs['_save_settings'] == [UPDATE_PERMISSION]
+    assert harness.specs['_save_settings'] == [UPDATE_PERMISSION, ADMIN_PERMISSION]
 
 
-def test_el7011_cr_a_member_reads_but_cannot_save(harness):
+def test_a_member_reads_but_cannot_save(harness):
     harness.permissions = {LIST_PERMISSION}
     assert _call(harness, 'get')[1] == 200
     assert _call(harness, 'put', {'allow_run_without_asking': True})[1] == 403
     assert harness.saved == {}
 
 
-def test_el7011_cr_without_schedules_list_get_is_403(harness):
+def test_without_schedules_list_get_is_403(harness):
     harness.permissions = set()
     assert _call(harness, 'get')[1] == 403
 
@@ -318,3 +319,9 @@ def test_a_failing_role_and_personal_project_lookup_refuses_the_save(harness):
     harness.rpc_error = RuntimeError('rpc unavailable')
     assert _call(harness, 'put', {'allow_run_without_asking': True})[1] == 403
     assert harness.saved == {}
+
+
+def test_a_role_with_only_the_schedules_admin_permission_may_save(harness):
+    harness.permissions = {ADMIN_PERMISSION}
+    assert _call(harness, 'put', {'allow_run_without_asking': True})[1] == 200
+    assert harness.saved == {PROJECT_ID: True}

@@ -279,7 +279,8 @@ def runs(world, history, monkeypatch):
         merged = {k: v for k, v in attrs.items() if not k.startswith("__")}
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **merged))
     for dotted in ("utils.schedule_timing", "models.pd.index", "models.pd.entity_schedule", "models.pd.schedule_run",
-                   "models.pd.schedule_list", "utils.schedule_access", "utils.schedule_dispatch", "utils.schedule_service",
+                   "models.pd.schedule_list", "utils.schedule_access", "utils.project_settings_access",
+                   "utils.schedule_admin_access", "utils.schedule_dispatch", "utils.schedule_service",
                    "utils.schedule_item_handlers"):
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", None)
         load(dotted.replace(".", "/") + ".py", fresh=True)

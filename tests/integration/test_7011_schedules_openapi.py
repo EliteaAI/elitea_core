@@ -49,7 +49,7 @@ LENIENT_MODULES = (
     'arbiter', f'{PKG}.models.entity_schedule', f'{PKG}.models.enums.all', f'{PKG}.models.pd.index',
     f'{PKG}.models.pd.sio', f'{PKG}.scripts.tool_icons', f'{PKG}.sio.asr',
     *(f'{PKG}.utils.{name}' for name in (
-        'schedule_access', 'schedule_claim', 'schedule_dispatch', 'schedule_notifications',
+        'schedule_access', 'schedule_admin_access', 'schedule_claim', 'schedule_dispatch', 'schedule_notifications',
         'schedule_service', 'schedule_timing', 'authors', 'schedule_queries', 'draft_llm_utils',
         'exceptions', 'predict_utils', 'schedule_draft_utils', 'service_prompt_utils', 'utils',
         'evaluation_run_utils', 'run_id', 'scheduler_bindings', 'sio_utils', 'prompt_eliminate_utils',

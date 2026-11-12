@@ -2,6 +2,7 @@
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Literal
@@ -38,6 +39,7 @@ from .schedule_access import (
     webhook_signing,
     schedule_scope,
 )
+from .schedule_admin_access import admin_action_spec, admin_refusal
 from .schedule_claim import fail_run, insert_run, merge_events
 from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
@@ -1308,14 +1310,19 @@ class ScheduleItemHandlers:
                 return RUN_NOT_FOUND
             return _run_detail_body(session, project_id, run, schedule.approval_rule, scope.user_id)
 
-    @auth.decorators.check_api(schedule_check_spec("admin"))
+    @auth.decorators.check_api(admin_action_spec("admin"))
     def _change_owner(self, project_id: int, schedule_id: int):
         """Give a schedule to another project member; the old and the new owner get a notice.
 
-        Who may call: a schedules admin only.
+        Who may call: a schedules admin, a project admin, or the owner of their own personal project.
         Errors: 400 `owner_id` missing or not a member who may own it; 403; 404; 503 the access
         check is not available.
         """
+        scope = schedule_scope(project_id)
+        refusal_answer = admin_refusal(project_id, "admin", scope)
+        if refusal_answer:
+            return refusal_answer
+        scope = replace(scope, is_admin=True)  # past the test above the caller is an admin here: any row is theirs to hand over
         # late, like schedule_risk: only the owner route needs the owner and auth RPC checks
         from .schedule_owner import (
             ACCESS_CHECK_UNAVAILABLE,
@@ -1327,7 +1334,6 @@ class ScheduleItemHandlers:
         owner_id = body.get("owner_id") if isinstance(body, dict) else None
         if type(owner_id) is not int:  # strict: "20", true and 20.0 are no owner ids (R2.3)
             return refusal(INVALID_INPUT, "owner_id must be an integer", field="owner_id")
-        scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
                 row = load_schedule_in_scope(session, schedule_id, scope)

@@ -116,6 +116,7 @@ def harness(isolated_sys_modules):
         current_user=lambda: {'id': CALLER_ID},
     )
     tools.config = types.SimpleNamespace(ADMINISTRATION_MODE=MODES[0], DEFAULT_MODE=MODES[1])
+    tools.rpc_tools = types.SimpleNamespace()  # the admin-only routes of the same class are not called here
     tools.db = types.SimpleNamespace(get_session=harness.get_session)
     tools.register_openapi = lambda **meta: (lambda func: func)
     tools.serialize = lambda value: value
@@ -129,6 +130,8 @@ def harness(isolated_sys_modules):
         sys.modules[f'{PACKAGE}.{name}'] = LenientModule(f'{PACKAGE}.{name}')  # the list handler, not run here
     _load('utils/constants.py', f'{PACKAGE}.utils.constants')
     _load('utils/schedule_access.py', f'{PACKAGE}.utils.schedule_access')
+    _load('utils/project_settings_access.py', f'{PACKAGE}.utils.project_settings_access')
+    _load('utils/schedule_admin_access.py', f'{PACKAGE}.utils.schedule_admin_access')
     harness.module = _load('utils/schedule_project_handlers.py', f'{PACKAGE}.utils.schedule_project_handlers')
     sys.modules.update(handler_stubs(PACKAGE, real='schedule_project_handlers'))
     harness.routes = _load('api/v2/schedules.py', f'{PACKAGE}.api.v2.schedules')

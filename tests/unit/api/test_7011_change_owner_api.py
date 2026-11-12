@@ -17,6 +17,7 @@ from unit.test_7011_schedule_crud_api import (
     OWNER_ID,
     PACKAGE,
     PLUGIN_ROOT,
+    PROJECT_ID,
     fake_connections,
 )
 from unit.test_7011_schedule_crud_api import harness as _crud_harness
@@ -93,6 +94,30 @@ def test_7011_r1_3_caller_without_schedules_admin_gets_403_and_no_audit_mark(har
     assert change_owner(harness, schedule_id, {'owner_id': OWNER_ID})[1] == 403
     assert unchanged(harness, schedule_id)
     assert (owner.checked, harness.notices, harness.span.attributes) == ([], [], {})
+
+
+def test_the_owner_of_a_personal_project_may_hand_over_any_schedule_of_it(harness, owner):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, EDITOR)
+    harness.personal_project_id = PROJECT_ID
+    body, status = change_owner(harness, schedule_id, {'owner_id': OWNER_ID})
+    assert (status, body['created_by']) == (200, OWNER_ID)
+
+
+def test_an_editor_with_another_personal_project_gets_403_on_the_owner_route(harness, owner):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, EDITOR)
+    harness.personal_project_id = PROJECT_ID + 1
+    assert change_owner(harness, schedule_id, {'owner_id': OWNER_ID})[1] == 403
+    assert unchanged(harness, schedule_id)
+
+
+def test_a_failing_personal_project_lookup_refuses_the_owner_route(harness, owner):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, EDITOR)
+    harness.rpc_error = RuntimeError('rpc unavailable')
+    assert change_owner(harness, schedule_id, {'owner_id': OWNER_ID})[1] == 403
+    assert unchanged(harness, schedule_id)
 
 
 @pytest.mark.parametrize('reason_name', ['NOT_ACTIVE_MEMBER', 'CANNOT_USE_SCHEDULES'])

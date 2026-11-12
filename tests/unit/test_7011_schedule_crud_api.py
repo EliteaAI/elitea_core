@@ -64,6 +64,22 @@ class Harness:
         self.connections, self.connection_calls, self.switched_off = {}, [], []
         self.path = ''
         self.query = {}
+        self.project_roles = []  # the caller's role names in the project, as `admin_get_user_roles` answers
+        self.personal_project_id = None  # the caller's personal project, as `projects_get_personal_project_id` answers
+        self.rpc_error = None
+        self.rpc = types.SimpleNamespace(admin_get_user_roles=self.roles_rpc,
+                                         projects_get_personal_project_id=self.personal_rpc)
+        self.rpc.timeout = lambda _seconds: self.rpc
+
+    def roles_rpc(self, project_id, user_id):
+        if self.rpc_error:
+            raise self.rpc_error
+        return [{'name': name} for name in self.project_roles]
+
+    def personal_rpc(self, user_id):
+        if self.rpc_error:
+            raise self.rpc_error
+        return self.personal_project_id
 
     def request_as(self, user_id, permissions):
         self.user_id, self.permissions = user_id, set(permissions)
@@ -201,6 +217,7 @@ def harness(isolated_sys_modules, monkeypatch):
         ADMINISTRATION_MODE='administration', DEFAULT_MODE='default', POSTGRES_TENANT_SCHEMA='tenant',
     )
     tools.db = types.SimpleNamespace(get_session=lambda project_id=None: harness.session_factory(), Base=Base)
+    tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=harness.rpc))
     tools.register_openapi = lambda **meta: (lambda func: func)
     tools.serialize = lambda value: value
     tools.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
@@ -253,6 +270,8 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/constants.py', 'utils.constants')
     load('utils/schedule_timing.py', 'utils.schedule_timing')
     load('utils/schedule_access.py', 'utils.schedule_access')
+    load('utils/project_settings_access.py', 'utils.project_settings_access')
+    load('utils/schedule_admin_access.py', 'utils.schedule_admin_access')
     load('utils/schedule_rights.py', 'utils.schedule_rights')
     load('models/pd/index.py', 'models.pd.index')
     load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')

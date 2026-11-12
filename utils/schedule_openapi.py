@@ -597,7 +597,7 @@ OPERATIONS = {
         "summary": "Change the owner of a schedule",
         "description": _text(
             "Give the schedule to another project member. The old and the new owner get a notice.",
-            "a schedules admin (`schedules.admin`) only",
+            "a schedules admin (`schedules.admin`), a project admin, or the owner of their own personal project",
             "400 `owner_id` is missing or the user cannot own the schedule; 403 no permission; 404 not found; "
             "503 the access check is unavailable"),
         "parameters": ITEM_PARAMS,
@@ -630,7 +630,7 @@ OPERATIONS = {
         "summary": "Export schedules to YAML",
         "description": _text(
             "Download the schedules of the project as one YAML file, or only the schedules in `ids`.",
-            "a schedules admin (`schedules.export`) only",
+            "a schedules admin (`schedules.export`), a project admin, or the owner of their own personal project",
             "400 invalid or unknown ids; 403 no permission"),
         "parameters": PROJECT_PARAMS + EXPORT_QUERY_PARAMS,
         "responses": _responses(200, "The YAML file (application/x-yaml)", None, {
@@ -644,7 +644,7 @@ OPERATIONS = {
             "name, updates it. Every other item creates a paused schedule owned by the caller. An import never "
             "confirms risks: an item with a blocking finding fails with the reason, and \"Run without asking\" "
             "with sensitive tools is saved as \"Pause and ask me\" with a `note`.",
-            "a schedules admin (`schedules.import`) only",
+            "a schedules admin (`schedules.import`), a project admin, or the owner of their own personal project",
             "400 no file, a file over 1 MB, or not a schedule file; 403 no permission"),
         "parameters": PROJECT_PARAMS,
         "request_body": IMPORT_BODY,
@@ -712,7 +712,7 @@ OPERATIONS = {
             "Allow or forbid the \"Run without asking\" approval rule in the project. Saved schedules keep "
             "their rule; while it is off, their runs pause and ask, and a save or an import with that rule "
             "is refused or changed to \"Pause and ask me\".",
-            "a project admin or a schedules admin (`schedules.admin`), or the owner of their own personal "
+            "a schedules admin (`schedules.admin`), a project admin, or the owner of their own personal "
             "project; an editor of a team project may not",
             "400 an unknown key or a value that is not true or false (`field` names it); 403 no permission; "
             "503 the settings store is unavailable"),
