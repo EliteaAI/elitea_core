@@ -621,6 +621,34 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "failed_projects": failed, "dry_run": values["dry_run"]}
 
     @web.method()
+    def ensure_toolkit_index_schedule_columns(self, *args, **kwargs):
+        """Admin task: let entity_schedules hold toolkit index schedules (R-2.0.9). Idempotent.
+
+        Makes application_id nullable, adds toolkit_id and index_name, widens the entity_type check and adds the
+        target check and the one-schedule-per-index unique index. Run it before the release code reads schedules.
+
+        Param: "project_id=<all|N>[;dry_run]"; a dry run lists the projects still missing the shape.
+        """
+        from ..utils.toolkit_index_schedule_ddl import (  # pylint: disable=C0415
+            apply_toolkit_index_schedule_columns, toolkit_index_pending_project_ids,
+        )
+        task = "ensure_toolkit_index_schedule_columns"
+        values, error = _parse_project_param(task, kwargs.get("param", "") or "", "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            pending = set(toolkit_index_pending_project_ids())
+            project_ids = _target_project_ids(self.context.rpc_manager, f"project_id={values['project_id']}")
+        except Exception:  # pylint: disable=W0703
+            log.exception("%s: failed to list projects", task)
+            return {"migrated": 0, "error": "failed to list projects"}
+        targets = sorted(pid for pid in project_ids if pid in pending)
+        migrated, failed = apply_toolkit_index_schedule_columns(targets, dry_run=values["dry_run"])
+        log.info("%s%s: migrated=%s failed=%s", "[DRY RUN] " if values["dry_run"] else "", task, migrated, failed)
+        return {"migrated": len(migrated), "projects": migrated, "failed": len(failed),
+                "failed_projects": failed, "dry_run": values["dry_run"]}
+
+    @web.method()
     def migrate_schedule_test_runs(self, *args, **kwargs):
         """Admin task: add the Test Run columns and indexes to entity_schedule_runs in each project schema (R-2.0.8).
 
@@ -2485,47 +2513,82 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return report
 
     @web.method()
-    def migrate_legacy_pipeline_webhooks(self, *args, **kwargs):
-        """Admin task: move legacy pipeline webhook triggers to webhook rows, one way (#7402).
+    def migrate_legacy_index_schedules(self, *args, **kwargs):
+        """Admin task: move legacy index schedules (toolkit `indexes_meta`) to schedule rows.
 
-        A dry run by default: only dry_run=false writes. Idempotent: a migrated version is skipped.
-        A version that cannot move keeps its legacy trigger and is logged; a failing project is reported.
+        A dry run by default: only dry_run=false writes. Idempotent: a moved key is gone from the toolkit JSON.
+        A project that fails is reported under errors and the next project runs.
 
         Param format:
             "project_id=<all|N>[;dry_run=false]"
         """
-        # Imported here: the module needs the running plugin (database, vault, auth RPC)
-        from ..utils.legacy_webhook_migration import migrate_project, parse_task_params
+        # Imported here: the module needs the running plugin (database, owner checks)
+        from ..utils.legacy_index_schedule_migration import migrate_index_project
+        from ..utils.legacy_schedule_migration import parse_task_params
 
         try:
             spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
             project_ids = resolve_target_project_ids(spec)
         except ValueError as exc:
-            log.error("migrate_legacy_pipeline_webhooks: %s", exc)
+            log.error("migrate_legacy_index_schedules: %s", exc)
             return {"error": str(exc)}
 
         prefix = "[DRY RUN] " if dry_run else ""
-        log.info("%sStarting migrate_legacy_pipeline_webhooks (projects=%s)", prefix, len(project_ids))
+        log.info("%sStarting migrate_legacy_index_schedules (projects=%s)", prefix, len(project_ids))
         report = {"dry_run": dry_run, "projects": [], "errors": []}
         for project_id in project_ids:
             try:
-                project = migrate_project(project_id, dry_run)
-            except Exception as exc:  # noqa: BLE001 - one failing project must not stop the others
-                log.exception("migrate_legacy_pipeline_webhooks: error in project %s", project_id)
-                report["errors"].append({"project_id": project_id, "error": type(exc).__name__})
-                continue
-            if project["found"]:
-                report["projects"].append(project)
+                report["projects"].append(migrate_index_project(project_id, dry_run))
+            except Exception:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("migrate_legacy_index_schedules: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": "the project could not be migrated; see the log"})
+        # Counts only: the full report goes back to the caller
         counts = [
-            (p["project_id"], p["found"], len(p["migrated"]), len(p["skipped"]), len(p["failed"]))
+            (p.get("project_id"), p.get("found", 0), p.get("migrated_enabled", 0),
+             len(p.get("migrated_paused", [])), len(p.get("held", [])), len(p.get("errors", [])))
             for p in report["projects"]
         ]
         log.info(
-            "%sExiting migrate_legacy_pipeline_webhooks — (project, found, migrated, skipped, failed)=%s "
+            "%sExiting migrate_legacy_index_schedules — (project, found, enabled, paused, held, errors)=%s "
             "failed_projects=%s",
             prefix, counts, len(report["errors"]),
         )
         return report
+
+    @web.method()
+    def restore_legacy_index_schedules(self, *args, **kwargs):
+        """Admin task: write the moved index schedules back to the toolkit JSON and delete their rows.
+
+        Refused while `legacy_index_step_enabled` is on (the next tick would move them again); a missing setting
+        counts as off. Each restored schedule is deleted with its run history. One project at a time.
+        `dry_run=false` is required to write; this task has no dry-run report, so a dry run only checks the
+        refusal and the project.
+
+        Param format:
+            "project_id=<N>[;dry_run=false]"
+        """
+        from ..utils.legacy_index_schedule_migration import (
+            RESTORE_HISTORY_WARNING, index_restore_refusal, restore_index_schedules,
+        )
+        from ..utils.legacy_schedule_migration import parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            if spec[0] != "single":
+                raise ValueError("project_id=<N> is required: a restore runs for one project")
+        except ValueError as exc:
+            log.error("restore_legacy_index_schedules: %s", exc)
+            return {"error": str(exc)}
+        refusal = index_restore_refusal(self.descriptor.config.get("scheduler", {}).get("schedules", {}))
+        if refusal:
+            log.error("restore_legacy_index_schedules: %s", refusal)
+            return {"error": refusal}
+        if dry_run:
+            return {"dry_run": True, "project_id": spec[1], "warning": RESTORE_HISTORY_WARNING}
+        report = restore_index_schedules(spec[1])
+        log.info("Exiting restore_legacy_index_schedules — project=%s restored=%s errors=%s",
+                 spec[1], len(report["restored"]), len(report["errors"]))
+        return {"dry_run": False, **report}
 
     @web.method()
     def backfill_legacy_trace_steps(self, *args, **kwargs):
@@ -2586,6 +2649,49 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "totals": totals,
             "by_project": by_project,
         }
+
+    @web.method()
+    def migrate_legacy_pipeline_webhooks(self, *args, **kwargs):
+        """Admin task: move legacy pipeline webhook triggers to webhook rows, one way (#7402).
+
+        A dry run by default: only dry_run=false writes. Idempotent: a migrated version is skipped.
+        A version that cannot move keeps its legacy trigger and is logged; a failing project is reported.
+
+        Param format:
+            "project_id=<all|N>[;dry_run=false]"
+        """
+        # Imported here: the module needs the running plugin (database, vault, auth RPC)
+        from ..utils.legacy_webhook_migration import migrate_project, parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            project_ids = resolve_target_project_ids(spec)
+        except ValueError as exc:
+            log.error("migrate_legacy_pipeline_webhooks: %s", exc)
+            return {"error": str(exc)}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("%sStarting migrate_legacy_pipeline_webhooks (projects=%s)", prefix, len(project_ids))
+        report = {"dry_run": dry_run, "projects": [], "errors": []}
+        for project_id in project_ids:
+            try:
+                project = migrate_project(project_id, dry_run)
+            except Exception as exc:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("migrate_legacy_pipeline_webhooks: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": type(exc).__name__})
+                continue
+            if project["found"]:
+                report["projects"].append(project)
+        counts = [
+            (p["project_id"], p["found"], len(p["migrated"]), len(p["skipped"]), len(p["failed"]))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting migrate_legacy_pipeline_webhooks — (project, found, migrated, skipped, failed)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
+        return report
 
     @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
