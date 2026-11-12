@@ -307,10 +307,12 @@ def _run_detail_body(session, project_id: int, run, approval_rule: str | None, v
 
     The tool results (`summary` and the preview of a `tool_call` event) go only to the user who started a manual or test run.
     `decider_id` is the user who approves, rejects or signs in for the run, so a client shows the buttons to that user only.
+    `can_approve_all` is true when the viewer may choose "approve all" on this waiting run now, so the UI shows the
+    choice only then.
     """
     # Late: only the detail routes read the conversation and the usage store
     from .schedule_run_detail import tool_call_events, usage_summary, version_label
-    from .schedule_runs import run_decider_id
+    from .schedule_runs import can_approve_all, run_decider_id
     row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
     tokens, cost_usd = usage_summary(session, project_id, run)
     tool_events = tool_call_events(session, run.conversation_id, with_output=not _hides_tool_output(run, viewer_id))
@@ -323,6 +325,7 @@ def _run_detail_body(session, project_id: int, run, approval_rule: str | None, v
         "decider_id": run_decider_id(session, run),
         "approval_rule": approval_rule,
         "approval_expires_at": _iso(run.approval_expires_at),
+        "can_approve_all": can_approve_all(session, project_id, run, viewer_id),
         "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
         "events": events,
     }, 200

@@ -21,6 +21,10 @@ class ContinuePredictPayload(BaseModel):
         None, description="Edited text for 'edit', the user's note for 'block_with_comment', or the answers object for a clarifying-question 'answer'.")
     hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
         None, description="Per-child HITL decisions for a parallel sub-agent resume.")
+    approve_all: bool = Field(
+        False, description="Only for a scheduled run: with hitl_action approve, the run asks no more "
+                           "sensitive-tool approvals until it ends. Only the person who started the run may send it, "
+                           "and only while the project allows Run without asking.")
     mcp_auth_resume: bool = Field(
         False, description="Whether this request resumes a durable Toolkit authorization interrupt.")
     mcp_auth_action: Optional[Literal["authorize", "skip"]] = Field(
@@ -55,6 +59,12 @@ class ContinuePredictPayload(BaseModel):
             raise ValueError("mcp_auth_action is required when mcp_auth_resume is true")
         if self.hitl_resume and self.mcp_auth_resume:
             raise ValueError("hitl_resume and mcp_auth_resume are mutually exclusive")
+        return self
+
+    @model_validator(mode='after')
+    def approve_all_needs_an_approve(self):
+        if self.approve_all and not (self.hitl_resume and self.hitl_action == "approve"):
+            raise ValueError("approve_all is valid only with hitl_resume and hitl_action approve")
         return self
 
     @model_validator(mode='after')

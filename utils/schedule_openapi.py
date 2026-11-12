@@ -124,6 +124,7 @@ RUN_DETAIL_EXAMPLE = {
     "started_at": "2026-10-21T09:00:00+00:00", "finished_at": "2026-10-21T09:00:38+00:00", "version_id": 420,
     "duration_ms": 38000, "version_label": "v3", "principal_label": "Ann Smith (schedule owner)",
     "risk_outcome": "needs_approval", "decider_id": 20, "approval_rule": "pause_and_ask", "approval_expires_at": None,
+    "can_approve_all": False,
     "summary": {"duration_ms": 38000, "tokens": 2140, "cost_usd": 0.03},
     "events": [
         {"at": "2026-10-21T09:00:00.120000+00:00", "kind": "started", "level": "info",
@@ -139,7 +140,8 @@ RUN_DETAIL_EXAMPLE = {
          "text": "Tool call: github · list_issues (1200 ms): 12 open issues", "toolkit": "github",
          "tool": "list_issues", "summary": "12 open issues", "duration_ms": 1200},
         {"at": "2026-10-21T09:00:09.000000+00:00", "kind": "paused", "level": "warning",
-         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue"},
+         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue",
+         "tools": [{"toolkit": "github", "tool": "create_issue"}]},
         {"at": "2026-10-21T09:00:30.000000+00:00", "kind": "decision", "level": "info",
          "text": "Approved by the schedule owner", "action": "approve", "by": 20},
         {"at": "2026-10-21T09:00:38.000000+00:00", "kind": "finished", "level": "success",
@@ -499,7 +501,7 @@ OPERATIONS = {
         "description": _text(
             "Answer one of the caller's own Test Runs for `application_id`, with the body of the run detail of a "
             "saved schedule: status, events, summary, conversation_id, version_label, tokens, cost_usd. "
-            "`approval_rule` is the one of the stored form.",
+            "`approval_rule` is the one of the stored form; `can_approve_all` is as for a run of a saved schedule.",
             "a project member with `schedules.run`; another owner's run, a run of a saved schedule and a run of "
             "another agent or pipeline are 404",
             "400 a missing `application_id`; 403 no permission; 404 `run_not_found`; "
@@ -571,7 +573,12 @@ OPERATIONS = {
             "needs_signin, the last when a toolkit has no saved login and its owner must sign in), a `summary` "
             "(duration, tokens, cost) and `events`. "
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
-            "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
+            "agent_started, tool_call, paused, decision and finished. A `paused` event names every tool of the pause in "
+            "`tools` (`toolkit`, `tool`). A `decision` event of an approve for the rest of the run has `approve_all` "
+            "true. `can_approve_all` is true when the run waits and the caller may choose \"approve all\" now: the run "
+            "acts as the caller (`run_actor_id`: who pressed Run now, else the owner), it is not a run of a webhook, and the project allows \"Run without asking\"; the UI "
+            "shows the choice only then. "
+            "Tool calls come from the run conversation; "
             "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
             "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
             "A manual or test run started by another user shows only toolkit, tool and duration. "

@@ -381,6 +381,7 @@ def reads(monkeypatch):
     monkeypatch.setitem(sys.modules, module.__name__, module)
     runs = types.ModuleType(f'{PACKAGE}.utils.schedule_runs')  # a draft Test run is decided by its starter
     runs.run_decider_id = lambda session, run: run.requested_by
+    runs.can_approve_all = lambda session, project_id, run, viewer_id: viewer_id == OWNER_ID
     monkeypatch.setitem(sys.modules, runs.__name__, runs)
 
 
@@ -480,6 +481,7 @@ def test_the_test_run_detail_has_the_body_of_the_run_detail_and_the_rule_of_the_
     assert body['approval_rule'] == 'pause_and_ask'
     assert body['decider_id'] == OWNER_ID
     assert {'events', 'status', 'conversation_id'} <= set(body)
+    assert body['can_approve_all'] is True
 
 
 def test_the_test_run_detail_is_404_for_a_foreign_a_saved_or_a_missing_run(harness, started, reads):

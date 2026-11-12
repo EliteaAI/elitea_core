@@ -8,13 +8,19 @@ from tools import db
 
 from ..models.entity_schedule import ACTIVE_STATUSES, REFUSAL_STREAK, RUN_FORM, EntitySchedule, EntityScheduleRun
 from .error_text import FAILED_REASON, GENERIC_FAILED_REASON, hide_locations, is_technical, last_exception_line, readable_reason, without_markup
-from .schedule_claim import RUN_TRIGGERS, append_run_events, fail_run, finished_event, lock_project_runs, run_event
+from .schedule_claim import (
+    RUN_TRIGGERS, TEXT_LIMIT, append_run_events, fail_run, finished_event, lock_project_runs, run_event,
+)
 from .schedule_timing import DEFAULT_WEBHOOK_MAX_WAITING, WEBHOOK_LIMIT_CEILING, at_least_one
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
 NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
+MORE_RESERVE = len(' (+999 more)')
+PAUSE_LIST_LIMIT = 50  # tools named in one pause line; the rest are counted. lean: raise it when a real run shows more
+APPROVE_ALL_TEXT = 'Approved; this run asks no more approvals'
+APPROVE_ALL_KEY = 'approve_all'  # the flag in the `form` column of the run row; the decision event is for display only
 PAUSE_REASON = 'the run needs a human answer'
 CHILD_PAUSE_REASON = 'a step inside a parallel branch needs an answer, and a scheduled run cannot give it'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
@@ -59,6 +65,18 @@ class ScheduleDecisionInvalid(Exception):
 
 class ScheduleRunNotWaiting(Exception):
     """The run of an approve or reject is not waiting for approval (R2.4)."""
+
+
+class ScheduleApproveAllForbidden(Exception):
+    """"Approve all" was asked by someone but the person the run acts for."""
+
+
+class ScheduleApproveAllWebhook(Exception):
+    """"Approve all" was asked on a run of a webhook: nobody is at hand to own the choice for a delivery."""
+
+
+class ScheduleApproveAllOff(Exception):
+    """"Approve all" was asked while the project does not allow "Run without asking"."""
 
 
 def approval_wait_hours() -> int:
@@ -284,6 +302,43 @@ def schedule_run_actor_id(project_id: int, run_id: int) -> int | None:
         return run_actor_id(session, run) if run is not None else None
 
 
+def is_webhook_run(session, run) -> bool:
+    """True for a run of a webhook row, a sample run included; the trigger kind is the one `_sign_in_policy` reads."""
+    if run.schedule_id is None:
+        return False
+    return session.scalar(select(EntitySchedule.trigger_kind).where(EntitySchedule.id == run.schedule_id)) == 'webhook'
+
+
+def check_approve_all(project_id: int, is_actor: bool, is_webhook: bool = False) -> None:
+    """Refuse "approve all" unless the caller is the actor of a run that is not a webhook run and the project allows
+    "Run without asking".
+
+    Raises `ScheduleApproveAllForbidden`, then `ScheduleApproveAllWebhook`, then `ScheduleApproveAllOff`. The setting is
+    read at each call: an admin may switch it off while the run waits. It takes no session, because the settings store
+    opens its own connection.
+    """
+    # Late: the settings store stays off every other run writer
+    from .schedule_settings import is_run_without_asking_allowed
+    if not is_actor:
+        raise ScheduleApproveAllForbidden()
+    if is_webhook:
+        raise ScheduleApproveAllWebhook()
+    if not is_run_without_asking_allowed(project_id):
+        raise ScheduleApproveAllOff()
+
+
+def can_approve_all(session, project_id: int, run, caller_id: int) -> bool:
+    """True when the caller may choose "approve all" now: the run waits, the caller decides it and
+    `check_approve_all` passes. The decider and the actor are two users for an admin's Run now, so nobody has the choice."""
+    if run.status != 'waiting_for_approval' or run_decider_id(session, run) != caller_id:
+        return False
+    try:
+        check_approve_all(project_id, run_actor_id(session, run) == caller_id, is_webhook_run(session, run))
+    except (ScheduleApproveAllForbidden, ScheduleApproveAllWebhook, ScheduleApproveAllOff):
+        return False
+    return True
+
+
 def _own_conversation(conversation_id: int | None, author_id: int | None) -> list:
     """Conditions that tie a chat hook to its own run: the run is linked to this conversation, or has none yet
     and the chat author owns the schedule. The run id comes from conversation meta, which a client can write.
@@ -329,9 +384,9 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
     A schedule that does not ask the owner, and any webhook, fails on a sign-in at once. `conversation_id` and
     `author_id` of the paused chat tie the pause to its own run (see `_own_conversation`).
     """
-    # A parallel pause carries its interrupts in `hitl_interrupts`
-    interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
-    sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
+    # The worker sends the same pause under both keys; the plural list is the whole pause, so read it alone
+    interrupts = interrupt.get('hitl_interrupts') or [interrupt.get('hitl_interrupt') or {}]
+    sensitive = [item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool']
     sign_in = None if sensitive else next((item for item in (interrupt, *interrupts) if _is_sign_in(item)), None)
     if sign_in is not None:
         rule, kind = _sign_in_policy(project_id, run_id)
@@ -346,8 +401,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict, conversati
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts),
                             conversation_id, author_id=author_id)
         return
-    event = _sign_in_event(waiting) if sign_in is not None else _paused_event(sensitive, sum(
-        item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1)
+    event = _paused_event(sensitive) if sensitive else _sign_in_event(sign_in)
     _park_run(project_id, run_id, event, _own_conversation(conversation_id, author_id))
 
 
@@ -394,9 +448,13 @@ def _park_in_session(project_id: int, session, run_id: int, event: dict, conditi
 
 
 def _over_waiting_cap(project_id: int, session, run_id: int) -> bool:
-    """True when a webhook run would pass the waiting bound of its row (#7400); the project lock holds until the commit."""
+    """True when a webhook run would pass the waiting bound of its row (#7400); the project lock holds until the commit.
+
+    A run that was approved once (`resumed_at` is set; a pause clears it and an approve sets it) is already admitted:
+    its later pauses are not counted again, and only the expiry re-arms.
+    """
     run = session.get(EntityScheduleRun, run_id)
-    if run is None or run.schedule_id is None or run.trigger not in RUN_TRIGGERS:
+    if run is None or run.schedule_id is None or run.trigger not in RUN_TRIGGERS or run.resumed_at is not None:
         return False
     schedule = session.get(EntitySchedule, run.schedule_id)
     if schedule is None or schedule.trigger_kind != 'webhook':  # cron schedules are never bounded here
@@ -464,11 +522,30 @@ def _copy_status(session, run_id: int, status: str) -> None:
     session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status=status))
 
 
-def _paused_event(item: dict, more: int = 0) -> dict:
-    """The pause line of the run log: toolkit and tool only, never the tool arguments; `more` counts the other tools."""
-    toolkit, tool = (str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name'))
-    text = f'Paused for approval: {toolkit} · {tool}' + (f' (+{more} more)' if more > 0 else '')
-    return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
+def _tool_names(items: list[dict], toolkit_key: str, tool_key: str) -> list[dict]:
+    """The distinct `{toolkit, tool}` of `items`, names only: a tool argument never gets here."""
+    names = dict.fromkeys((str(item.get(toolkit_key) or '?')[:NAME_LIMIT], str(item.get(tool_key) or '?')[:NAME_LIMIT])
+                          for item in items)
+    return [{'toolkit': toolkit, 'tool': tool} for toolkit, tool in names]
+
+
+def _pause_text(prefix: str, tools: list[dict]) -> str:
+    """`prefix` and `toolkit · tool` for each tool; the tools over `PAUSE_LIST_LIMIT`, or over the room the event text has, are counted."""
+    labels = []
+    for item in tools[:PAUSE_LIST_LIMIT]:
+        shown = ', '.join([*labels, f"{item['toolkit']} · {item['tool']}"])
+        if len(prefix) + len(shown) + MORE_RESERVE > TEXT_LIMIT:
+            break
+        labels.append(f"{item['toolkit']} · {item['tool']}")
+    rest = len(tools) - len(labels)
+    return prefix + ', '.join(labels) + (f' (+{rest} more)' if rest else '')
+
+
+def _paused_event(items: list[dict]) -> dict:
+    """The pause line of the run log: every tool of the pause by toolkit and tool name, never the arguments."""
+    tools = _tool_names(items, 'toolkit_name', 'tool_name')
+    return run_event('paused', _pause_text('Paused for approval: ', tools), 'warning',
+                     toolkit=tools[0]['toolkit'], tool=tools[0]['tool'], tools=tools[:PAUSE_LIST_LIMIT])
 
 
 def _sign_in_event(item: dict) -> dict:
@@ -488,7 +565,8 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
-                            fan_out: bool = False, sign_in: bool = False, conversation_id: int | None = None) -> str | None:
+                            fan_out: bool = False, sign_in: bool = False, conversation_id: int | None = None,
+                            approve_all: bool = False) -> str | None:
     """Check the decision on a waiting run without changing it; `reject` or `approve`.
 
     Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but the decider of the run
@@ -499,6 +577,8 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
     then `ScheduleRunNotWaiting` when the run is not waiting. None when a fan-out child decides a run
     that an earlier decision of the same pause resumed: nothing to change. With `sign_in`, the actions are
     the sign-in answers (`authorize`, `skip`) and map to approve and reject.
+    `approve_all` with an approve is checked last (`check_approve_all`): `ScheduleApproveAllForbidden`,
+    `ScheduleApproveAllWebhook` or `ScheduleApproveAllOff`, and the run keeps waiting. A reject ignores it.
     """
     if sign_in:  # an unknown answer stays in the list, so the check below refuses it
         actions = [SIGN_IN_ACTIONS.get(action, action) for action in actions]
@@ -509,20 +589,28 @@ def check_schedule_decision(project_id: int, run_id: int, caller_id: int, action
         if run_decider_id(session, run) != caller_id:
             raise ScheduleDecisionForbidden(run_id)
         status, resumed_at = run.status, run.resumed_at
+        is_actor = run_actor_id(session, run) == caller_id
+        is_webhook = approve_all and is_webhook_run(session, run)
     if not actions or not all(action in DECISION_ACTIONS for action in actions):
         raise ScheduleDecisionInvalid(actions)
     if fan_out and status == 'running' and resumed_at is not None:
         return None
     if status != 'waiting_for_approval':
         raise ScheduleRunNotWaiting(run_id)
-    return 'reject' if 'reject' in actions else 'approve'
+    if 'reject' in actions:
+        return 'reject'
+    if approve_all:
+        check_approve_all(project_id, is_actor, is_webhook)
+    return 'approve'
 
 
-def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None:
+def apply_schedule_decision(project_id: int, run_id: int, decision: str, approve_all: bool = False) -> None:
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
     The run log gets the decision; only the decider passes the check, so that user is who decided.
+    `approve_all` with an approve sets the flag `approves_all` reads, and is written into the decision event for the
+    log: the run asks no more tool approvals.
     """
     conversation_id = None
     with db.get_session(project_id) as session:
@@ -535,9 +623,15 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
         if run is None:
             raise ScheduleRunNotWaiting(run_id)
         approved = decision == 'approve'
-        append_run_events(session, run_id, run_event(
-            'decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
-            'info' if approved else 'warning', action=decision, by=run_decider_id(session, run)))
+        decider_id = run_decider_id(session, run)
+        if approved and approve_all:
+            event = run_event('decision', APPROVE_ALL_TEXT, 'info', action=decision, by=decider_id, approve_all=True)
+        else:
+            event = run_event('decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
+                              'info' if approved else 'warning', action=decision, by=decider_id)
+        append_run_events(session, run_id, event)
+        if approved and approve_all:
+            _set_approve_all(session, run_id)
         if approved:
             session.execute(
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
@@ -550,6 +644,27 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
             conversation_id = run.conversation_id
         session.commit()
     delete_run_checkpoints(project_id, conversation_id)
+
+
+def _set_approve_all(session, run_id: int) -> None:
+    """Set the approve-all flag in the `form` of the run, next to what the form already holds; the caller holds the row lock."""
+    table = EntityScheduleRun.__table__
+    form = session.scalar(select(RUN_FORM).where(table.c.id == run_id)) or {}
+    session.execute(update(table).where(table.c.id == run_id).values({RUN_FORM: {**form, APPROVE_ALL_KEY: True}}))
+
+
+def approves_all(session, run_id: int) -> bool:
+    """True when the owner approved all sensitive tools for the rest of this run, and the run is not over.
+
+    The choice is a flag in the `form` column of the run row, set by `apply_schedule_decision`; the run log is capped at
+    `EVENT_LIMIT` events and holds the choice for display only. It ends with the run: a Continue on the chat after the
+    run ended gets the normal approval again. It takes the caller's session, because the continue flow holds one open.
+    `form` is the column of the Test Run admin task; `_approval_rule` and the conversation list read it already.
+    """
+    row = session.execute(select(EntityScheduleRun.status, RUN_FORM).where(EntityScheduleRun.id == run_id)).first()
+    if row is None or row[0] not in ACTIVE_STATUSES:
+        return False
+    return (row[1] or {}).get(APPROVE_ALL_KEY) is True
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:

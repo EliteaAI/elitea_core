@@ -106,19 +106,73 @@ def test_cr_el7011_a_sensitive_pause_logs_the_toolkit_and_tool_but_never_the_arg
     assert (event["kind"], event["level"], event["toolkit"], event["tool"]) == (
         "paused", "warning", "github", "create_issue")
     assert event["text"] == "Paused for approval: github · create_issue"
+    assert event["tools"] == [{"toolkit": "github", "tool": "create_issue"}]
     assert "secret" not in str(event)
 
 
-def test_cr_el7011_a_parallel_pause_names_the_first_tool_and_counts_the_rest(runs, session, sent):
+def test_a_pause_that_carries_the_same_tool_in_both_payload_keys_names_it_once(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
-    second = {**SENSITIVE["hitl_interrupt"], "tool_name": "delete_issue"}
-    third = {**SENSITIVE["hitl_interrupt"], "tool_name": "close_issue"}
+    item = SENSITIVE["hitl_interrupt"]
 
-    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [SENSITIVE["hitl_interrupt"], second, third]})
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": item, "hitl_interrupts": [item]})
 
     (event,) = _events(session, run)
-    assert event["text"] == "Paused for approval: github · create_issue (+2 more)"
-    assert event["tool"] == "create_issue"
+    assert event["text"] == "Paused for approval: github · create_issue"
+    assert "more" not in event["text"]
+    assert event["tools"] == [{"toolkit": "github", "tool": "create_issue"}]
+
+
+def test_a_parallel_pause_lists_every_tool_by_name(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    first = SENSITIVE["hitl_interrupt"]
+    second = {**first, "tool_name": "delete_issue"}
+    third = {**first, "toolkit_name": "jira", "tool_name": "close_issue"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": first, "hitl_interrupts": [first, second, third]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue, github · delete_issue, jira · close_issue"
+    assert event["tools"] == [
+        {"toolkit": "github", "tool": "create_issue"}, {"toolkit": "github", "tool": "delete_issue"},
+        {"toolkit": "jira", "tool": "close_issue"}]
+    assert (event["toolkit"], event["tool"]) == ("github", "create_issue")
+
+
+def test_a_pause_over_the_list_limit_counts_the_rest(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    limit = runs.PAUSE_LIST_LIMIT
+    items = [{**SENSITIVE["hitl_interrupt"], "tool_name": f"tool_{number}"} for number in range(limit + 3)]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    (event,) = _events(session, run)
+    shown = event["text"].count(" · ")
+    assert len(event["tools"]) == limit
+    assert shown < len(items)
+    assert event["text"].endswith(f"(+{len(items) - shown} more)")
+    assert len(event["text"]) <= _claim().TEXT_LIMIT
+
+
+def test_a_pause_over_the_list_limit_with_short_names_counts_only_the_tools_over_the_limit(runs, session, sent, monkeypatch):
+    run = _run(runs, session, _schedule(runs, session))
+    items = [{**SENSITIVE["hitl_interrupt"], "toolkit_name": "a", "tool_name": f"t{number}"} for number in range(53)]
+    monkeypatch.setattr(runs, "PAUSE_LIST_LIMIT", 4)
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: a · t0, a · t1, a · t2, a · t3 (+49 more)"
+    assert len(event["tools"]) == 4
+
+
+def test_a_pause_with_a_tool_argument_in_every_item_never_stores_it(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    items = [{**SENSITIVE["hitl_interrupt"], "tool_name": name} for name in ("create_issue", "delete_issue")]
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": items})
+
+    (event,) = _events(session, run)
+    assert "secret" not in str(event)
 
 
 def test_cr_el7011_a_human_step_pause_logs_only_the_failed_end(runs, session, sent):

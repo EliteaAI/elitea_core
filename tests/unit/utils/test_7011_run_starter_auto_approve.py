@@ -244,3 +244,14 @@ def test_a_personal_credential_alone_does_not_give_needs_approval(run):
     run("pause_and_ask", True)
 
     assert run.outcomes == ["ok"]
+
+
+def test_pause_and_ask_starts_the_run_without_a_pause_before_the_first_call(run):
+    sensitive = [{"code": "sensitive_action", "toolkit": "GitHub", "tool": "create_pull_request"},
+                 {"code": "sensitive_action", "toolkit": "GitHub", "tool": "delete_file"}]
+    run.state.review = {**clean_review(), "sensitive": sensitive, "fingerprint": "fp-1"}
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert run.finishes == [] and run.outcomes == ["needs_approval"]

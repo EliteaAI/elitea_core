@@ -5,15 +5,19 @@ The model imports only pydantic + stdlib, so it loads without stubs.
 Run from plugin root:
     python3 tests/run_tests.py unit/models/test_continue_predict_payload.py -v
 """
+import ast
 import pathlib
 import sys
+import uuid
+from typing import Any, Dict, List, Optional
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TESTS_DIR))
 
+from fixtures.cut_source import load_cut
 from fixtures.helpers import load_module_with_stubs
 
 UUID_STR = "550e8400-e29b-41d4-a716-446655440000"
@@ -120,3 +124,62 @@ class TestContinuePredictPayload:
     @pytest.mark.parametrize("ok", [-1, 0, 30, 300])
     def test_await_timeout_valid(self, payload_model, ok):
         assert payload_model.model_validate(_base(await_task_timeout=ok)).await_task_timeout == ok
+
+
+class TestApproveAll:
+    def test_approve_all_is_accepted_with_approve(self, payload_model):
+        assert payload_model.model_validate(_base(approve_all=True)).approve_all is True
+
+    def test_approve_all_defaults_to_false(self, payload_model):
+        assert payload_model.model_validate(_base()).approve_all is False
+
+    @pytest.mark.parametrize("action, value", [("reject", None), ("edit", "x"), ("block_with_comment", "x")])
+    def test_approve_all_with_another_action_is_refused(self, payload_model, action, value):
+        with pytest.raises(ValidationError):
+            payload_model.model_validate(_base(hitl_action=action, hitl_value=value, approve_all=True))
+
+    def test_approve_all_without_hitl_resume_is_refused(self, payload_model):
+        with pytest.raises(ValidationError):
+            payload_model.model_validate(_base(hitl_resume=False, approve_all=True))
+
+    def test_approve_all_with_a_sign_in_resume_is_refused(self, payload_model):
+        with pytest.raises(ValidationError):
+            payload_model.model_validate({
+                "conversation_uuid": UUID_STR, "message_id": MSG_ID, "mcp_auth_resume": True,
+                "mcp_auth_action": "authorize", "approve_all": True})
+
+
+@pytest.fixture(scope="module")
+def sio_model(models_path):
+    """SioContinuePredictModel cut out of models/pd/predict.py: the module imports the database models."""
+    source = (models_path / "pd" / "predict.py").read_text()
+    nodes = [node for node in ast.parse(source).body if getattr(node, "name", None) == "SioContinuePredictModel"]
+    namespace = load_cut(nodes, {
+        "BaseModel": BaseModel, "Field": Field, "model_validator": model_validator, "Optional": Optional,
+        "Dict": Dict, "List": List, "Any": Any, "uuid": uuid, "UUID": uuid.UUID,
+        "EntitySettingsLlm": dict, "AttachmentMessageItemPredict": dict}, "predict.py")
+    return namespace["SioContinuePredictModel"]
+
+
+def _sio(**over):
+    data = {"project_id": 1, "conversation_uuid": UUID_STR, "message_id": MSG_ID,
+            "hitl_resume": True, "hitl_action": "approve"}
+    data.update(over)
+    return data
+
+
+class TestSioApproveAll:
+    def test_approve_all_is_accepted_with_approve(self, sio_model):
+        assert sio_model.model_validate(_sio(approve_all=True)).approve_all is True
+
+    def test_approve_all_defaults_to_false(self, sio_model):
+        assert sio_model.model_validate(_sio()).approve_all is False
+
+    @pytest.mark.parametrize("action", ["reject", "edit", "block_with_comment", "answer"])
+    def test_approve_all_with_another_action_is_refused(self, sio_model, action):
+        with pytest.raises(ValidationError):
+            sio_model.model_validate(_sio(hitl_action=action, approve_all=True))
+
+    def test_approve_all_without_hitl_resume_is_refused(self, sio_model):
+        with pytest.raises(ValidationError):
+            sio_model.model_validate(_sio(hitl_resume=False, approve_all=True))

@@ -32,6 +32,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - edit — continue with `hitl_value` as the edited text.
         - block_with_comment — block and continue with `hitl_value` as the note.
 
+        approve_all: only for a schedule run; ignored outside a schedule run. Refused (403) unless the caller is the
+        person who started the run, refused (403, code `approve_all_webhook`) for a run of a webhook, and refused
+        (409, code `approve_all_off`) while the project does not allow "Run without asking".
+
         For an on-demand Toolkit authorization pause, send `mcp_auth_resume: true`,
         `mcp_auth_action: authorize|skip`, and the exact `authorization_request_id`
         returned by the pause. Do not set `hitl_resume` for this protocol.
@@ -79,6 +83,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "hitl_action": parsed.hitl_action,
             "hitl_value": parsed.hitl_value,
             "hitl_decisions": parsed.hitl_decisions,
+            "approve_all": parsed.approve_all,
             "mcp_auth_resume": parsed.mcp_auth_resume,
             "mcp_auth_action": parsed.mcp_auth_action,
             "mcp_auth_decisions": parsed.mcp_auth_decisions,
@@ -114,8 +119,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if isinstance(result, dict) and ("error" in result or "stopped" in result or "task_id" in result):
             if "error" in result:
                 error_value = result["error"]
-                return {"error": error_value if isinstance(error_value, str) else str(error_value)}, \
-                    result.get("status", 400)
+                body = {"error": error_value if isinstance(error_value, str) else str(error_value)}
+                body.update({key: result[key] for key in ("code", "field") if key in result})
+                return body, result.get("status", 400)
             return result, 200
 
         # Blocking path: the resumed response message (message_id) is complete. Return it plus its
