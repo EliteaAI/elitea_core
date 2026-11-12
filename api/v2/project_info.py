@@ -58,6 +58,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             except Exception:
                 result['teammates_count'] = 0
 
+        if not requested or 'created_at' in requested:
+            try:
+                result['created_at'] = rpc.project_get_created_at(project_id)
+            except Exception:
+                result['created_at'] = None
+
         if not requested or 'icon_meta' in requested:
             config = rpc.configurations_get_first_filtered_project(
                 project_id=project_id,
