@@ -17,6 +17,8 @@ PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 LIST_PERMISSION = 'models.applications.schedules.list'
 ADMIN_PERMISSION = 'models.applications.schedules.admin'
+UPDATE_PERMISSION = 'models.applications.schedules.update'
+USER_ID = 42
 INVALID = {'code': 'invalid_input', 'error': 'allow_run_without_asking must be true or false', 'field': 'allow_run_without_asking'}
 # #7400: the GET also answers the per-webhook cap, its platform default and maximum
 CAPS = {'webhook_max_concurrent_runs': None, 'webhook_max_concurrent_runs_default': 3,
@@ -25,13 +27,29 @@ CAPS = {'webhook_max_concurrent_runs': None, 'webhook_max_concurrent_runs_defaul
 
 class Harness:
     def __init__(self):
-        self.permissions = {LIST_PERMISSION, ADMIN_PERMISSION}
+        self.permissions = {LIST_PERMISSION, UPDATE_PERMISSION, ADMIN_PERMISSION}
         self.saved = {}
         self.body = None
         self.specs = {}
         self.read_error = False
         self.save_error = None
         self.caps = {}
+        self.project_roles = []  # the caller's role names in the project, as `admin_get_user_roles` answers
+        self.personal_project_id = None
+        self.rpc_error = None
+        self.rpc = types.SimpleNamespace(admin_get_user_roles=self.roles_rpc,
+                                         projects_get_personal_project_id=self.personal_rpc)
+        self.rpc.timeout = lambda _seconds: self.rpc
+
+    def roles_rpc(self, project_id, user_id):
+        if self.rpc_error:
+            raise self.rpc_error
+        return [{'name': name} for name in self.project_roles]
+
+    def personal_rpc(self, user_id):
+        if self.rpc_error:
+            raise self.rpc_error
+        return self.personal_project_id
 
     def check_api(self, spec):
         required = set(spec['permissions'])
@@ -104,7 +122,9 @@ def harness(isolated_sys_modules):
         with_modes=lambda urls: urls, endpoint_metrics=lambda func: func,
     )
     tools.auth = types.SimpleNamespace(decorators=types.SimpleNamespace(check_api=harness.check_api),
-                                       current_user=lambda: {'id': 42})
+                                       current_user=lambda: {'id': USER_ID},
+                                       resolve_permissions=lambda **kwargs: set(harness.permissions))
+    tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=harness.rpc))
     tools.config = types.SimpleNamespace(ADMINISTRATION_MODE='administration', DEFAULT_MODE='default')
     tools.db = LenientModule('db')
     sys.modules['tools'] = tools
@@ -126,6 +146,7 @@ def harness(isolated_sys_modules):
         sys.modules[f'{PACKAGE}.{name}'] = LenientModule(f'{PACKAGE}.{name}')  # the list handler, not run here
     _load('utils/constants.py', f'{PACKAGE}.utils.constants')
     _load('utils/schedule_access.py', f'{PACKAGE}.utils.schedule_access')
+    _load('utils/project_settings_access.py', f'{PACKAGE}.utils.project_settings_access')
     _load('utils/schedule_project_handlers.py', f'{PACKAGE}.utils.schedule_project_handlers')
     sys.modules.update(handler_stubs(PACKAGE, real='schedule_project_handlers'))
     harness.routes = _load('api/v2/schedules.py', f'{PACKAGE}.api.v2.schedules')
@@ -188,7 +209,7 @@ def test_put_answers_503_when_configurations_has_no_owned_types(harness):
 
 def test_el7011_cr_get_needs_schedules_list_and_put_needs_schedules_admin(harness):
     assert harness.specs['_get_settings'] == [LIST_PERMISSION]
-    assert harness.specs['_save_settings'] == [ADMIN_PERMISSION]
+    assert harness.specs['_save_settings'] == [UPDATE_PERMISSION]
 
 
 def test_el7011_cr_a_member_reads_but_cannot_save(harness):
@@ -260,3 +281,40 @@ def test_a_save_with_both_keys_needs_no_read(harness):
     harness.read_error = True  # the whole record is in the body
     body = {'allow_run_without_asking': True, 'webhook_max_concurrent_runs': 3}
     assert _call(harness, 'put', body) == (body, 200)
+
+
+# --- who may save: a project admin, a schedules admin, or the owner of their own personal project
+
+def _as_editor(harness):
+    harness.permissions = {LIST_PERMISSION, UPDATE_PERMISSION}
+
+
+def test_the_owner_of_a_personal_project_without_an_admin_role_may_save(harness):
+    _as_editor(harness)
+    harness.project_roles = ['editor', 'viewer', 'monitor']
+    harness.personal_project_id = PROJECT_ID
+    assert _call(harness, 'put', {'allow_run_without_asking': True}) == ({'allow_run_without_asking': True}, 200)
+    assert harness.saved == {PROJECT_ID: True}
+
+
+def test_an_editor_of_a_team_project_is_refused_with_the_access_denied_body(harness):
+    _as_editor(harness)
+    harness.project_roles = ['editor', 'viewer']
+    harness.personal_project_id = PROJECT_ID + 1  # their own personal project is another one
+    response, status = _call(harness, 'put', {'allow_run_without_asking': True})
+    assert (status, response['error'], response['required']) == (403, 'access_denied', [ADMIN_PERMISSION])
+    assert harness.saved == {}
+
+
+def test_a_project_admin_role_may_save_without_the_schedules_admin_permission(harness):
+    _as_editor(harness)
+    harness.project_roles = ['admin']
+    assert _call(harness, 'put', {'allow_run_without_asking': True})[1] == 200
+    assert harness.saved == {PROJECT_ID: True}
+
+
+def test_a_failing_role_and_personal_project_lookup_refuses_the_save(harness):
+    _as_editor(harness)
+    harness.rpc_error = RuntimeError('rpc unavailable')
+    assert _call(harness, 'put', {'allow_run_without_asking': True})[1] == 403
+    assert harness.saved == {}

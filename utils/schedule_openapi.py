@@ -712,7 +712,8 @@ OPERATIONS = {
             "Allow or forbid the \"Run without asking\" approval rule in the project. Saved schedules keep "
             "their rule; while it is off, their runs pause and ask, and a save or an import with that rule "
             "is refused or changed to \"Pause and ask me\".",
-            "a schedules admin (`schedules.admin`) only",
+            "a project admin or a schedules admin (`schedules.admin`), or the owner of their own personal "
+            "project; an editor of a team project may not",
             "400 an unknown key or a value that is not true or false (`field` names it); 403 no permission; "
             "503 the settings store is unavailable"),
         "parameters": PROJECT_PARAMS,

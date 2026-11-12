@@ -12,7 +12,13 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.pd.schedule_list import ScheduleListFilters, ScheduleListItem
 from .authors import get_authors_data
 from .error_text import public_reason
-from .schedule_access import allowed_actions, row_webhook_url, schedule_check_spec, schedule_scope
+from .schedule_access import (
+    SCHEDULE_PERMISSIONS,
+    allowed_actions,
+    row_webhook_url,
+    schedule_check_spec,
+    schedule_scope,
+)
 from .schedule_queries import list_schedules
 
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
@@ -29,6 +35,8 @@ UNDEFINED_COLUMN = "42703"
 SCHEDULES_UNAVAILABLE = {"code": "schedules_unavailable",
                          "error": "Schedules are not available yet: the administrator must run the admin tasks "
                                   "ensure_webhook_trigger_columns and ensure_toolkit_index_schedule_columns"}
+# The body `check_api` answers, so a refusal inside the handler looks the same to the client
+SETTINGS_DENIED = {"ok": False, "error": "access_denied", "required": [SCHEDULE_PERMISSIONS["admin"]]}
 SETTINGS_UNAVAILABLE = {"code": "settings_unavailable", "error": "The project settings store is unavailable; try again later"}
 
 
@@ -222,14 +230,20 @@ class ScheduleProjectHandlers:
                 "webhook_max_concurrent_runs_default": limits.per_webhook,
                 "webhook_max_concurrent_runs_limit": limits.per_webhook_limit}, 200
 
-    @auth.decorators.check_api(schedule_check_spec("admin"))
+    # The decorator lets editors in; the owner of a personal project holds no admin role, so the admin test is below
+    @auth.decorators.check_api(schedule_check_spec("update"))
     def _save_settings(self, project_id: int):
         """Allow or forbid "Run without asking", or set the project's per-webhook running cap; a key left out keeps its value.
         Saved schedules keep their rule; while "Run without asking" is off, their runs pause and ask.
 
-        Who may call: a schedules admin (`schedules.admin`) only.
+        Who may call: a project admin or a schedules admin (`schedules.admin`), or the owner of their own personal
+        project; an editor of a team project may not.
         Errors: 400 an unknown key or a value that is not true or false, with `field`; 403; 503 the store fails.
         """
+        from .project_settings_access import can_manage_project_settings  # late: the other handler tests load this module without it
+        if not (schedule_scope(project_id).is_admin
+                or can_manage_project_settings(project_id, auth.current_user().get("id"))):
+            return SETTINGS_DENIED, 403
         from .schedule_settings import ScheduleProjectSettings, read_saved_settings, save_schedule_settings
         body = request.get_json(silent=True)
         # Each control saves only its own key: the others come from one read, and a failed read writes nothing
