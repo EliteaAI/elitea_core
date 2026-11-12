@@ -2559,23 +2559,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def restore_legacy_index_schedules(self, *args, **kwargs):
         """Admin task: write the moved index schedules back to the toolkit JSON and delete their rows.
 
-        Refused while `legacy_index_step_enabled` is on (the next tick would move them again); a missing setting
-        counts as off. Each restored schedule is deleted with its run history. One project at a time.
-        `dry_run=false` is required to write; this task has no dry-run report, so a dry run only checks the
-        refusal and the project.
+        A dry run by default: only dry_run=false writes. A dry run lists, per project, the schedules a live run
+        restores. Refused while `legacy_index_step_enabled` is on (the next tick would move them again); a missing
+        setting counts as off. Each restored schedule is deleted with its run history. A project that fails is
+        reported under errors and the next project runs.
 
         Param format:
-            "project_id=<N>[;dry_run=false]"
+            "project_id=<all|N|lo-hi>[;dry_run=false]"
         """
-        from ..utils.legacy_index_schedule_migration import (
-            RESTORE_HISTORY_WARNING, index_restore_refusal, restore_index_schedules,
-        )
+        from ..utils.legacy_index_schedule_migration import index_restore_refusal, restore_index_schedules
         from ..utils.legacy_schedule_migration import parse_task_params
 
         try:
             spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
-            if spec[0] != "single":
-                raise ValueError("project_id=<N> is required: a restore runs for one project")
         except ValueError as exc:
             log.error("restore_legacy_index_schedules: %s", exc)
             return {"error": str(exc)}
@@ -2583,12 +2579,33 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         if refusal:
             log.error("restore_legacy_index_schedules: %s", refusal)
             return {"error": refusal}
-        if dry_run:
-            return {"dry_run": True, "project_id": spec[1], "warning": RESTORE_HISTORY_WARNING}
-        report = restore_index_schedules(spec[1])
-        log.info("Exiting restore_legacy_index_schedules — project=%s restored=%s errors=%s",
-                 spec[1], len(report["restored"]), len(report["errors"]))
-        return {"dry_run": False, **report}
+        try:
+            project_ids = resolve_target_project_ids(spec)
+        except ValueError as exc:
+            log.error("restore_legacy_index_schedules: %s", exc)
+            return {"error": str(exc)}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("%sStarting restore_legacy_index_schedules (projects=%s)", prefix, len(project_ids))
+        report = {"dry_run": dry_run, "projects": [], "errors": []}
+        for project_id in project_ids:
+            try:
+                report["projects"].append(restore_index_schedules(project_id, dry_run=dry_run))
+            except Exception:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("restore_legacy_index_schedules: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": "the project could not be restored; see the log"})
+        # Counts only: the full report goes back to the caller
+        counts = [
+            (p.get("project_id"), len(p.get("restored", [])), p.get("without_original_trigger", 0),
+             len(p.get("errors", [])))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting restore_legacy_index_schedules — (project, restored, without_original_trigger, errors)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
+        return report
 
     @web.method()
     def backfill_legacy_trace_steps(self, *args, **kwargs):

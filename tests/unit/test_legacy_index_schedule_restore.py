@@ -103,3 +103,13 @@ def test_the_restore_never_overwrites_a_key_and_keeps_rows_without_an_original(m
     assert report["without_original_trigger"] == 1
     assert migration.schedules_of("docs")["7"] == newer
     assert [r.index_name for r in rows(migration)] == ["manual"]
+
+
+def test_a_dry_run_restore_lists_the_rows_and_writes_nothing(migration):
+    migration.set_meta({"docs": {"schedules": {}}})
+    write(migration, row_values(moved={"7": BODY}), keys=())
+    migration.seed_index("manual")
+    report = migration.migration.restore_index_schedules(5, dry_run=True)
+    assert (len(report["restored"]), report["errors"], report["without_original_trigger"]) == (1, [], 1)
+    assert [r.index_name for r in rows(migration)] == ["docs", "manual"]
+    assert migration.schedules_of("docs") == {}

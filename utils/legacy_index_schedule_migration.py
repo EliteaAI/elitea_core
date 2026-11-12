@@ -271,12 +271,13 @@ def migrate_index_project(project_id: int, dry_run: bool, enforce_limits: bool =
     return migrate_project(project_id, dry_run, enforce_limits, body=_migrate_indexes)
 
 
-def restore_index_schedules(project_id: int) -> dict:
+def restore_index_schedules(project_id: int, dry_run: bool = False) -> dict:
     """Undo the migration of one project: write `original_trigger` back under its keys and delete the row.
 
     A key the toolkit JSON already holds is never overwritten. A row without `original_trigger` (made in the
     UI) stays and is counted. A failed row goes under `errors` and the next one runs. The restore removes the
     row with its run history; switch the legacy index step off first, or the next tick moves the keys again.
+    A dry run lists the ids a live run restores under `restored` and writes nothing.
     """
     from tools import db
 
@@ -294,6 +295,9 @@ def restore_index_schedules(project_id: int) -> dict:
         report['without_original_trigger'] = session.scalar(
             select(func.count()).select_from(EntitySchedule)
             .where(EntitySchedule.entity_type == TOOLKIT_INDEX, EntitySchedule.original_trigger.is_(None)))
+        if dry_run:
+            report['restored'] = [schedule_id for schedule_id, _, _ in rows]
+            return report
         for schedule_id, toolkit_id, index_name in rows:
             try:
                 toolkit = session.execute(
