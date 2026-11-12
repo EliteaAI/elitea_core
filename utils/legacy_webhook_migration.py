@@ -137,7 +137,7 @@ def migrate_version(session, project_id: int, version, row: dict, value: str) ->
 def _remove_old_keys(project_id: int, keys: set[str]) -> None:
     from tools import VaultClient
 
-    client = VaultClient(project_id)
+    client = VaultClient({'id': project_id})
     if hasattr(client, 'update_secrets'):
         client.update_secrets(remove=sorted(keys))
         return
@@ -151,7 +151,8 @@ def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
 
     report = {'project_id': project_id, 'found': 0, 'migrated': [], 'skipped': [], 'failed': [],
               'old_secrets_removed': 0, 'old_secrets_kept': 0}
-    visible = VaultClient(project_id).get_secrets() or {}
+    # A dict skips the project RPC, which opens a stray thread-local session in a task thread
+    visible = VaultClient({'id': project_id}).get_secrets() or {}
     done = _migrated_ids(session)
     remaining, migrated_keys = [], set()
     for version, pipeline_name in _legacy_versions(session):
