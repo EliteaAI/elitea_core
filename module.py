@@ -417,6 +417,7 @@ class Module(module.ModuleModel):
         self._register_managed_schedules()
         self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
+        self._register_budget_period_snapshot()
 
         # ORM create_all() creates missing tenant tables but never expands an
         # existing one. Apply the transactionally committed compatibility guard
@@ -1588,14 +1589,6 @@ class Module(module.ModuleModel):
         self.mcp_category_name = mcp_config.get('category_name') or 'MCP'
         log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
         self._init_publishing_guardrail()
-        # A changed platform default has no database event; record it now instead of at the
-        # next hourly run (#7510). Off the config thread: it resolves every project
-        try:
-            Thread(
-                target=self.snapshot_all_project_budgets, name='budget_period_snapshot', daemon=True,
-            ).start()
-        except Exception:  # pylint: disable=W0703
-            log.exception('Failed to start the budget period snapshot')
 
     def _bootstrap_platform_schedules(self):
         """Create the platform schedule rows and reconcile them with config."""
@@ -1655,14 +1648,6 @@ class Module(module.ModuleModel):
                     'rpc_kwargs': {'idle_days': 30},
                     'name': 'skill_scratch_sweep',
                     'cron': '0 4 * * *',
-                    'active': True,
-                },
-                {
-                    # Month-by-month history of the effective project limit (#7510)
-                    'rpc_func': 'elitea_core_snapshot_all_project_budgets',
-                    'rpc_kwargs': {},
-                    'name': 'project_budget_period_snapshot',
-                    'cron': '17 * * * *',
                     'active': True,
                 },
                 {
@@ -1831,6 +1816,25 @@ class Module(module.ModuleModel):
             'rpc_func': 'mcp_servers_handler'
         }
         self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists(schedule_data)
+
+    def _register_budget_period_snapshot(self):
+        """Hourly job that records the month's effective project limits (#7510).
+
+        Kept apart from the platform schedule inventory: it is not a configurable platform
+        schedule, and a missing scheduling plugin must only skip this job.
+        """
+        try:
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'elitea_core_snapshot_all_project_budgets',
+                'rpc_kwargs': {},
+                'name': 'project_budget_period_snapshot',
+                'cron': '17 * * * *',
+                'active': True,
+            })
+        except Empty:
+            log.warning('No scheduling plugin responded: name=project_budget_period_snapshot')
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to create schedule: name=project_budget_period_snapshot')
 
     # Provider Hub Methods
     def provider_hub_init(self):
