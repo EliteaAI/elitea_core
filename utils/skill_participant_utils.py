@@ -13,7 +13,7 @@ from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTa
 from .project_skills import build_project_skill_catalog, is_project_skills_in_chat_enabled, \
     resolve_mentioned_project_skills
 from .skill_llm_override import select_llm_override
-from .skill_frontmatter import invocation_flags
+from .skill_frontmatter import argument_hint_payload, invocation_flags
 from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
 from .skill_utils import consume_message_skills, merge_invoked_skills, model_only_names, validate_message_skill_limit
 from .utils import get_public_project_id
@@ -235,6 +235,7 @@ def describe_pinned_version(skill, version_id: Optional[int], published_only: bo
         'version_name': version.name,
         'is_available': bool((version.instructions or '').strip()),
         **invocation_flags(version.meta),
+        **argument_hint_payload(version.meta),
     }
 
 

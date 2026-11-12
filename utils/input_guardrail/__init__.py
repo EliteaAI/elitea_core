@@ -171,6 +171,25 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
     return [s for s in slots if s.text]
 
 
+def _skill_arguments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        skill for skill in payload.get('invoked_skills') or []
+        if isinstance(skill, dict) and isinstance(skill.get('argument'), str) and skill['argument']
+    ]
+
+
+def _redact_skill_arguments(payload: Dict[str, Any], policy: Policy) -> None:
+    """Carry a redaction of the typed argument into the body copy, outside the verdict, as it also sits in user_input."""
+    for skill in _skill_arguments(payload):
+        result = inspect([Segment('current_turn', 0, skill['argument'])], policy)
+        if effective_action(result, policy) == 'block':
+            raise _blocked(summary(result, policy))
+        redacted = result.redacted.get(('current_turn', 0))
+        if redacted is not None:
+            skill['instructions'] = skill['instructions'].replace(skill['argument'], redacted)
+            skill['argument'] = redacted
+
+
 def _variable_slots(kind: str, variables: Iterable) -> List[_Slot]:
     return [
         _Slot(kind, v['value'], lambda text, v=v: v.__setitem__('value', text))
@@ -530,6 +549,15 @@ def apply_input_guardrail(call_kwargs: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
     if action == 'block':
         raise _blocked(result_summary)
+    try:
+        if todo:
+            _redact_skill_arguments(payload, policy)
+    except InputGuardrailBlockedError:
+        raise
+    except Exception:  # pylint: disable=W0703
+        log.warning('[INPUT_GUARDRAIL] skill argument check failed (on_error=%s)', policy.on_error)
+        if policy.on_error == 'fail_closed':
+            raise InputGuardrailBlockedError(categories=['error'], rules=[], segments=[])
     payload[INSPECTED_PAYLOAD_KEY] = sorted(already | {segment_hash(s.text) for s in slots})
     if result_summary and (result_summary['detection_count'] or result_summary['error']):
         verdict = verdict_meta(result_summary)

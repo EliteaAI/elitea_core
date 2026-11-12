@@ -87,8 +87,8 @@ class TestValidation:
 
     def test_the_two_keys_are_no_longer_reported_as_unused(self, frontmatter):
         assert frontmatter.list_unused_frontmatter_keys(
-            {'disable-model-invocation': True, 'user-invocable': False, 'argument-hint': '[v]'}
-        ) == ['argument-hint']
+            {'disable-model-invocation': True, 'user-invocable': False, 'compatibility': 'x'}
+        ) == ['compatibility']
 
     def test_a_stored_non_boolean_is_a_400_on_save(self, skill_utils):
         with pytest.raises(skill_utils.SkillSpecViolationError, match='user-invocable'):
