@@ -17,6 +17,7 @@
 
 """Utility functions for MCP OAuth operations."""
 
+import re
 from typing import Optional
 
 import requests
@@ -31,7 +32,33 @@ OAUTH_CONFIGURATION_KEYS = (
     'teams_configuration',
     'outlook_configuration',
     'ms_graph_configuration',
+    'dataverse_configuration',  # its token endpoint is pinned: see dataverse_token_endpoint
 )
+
+
+DATAVERSE_CONFIGURATION_KEY = 'dataverse_configuration'
+# Same shape the SDK accepts for a tenant: a GUID or a domain name, never a path or a host
+_TENANT_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]{0,99}')
+
+
+def dataverse_token_endpoint(settings: dict) -> Optional[str]:
+    """The only token endpoint a Dataverse toolkit may sign in at, built from its credential's tenant.
+
+    None when the toolkit has no Dataverse credential. An empty string when it has one but the tenant is
+    missing or malformed: no endpoint is then acceptable.
+    """
+    config = settings.get(DATAVERSE_CONFIGURATION_KEY)
+    if not isinstance(config, dict) or not config:
+        return None
+    tenant = str(config.get('tenant_id') or '').strip()
+    if not _TENANT_PATTERN.fullmatch(tenant):
+        return ''
+    return f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token'
+
+
+def is_same_endpoint(expected: str, given: Optional[str]) -> bool:
+    """Whether ``given`` is ``expected``, ignoring a trailing slash; an empty ``expected`` matches nothing."""
+    return bool(expected) and expected.rstrip('/') == (given or '').strip().rstrip('/')
 
 
 class TokenRefreshError(ValueError):
