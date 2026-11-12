@@ -53,6 +53,11 @@ class ImportMessage(_ImportBase):
     items: List[ImportItem] = []
 
 
+class ImportEntityRef(_ImportBase):
+    project_id: Optional[int] = None
+    entity_id: Optional[int] = None
+
+
 class ImportParticipant(_ImportBase):
     id: Optional[int] = None
     entity_name: str
@@ -60,6 +65,7 @@ class ImportParticipant(_ImportBase):
     version: Optional[str] = None
     public: bool = False
     toolkit_type: Optional[str] = None
+    ref: Optional[ImportEntityRef] = None
 
 
 class ImportConversationInfo(_ImportBase):
@@ -85,3 +91,4 @@ class ChatExportEnvelope(_ImportBase):
 
 class ImportCommitPayload(_ImportBase):
     selected_attachments: List[str] = []
+    skip_participants: List[int] = []

@@ -148,7 +148,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         with db.get_session(project_id) as session:
             try:
                 conversation_id, context_strategy, failed = commit_import(
-                    session, project_id, user_id, import_id, payload.selected_attachments
+                    session, project_id, user_id, import_id, payload.selected_attachments,
+                    payload.skip_participants,
                 )
             except ChatImportError as e:
                 return {"error": str(e)}, 400
