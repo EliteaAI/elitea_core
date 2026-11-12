@@ -54,6 +54,9 @@ def migration(monkeypatch):
           is_gitlab_signing_mode=lambda kind, method: kind == "gitlab" and method == "signing_token")
     _stub(monkeypatch, "plugins.elitea_core.utils.schedule_prerun", ACCESS_CHECK_UNAVAILABLE="access_check_unavailable",
           DISABLED_OWNER_LOST_ACCESS="owner_lost_access", check_owner_access=None)
+    # load() writes sys.modules directly; register both names so teardown restores what other suites loaded
+    for name in ("utils.legacy_schedule_migration", "utils.legacy_webhook_migration"):
+        monkeypatch.setitem(sys.modules, "plugins.elitea_core." + name, None)
     load("utils/legacy_schedule_migration.py", fresh=True)
     module = load(MODULE, fresh=True)
     module.members, module.versions, module.done, module.moved = {7}, [], set(), []
