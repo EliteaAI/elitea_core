@@ -11,8 +11,10 @@ from pylon.core.tools import log
 from tools import db
 
 from ..models.all import ApplicationVersion
+from ..models.pd.mcp_oauth import VAULT_SECRET_PATTERN
 from .application_tools import ConfigurationExpandError, expand_toolkit_settings
 from .pipeline_utils import validate_yaml_from_str
+from .stored_oauth_tokens import LOGIN_RESOLVERS
 
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
@@ -23,7 +25,8 @@ WAIT_HINT = 'Sign in or add the credentials before the run; otherwise the run wa
 SENSITIVE_CODE = 'sensitive_action'
 PERSONAL_CODE = 'personal_credential'
 SENSITIVE_CODES = {SENSITIVE_CODE, PERSONAL_CODE}
-TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint', 'openapi': 'OpenAPI'}
+TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint', 'openapi': 'OpenAPI',
+               'ms_graph': 'MS Graph'}
 INCOMPLETE_CODE = 'scan_incomplete'
 
 
@@ -54,17 +57,27 @@ def _error_types(errors) -> set:
     return types
 
 
+def _has_saved_login(credential: dict) -> bool:
+    """A refresh token that is empty, or still a `{{secret.x}}` reference after expansion (its secret is gone), is no login."""
+    token = credential.get('refresh_token')
+    token = token.strip() if isinstance(token, str) else ''
+    return bool(token) and not VAULT_SECRET_PATTERN.match(token)
+
+
 def _uses_personal_token(tool, expanded: dict) -> bool:
-    # Same rule as the UI hook useDelegatedOauthToolkits: a referenced credential is authoritative
+    # A saved login lets the run sign in without a browser (inject_stored_logins), so only a delegated
+    # credential without one needs the owner. The referenced credential is authoritative.
     if tool.type == 'mcp' or (tool.meta or {}).get('mcp') or tool.type.startswith('mcp_'):
         return True
-    if tool.type not in ('sharepoint', 'openapi'):
+    settings_key = f'{tool.type}_configuration'
+    if tool.type != 'openapi' and settings_key not in LOGIN_RESOLVERS:
         return False
-    if (tool.settings or {}).get(f'{tool.type}_configuration'):
-        credential = expanded.get(f'{tool.type}_configuration') or {}
-        # a stored Microsoft login lets the run sign in without a browser (inject_stored_logins)
-        stored_login = tool.type == 'sharepoint' and bool(credential.get('refresh_token'))
-        return bool(credential.get('oauth_discovery_endpoint')) and not stored_login
+    if (tool.settings or {}).get(settings_key):
+        credential = expanded.get(settings_key) or {}
+        if tool.type == 'openapi':
+            return bool(credential.get('oauth_discovery_endpoint'))
+        delegated = bool(credential.get('oauth_discovery_endpoint')) or bool(LOGIN_RESOLVERS[settings_key](credential))
+        return delegated and not _has_saved_login(credential)
     return tool.type == 'openapi' and bool(expanded.get('oauth_discovery_endpoint'))
 
 

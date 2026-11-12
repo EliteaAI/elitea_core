@@ -38,6 +38,7 @@ def mcp_oauth():
     'openapi_configuration',
     'teams_configuration',
     'outlook_configuration',
+    'dataverse_configuration',
 ])
 def test_every_delegated_oauth_configuration_supplies_the_secret(mcp_oauth, key):
     settings = {key: {'client_id': 'cid', 'client_secret': 'real-secret', 'scopes': ['User.Read']}}
@@ -45,6 +46,21 @@ def test_every_delegated_oauth_configuration_supplies_the_secret(mcp_oauth, key)
 
     assert mcp_oauth.pick_oauth_setting(sources, 'client_secret') == 'real-secret'
     assert mcp_oauth.pick_oauth_setting(sources, 'client_id') == 'cid'
+
+
+def test_dataverse_toolkit_settings_supply_the_stored_client_secret(mcp_oauth):
+    settings = {
+        'dataverse_configuration': {
+            'url': 'https://org.crm4.dynamics.com',
+            'tenant_id': 'tenant-1',
+            'client_id': 'cid',
+            'client_secret': 'real-secret',
+        },
+    }
+    configs = mcp_oauth.get_oauth_configurations(settings)
+
+    assert configs == [settings['dataverse_configuration']]
+    assert mcp_oauth.pick_oauth_setting([settings, *configs], 'client_secret') == 'real-secret'
 
 
 def test_configurations_are_returned_by_reference_so_expansion_is_seen(mcp_oauth):
@@ -80,3 +96,37 @@ def test_non_dict_and_empty_configurations_are_ignored(mcp_oauth):
 
 def test_nothing_found_returns_none(mcp_oauth):
     assert mcp_oauth.pick_oauth_setting([{}, {'client_secret': ''}], 'client_secret') is None
+
+
+def test_dataverse_token_endpoint_is_built_from_the_credential_tenant(mcp_oauth):
+    settings = {'dataverse_configuration': {'tenant_id': ' contoso.onmicrosoft.com ', 'client_secret': 's'}}
+
+    assert mcp_oauth.dataverse_token_endpoint(settings) == (
+        'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token')
+
+
+@pytest.mark.parametrize('settings', [{}, {'teams_configuration': {'tenant_id': 't'}},
+                                      {'dataverse_configuration': None}, {'dataverse_configuration': {}}])
+def test_a_toolkit_without_a_dataverse_credential_has_no_pinned_endpoint(mcp_oauth, settings):
+    assert mcp_oauth.dataverse_token_endpoint(settings) is None
+
+
+@pytest.mark.parametrize('tenant', [None, '', '   ', '../x', 'a/b', 'evil.example/', '-lead', 'a b', 't' * 101])
+def test_a_dataverse_credential_with_a_bad_tenant_pins_no_acceptable_endpoint(mcp_oauth, tenant):
+    endpoint = mcp_oauth.dataverse_token_endpoint({'dataverse_configuration': {'tenant_id': tenant, 'url': 'u'}})
+
+    assert endpoint == ''
+    assert not mcp_oauth.is_same_endpoint(endpoint, endpoint)
+
+
+@pytest.mark.parametrize('given, same', [
+    ('https://login.microsoftonline.com/t/oauth2/v2.0/token', True),
+    ('https://login.microsoftonline.com/t/oauth2/v2.0/token/', True),
+    ('https://login.microsoftonline.com/T/oauth2/v2.0/token', False),
+    ('https://login.microsoftonline.com/other/oauth2/v2.0/token', False),
+    ('https://login.microsoftonline.com/t/oauth2/v2.0/token?x=1', False),
+    ('', False),
+    (None, False),
+])
+def test_an_endpoint_is_the_same_only_when_it_is_the_pinned_one(mcp_oauth, given, same):
+    assert mcp_oauth.is_same_endpoint('https://login.microsoftonline.com/t/oauth2/v2.0/token', given) is same
