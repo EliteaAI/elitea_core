@@ -60,7 +60,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Only conversations of a schedule run with this status. Unknown value: 400."},
             {"name": "trigger", "in": "query", "required": False,
              "schema": {"type": "string", "enum": list(get_args(RunTrigger))},
-             "description": "Only conversations of a schedule run with this trigger: cron (scheduled), manual or test. "
+             "description": "Only conversations of a schedule run with this trigger: cron (scheduled), manual, webhook or test. "
                             "Unknown value: 400."},
             {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1},
              "description": "Only conversations of a schedule run of this version. Not an id: 400."},
