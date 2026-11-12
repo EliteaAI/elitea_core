@@ -4,6 +4,7 @@
 Core substitutes on the user-message path only, into a copy of the body: every bare ``$ARGUMENTS`` becomes the
 escaped argument, a body without one ends with an ``ARGUMENTS:`` line, nothing typed renders the empty string.
 """
+import ast
 import importlib.util
 import pathlib
 import sys
@@ -338,12 +339,15 @@ class TestAnsweringSkillHook:
         assert 'skill_argument' not in result
 
 
-def test_the_request_model_carries_the_answering_skills_argument_to_the_payload():
+def test_the_answering_skills_argument_reaches_the_payload_only_as_a_server_argument():
     plugin_root = pathlib.Path(__file__).resolve().parents[3]
-    assert 'skill_argument: Optional[str] = None' in (plugin_root / 'models' / 'pd' / 'chat.py').read_text()
-    predict = (plugin_root / 'utils' / 'predict_utils.py').read_text()
-    assert "skill_argument = getattr(parsed, 'skill_argument', None)" in predict
-    assert "payload['skill_argument'] = skill_argument" in predict
+    chat = ast.parse((plugin_root / 'models' / 'pd' / 'chat.py').read_text())
+    request = next(n for n in chat.body if isinstance(n, ast.ClassDef) and n.name == 'ApplicationChatRequest')
+    assert 'skill_argument' not in {n.target.id for n in request.body if isinstance(n, ast.AnnAssign)}
+    predict = ast.parse((plugin_root / 'utils' / 'predict_utils.py').read_text())
+    build = next(n for n in predict.body if isinstance(n, ast.FunctionDef) and n.name == 'generate_predict_payload')
+    assert 'skill_argument' in {a.arg for a in build.args.args}
+    assert "payload['skill_argument'] = skill_argument" in (plugin_root / 'utils' / 'predict_utils.py').read_text()
 
 
 class TestAnsweringSkillTurn:

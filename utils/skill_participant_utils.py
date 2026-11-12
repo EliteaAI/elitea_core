@@ -15,8 +15,8 @@ from .project_skills import build_project_skill_catalog, is_project_skills_in_ch
 from .skill_llm_override import select_llm_override
 from .skill_frontmatter import argument_hint_payload, invocation_flags
 from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
-from .skill_utils import apply_recipient_skill_argument, consume_message_skills, merge_invoked_skills, model_only_names, \
-    validate_message_skill_limit
+from .skill_utils import SKILL_ARGUMENT_KEY, apply_recipient_skill_argument, consume_message_skills, merge_invoked_skills, \
+    model_only_names, validate_message_skill_limit
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -182,6 +182,7 @@ def pop_skill_dispatch(payload: dict, start_event_content: dict) -> tuple[dict, 
     if not dispatch:
         return {}, start_event_content
     rpc_kwargs = {key: dispatch[key] for key in ('usage_entity', 'applied_skills', 'sid_project_id')}
+    rpc_kwargs['skill_argument'] = payload.pop(SKILL_ARGUMENT_KEY, None)
     return rpc_kwargs, {**start_event_content, **dispatch['start_event_content']}
 
 

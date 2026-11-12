@@ -336,6 +336,7 @@ def generate_predict_payload(
     chat_skills: Optional[list] = None,
     invoked_skills: Optional[list] = None,
     project_skills: Optional[list] = None,
+    skill_argument: Optional[str] = None,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_run: bool = False,
 ) -> dict:
@@ -662,7 +663,6 @@ def generate_predict_payload(
     if inspected:
         # Accepted history (#6886): without it checkpoint B re-inspects those turns
         payload['input_guardrail_inspected'] = list(inspected)
-    skill_argument = getattr(parsed, 'skill_argument', None)
     if skill_argument:
         payload['skill_argument'] = skill_argument
 

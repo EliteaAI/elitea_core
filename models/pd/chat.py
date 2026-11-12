@@ -81,8 +81,6 @@ class ApplicationChatRequest(MergeUpdateBase):
     execution_generation: Optional[str] = None
     # Segment hashes checkpoint A already settled (#6886); forwarded to checkpoint B
     input_guardrail_inspected: Optional[List[str]] = None
-    # The text a leading ~name handed to the answering skill (#7508), as placed in its instructions
-    skill_argument: Optional[str] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     variables: Optional[List[ApplicationVariableModel]] = None

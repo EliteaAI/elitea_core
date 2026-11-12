@@ -1011,3 +1011,4 @@ def test_an_argument_that_is_also_part_of_the_owners_text_cannot_hide_it(guardra
     else:
         guardrail.apply_input_guardrail(call := _call(**payload))
         assert FAKE_GITHUB_TOKEN not in call['kwargs']['application']['version_details']['instructions']
+
