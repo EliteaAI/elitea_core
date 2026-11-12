@@ -5,7 +5,7 @@
 from flask import request
 from pydantic import BaseModel, Field, StrictBool, ValidationError
 from pylon.core.tools import log
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from tools import auth, db
 
 from ..models.entity_schedule import EntitySchedulePreference
@@ -24,6 +24,11 @@ INVALID_SETTING = {"code": INVALID_INPUT, "error": "allow_run_without_asking mus
                    "field": "allow_run_without_asking"}
 INVALID_WEBHOOK_CAP = {"code": INVALID_INPUT, "error": "Running runs per webhook must be a whole number of at least 1",
                       "field": "webhook_max_concurrent_runs"}
+# A project schema without the release columns; the answer names the admin tasks instead of a bare 500
+UNDEFINED_COLUMN = "42703"
+SCHEDULES_UNAVAILABLE = {"code": "schedules_unavailable",
+                         "error": "Schedules are not available yet: the administrator must run the admin tasks "
+                                  "ensure_webhook_trigger_columns and ensure_toolkit_index_schedule_columns"}
 SETTINGS_UNAVAILABLE = {"code": "settings_unavailable", "error": "The project settings store is unavailable; try again later"}
 
 
@@ -77,7 +82,7 @@ class ScheduleProjectHandlers:
         """Answer one page of schedules as `{"total", "rows"}`, with owner names and allowed actions (R1.1-R5.3).
 
         Who may call: a project member with `schedules.list`; only a schedules admin sees other owners' schedules.
-        Errors: 400 invalid query option; 403.
+        Errors: 400 invalid query option; 403; 503 `schedules_unavailable` (a release schema task did not run).
         """
         args = request.args.to_dict()
         owner_ids = request.args.getlist('owner_ids')
@@ -91,9 +96,15 @@ class ScheduleProjectHandlers:
             return {"code": INVALID_INPUT, "error": text, "field": name}, 400
 
         scope = schedule_scope(project_id)
-        with db.get_session(project_id) as session:
-            total, rows = list_schedules(session, scope, filters, filters.limit, filters.offset)
-            running = _webhook_load(session, project_id, rows)
+        try:
+            with db.get_session(project_id) as session:
+                total, rows = list_schedules(session, scope, filters, filters.limit, filters.offset)
+                running = _webhook_load(session, project_id, rows)
+        except DBAPIError as error:
+            if getattr(error.orig, "pgcode", None) != UNDEFINED_COLUMN:
+                raise
+            log.warning("Schedules of project %s need the release schema tasks: %s", project_id, error.orig)
+            return SCHEDULES_UNAVAILABLE, 503
         names = _owner_names({row.created_by for row in rows})
         items = [
             ScheduleListItem(

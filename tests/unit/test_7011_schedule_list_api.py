@@ -382,3 +382,36 @@ def test_a_last_run_reason_stored_with_an_engineer_text_is_listed_as_the_generic
 
     assert rows[0]["last_run_reason"] == "The run failed. Open the run log or ask an administrator for details."
     assert rows[1]["last_run_reason"] == "The run failed: The step 'a' of b could not be completed."
+
+
+# #7534: an upgraded project whose release schema tasks did not run gets a 503 that names them, not a bare 500
+def test_7534_missing_release_column_answers_503_with_the_tasks(env, monkeypatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    class Orig(Exception):
+        pgcode = "42703"
+
+    def missing_column(*args, **kwargs):
+        raise ProgrammingError("SELECT", {}, Orig("column entity_schedules.toolkit_id does not exist"))
+
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_project_handlers"], "list_schedules", missing_column)
+    env.grant(9, "list")
+    body, status = call(env)
+    assert status == 503
+    assert body["code"] == "schedules_unavailable"
+    assert "ensure_toolkit_index_schedule_columns" in body["error"]
+
+
+def test_7534_other_database_errors_still_raise(env, monkeypatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    class Orig(Exception):
+        pgcode = "42601"
+
+    def syntax_error(*args, **kwargs):
+        raise ProgrammingError("SELECT", {}, Orig("syntax error"))
+
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_project_handlers"], "list_schedules", syntax_error)
+    env.grant(9, "list")
+    with pytest.raises(ProgrammingError):
+        call(env)
