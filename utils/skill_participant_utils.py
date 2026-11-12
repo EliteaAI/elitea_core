@@ -15,7 +15,8 @@ from .project_skills import build_project_skill_catalog, is_project_skills_in_ch
 from .skill_llm_override import select_llm_override
 from .skill_frontmatter import argument_hint_payload, invocation_flags
 from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
-from .skill_utils import consume_message_skills, merge_invoked_skills, model_only_names, validate_message_skill_limit
+from .skill_utils import apply_recipient_skill_argument, consume_message_skills, merge_invoked_skills, model_only_names, \
+    validate_message_skill_limit
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -392,6 +393,8 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
         _, resumed_skills = consume_message_skills(
             mention_source, merge_mention_candidates([] if is_dummy else agent_skills, candidates, project_skills),
         )
+    if participant.entity_name == ParticipantTypes.skill:
+        apply_recipient_skill_argument(result, mention_source, [c.get('name') for c in [*candidates, *project_skills]])
     if not has_skill_mention(result.get('user_input')):
         if resumed_skills:
             result[INVOKED_SKILLS_KEY] = resumed_skills

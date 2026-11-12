@@ -191,6 +191,7 @@ def env(isolated_sys_modules):
           validate_message_skill_limit=lambda content, candidates: None,
           model_only_names=model_only_names,
           merge_invoked_skills=lambda message, resumed: [*message, *(resumed or [])],
+          apply_recipient_skill_argument=lambda result, source, names: None,
           SkillInvocationLimitError=SkillInvocationLimitError)
     _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
           build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)

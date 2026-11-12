@@ -939,3 +939,75 @@ def test_a_project_secret_passed_as_a_skill_argument_is_not_input(guardrail, act
     assert payload['invoked_skills'][0]['instructions'] == f'Deploy {FAKE_GITHUB_TOKEN} now'
     assert payload['user_input'] == f'deploy {FAKE_GITHUB_TOKEN}'
     _assert_no_value(FAKE_GITHUB_TOKEN, guardrail.spans)
+
+
+def _answering_skill_payload(argument, user_input=None):
+    body = f'Greet {argument} warmly'
+    return {
+        'user_input': user_input if user_input is not None else f'greet {argument}',
+        'application': {'version_details': {'instructions': body}},
+        'skill_argument': argument,
+    }
+
+
+def test_the_answering_skills_argument_is_user_input_not_its_instructions(guardrail):
+    _enable(guardrail, categories={'credentials': 'redact'})
+    call = _call(**_answering_skill_payload(FAKE_GITHUB_TOKEN))
+
+    verdict = guardrail.apply_input_guardrail(call)
+
+    payload = call['kwargs']
+    assert payload['user_input'] == 'greet [REDACTED:credentials]'
+    assert payload['application']['version_details']['instructions'] == 'Greet [REDACTED:credentials] warmly'
+    assert payload['skill_argument'] == '[REDACTED:credentials]'
+    assert verdict['detection_count'] == 1 and verdict['segments'] == ['current_turn']
+    assert len(guardrail.spans) == 1
+    _assert_no_value(FAKE_GITHUB_TOKEN, call['kwargs'], guardrail.spans)
+
+
+def test_the_answering_skills_own_body_is_still_inspected_as_instructions(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    payload = _answering_skill_payload('Anna')
+    payload['application']['version_details']['instructions'] = f'Greet Anna with {FAKE_GITHUB_TOKEN}'
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as blocked:
+        guardrail.apply_input_guardrail(_call(**payload))
+
+    assert blocked.value.segments == ['instructions']
+
+
+def test_an_answering_skills_argument_the_budget_left_unchecked_is_still_redacted(guardrail):
+    _enable(guardrail, categories={'credentials': 'redact'}, max_inspect_chars=100, on_error='fail_open')
+    call = _call(**_answering_skill_payload(FAKE_GITHUB_TOKEN, user_input='x' * 5000 + FAKE_GITHUB_TOKEN))
+
+    guardrail.apply_input_guardrail(call)
+
+    assert call['kwargs']['application']['version_details']['instructions'] == 'Greet [REDACTED:credentials] warmly'
+
+
+@pytest.mark.parametrize('action', ['block', 'redact'])
+def test_a_project_secret_handed_to_the_answering_skill_is_not_input(guardrail, action):
+    _enable(guardrail, categories={'credentials': action})
+    payload = _answering_skill_payload('{{secret.gh}}')
+
+    payload = guardrail.inspect_and_unsecret(payload, _Vault({'gh': FAKE_GITHUB_TOKEN}), 1, 7)
+    assert guardrail.apply_input_guardrail({'kwargs': payload, 'meta': {'project_id': 1}}) is None
+
+    assert payload['application']['version_details']['instructions'] == f'Greet {FAKE_GITHUB_TOKEN} warmly'
+    _assert_no_value(FAKE_GITHUB_TOKEN, guardrail.spans)
+
+
+@pytest.mark.parametrize('action', ['block', 'redact'])
+def test_an_argument_that_is_also_part_of_the_owners_text_cannot_hide_it(guardrail, action):
+    _enable(guardrail, categories={'credentials': action})
+    prefix = FAKE_GITHUB_TOKEN[:3]
+    payload = _answering_skill_payload(prefix)
+    payload['application']['version_details']['instructions'] = f'Greet {prefix} warmly. Use {FAKE_GITHUB_TOKEN}'
+
+    if action == 'block':
+        with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as blocked:
+            guardrail.apply_input_guardrail(_call(**payload))
+        assert 'instructions' in blocked.value.segments
+    else:
+        guardrail.apply_input_guardrail(call := _call(**payload))
+        assert FAKE_GITHUB_TOKEN not in call['kwargs']['application']['version_details']['instructions']

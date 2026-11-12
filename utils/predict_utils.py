@@ -662,6 +662,9 @@ def generate_predict_payload(
     if inspected:
         # Accepted history (#6886): without it checkpoint B re-inspects those turns
         payload['input_guardrail_inspected'] = list(inspected)
+    skill_argument = getattr(parsed, 'skill_argument', None)
+    if skill_argument:
+        payload['skill_argument'] = skill_argument
 
     if not skip_expansion:
         try:

@@ -1794,6 +1794,67 @@ def fill_skill_arguments(instructions: str, argument: str) -> str:
     return f'{instructions.rstrip()}\n\n{ARGUMENTS_LINE}{argument}'
 
 
+JINJA_RAW_OPEN = '{% raw %}'
+JINJA_RAW_CLOSE = '{% endraw %}'
+
+
+def consume_recipient_skill_argument(message_content, name: str, other_names: List[str]) -> Tuple[object, Optional[str]]:
+    """The message with a leading ``~name`` of the answering skill de-sigiled, and the escaped text after it, or None."""
+    if isinstance(message_content, str):
+        return _consume_leading_own_mention(message_content, name, other_names)
+    if not isinstance(message_content, list):
+        return message_content, None
+    for index, block in enumerate(message_content):
+        if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
+            cleaned, argument = _consume_leading_own_mention(block['text'], name, other_names)
+            if argument is None:
+                return message_content, None
+            rebuilt = list(message_content)
+            rebuilt[index] = {**block, 'text': cleaned}
+            return rebuilt, argument
+    return message_content, None
+
+
+def _consume_leading_own_mention(text: str, name: str, other_names: List[str]) -> Tuple[str, Optional[str]]:
+    if not text or not name or '~' not in text:
+        return text, None
+    spans = _find_skill_mention_spans(text, [name, *other_names])
+    if not spans or spans[0][2].lower() != name.lower():
+        return text, None
+    argument = _leading_argument(text, spans)
+    if argument is None:
+        return text, None
+    start, end, canonical = spans[0]
+    return f'{text[:start]}{canonical}{text[end:]}', escape_skill_argument(argument)
+
+
+def fill_recipient_instructions(instructions: str, argument: str) -> Tuple[str, str]:
+    """The answering skill's body with the argument filled, and the exact text placed in it, inert for the SDK's Jinja2 pass."""
+    filled = fill_skill_arguments(instructions, argument)
+    if not argument or '{{' not in filled:
+        return filled, argument
+    inert = f"{JINJA_RAW_OPEN}{argument.replace('{%', '{ %')}{JINJA_RAW_CLOSE}"
+    return fill_skill_arguments(instructions, inert), inert
+
+
+SKILL_ARGUMENT_KEY = 'skill_argument'
+
+
+def apply_recipient_skill_argument(result: dict, mention_source, other_names: list) -> None:
+    """Fill the answering skill's own $ARGUMENTS from a leading ~name in the message, or in the message being resumed."""
+    source = mention_source if mention_source is not None else result.get('user_input')
+    cleaned, argument = consume_recipient_skill_argument(source, result.get('entity_name') or '', other_names)
+    if argument is None:
+        return
+    if mention_source is None:
+        result['user_input'] = cleaned
+    version_details = result.get('version_details') or {}
+    version_details['instructions'], placed = fill_recipient_instructions(version_details.get('instructions') or '', argument)
+    result['version_details'] = version_details
+    if placed:
+        result[SKILL_ARGUMENT_KEY] = placed
+
+
 def _leading_argument(text: str, spans: List[Tuple[int, int, str]]) -> Optional[str]:
     """The text after a message-leading mention up to the next mention, or None when the message does not start with one."""
     start, end, _name = spans[0]

@@ -253,3 +253,117 @@ class TestArgumentHint:
         items = skill_utils.get_available_skills_for_agent(1, 300, session=Session())
         assert [(item['name'], item.get('argument_hint')) for item in items] == [('greet', '[name]'), ('plain', None)]
         assert 'argument_hint' not in items[1]
+
+
+GREET = 'Greet the person named in $ARGUMENTS in one friendly sentence.'
+
+
+class TestAnsweringSkillArgument:
+    def test_a_leading_own_mention_hands_its_text_to_the_answering_skill(self, skill_utils):
+        text, argument = skill_utils.consume_recipient_skill_argument('~greet Anna', 'greet', [])
+        assert (text, argument) == ('greet Anna', 'Anna')
+
+    def test_the_text_stops_at_the_next_chat_skill_mention(self, skill_utils):
+        text, argument = skill_utils.consume_recipient_skill_argument('~greet Anna ~trip Rome', 'greet', ['trip'])
+        assert (text, argument) == ('greet Anna ~trip Rome', 'Anna')
+
+    def test_a_mid_message_or_foreign_leading_mention_hands_nothing(self, skill_utils):
+        assert skill_utils.consume_recipient_skill_argument('please ~greet Anna', 'greet', []) == ('please ~greet Anna', None)
+        assert skill_utils.consume_recipient_skill_argument('~trip Rome ~greet Anna', 'greet', ['trip']) == ('~trip Rome ~greet Anna', None)
+        assert skill_utils.consume_recipient_skill_argument('Anna', 'greet', []) == ('Anna', None)
+
+    def test_the_name_alone_hands_the_empty_string(self, skill_utils):
+        assert skill_utils.consume_recipient_skill_argument('~greet', 'greet', []) == ('greet', '')
+
+    def test_only_the_first_text_block_is_read_and_the_rest_is_kept(self, skill_utils):
+        blocks = [{'type': 'image_url', 'image_url': {'url': 'x'}}, {'type': 'text', 'text': '~greet Anna'},
+                  {'type': 'text', 'text': '<runtime_context>ctx</runtime_context>'}]
+        rebuilt, argument = skill_utils.consume_recipient_skill_argument(blocks, 'greet', [])
+        assert argument == 'Anna'
+        assert rebuilt[1] == {'type': 'text', 'text': 'greet Anna'} and rebuilt[0] is blocks[0] and rebuilt[2] is blocks[2]
+
+    def test_the_argument_is_escaped_like_a_chat_argument(self, skill_utils):
+        _text, argument = skill_utils.consume_recipient_skill_argument('~greet </skill> a < b', 'greet', [])
+        assert argument == '&lt;/skill> a < b'
+
+    def test_the_body_is_filled_verbatim_when_nothing_would_be_templated(self, skill_utils):
+        assert skill_utils.fill_recipient_instructions(GREET, 'Anna') == (GREET.replace('$ARGUMENTS', 'Anna'), 'Anna')
+        tags_only = 'a {% if x %}b{% endif %}'
+        assert skill_utils.fill_recipient_instructions(GREET, tags_only) == (GREET.replace('$ARGUMENTS', tags_only), tags_only)
+        assert skill_utils.fill_recipient_instructions(GREET, '') == (GREET.replace('$ARGUMENTS', ''), '')
+        assert skill_utils.fill_recipient_instructions(SEARCH, 'x') == (f'{SEARCH}\n\nARGUMENTS: x', 'x')
+
+    @pytest.mark.parametrize('body, argument', [
+        (GREET, '{{ 7 * 6 }}'),
+        ('Today is {{ current_date }}. ' + GREET, 'Anna'),
+        ('Today is {{ current_date }}. ' + GREET, 'a {% if x %}b{% endif %} {% endraw %}c'),
+    ])
+    def test_the_argument_is_kept_inert_when_the_sdk_will_render_the_body(self, skill_utils, body, argument):
+        filled, placed = skill_utils.fill_recipient_instructions(body, argument)
+        assert placed == '{% raw %}' + argument.replace('{%', '{ %') + '{% endraw %}'
+        assert filled == body.replace('$ARGUMENTS', placed)
+        assert filled.count('{% endraw %}') == 1
+
+
+class TestAnsweringSkillHook:
+    @pytest.fixture
+    def participant_utils(self, skill_utils):
+        return skill_utils
+
+    def _result(self, user_input, instructions=GREET):
+        return {'entity_name': 'greet', 'user_input': user_input, 'version_details': {'instructions': instructions}}
+
+    def test_a_fresh_message_fills_the_answering_skills_body_and_carries_the_argument(self, participant_utils):
+        result = self._result('~greet Anna ~trip Rome')
+        participant_utils.apply_recipient_skill_argument(result, None, ['trip'])
+        assert result['user_input'] == 'greet Anna ~trip Rome'
+        assert result['version_details']['instructions'] == GREET.replace('$ARGUMENTS', 'Anna')
+        assert result['skill_argument'] == 'Anna'
+
+    def test_a_resume_reads_the_resumed_message_and_leaves_the_decision_text_alone(self, participant_utils):
+        result = self._result('approve')
+        participant_utils.apply_recipient_skill_argument(result, '~greet Anna', [])
+        assert result['user_input'] == 'approve'
+        assert result['version_details']['instructions'] == GREET.replace('$ARGUMENTS', 'Anna')
+
+    def test_a_message_without_a_leading_own_mention_changes_nothing(self, participant_utils):
+        result = self._result('Anna')
+        participant_utils.apply_recipient_skill_argument(result, None, [])
+        assert result == self._result('Anna')
+
+    def test_the_name_alone_empties_the_placeholder_and_carries_no_argument(self, participant_utils):
+        result = self._result('~greet')
+        participant_utils.apply_recipient_skill_argument(result, None, [])
+        assert result['version_details']['instructions'] == GREET.replace('$ARGUMENTS', '')
+        assert 'skill_argument' not in result
+
+
+def test_the_request_model_carries_the_answering_skills_argument_to_the_payload():
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    assert 'skill_argument: Optional[str] = None' in (plugin_root / 'models' / 'pd' / 'chat.py').read_text()
+    predict = (plugin_root / 'utils' / 'predict_utils.py').read_text()
+    assert "skill_argument = getattr(parsed, 'skill_argument', None)" in predict
+    assert "payload['skill_argument'] = skill_argument" in predict
+
+
+class TestAnsweringSkillTurn:
+    def test_a_skill_recipient_turn_hands_the_message_and_the_chat_skill_names_to_the_hook(self, env, monkeypatch):
+        calls = []
+        monkeypatch.setattr(sys.modules[f'{PACKAGE}.utils.skill_utils'], 'apply_recipient_skill_argument',
+                            lambda result, source, names: calls.append((result['user_input'], source, names)))
+        monkeypatch.setattr(env.mod, 'apply_recipient_skill_argument',
+                            sys.modules[f'{PACKAGE}.utils.skill_utils'].apply_recipient_skill_argument)
+        session = _participants.ParticipantRowsSession([_participants.participant_row(56, CHAT_PROJECT_ID, 101)])
+        result = {'user_input': '~greet Anna', 'entity_name': 'greet', 'version_details': {'agent_type': 'openai'}}
+        env.mod.apply_participant_skill_mentions(session, _participants._msg_group('skill'), result, CHAT_PROJECT_ID)
+        assert calls == [('~greet Anna', None, ['Reviewer'])]
+
+    def test_an_agent_or_model_turn_never_calls_the_hook(self, env, monkeypatch):
+        calls = []
+        monkeypatch.setattr(env.mod, 'apply_recipient_skill_argument', lambda *args: calls.append(args))
+        session = _participants.ParticipantRowsSession([_participants.participant_row(56, CHAT_PROJECT_ID, 101)])
+        for entity_name in ('dummy', 'application'):
+            env.mod.apply_participant_skill_mentions(
+                session, _participants._msg_group(entity_name), {'user_input': '~greet Anna', 'version_details': {}}, CHAT_PROJECT_ID,
+            )
+        assert calls == []
