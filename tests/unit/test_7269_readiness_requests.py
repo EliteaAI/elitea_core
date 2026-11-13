@@ -139,7 +139,15 @@ class SecretsFake:
             error = RuntimeError("refused")
             error.code, error.key = "GRANT_EXISTS", items[0]["key"]
             raise error
-        return [{"key": item["key"], "id": str(uuid.uuid4())} for item in items]
+        made = [{"key": item["key"], "id": str(uuid.uuid4())} for item in items]
+        for item, answer in zip(items, made):   # (#7228) a suite that reads its own requests back sets ``persist``
+            if getattr(self, "persist", None) is not None and item["kind"] == "grant":
+                key = "|".join((str(item["binding_ref"]), str(item["toolkit_id"]), str(item["ref"]), "*",
+                                str(item["subject_ref"])))
+                self.persist.grants[(project_id, key)] = {
+                    "grant_id": answer["id"], "state": "pending_approval", "revocation_epoch": 0,
+                    "valid_from": None, "valid_until": None, "operations": ["*"]}
+        return made
 
 
 @pytest.fixture
@@ -295,8 +303,9 @@ def test_one_batch_files_the_binding_the_reference_and_the_grant_as_the_members_
     filed = file(ns, env)
     assert [item["kind"] for item in filed] == ["binding", "reference", "grant"]
     [row] = bindings(env, ns)
+    # (#7228, C9-SEC-100) the platform's own filing is automatic: the request's actor is its creator, the member
     assert (row.state, row.created_by, row.state_changed_by, row.identity_mode) == (
-        "pending_approval", MEMBER, MEMBER, "elitea_native")
+        "pending_approval", MEMBER, None, "elitea_native")
     # the secrets plugin got the batch's own session (whose commit is a flush), the reference first, then the grant
     assert [(session, items[0]["kind"]) for session, _, items, _ in env.secrets.calls] == [
         ("_OneTransaction", "reference"), ("_OneTransaction", "grant")]
@@ -306,7 +315,7 @@ def test_one_batch_files_the_binding_the_reference_and_the_grant_as_the_members_
     assert grant["ref"] == filed[1]["id"] and env.secrets.calls[0][2][0]["configuration_uuid"] == cred.uuid
     events = [(event["reason_code"], event.get("caller_ref")) for _, event in env.recorded]
     assert events.count(("GOVERNANCE_REQUEST_FILED", f"user:{MEMBER}")) == 3
-    assert ("BINDING_PENDING_APPROVAL", f"operator:{MEMBER}") in events
+    assert ("BINDING_PENDING_APPROVAL_AUTOMATIC", f"operator:{MEMBER}") in events   # (#7228) the platform filed it
     # every event in the one transaction: the batch's session, or the lifecycle's view of it
     assert len({id(getattr(session, "_session", session)) for session, _ in env.recorded}) == 1
     batch = getattr(env.recorded[0][0], "_session", env.recorded[0][0])
@@ -350,11 +359,174 @@ def test_a_request_never_approves_and_the_requester_cannot_approve_it(ns, env):
     assert refused.value.code == "SELF_APPROVAL"
 
 
+def test_an_approver_who_files_through_the_platform_is_the_requester_and_cannot_approve_it(ns, env):
+    """(#7228, C9-SEC-101) the platform's filing is the member's own request when they may approve: an admin who
+    edits an agent and requests from the card never approves that edit; another approver may."""
+    credential(env)
+    env.permissions[MEMBER] = set(MEMBER_RIGHTS) | {"governance.bindings.approve"}
+    file(ns, env, keys=["binding"])
+    [row] = bindings(env, ns)
+    assert (row.state, row.created_by, row.state_changed_by) == ("pending_approval", MEMBER, MEMBER)
+    events = [event["reason_code"] for _, event in env.recorded]
+    assert "BINDING_PENDING_APPROVAL" in events and "BINDING_PENDING_APPROVAL_AUTOMATIC" not in events
+    values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native", "binding_id": row.id,
+              "action": "activate", "approval_ref": "A", "policy_revision": "B", "dry_run": False,
+              "reviewed_digest": row.definition_digest}
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        ns.binding_admin.run_binding_action(module(ns), values, MEMBER)
+    assert refused.value.code == "SELF_APPROVAL"
+
+
 def test_a_changed_agent_is_rebound_by_its_editor(ns, env):
     binding = env.add_binding(1, 7, 70, digest="adv1:" + "9" * 64)
     file(ns, env, keys=["binding"])
     [row] = bindings(env, ns)
     assert (row.id, row.state, row.definition_digest, row.approval_ref) == (binding, "pending_approval", DIGEST, None)
+
+
+def approve(ns, binding_id, actor=OTHER, reviewed=None):
+    values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native",
+              "binding_id": binding_id, "action": "activate", "approval_ref": "A", "policy_revision": "B",
+              "dry_run": False, "reviewed_digest": reviewed}
+    return ns.binding_admin.run_binding_action(module(ns), values, actor)
+
+
+def test_a_waiting_identity_for_an_older_definition_is_changed_and_brought_up_to_date_in_place(ns, env):
+    """(#7228) The binding a run filed waits for approval; then a toolkit was attached, so its digest is old. The card
+    says it changed (never merely "waits for approval"), and the request brings it up to date on the same row, still
+    waiting, nothing raised; the approver then approves the definition as it is."""
+    binding = env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64)
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        approve(ns, binding)
+    assert refused.value.code == "BINDING_DIGEST_MISMATCH"
+    found = items(ns, env)["binding"]
+    assert (found["state"], found["requestable"]) == ("changed", True)
+    assert [item["kind"] for item in file(ns, env, keys=["binding"])] == ["binding"]
+    [row] = bindings(env, ns)
+    assert (row.id, row.state, row.definition_digest, row.revocation_epoch) == (binding, "pending_approval", DIGEST, 0)
+    after = items(ns, env)["binding"]   # up to date: it only waits now, and is not requested again
+    assert (after["state"], after["requestable"]) == ("pending_approval", False)
+    assert approve(ns, binding)["state"] == "active"
+
+
+def test_attaching_a_toolkit_to_a_waiting_identity_brings_it_up_to_date(ns, env):
+    binding = env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64)
+    tool_id = credential(env, binding, reference=True).tool_id
+    claims = {"uid": MEMBER, "run": "run-83"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {"ok": True},
+                                                 {"project_id": "1", "tool_id": str(tool_id)})
+    [version] = result["versions"]
+    assert "binding" in [item["kind"] for item in version["filed"]]
+    [row] = bindings(env, ns)
+    assert (row.state, row.definition_digest) == ("pending_approval", DIGEST)
+    assert approve(ns, binding)["state"] == "active"
+
+
+def test_a_retired_identity_is_requested_again_on_its_row_and_approved(ns, env):
+    binding = env.add_binding(1, 7, 70, state="retired", digest="adv1:" + "9" * 64, epoch=2)
+    credential(env, binding)
+    assert (items(ns, env)["binding"]["state"], items(ns, env)["binding"]["requestable"]) == ("missing", True)
+    assert [item["kind"] for item in file(ns, env, keys=["binding"])] == ["binding"]
+    [row] = bindings(env, ns)   # the same row: one audit chain per version
+    assert (row.id, row.state, row.definition_digest, row.created_by, row.revocation_epoch) == (
+        binding, "pending_approval", DIGEST, MEMBER, 2)
+    assert "BINDING_REVIVED" in [event["reason_code"] for _, event in env.recorded]
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        approve(ns, binding, actor=MEMBER)
+    assert refused.value.code == "SELF_APPROVAL"
+    assert approve(ns, binding)["state"] == "active"
+
+
+def retire(ns, binding_id, actor=OTHER):
+    values = {"project_id": 1, "application_id": 7, "version_id": 70, "mode": "elitea_native",
+              "binding_id": binding_id, "action": "retire", "dry_run": False}
+    return ns.binding_admin.run_binding_action(module(ns), values, actor)
+
+
+def test_retirement_ends_the_bindings_grants_and_mandates_and_a_revival_starts_clean(ns, env):
+    """(#7228, C9-SEC-96/97, the reviewer's row b) A retired binding's grants and live mandates end with it, in its
+    transaction and audited; requested again and approved, none of them comes back: the member's grant is to be
+    requested again and the schedule's mandate stays revoked."""
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    cred = credential(env, binding, reference=True)
+    key = cred.key(subject(MEMBER))
+    env.grants[(1, key)] = {"grant_id": "g1", "state": "active", "valid_from": None, "valid_until": None,
+                            "revocation_epoch": 0, "operations": ["*"]}
+    mandate = mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding)
+    assert retire(ns, binding)["state"] == "retired"
+    assert env.grants[(1, key)]["state"] == "revoked"
+    assert env.revoked_binding_grants == [(1, str(binding), OTHER, "BINDING_RETIRED")]
+    [row] = env.query(1, ns.Mandate)
+    assert (row.id, row.state) == (mandate, "revoked")
+    reasons = [event["reason_code"] for _, event in env.recorded]
+    assert "MANDATE_REVOKED_BINDING_RETIRED" in reasons and reasons[-1] == "MANDATE_REVOKED_BINDING_RETIRED"
+    # requested again and approved: same row, and nothing that hung off it is back
+    assert "binding" in [item["kind"] for item in file(ns, env, keys=["binding"])]
+    assert env.revoked_binding_grants[-1][3] == "BINDING_REVIVED"   # leftovers of an older retirement end too
+    assert approve(ns, binding)["state"] == "active"
+    found = items(ns, env)
+    assert (found[f"grant:1:{cred.uuid}"]["state"], found[f"grant:1:{cred.uuid}"]["requestable"]) == ("missing", True)
+    assert env.query(1, ns.Mandate)[0].state == "revoked"
+
+
+def test_a_retirement_that_cannot_end_the_grants_changes_nothing(ns, env, monkeypatch):
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("audit down")
+    env.secrets_extra["revoke_binding_grants"] = broken
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        retire(ns, binding)
+    assert refused.value.code == "AUDIT_UNAVAILABLE"
+    [row] = bindings(env, ns)
+    assert row.state == "active" and env.query(1, ns.Mandate)[0].state == "active"
+
+
+def test_a_binding_with_more_grants_than_a_retirement_revokes_is_refused_readably(ns, env):
+    """(#7228, D3-S3) the secrets plugin's ceiling reads as such, never as an audit outage; nothing is retired."""
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+
+    class TooMany(Exception):
+        code = "TOO_MANY_GRANTS"
+
+    def too_many(*_args, **_kwargs):
+        raise TooMany()
+    env.secrets_extra["revoke_binding_grants"] = too_many
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        retire(ns, binding)
+    assert refused.value.code == "TOO_MANY_GRANTS" and "audit" not in refused.value.message
+    assert bindings(env, ns)[0].state == "active"
+
+
+def test_a_consent_that_cannot_be_withdrawn_after_the_retirement_is_said_not_raised(ns, env, monkeypatch):
+    """(#7228, D3-S4) the retirement and the mandates' revocation are committed; the owner's consent that could not be
+    withdrawn afterwards is named in the reply, no error."""
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    mandate = mandate_env.add_mandate(env, ns, owner=MEMBER, state="active", binding_ref=binding)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("secrets down")
+    monkeypatch.setattr(ns.mandate_identity, "retire_consent", broken)
+    result = retire(ns, binding)
+    assert (result["state"], result["consents_to_withdraw"]) == ("retired", [str(mandate)])
+    assert env.query(1, ns.Mandate)[0].state == "revoked"
+
+
+def test_a_stale_approval_dialog_cannot_approve_a_definition_brought_up_to_date_since(ns, env):
+    """(#7228, C9-SEC-98, the reviewer's row a) The approver opened the waiting identity; a toolkit change then
+    brought it up to date in place. The approval from the old dialog names the digest it showed: refused, nothing
+    changed, nothing audited; with the digest the row now holds it goes through."""
+    binding = env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64)
+    shown = bindings(env, ns)[0].definition_digest
+    file(ns, env, keys=["binding"])   # brought up to date in place (as a PATCH tool of a run does)
+    events = len(env.recorded)
+    with pytest.raises(ns.binding_admin.BindingActionError) as refused:
+        approve(ns, binding, reviewed=shown)
+    assert refused.value.code == "BINDING_DIGEST_MISMATCH"
+    [row] = bindings(env, ns)
+    assert (row.state, row.definition_digest, len(env.recorded)) == ("pending_approval", DIGEST, events)
+    assert approve(ns, binding, reviewed=DIGEST)["state"] == "active"
 
 
 def test_off_refuses_the_batch(ns, env):
@@ -388,6 +560,70 @@ def test_other_internal_mcp_calls_and_off_file_nothing(ns, env):
                                                "elitea_core/applications/{mode}/{project_id}", 1,
                                                {"version_details": {"id": 70}}) is None
     assert env.recorded == []
+
+
+@pytest.mark.parametrize("method, path, params", [
+    ("PUT", "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+     {"project_id": "1", "application_id": "7", "version_id": "70"}),
+    ("PATCH", "/api/v2/elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}",
+     {"project_id": "1", "application_id": "7", "version_id": "70"}),
+])
+def test_a_version_a_run_changed_is_requested_again_for_its_user(ns, env, method, path, params):
+    """(#7228 item 8 a) a version given a toolkit: what it now needs is filed, attributed to the run's user."""
+    credential(env)
+    claims = {"uid": MEMBER, "run": "run-78"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, method, path, "1", {"id": 70}, params)
+    assert (result["entity_kind"], result["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in result["filed"]] == ["binding", "reference", "grant"]
+    filed = [event for _, event in env.recorded if event["reason_code"] == "GOVERNANCE_REQUEST_FILED"]
+    assert {event["caller_ref"] for event in filed} == {"run:run-78"}
+    # (item 8 e) one sentence for the model: what waits for whom, never a value
+    assert result["next"].startswith("Requested for approval: the agent's identity, the credential, your use of the "
+                                     "credential.") and "nothing more is needed from you" in result["next"]
+
+
+def test_a_toolkit_a_run_changed_is_asked_again_by_its_id_from_the_path(ns, env):
+    tool_id = credential(env).tool_id
+    claims = {"uid": MEMBER, "run": "run-79"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PUT",
+                                                 "elitea_core/tool/{mode}/{project_id}/{tool_id}", 1, {},
+                                                 {"tool_id": str(tool_id)})
+    assert result is not None and result["entity_kind"] == "toolkit" and result["entity_id"] == tool_id
+    assert "next" in result
+
+
+def test_a_change_names_no_entity_without_its_path_id(ns, env):
+    claims = {"uid": MEMBER, "run": "r"}
+    for bad in (None, {"version_id": "x"}, {"version_id": "0"}, {"version_id": str(2**31)}):
+        assert ns.governance_requests.file_for_run(
+            module(ns), claims, "PUT", "elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}", 1, {},
+            bad) is None
+    assert env.recorded == []
+
+
+def test_a_refused_request_of_a_run_reads_as_a_sentence(ns, env, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ns.governance_requests.RequestRefused("STALE_READINESS")
+
+    monkeypatch.setattr(ns.governance_requests, "file_requests", refuse)
+    result = ns.governance_requests.file_for_run(module(ns), {"uid": MEMBER, "run": "r"}, "POST",
+                                                 "elitea_core/applications/{mode}/{project_id}", 1,
+                                                 {"version_details": {"id": 70}})
+    assert result["refused"] == "STALE_READINESS" and "could not be filed automatically" in result["next"]
+
+
+@pytest.mark.parametrize("summary, sentence", [
+    ({"items": []}, "Everything it needs to run governed is in place."),
+    ({"items": [{"kind": "reference", "state": "needs_value", "for": "me", "title": "jira"}]},
+     "Your own value for 'jira' is still needed; write it in the card in the chat."),
+    ({"items": [{"kind": "grant", "state": "missing", "requestable": True}]},
+     "Some of what it needs could not be requested automatically; the card in the chat lets you request it."),
+    ({"items": [{"kind": "binding", "state": "pending_approval", "escalated": True}]},
+     "Requested for approval: the agent's identity. It can be used once a platform operator approves; nothing more "
+     "is needed from you."),
+])
+def test_the_next_step_sentence(ns, summary, sentence):
+    assert ns.governance_requests.next_step(summary) == sentence
 
 
 def test_a_credential_a_run_created_is_requested_as_its_users_personal_reference(ns, env):
@@ -745,6 +981,18 @@ def _title_toolkit(env, monkeypatch, ns, answers, tool_id=2, field="pgvector_con
     return calls
 
 
+def test_a_title_selected_credential_resolved_for_the_user_needs_its_reference_and_grant_like_a_uuid(ns, env,
+                                                                                                     monkeypatch):
+    binding = env.add_binding(1, 7, 70, digest=DIGEST)
+    cred = credential(env, binding, reference=True)
+    _title_toolkit(env, monkeypatch, ns, {"github_access": {"configuration_uuid": cred.uuid,
+                                                            "configuration_project_id": 1}},
+                   tool_id=4, field="github_configuration", value={"elitea_title": "github_access"})
+    env.configurations[(1, cred.uuid)]["section"] = "credentials"
+    found = items(ns, env)
+    assert f"grant:4:{cred.uuid}" in found and "reference:4:github_configuration" not in found
+
+
 def test_a_title_only_index_store_is_resolved_as_the_run_resolves_it_and_is_not_a_credential(ns, env, monkeypatch):
     binding = env.add_binding(1, 7, 70, digest=DIGEST)
     cred = credential(env, binding)   # the jira credential by uuid: no reference yet
@@ -761,12 +1009,13 @@ def test_a_title_only_index_store_is_resolved_as_the_run_resolves_it_and_is_not_
     assert calls == [(1, {"elitea_title": "elitea-pgvector", "private": False}, MEMBER)]   # one call, as the run asks
 
 
-def test_a_title_that_does_not_resolve_stays_not_registrable(ns, env, monkeypatch):
+def test_a_title_that_does_not_resolve_is_not_found_never_a_typed_value(ns, env, monkeypatch):
+    """(#7228 round 4) the same resolution admission uses: nothing found for this user reads ``not_found``."""
     env.add_binding(1, 7, 70, digest=DIGEST)
     _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": LookupError("not found")})
     found = items(ns, env)
     [item] = [item for key, item in found.items() if key.startswith("reference:")]
-    assert (item["state"], item["requestable"]) == ("not_registrable", False)
+    assert (item["state"], item["requestable"]) == ("not_found", False)
 
 
 def test_a_title_only_credential_is_treated_like_its_uuid(ns, env, monkeypatch):
@@ -786,3 +1035,138 @@ def test_an_unreachable_resolver_makes_readiness_unavailable_never_a_wrong_list(
     _title_toolkit(env, monkeypatch, ns, {"elitea-pgvector": TimeoutError("rpc")})
     with pytest.raises(ns.governance_readiness.ReadinessUnavailable):
         items(ns, env)
+
+
+def stored_operations(ns, env):
+    """The binding's ``allowed_platform_operations`` as stored (a deferred column, read on its own)."""
+    model = ns.models.AgentIdentityBinding
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return session.execute(ns.sa.select(model.allowed_platform_operations)).scalar_one()
+
+
+# --- #7228 fix round 2: a requested identity proposes what its agent is configured to use -----------------------
+
+INTERNAL_MCP = {"url": "http://pylon_main:8080/app/1/mcp/elitea_core/applications", "headers": {}}
+
+
+def test_a_version_with_the_internal_toolkit_proposes_every_operation_and_the_request_files_them(ns, env):
+    env.add_toolkit(1, 70, 9, "mcp", INTERNAL_MCP)
+    found = items(ns, env)
+    assert found["binding"]["operations"] == ["read", "build", "credentials", "run"]
+    filed = file(ns, env, keys=["binding"])
+    assert [item["kind"] for item in filed] == ["binding"]
+    assert stored_operations(ns, env) == ["read", "build", "credentials", "run"]
+    assert items(ns, env)["binding"]["operations"] == ["read", "build", "credentials", "run"]   # pending: held
+
+
+def test_a_version_without_the_internal_toolkit_stays_read_only(ns, env):
+    credential(env)
+    assert "operations" not in items(ns, env)["binding"]
+    file(ns, env, keys=["binding"])
+    assert stored_operations(ns, env) is None
+
+
+def test_an_external_mcp_toolkit_is_not_the_internal_one(ns, env):
+    env.add_toolkit(1, 70, 9, "mcp", {"url": "https://mcp.example.com/app/1/mcp", "headers": {}})
+    assert ns.governance_readiness.proposed_operations(types.SimpleNamespace(meta={}), []) is None
+    assert ns.governance_readiness.proposed_operations(
+        types.SimpleNamespace(meta={"internal_tools": ["internal_mcp"]}), []) == ["read", "build", "credentials", "run"]
+
+
+def test_the_internal_tool_keys_match_the_injection(ns):
+    source = (PLUGIN_ROOT / "utils" / "internal_tools.py").read_text()
+    for key in ns.governance_readiness.INTERNAL_TOOL_KEYS:
+        assert f"= '{key}'" in source
+
+
+# --- #7228 fix round 2: what a run's toolkit change files for the versions using it -----------------------------
+
+TOOL_PATCH = "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}"
+
+
+def test_linking_a_toolkit_to_a_version_files_that_versions_requests(ns, env):
+    """``PATCH tool`` links the toolkit to a version (``entity_tool_mapping``): that version's identity and the user's
+    grant are filed with the toolkit's own readiness, attributed to the run."""
+    tool_id = credential(env).tool_id
+    claims = {"uid": MEMBER, "run": "run-80"}
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {"ok": True},
+                                                 {"project_id": "1", "tool_id": str(tool_id)})
+    assert (result["entity_kind"], result["entity_id"]) == ("toolkit", tool_id)
+    [version] = result["versions"]
+    assert (version["entity_kind"], version["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in version["filed"]] == ["binding", "reference", "grant"]
+    filed = [event for _, event in env.recorded if event["reason_code"] == "GOVERNANCE_REQUEST_FILED"]
+    assert {event["caller_ref"] for event in filed} == {"run:run-80"}
+    assert "Requested for approval" in result["next"] and "the agent's identity" in result["next"]
+
+
+def test_a_repeated_change_files_nothing_more_and_the_version_only_waits_for_approval(ns, env):
+    tool_id = credential(env, reference=True, grants=True).tool_id
+    env.secrets.persist = env   # the grant filed is read back as pending, as the secrets plugin answers it
+    claims = {"uid": MEMBER, "run": "run-81"}
+    params = {"project_id": "1", "tool_id": str(tool_id)}
+    first = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {}, params)
+    second = ns.governance_requests.file_for_run(module(ns), claims, "PATCH", TOOL_PATCH, 1, {}, params)
+    assert [item["kind"] for item in first["versions"][0]["filed"]] == ["binding", "grant"]
+    assert second["versions"][0]["filed"] == []                     # nothing filed twice
+    assert [item for item in items(ns, env).values() if item["requestable"]] == []   # only approvals left
+    assert len(bindings(env, ns)) == 1
+
+
+def link(ns, env, tool_id, version_id, entity_type="agent"):
+    env.add_version(1, version_id, 7, name=f"v{version_id}")
+    env.digests[version_id] = "adv1:" + f"{version_id:064x}"
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.add(ns.EntityToolMapping(tool_id=tool_id, entity_version_id=version_id, entity_type=entity_type,
+                                         selected_tools=["run"]))
+        session.commit()
+
+
+def test_a_toolkit_used_by_more_versions_than_the_cap_says_how_many_it_skipped(ns, env, monkeypatch):
+    """(#7228, D2-S2) The fan-out stops at the cap and says so: ``versions_more`` and the model's sentence."""
+    tool_id = credential(env).tool_id
+    link(ns, env, tool_id, 71)
+    link(ns, env, tool_id, 72)
+    monkeypatch.setattr(ns.governance_requests, "MAX_TOOLKIT_VERSIONS", 2)
+    result = ns.governance_requests.file_for_run(module(ns), {"uid": MEMBER, "run": "run-84"}, "PATCH", TOOL_PATCH, 1,
+                                                 {"ok": True}, {"project_id": "1", "tool_id": str(tool_id)})
+    assert [version["entity_id"] for version in result["versions"]] == [70, 71]
+    assert result["versions_more"] == 1
+    assert result["next"].endswith("1 more agents use this toolkit: open them to request what they need.")
+
+
+def test_a_linked_version_whose_readiness_cannot_be_read_is_refused_alone(ns, env):
+    tool_id = credential(env).tool_id
+    link(ns, env, tool_id, 74)
+    env.digests.pop(74)   # its definition cannot be read
+    result = ns.governance_requests.file_for_run(module(ns), {"uid": MEMBER, "run": "run-85"}, "PATCH", TOOL_PATCH, 1,
+                                                 {"ok": True}, {"project_id": "1", "tool_id": str(tool_id)})
+    by_id = {version["entity_id"]: version for version in result["versions"]}
+    assert by_id[74]["refused"] == "DEPENDENCY_UNAVAILABLE" and "refused" not in by_id[70]
+    assert [item["kind"] for item in by_id[70]["filed"]] == ["binding", "reference", "grant"]
+
+
+def test_the_fan_out_reads_agent_versions_only(ns, env):
+    """(#7228, D2-N1) as the definition digest does: another entity type's id is never taken for an agent version."""
+    tool_id = credential(env).tool_id
+    link(ns, env, tool_id, 73, entity_type="pipeline_node")
+    assert ns.governance_requests._toolkit_versions(1, tool_id) == ([70], 0)
+
+
+def test_a_new_version_a_run_creates_is_requested_like_an_agent(ns, env):
+    credential(env)
+    claims = {"uid": MEMBER, "run": "run-82"}
+    result = ns.governance_requests.file_for_run(
+        module(ns), claims, "POST", "/api/v2/elitea_core/versions/{mode}/{project_id}/{application_id}", 1,
+        {"id": 70, "application_id": 7, "name": "v2"}, {"project_id": "1", "application_id": "7"})
+    assert (result["entity_kind"], result["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in result["filed"]] == ["binding", "reference", "grant"]
+
+
+def test_every_build_write_on_a_toolkit_or_a_version_is_covered(ns):
+    """The ``build`` writes of the operation map that create or change a toolkit or a version all file requests."""
+    build = {key for key, operation in ns.internal_obo.ENDPOINT_OPERATIONS.items() if operation == "build"
+             and any(part in key[1] for part in ("elitea_core/tool", "elitea_core/version", "application",
+                                                 "elitea_core/applications"))}
+    covered = set(ns.governance_requests.CREATIONS) | set(ns.governance_requests.UPDATES)
+    assert build - covered == set()

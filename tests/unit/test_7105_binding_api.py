@@ -231,7 +231,17 @@ def create(ns, **over):
                                                     "identity_mode": "elitea_native", **over}, **{})
 
 
+def stored_digest(ns, binding_id, project_id=1):
+    """The digest the row holds now, as the approve dialog shows it (``definition_digest_full``, #7228)."""
+    with ns.sa_orm.Session(ns.env.engine(project_id)) as session:
+        row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(str(binding_id)))
+        return None if row is None else row.definition_digest
+
+
 def act(ns, binding_id, action, expected_state, actor="admin", **more):
+    if action == "activate" and "definition_digest" not in more:   # (#7228) the digest the approver reviewed
+        more["definition_digest"] = stored_digest(ns, binding_id) or "adv1:" + "0" * 64
+    more = {key: value for key, value in more.items() if value is not None}
     return hit(ns, "agent_identity_action", "post", actor=actor, binding_id=uuid.UUID(str(binding_id)),
                body={"action": action, "expected_state": expected_state, **more})
 
@@ -320,6 +330,50 @@ def test_create_twice_is_a_conflict(ns, env):
     assert (status, payload["code"]) == (409, "BINDING_EXISTS") and len(rows(env, ns)) == 1
 
 
+@pytest.mark.parametrize("action, state, digest", [
+    ("activate", "pending_approval", None),          # an approval names what it approves
+    ("submit", "draft", "adv1:" + "1" * 64),         # and only an approval does
+    ("retire", "active", "adv1:" + "1" * 64),
+])
+def test_only_an_activation_carries_the_reviewed_digest_and_it_must(ns, env, action, state, digest):
+    """(#7228, C9-SEC-98)"""
+    binding_id = reach(ns, env, state)
+    more = {"approval_ref": "a", "policy_revision": "r"} if action == "activate" else {}
+    payload, status = hit(ns, "agent_identity_action", "post", actor="admin2", binding_id=uuid.UUID(binding_id),
+                          body={"action": action, "expected_state": state, "definition_digest": digest, **more}
+                          if digest else {"action": action, "expected_state": state, **more})
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST") and binding(env, ns).state == state
+
+
+def test_an_approval_of_a_digest_the_row_no_longer_holds_is_a_conflict_and_changes_nothing(ns, env):
+    binding_id = str(env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64))
+    [row] = hit(ns, "agent_identities", "get")[0]["rows"]
+    shown = row["definition_digest_full"]
+    assert act(ns, binding_id, "rebind", "pending_approval")[1] == 200   # brought up to date meanwhile
+    events = len(env.recorded)
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin2", approval_ref="a",
+                          policy_revision="r", definition_digest=shown)
+    assert (status, payload["code"]) == (409, "BINDING_DIGEST_MISMATCH")
+    assert (binding(env, ns).state, len(env.recorded)) == ("pending_approval", events)
+    assert shown not in json.dumps(payload)
+
+
+def test_a_create_after_retirement_requests_the_same_row_again(ns, env):
+    """(#7228) one row per version and mode: a retired binding is requested again as a draft (same id, audited)."""
+    binding_id = reach(ns, env, "retired")
+    payload, status = create(ns)
+    assert status == 200 and len(rows(env, ns)) == 1
+    assert (str(binding(env, ns).id), binding(env, ns).state) == (binding_id, "draft")
+    assert env.recorded[-1][1]["reason_code"] == "BINDING_REVIVED"
+
+
+def test_a_waiting_binding_for_an_older_definition_is_brought_up_to_date_by_a_rebind(ns, env):
+    binding_id = str(env.add_binding(1, 7, 70, state="pending_approval", digest="adv1:" + "9" * 64))
+    payload, status = act(ns, binding_id, "rebind", "pending_approval")
+    assert (status, payload["state"]) == (200, "pending_approval")
+    assert (binding(env, ns).definition_digest, binding(env, ns).revocation_epoch) == (DIGEST, 0)
+
+
 def test_create_for_a_version_that_is_not_in_the_application_or_project_is_not_found(ns, env):
     seed_agent(env, 2, 8, "Other", 80)
     for body in ({"application_id": 8, "version_id": 70}, {"application_id": 7, "version_id": 80},
@@ -347,7 +401,7 @@ ACTION_RESULT = {   # action -> {state it applies to: state it ends in}
     "resume": {"suspended": "active"},
     "retire": {"draft": "retired", "provisioning": "retired", "pending_approval": "retired", "active": "retired",
                "suspended": "retired", "retiring": "retired"},
-    "rebind": {"active": "pending_approval", "suspended": "pending_approval"},
+    "rebind": {"active": "pending_approval", "suspended": "pending_approval", "pending_approval": "pending_approval"},
 }
 
 
@@ -450,17 +504,40 @@ def test_an_audit_trail_that_is_down_is_a_503_and_nothing_changes(ns, env):
 
 # --- self-approval ----------------------------------------------------------------------------------
 
-def test_the_creator_cannot_approve_and_another_admin_can(ns, env):
+def test_the_requester_cannot_approve_and_another_admin_can(ns, env):
     binding_id = create(ns)[0]["id"]
-    act(ns, binding_id, "submit", "draft", actor="admin2")
+    act(ns, binding_id, "submit", "draft", actor="admin")   # the creator makes the request
     before = len(env.recorded)
-    for actor in ("admin", "admin2"):   # the creator, and whoever submitted it
-        payload, status = act(ns, binding_id, "activate", "pending_approval", actor=actor,
-                              approval_ref="CHG-12", policy_revision="rev-1")
-        assert (status, payload["code"]) == (403, "SELF_APPROVAL"), actor
-        assert payload["error"] == "another operator must approve this binding"
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin",
+                          approval_ref="CHG-12", policy_revision="rev-1")
+    assert (status, payload["code"]) == (403, "SELF_APPROVAL")
+    assert payload["error"] == "another operator must approve this binding"
     assert (binding(env, ns).state, len(env.recorded)) == ("pending_approval", before)
     payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin3",
+                          approval_ref="CHG-12", policy_revision="rev-1")
+    assert (status, payload["state"]) == (200, "active")
+
+
+def test_a_move_by_someone_who_may_not_approve_keeps_the_creator_as_the_requests_actor(ns, env):
+    """(#7228, C9-SEC-100) a manage-only caller submits: they do not become the request's actor (the creator stays
+    excluded); the event says the mover was not an approver."""
+    binding_id = create(ns)[0]["id"]
+    assert act(ns, binding_id, "submit", "draft", actor="token_manage")[1] == 200
+    assert binding(env, ns).state_changed_by is None
+    assert env.recorded[-1][1]["reason_code"] == "BINDING_PENDING_APPROVAL_BY_NON_APPROVER"
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin",
+                          approval_ref="CHG-12", policy_revision="rev-1")
+    assert (status, payload["code"]) == (403, "SELF_APPROVAL")
+
+
+def test_a_creator_who_did_not_make_the_current_request_may_approve_it_over_rest(ns, env):
+    """(#7228) created by one admin, the request made by the other: the creator approves (no two-admin dead end)."""
+    binding_id = create(ns)[0]["id"]
+    act(ns, binding_id, "submit", "draft", actor="admin2")
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin2",
+                          approval_ref="CHG-12", policy_revision="rev-1")
+    assert (status, payload["code"]) == (403, "SELF_APPROVAL")
+    payload, status = act(ns, binding_id, "activate", "pending_approval", actor="admin",
                           approval_ref="CHG-12", policy_revision="rev-1")
     assert (status, payload["state"]) == (200, "active")
 
@@ -782,6 +859,8 @@ def test_a_row_has_the_designed_fields_and_no_secret(ns, env):
         "policy_revision": None, "approval_ref": None, "revocation_epoch": 0,
         "created_by": {"id": 11, "email": "admin1@example.com"}, "state_changed_by": None,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "platform_operations": None,   # (#7228) what the agent may do on the platform: none proposed = read only
+        "definition_digest_full": row["definition_digest_full"],   # (#7228) what an approval of this row approves
     }
     assert "external_agent_identity_ref" not in row and "owner_user_ref" not in row
 

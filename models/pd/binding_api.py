@@ -30,3 +30,9 @@ class BindingActionRequest(BaseModel):
     # printable reference text, as long as the column
     approval_ref: Optional[StrictStr] = Field(default=None, pattern=REFERENCE_PATTERN)
     policy_revision: Optional[StrictStr] = Field(default=None, pattern=REFERENCE_PATTERN)
+    # (#7228) activate only: the operations the approver keeps of the proposal (a subset; the same parser as create)
+    platform_operations: Optional[list[Literal["read", "build", "credentials", "run"]]] = Field(
+        default=None, max_length=4)
+    # (#7228, C9-SEC-98) activate only, and required for it: the definition digest the approver reviewed (as the row
+    # showed it); an approval of a binding that was brought up to date since is refused (BINDING_DIGEST_MISMATCH)
+    definition_digest: Optional[StrictStr] = Field(default=None, pattern=r"^adv1:[0-9a-f]{64}$")
