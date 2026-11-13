@@ -160,6 +160,7 @@ def _install_package(rpc_state):
 
     skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
     skill_utils.get_max_instructions_length = lambda: SKILL_INSTRUCTIONS_MAX_LENGTH
+    skill_utils.get_max_skills_per_agent = lambda: 50
 
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
     service_prompt_utils.get_service_prompt = lambda key: SERVICE_PROMPTS.get(key, DEFAULT_PROMPT)
@@ -169,6 +170,9 @@ def _install_package(rpc_state):
     generate_application_utils.build_system_prompt = lambda template, *a, **k: template
     generate_application_utils.fetch_application_for_edit = lambda *a, **k: None
     generate_application_utils.build_edit_system_prompt = lambda template, *a, **k: template
+    generate_application_utils.offer_attached_resources = (
+        lambda current_config, agents, pipelines, skills, max_skills: (agents, pipelines, skills)
+    )
 
     flask = types.ModuleType('flask')
     flask.request = _Request

@@ -492,7 +492,7 @@ def apply_offered_origins(
         return item.get("project_id") or current_project_id
 
     def _filter(key, offered_items, id_key):
-        offered = {(_origin(item), item.get(id_key)) for item in offered_items}
+        offered = {(_origin(item), item.get(id_key)): item for item in offered_items}
         projects_by_id: dict = {}
         for project, item_id in offered:
             projects_by_id.setdefault(item_id, set()).add(project)
@@ -510,6 +510,7 @@ def apply_offered_origins(
             if project is None:
                 continue
             item["project_id"] = None if project == current_project_id else project
+            item["description"] = offered[(project, item_id)].get("description")
             kept.append(item)
         parsed[key] = kept
 

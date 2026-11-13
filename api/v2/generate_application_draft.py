@@ -49,8 +49,10 @@ from ...utils.generate_application_utils import (
     build_system_prompt,
     fetch_application_for_edit,
     build_edit_system_prompt,
+    offer_attached_resources,
 )
 from ...utils.service_prompt_utils import get_service_prompt
+from ...utils.skill_utils import get_max_skills_per_agent
 from ...utils.utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY_CREATE = "generate_application_draft"
@@ -103,6 +105,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return exc.body, exc.status
 
         max_starters = get_max_conversation_starters()
+        max_skills = get_max_skills_per_agent()
         if req.is_edit_mode:
             # Edit mode: fetch existing application config, provide ALL available resources
             current_config = fetch_application_for_edit(
@@ -114,14 +117,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
             max_starters = max(
                 max_starters, count_conversation_starters(current_config.get('conversation_starters')),
             )
+            max_skills = max(max_skills, len(current_config.get('attached_skills') or []))
 
             log.debug("generate_application_draft: edit mode, current_config attached_toolkits=%s", current_config.get("attached_toolkits"))
 
             try:
-                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(project_id, req.user_description)
+                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(
+                    project_id, req.user_description, max_skills,
+                )
             except Exception:
                 log.warning("generate_application_draft: failed to fetch project resources")
                 toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
+            agents, pipelines, skills = offer_attached_resources(
+                current_config, agents, pipelines, skills, max_skills,
+            )
 
             # LLM gets ALL available resources to decide what to keep/add/remove
             template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
@@ -129,13 +138,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": "Service prompt 'edit_application_draft' is not configured"}, 500
             system_prompt = build_edit_system_prompt(
                 template, project_id, current_config, toolkits, mcp, agents, pipelines, skills,
-                max_conversation_starters=max_starters,
+                max_conversation_starters=max_starters, max_skills_per_agent=max_skills,
             )
             log.debug("generate_application_draft: edit system_prompt length=%d", len(system_prompt))
         else:
             # Create mode: existing behavior
             try:
-                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(project_id, req.user_description)
+                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(
+                    project_id, req.user_description, max_skills,
+                )
             except Exception:
                 log.warning("generate_application_draft: failed to fetch project resources")
                 toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
@@ -145,7 +156,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
             system_prompt = build_system_prompt(
                 template, project_id, toolkits, mcp, agents, pipelines, skills,
-                max_conversation_starters=max_starters,
+                max_conversation_starters=max_starters, max_skills_per_agent=max_skills,
             )
 
         try:
@@ -206,7 +217,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         try:
             draft = GenerateApplicationDraftResponse.model_validate(
-                parsed, context={'max_conversation_starters': max_starters},
+                parsed, context={'max_conversation_starters': max_starters, 'max_skills_per_agent': max_skills},
             )
         except ValidationError as e:
             log.warning("generate_application_draft: validation failed: %s", e.errors())

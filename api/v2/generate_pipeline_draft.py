@@ -48,6 +48,7 @@ from ...utils.exceptions import PoolSaturationError
 from ...utils.generate_application_utils import (
     fetch_project_resources,
     fetch_application_for_edit,
+    offer_attached_resources,
 )
 from ...utils.pipeline_prompt_utils import (
     build_pipeline_system_prompt,
@@ -55,6 +56,7 @@ from ...utils.pipeline_prompt_utils import (
 )
 from ...utils.pipeline_validator import fix_deprecated_end_node, fix_missing_node_bindings, validate_pipeline_yaml
 from ...utils.service_prompt_utils import get_service_prompt
+from ...utils.skill_utils import get_max_skills_per_agent
 from ...utils.utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY_CREATE = "generate_pipeline_draft"
@@ -125,13 +127,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except DraftSettingsError as exc:
             return exc.body, exc.status
 
+        max_skills = get_max_skills_per_agent()
+        if current_config:
+            max_skills = max(max_skills, len(current_config.get("attached_skills") or []))
         try:
             toolkits, mcp, agents, pipelines, skills = fetch_project_resources(
-                project_id, req.user_description
+                project_id, req.user_description, max_skills
             )
         except Exception:
             log.warning("generate_pipeline_draft: failed to fetch project resources")
             toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
+        if current_config:
+            agents, pipelines, skills = offer_attached_resources(
+                current_config, agents, pipelines, skills, max_skills
+            )
 
         reference = get_service_prompt(_SERVICE_PROMPT_KEY_REFERENCE)
         if not reference:

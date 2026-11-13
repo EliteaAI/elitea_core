@@ -265,15 +265,27 @@ class TestValidatePipelines:
 # ---------------------------------------------------------------------------
 
 class TestLimitSuggestedSkills:
-    def test_keeps_up_to_max(self, pd_module):
-        skills = [{"id": i, "name": f"skill-{i}"} for i in range(5)]
+    def test_keeps_more_than_five_without_context(self, pd_module):
+        skills = [{"id": i, "name": f"skill-{i}"} for i in range(7)]
         r = _make_response(pd_module, {"suggested_skills": skills})
-        assert len(r.suggested_skills) == 5
+        assert [s.id for s in r.suggested_skills] == list(range(7))
 
-    def test_truncates_over_max(self, pd_module):
-        skills = [{"id": i, "name": f"skill-{i}"} for i in range(10)]
+    def test_truncates_to_default_limit_without_context(self, pd_module):
+        skills = [{"id": i, "name": f"skill-{i}"} for i in range(60)]
         r = _make_response(pd_module, {"suggested_skills": skills})
-        assert len(r.suggested_skills) == pd_module.MAX_SUGGESTED_SKILLS
+        assert len(r.suggested_skills) == pd_module.DEFAULT_MAX_SKILLS_PER_AGENT
+
+    def test_local_default_matches_the_skill_utils_module(self, pd_module):
+        source = (PLUGIN_ROOT / "utils/skill_utils.py").read_text()
+        assert f"DEFAULT_MAX_SKILLS_PER_AGENT = {pd_module.DEFAULT_MAX_SKILLS_PER_AGENT}\n" in source
+
+    def test_truncates_to_configured_limit(self, pd_module):
+        skills = [{"id": i, "name": f"skill-{i}"} for i in range(10)]
+        r = pd_module.GenerateApplicationDraftResponse.model_validate(
+            {**_valid_base(pd_module), "suggested_skills": skills},
+            context={"max_skills_per_agent": 6},
+        )
+        assert [s.id for s in r.suggested_skills] == list(range(6))
 
     def test_none_becomes_empty(self, pd_module):
         r = _make_response(pd_module, {"suggested_skills": None})
