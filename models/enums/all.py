@@ -23,6 +23,12 @@ class AgentTypes(StrEnum):
 
 
 # Merged from promptlib_shared.models.enums.all
+class ImportParticipantStatus(StrEnum):
+    same = 'same'
+    name_only = 'name_only'
+    not_found = 'not_found'
+
+
 class PublishStatus(StrEnum):
     draft = 'draft'
     on_moderation = 'on_moderation'
