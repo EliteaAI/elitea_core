@@ -81,18 +81,21 @@ def _project_identity(project, owner_map):
     }
 
 
-def _past_month_rows(rpc, projects, owner_map, period):
+def _past_month_rows(rpc, projects, owner_map, period, spend_scope=None):
     """Rows of a finished month: spend only.
 
     Limits are not stored per month, and applying today's limit to old spend would be wrong,
     so a past row carries no limit, used or source. Spend that could not be read is None, not
     0.0, so a failed read never looks like a month in which nothing was spent.
+
+    spend_scope narrows the spend to one counter, as for a Tool Spend feature (#7547); without
+    it the rows carry the project's total spend.
     """
     project_ids = [project["id"] for project in projects]
     #
     try:
         answer = rpc.timeout(30).usage_get_projects_period_spend(
-            project_ids=project_ids, period=period,
+            project_ids=project_ids, period=period, **(spend_scope or {}),
         ) or {}
     except Exception:  # pylint: disable=W0703
         answer = {}
@@ -244,8 +247,6 @@ class AdminAPI(api_tools.APIModeHandler):
                 validate_feature_period(feature, "month")
             except ValueError as error:
                 return {"error": str(error)}, 400
-            if not is_current:
-                return {"error": "Tool Spend limits can only be listed for the current month"}, 400
         spend_scope = {"model_name": feature} if feature else {}
         #
         # Owner ids are OR'd into the project search, so resolve them only for personal
@@ -283,7 +284,7 @@ class AdminAPI(api_tools.APIModeHandler):
         #
         if not is_current:
             return {
-                "rows": _past_month_rows(rpc, projects, owner_map, period),
+                "rows": _past_month_rows(rpc, projects, owner_map, period, spend_scope),
                 "total": listing.get("total", len(projects)),
                 "counts": listing.get("counts") or {},
                 "period": period,
