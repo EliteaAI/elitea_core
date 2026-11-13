@@ -1,0 +1,198 @@
+# Pipeline node registry: the one place that says which node types exist, their lifecycle
+# status, and the fields the runtime reads (elitea_sdk/runtime/langchain/langraph_agent.py,
+# create_graph). The validator, the Builder reference and the UI palette all read this file;
+# a test fails when the runtime dispatches a type that is not listed here.
+#
+# status:
+#   current     offered in the UI and to the Builder
+#   deprecated  still runs existing pipelines; not offered for new ones (validator warns)
+#   removed     do not author; the validator rejects it
+#   ui_only     an editor marker the runtime refuses to build
+#
+# routing:
+#   transition  the node is followed by `transition: <id>` (or END)
+#   own         the node installs its own edges (routes / nodes) and ignores `transition`
+#
+# required lists the dotted paths a node needs to do anything useful; `a|b` means at least one
+# of them must be present and non-empty. The runtime enforces only some of them and fills
+# defaults for others (an llm node with no mapping silently sends just the history), which is
+# why authoring checks them here.
+
+schema_version: 1
+
+nodes:
+  llm:
+    status: current
+    category: interaction
+    summary: Call a language model, with or without tools; free-form or structured output.
+    routing: transition
+    required: [input_mapping.system|input_mapping.task]
+    optional: [input, output, structured_output, tool_names, tool_execution_timeout, input_mapping.chat_history]
+    defaults:
+      input: [messages]
+      structured_output: false
+
+  agent:
+    status: current
+    category: interaction
+    summary: Delegate a task to an agent or pipeline attached to this pipeline.
+    routing: transition
+    required: [tool, input_mapping.task]
+    optional: [toolkit_name, input, output, input_mapping.chat_history]
+    defaults:
+      input: [messages]
+
+  toolkit:
+    status: current
+    category: execution
+    summary: Call one tool of an attached toolkit directly, without an LLM.
+    routing: transition
+    required: [tool]
+    optional: [toolkit_name, input, output, input_mapping, structured_output]
+    defaults:
+      input: [messages]
+
+  mcp:
+    status: current
+    category: execution
+    summary: Call one tool of an attached MCP server directly, without an LLM.
+    routing: transition
+    required: [tool]
+    optional: [toolkit_name, input, output, input_mapping, structured_output]
+    defaults:
+      input: [messages]
+
+  code:
+    status: current
+    category: execution
+    summary: Run Python in the sandbox; read state with elitea_state, return a dict.
+    routing: transition
+    required: [code.value]
+    optional: [input, output, structured_output, debug]
+    defaults:
+      input: [messages]
+      structured_output: false
+
+  router:
+    status: current
+    category: control_flow
+    summary: Branch on a Jinja2 template over state, without an LLM.
+    routing: own
+    required: [condition, routes]
+    optional: [default_output, input]
+    defaults:
+      default_output: END
+      input: [messages]
+
+  decision:
+    status: current
+    category: control_flow
+    summary: Let an LLM choose the next node from a list, guided by a description.
+    routing: own
+    required: [nodes, description]
+    optional: [default_output, input, decisional_inputs]
+    defaults:
+      default_output: END
+      input: [messages]
+
+  hitl:
+    status: current
+    category: control_flow
+    summary: Pause for a person to approve, reject or edit, then route on the choice.
+    routing: own
+    blocks_unattended: true
+    required: [user_message, routes]
+    optional: [input, edit_state_key]
+    defaults:
+      input: [messages]
+
+  state_modifier:
+    status: current
+    category: utility
+    summary: Render a Jinja2 template from state into one state variable.
+    routing: transition
+    required: [template, output]
+    optional: [input, variables_to_clean]
+    defaults:
+      input: [messages]
+
+  printer:
+    status: deprecated
+    category: utility
+    summary: Show a message and pause until the user continues.
+    routing: transition
+    blocks_unattended: true
+    required: [input_mapping.printer, transition]
+    optional: [final_message]
+    replacement: >-
+      end the path on an llm or code node that writes the answer to messages;
+      use hitl when a person must approve before the pipeline continues
+
+  custom:
+    status: ui_only
+    category: utility
+    summary: Editor marker for editing a node as raw JSON; not executable.
+    routing: transition
+    replacement: set type to the real node type (llm, code, toolkit, mcp, agent, router, ...)
+
+  indexer:
+    status: deprecated
+    category: execution
+    summary: Index content with a toolkit indexer tool (legacy; not offered in the editor).
+    routing: transition
+    required: [tool, indexer_tool]
+    optional: [input_mapping, chunking_tool, chunking_config, input, output, structured_output]
+    replacement: call the toolkit's index tool from a toolkit node
+
+  function:
+    status: removed
+    category: execution
+    summary: Legacy direct tool call.
+    routing: transition
+    replacement: toolkit or mcp node (change only the type)
+
+  tool:
+    status: removed
+    category: execution
+    summary: Legacy LLM-driven tool call.
+    routing: transition
+    replacement: toolkit node with an explicit input_mapping
+
+  loop:
+    status: removed
+    category: iteration
+    summary: Legacy loop over a tool.
+    routing: transition
+    replacement: code node that keeps an index or pops from a list, plus a router back to it
+
+  loop_from_tool:
+    status: removed
+    category: iteration
+    summary: Legacy loop over a tool's output list.
+    routing: transition
+    replacement: code node that keeps an index or pops from a list, plus a router back to it
+
+  pipeline:
+    status: removed
+    category: execution
+    summary: Nested pipeline (subgraph).
+    routing: transition
+    replacement: agent node that calls the pipeline as an attached application
+
+  subgraph:
+    status: removed
+    category: execution
+    summary: Nested pipeline (subgraph).
+    routing: transition
+    replacement: agent node that calls the pipeline as an attached application
+
+# Routing written on the node itself rather than as a separate node.
+inline_constructs:
+  condition:
+    status: removed
+    summary: Inline `condition:` block on a non-router node.
+    replacement: a separate router node
+  decision:
+    status: deprecated
+    summary: Inline `decision:` block on a node (still routes).
+    replacement: a separate decision node

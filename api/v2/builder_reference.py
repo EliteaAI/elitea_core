@@ -15,47 +15,39 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Serve the pipeline authoring reference document.
+"""Serve the pipeline authoring reference, one topic at a time.
 
-GET /elitea_core/builder_reference/prompt_lib/<project_id>
+GET /elitea_core/builder_reference/prompt_lib/<project_id>?topics=overview,node:llm
 
-Returns the pipeline authoring reference (node types, required fields,
-transition syntax, wiring patterns). Used by the Builder and by AI
-prompts that need the full schema context on demand.
+Returns the requested pages of the pipeline authoring reference (#6388): an overview of the
+pipeline YAML, one page per node type with its required fields from the node registry,
+patterns, design notes, runtime limits and troubleshooting. The content is the SDK's, kept in
+``utils/pipeline_authoring``. With no ``topics`` the overview is returned.
 """
 
-from pylon.core.tools import log
+from flask import request
+
 from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.pipeline_validator import KNOWN_NODE_TYPES
-from ...utils.service_prompt_utils import get_service_prompt
-
-_SERVICE_PROMPT_KEY_REFERENCE = "pipeline_authoring_reference"
+from ...utils.pipeline_authoring import builder_reference, node_types, reference_tool_description
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Pipeline Builder Reference",
         description=(
-            "Return the pipeline authoring reference document: node types, "
-            "required fields, transition syntax, and wiring patterns. "
-            "Use this when authoring or debugging pipeline YAML."
+            "Return pages of the pipeline authoring reference: the YAML shape, each node "
+            "type's fields and behaviour, patterns, runtime limits and troubleshooting."
         ),
         tags=["elitea_core/applications"],
         mcp_tool=True,
         available_to_users=True,
-        mcp_description="""
-        Return the complete pipeline authoring reference.
-
-        Call this tool at the start of a pipeline authoring session, or whenever
-        you need to look up a node type's required fields, transition syntax, or
-        a wiring pattern.
-
-        Returns: { "reference": "<full reference text>",
-                   "node_types": ["llm", "code", ...],
-                   "version": "1.0" }
-        """,
+        mcp_description=reference_tool_description(),
+        parameters=[
+            {"name": "topics", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Comma-separated topics, e.g. overview,node:llm,node:router. Default: overview."},
+        ],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.applications.details"],
@@ -66,23 +58,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     })
     @api_tools.endpoint_metrics
     def get(self, project_id: int):
-        reference = get_service_prompt(_SERVICE_PROMPT_KEY_REFERENCE)
-        if not reference:
-            log.warning(
-                "builder_reference: service prompt '%s' not configured",
-                _SERVICE_PROMPT_KEY_REFERENCE,
-            )
-            return {
-                "error": (
-                    f"Service prompt '{_SERVICE_PROMPT_KEY_REFERENCE}' is not configured. "
-                    f"Seed it via Settings → Service Prompts."
-                )
-            }, 500
-
         return {
-            "reference": reference,
-            "node_types": sorted(KNOWN_NODE_TYPES),
-            "version": "1.0",
+            "reference": builder_reference(request.args.get("topics") or None),
+            "node_types": node_types("current"),
+            "version": "2.0",
         }, 200
 
 

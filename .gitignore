@@ -1,5 +1,7 @@
 venv/
 *.pyc
 *.md
+# Pipeline authoring pages served to the Builder (#6388); copied from elitea-sdk
+!utils/pipeline_authoring/knowledge/**/*.md
 MIGRATION*
 /static/ui

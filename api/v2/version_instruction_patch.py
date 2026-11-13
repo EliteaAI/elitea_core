@@ -19,7 +19,20 @@ from ...utils.mcp_versioning import (
     build_mcp_backup_version_name,
     instructions_sha256,
 )
-from ...utils.pipeline_validator import validate_pipeline_yaml
+from ...utils.pipeline_authoring import validate_pipeline
+
+
+def errors_the_patch_introduced(before: str, after: str) -> list:
+    """Errors in the patched YAML that the original did not have.
+
+    An edit is refused only for what it breaks: a pipeline saved before the validator knew a
+    rule can still be edited, and each refusal names what this edit got wrong.
+    """
+    def key(finding):
+        return finding["rule"], finding["node_id"], finding["field"]
+
+    existing = {key(f) for f in validate_pipeline(before)["errors"]}
+    return [f for f in validate_pipeline(after)["errors"] if key(f) not in existing]
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -107,17 +120,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     replace_all=patch_data.replace_all,
                 )
 
-                # For pipeline versions, validate the patched YAML structurally
-                # before committing so the Builder cannot save invalid pipelines.
+                # For pipeline versions, validate the patched YAML before committing so
+                # the Builder cannot save an edit that breaks the pipeline.
                 from ...models.enums.all import AgentTypes
                 if source_version.agent_type == AgentTypes.pipeline.value:
-                    validation_result = validate_pipeline_yaml(
-                        updated_instructions, project_id=project_id
+                    new_errors = errors_the_patch_introduced(
+                        source_version.instructions or "", updated_instructions
                     )
-                    if not validation_result.valid:
+                    if new_errors:
                         return {
                             "error": "Pipeline YAML is invalid",
-                            "validation_errors": [e.model_dump() for e in validation_result.errors],
+                            "validation_errors": new_errors,
                         }, 422
 
                 update_data = ApplicationVersionUpdateModel.model_validate({

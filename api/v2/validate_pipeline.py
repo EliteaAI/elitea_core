@@ -15,64 +15,53 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Validate a pipeline YAML string against the structural rules.
+"""Validate a pipeline YAML string before it is saved.
 
 POST /elitea_core/validate_pipeline/prompt_lib/<project_id>
 
-This endpoint is exposed as an internal MCP tool so that the Agent &
-Pipeline Builder can validate before saving, enabling a self-correction
-loop: generate → validate → errors? → fix → validate → save.
+Exposed as an internal MCP tool so the Agent & Pipeline Builder can check a draft before
+saving it: generate -> validate -> fix -> validate -> save. The rules are the SDK's
+(``utils/pipeline_authoring``): node types and required fields come from the node
+registry, and each finding names the node, the field and a fix.
 """
+
+from typing import Optional
 
 from flask import request
 from pydantic import BaseModel, ValidationError
 
-from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.pipeline_validator import validate_pipeline_yaml
+from ...utils.pipeline_authoring import VALIDATE_TOOL_DESCRIPTION, validate_for_builder
 
 
 class ValidatePipelineRequest(BaseModel):
     pipeline_yaml: str
+    trigger: Optional[str] = None
+
+
+def with_legacy_keys(result: dict) -> dict:
+    """Findings also carry the former ``code`` and ``severity`` keys for existing readers."""
+    for severity, key in (("error", "errors"), ("warning", "warnings")):
+        for finding in result[key]:
+            finding.setdefault("code", finding["rule"])
+            finding.setdefault("severity", severity)
+    return result
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Validate Pipeline YAML",
         description=(
-            "Validate a pipeline YAML string against the structural rules. "
-            "Returns errors and warnings without saving anything. "
-            "Call this before create_version or update_version to confirm the YAML is valid."
+            "Validate a pipeline YAML string against the pipeline rules. Returns errors and "
+            "warnings without saving anything."
         ),
         request_body=ValidatePipelineRequest,
         tags=["elitea_core/applications"],
         mcp_tool=True,
         available_to_users=True,
-        mcp_description="""
-        Validate a pipeline YAML string before saving it.
-
-        Call this tool BEFORE create_version or update_version for any pipeline you generated or
-        edited. If the result has errors, fix them and validate again before saving.
-
-        Input: { "pipeline_yaml": "<yaml string>" }
-
-        Output: { "valid": true/false, "errors": [...], "warnings": [...] }
-        Each error/warning has: code, node_id, field, message, severity.
-
-        Common fixes:
-        - missing_nodes: add a top-level 'nodes' list with at least one node
-        - missing_node_id: add unique 'id' to each node
-        - unknown_node_type: set 'type' to one of: llm, code, agent, toolkit, mcp,
-          router, decision, state_modifier, printer, hitl, custom
-        - no_end_node: set `transition: END` on the last node of each execution path
-          (do NOT add a separate node with type: end — that is deprecated)
-        - end_node_unreachable: wire the graph so all paths reach a node with `transition: END`
-        - unknown_transition_target: fix the target node id spelling
-        - missing_tool_name: add 'name' to agent/toolkit/mcp nodes
-        - missing_code_field: add a 'code' field to code nodes
-        """,
+        mcp_description=VALIDATE_TOOL_DESCRIPTION,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.applications.details"],
@@ -90,8 +79,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as exc:
             return exc.errors(include_url=False), 400
 
-        result = validate_pipeline_yaml(req.pipeline_yaml, project_id=project_id)
-        return result.model_dump(), 200
+        return with_legacy_keys(validate_for_builder(req.pipeline_yaml, trigger=req.trigger)), 200
 
 
 class API(api_tools.APIBase):
