@@ -65,7 +65,13 @@ def _load_module(request):
     #
     # Only the period validation of a feature name is needed from it, and that has its own tests
     features = types.ModuleType(f"{PKG}.utils.tool_spend_features")
-    features.validate_feature_period = lambda feature, period_kind: None
+
+    def validate_feature_period(feature, period_kind):
+        # Same rule as the real one: "llm" is the budgets listing itself, not a Tool Spend feature
+        if not feature or feature == "llm":
+            raise ValueError(f"Invalid tool spend feature: {feature!r}")
+
+    features.validate_feature_period = validate_feature_period
     sys.modules[features.__name__] = features
     #
     try:
@@ -104,6 +110,7 @@ class FakeRpc:
         self.current_spend = current_spend or {}
         self.current_limits = current_limits or {}
         self.called = []
+        self.spend_kwargs = []
 
     def timeout(self, _seconds):
         return self
@@ -129,7 +136,12 @@ class FakeRpc:
 
     def usage_get_projects_period_spend(self, **kwargs):
         self.called.append("usage_get_projects_period_spend")
+        self.spend_kwargs.append(kwargs)
         return self.period_spend
+
+    def elitea_core_list_project_feature_budgets(self, **kwargs):
+        self.called.append("elitea_core_list_project_feature_budgets")
+        return {1: {"limit": 20.0, "enabled": True, "feature_enabled": True}}
 
     def elitea_core_get_effective_project_limits(self, **kwargs):
         self.called.append("elitea_core_get_effective_project_limits")
@@ -307,10 +319,63 @@ class TestPeriodValidation(unittest.TestCase):
         self.assertEqual(payload["period_start"], f"{year:04d}-{month:02d}-01")
         self.assertTrue(payload["period_end"].startswith(f"{year:04d}-{month:02d}-"))
 
-    def test_tool_spend_has_no_monthly_history(self):
-        payload, status = _call({"period": LAST, "feature": "web_search"}, FakeRpc())
+
+class TestToolSpendPastMonth(unittest.TestCase):
+    """The Web Search page (#7547) lists a past month the same way: spend only, for that feature."""
+
+    SPEND = {"available": True, "spend": {1: 3.0, 2: 0.0}, "earliest_period": "202601"}
+
+    def test_the_spend_is_scoped_to_the_feature_not_the_project_total(self):
+        rpc = FakeRpc(period_spend=self.SPEND)
+        #
+        _call({"period": LAST, "feature": "web_search"}, rpc)
+        #
+        self.assertEqual(rpc.spend_kwargs[0]["model_name"], "web_search")
+        self.assertEqual(rpc.spend_kwargs[0]["period"], LAST)
+
+    def test_the_llm_listing_still_reads_the_project_total(self):
+        rpc = FakeRpc(period_spend=self.SPEND)
+        #
+        _call({"period": LAST}, rpc)
+        #
+        self.assertNotIn("model_name", rpc.spend_kwargs[0])
+
+    def test_a_past_row_is_spend_only_with_no_configuration(self):
+        rpc = FakeRpc(period_spend=self.SPEND)
+        payload, status = _call({"period": LAST, "feature": "web_search"}, rpc)
+        row = _rows(payload)[1]
+        #
+        self.assertEqual(status, 200)
+        self.assertEqual(row["spend"], 3.0)
+        self.assertTrue(row["spend_available"])
+        for field in ("effective_limit", "limit_source", "percent_used", "remaining", "monthly_limit",
+                      "member_default_limit", "enabled", "feature_enabled", "feature"):
+            self.assertNotIn(field, row, field)
+
+    def test_neither_the_feature_budgets_nor_the_limits_are_read(self):
+        rpc = FakeRpc(period_spend=self.SPEND)
+        #
+        _call({"period": LAST, "feature": "web_search"}, rpc)
+        #
+        self.assertNotIn("elitea_core_list_project_feature_budgets", rpc.called)
+        self.assertNotIn("elitea_core_get_effective_feature_project_limits", rpc.called)
+        self.assertNotIn("usage_get_projects_spend", rpc.called)
+
+    def test_unreadable_feature_spend_is_null_not_zero(self):
+        rpc = FakeRpc(period_spend={"available": False, "spend": {}})
+        row = _rows(_call({"period": LAST, "feature": "web_search"}, rpc)[0])[1]
+        #
+        self.assertFalse(row["spend_available"])
+        self.assertIsNone(row["spend"])
+
+    def test_a_reserved_feature_name_is_still_refused_for_a_past_month(self):
+        rpc = FakeRpc(period_spend=self.SPEND)
+        #
+        payload, status = _call({"period": LAST, "feature": "llm"}, rpc)
+        #
         self.assertEqual(status, 400)
-        self.assertIn("error", payload)
+        self.assertIn("Invalid tool spend feature", payload["error"])
+        self.assertEqual(rpc.called, [])
 
 
 if __name__ == "__main__":
