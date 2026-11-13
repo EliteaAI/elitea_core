@@ -13,6 +13,11 @@
 #   transition  the node is followed by `transition: <id>` (or END)
 #   own         the node installs its own edges (routes / nodes) and ignores `transition`
 #
+# The UI node picker keeps its own list: EliteaUI
+# src/[fsd]/features/pipelines/flow-editor/lib/constants/deprecated.constants.js (DeprecatedNodes).
+# Change a node's status in both places, then copy this file to elitea_core
+# utils/pipeline_authoring/node_registry.yaml (a test there fails when the copies differ).
+#
 # required lists the dotted paths a node needs to do anything useful; `a|b` means at least one
 # of them must be present and non-empty. The runtime enforces only some of them and fills
 # defaults for others (an llm node with no mapping silently sends just the history), which is
