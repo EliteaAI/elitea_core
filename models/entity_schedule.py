@@ -146,7 +146,7 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     legacy_application_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # configuration_uuids the version uses, written by the Connections check (#7401)
     credential_refs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    # The legacy version trigger a migrated row replaced, read back by restore_version_trigger; NULL on rows moved before the column existed
+    # The legacy version trigger a migrated row replaced, NULL on rows moved before the column existed
     original_trigger: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Governance refusals in a row since the last admitted governed start or resume (#7254); NULL counts as 0. A table
     # column only, not mapped (`exclude_properties`): no ORM INSERT or SELECT names it, so a schema that predates it

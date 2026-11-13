@@ -203,12 +203,6 @@ def test_the_project_cap_holds_enabled_rows_only_with_enforce_limits(migration, 
     assert (free["migrated_enabled"], free["held"], free["above_project_cap"]) == (2, [], True)
 
 
-def test_a_restore_is_refused_while_the_legacy_index_step_is_on(migration):
-    assert migration.index_restore_refusal({"legacy_index_step_enabled": True})
-    assert migration.index_restore_refusal({}) is None
-    assert migration.index_restore_refusal(None) is None
-
-
 def test_the_legacy_toolkit_query_loads_full_rows_only_for_toolkits_with_a_schedule(migration, monkeypatch):
     import sqlalchemy as sa
     from sqlalchemy import orm

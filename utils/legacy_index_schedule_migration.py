@@ -8,7 +8,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..models.pd.index import ToolkitIndexingSchedule
-from .constants import LEGACY_INDEX_STEP_DEFAULT
 from .legacy_schedule_migration import (
     DISABLED_INVALID_CRON,
     NAME_LIMIT,
@@ -32,15 +31,7 @@ INDEX_LOOKUP_FAILED = 'index_lookup_failed'
 INDEX_ALREADY_SCHEDULED = 'index_already_scheduled'
 CREDENTIAL_REVIEW = 'credential_review'
 EXPIRED = 'expired'
-RESTORE_HISTORY_WARNING = 'a restored schedule is deleted with its run history'
-RESTORE_FAILED = 'the schedule could not be restored; see the log'
-RESTORE_REFUSED = 'the legacy index step is on: switch legacy_index_step_enabled off before a restore'
 FIRST_RUN_DELAY = timedelta(seconds=60)
-
-
-def index_restore_refusal(settings: dict | None) -> str | None:
-    """The refusal text of a restore while the legacy index step is on (it would move the schedules again)."""
-    return RESTORE_REFUSED if (settings or {}).get('legacy_index_step_enabled', LEGACY_INDEX_STEP_DEFAULT) else None
 
 
 def _rank_key(item: tuple) -> tuple:
@@ -269,58 +260,3 @@ def _migrate_indexes(session, project_id: int, dry_run: bool, enforce_limits: bo
 def migrate_index_project(project_id: int, dry_run: bool, enforce_limits: bool = False) -> dict:
     """Move the legacy index schedules of one project under its advisory lock; the project report."""
     return migrate_project(project_id, dry_run, enforce_limits, body=_migrate_indexes)
-
-
-def restore_index_schedules(project_id: int, dry_run: bool = False) -> dict:
-    """Undo the migration of one project: write `original_trigger` back under its keys and delete the row.
-
-    A key the toolkit JSON already holds is never overwritten. A row without `original_trigger` (made in the
-    UI) stays and is counted. A failed row goes under `errors` and the next one runs. The restore removes the
-    row with its run history; switch the legacy index step off first, or the next tick moves the keys again.
-    A dry run lists the ids a live run restores under `restored` and writes nothing.
-    """
-    from tools import db
-
-    from ..models.all import EliteATool
-    from ..models.entity_schedule import EntitySchedule
-
-    report = {'project_id': project_id, 'restored': [], 'errors': [], 'without_original_trigger': 0,
-              'warning': RESTORE_HISTORY_WARNING}
-    with db.get_session(project_id) as session:
-        rows = session.execute(
-            select(EntitySchedule.id, EntitySchedule.toolkit_id, EntitySchedule.index_name)
-            .where(EntitySchedule.entity_type == TOOLKIT_INDEX, EntitySchedule.original_trigger.is_not(None))
-            .order_by(EntitySchedule.id)
-        ).all()
-        report['without_original_trigger'] = session.scalar(
-            select(func.count()).select_from(EntitySchedule)
-            .where(EntitySchedule.entity_type == TOOLKIT_INDEX, EntitySchedule.original_trigger.is_(None)))
-        if dry_run:
-            report['restored'] = [schedule_id for schedule_id, _, _ in rows]
-            return report
-        for schedule_id, toolkit_id, index_name in rows:
-            try:
-                toolkit = session.execute(
-                    select(EliteATool).where(EliteATool.id == toolkit_id).with_for_update()).scalar_one()
-                schedule = session.get(EntitySchedule, schedule_id)
-                meta = dict(toolkit.meta or {})
-                indexes_meta = {name: dict(entry) if isinstance(entry, dict) else entry
-                                for name, entry in (meta.get('indexes_meta') or {}).items()}
-                entry = indexes_meta.setdefault(index_name, {})
-                schedules = dict(entry.get('schedules') or {})
-                for key, body in (schedule.original_trigger.get('schedules') or {}).items():
-                    schedules.setdefault(key, body)
-                entry['schedules'] = schedules
-                toolkit.meta = {**meta, 'indexes_meta': indexes_meta}
-                flag_modified(toolkit, 'meta')
-                session.delete(schedule)
-                session.commit()
-                report['restored'].append(schedule_id)
-            except Exception as error:  # noqa: BLE001 -- one bad row must not stop the project
-                session.rollback()
-                log.warning('Project %s: cannot restore index schedule %s: %s', project_id, schedule_id, error)
-                report['errors'].append({'schedule_id': schedule_id, 'error': RESTORE_FAILED})
-    if report['without_original_trigger']:
-        log.warning('Project %s: %s index schedules have no original trigger and stay schedules',
-                    project_id, report['without_original_trigger'])
-    return report

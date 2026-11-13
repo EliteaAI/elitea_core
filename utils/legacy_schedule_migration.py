@@ -136,66 +136,6 @@ def _legacy_versions(session) -> list:
     ).all()
 
 
-RESTORE_FAILED = 'the trigger could not be restored; see the log'
-
-
-def restore_version_trigger(session, schedule_id: int) -> None:
-    """Undo one migration: write `original_trigger` back to the version and delete the schedule row.
-
-    Rows migrated before the column existed hold NULL and cannot be restored, and neither can a row whose
-    version is gone: ValueError, nothing deleted. Switch the legacy step off (`legacy_step_enabled`) first,
-    or the next tick moves the trigger again. The restore removes the schedule row and its run history.
-    """
-    from ..models.all import ApplicationVersion
-    from ..models.entity_schedule import EntitySchedule
-
-    schedule = session.get(EntitySchedule, schedule_id)
-    if schedule is None or schedule.original_trigger is None:
-        raise ValueError('the schedule has no original trigger to restore')
-    version = session.get(ApplicationVersion, schedule.version_id)
-    if version is None:
-        raise ValueError('the version of the schedule is gone, so its trigger has nowhere to go')
-    try:
-        version.pipeline_settings = {**(version.pipeline_settings or {}), 'trigger': schedule.original_trigger}
-        session.delete(schedule)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-
-
-def restore_project_triggers(project_id: int) -> dict:
-    """Undo every migration of one project; the report lists restored ids, failures and the rows left as they are.
-
-    `without_original_trigger` counts the pipeline rows with NULL: migrated before the column existed, or made
-    in the UI. Both stay as schedules. A failed row goes under `errors` and the next one runs.
-    """
-    from tools import db
-
-    from ..models.entity_schedule import EntitySchedule
-
-    report = {'project_id': project_id, 'restored': [], 'errors': [], 'without_original_trigger': 0}
-    with db.get_session(project_id) as session:
-        ids = session.scalars(
-            select(EntitySchedule.id)
-            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_not(None))
-            .order_by(EntitySchedule.id)
-        ).all()
-        report['without_original_trigger'] = session.scalar(
-            select(func.count()).select_from(EntitySchedule)
-            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_(None))
-        )
-        for schedule_id in ids:
-            try:
-                restore_version_trigger(session, schedule_id)
-                report['restored'].append(schedule_id)
-            except Exception as error:  # noqa: BLE001 -- one bad row must not stop the project
-                log.warning('Project %s: cannot restore schedule %s: %s', project_id, schedule_id, error)
-                report['errors'].append({'schedule_id': schedule_id, 'error': RESTORE_FAILED})
-    if report['without_original_trigger']:
-        log.warning('Project %s: %s pipeline schedules have no original trigger and stay schedules',
-                    project_id, report['without_original_trigger'])
-    return report
 
 
 def _migrate_versions(session, project_id: int, dry_run: bool, enforce_limits: bool = False) -> dict:

@@ -385,40 +385,6 @@ class RPC:
         """
         _guarded_tick(self)
 
-    @web.rpc("schedules_restore_legacy_triggers")
-    def schedules_restore_legacy_triggers(self, project_id: int, **kwargs):  # pylint: disable=W0613
-        """Operator revert of the legacy migration: put each migrated trigger back on its version.
-
-        Refused while `legacy_step_enabled` is on, because the next tick would migrate the trigger again.
-        Returns the project report of `restore_project_triggers`, or an error text.
-        """
-        settings = this.module.descriptor.config.get("scheduler", {}).get("schedules", {})
-        if settings.get("legacy_step_enabled", True):
-            return {"error": "set scheduler.schedules.legacy_step_enabled to false before a restore"}
-        from ..utils.legacy_schedule_migration import restore_project_triggers
-        report = restore_project_triggers(int(project_id))
-        log.info("schedules_restore_legacy_triggers: project_id=%s restored=%s errors=%s without_original_trigger=%s",
-                 project_id, len(report["restored"]), len(report["errors"]), report["without_original_trigger"])
-        return report
-
-    @web.rpc("schedules_restore_legacy_index_schedules")
-    def schedules_restore_legacy_index_schedules(self, project_id: int, **kwargs):  # pylint: disable=W0613
-        """Operator revert of the index migration: put each migrated schedule back under its toolkit key.
-
-        Refused while `legacy_index_step_enabled` is on, because the next tick would migrate it again.
-        Returns the project report of `restore_index_schedules`, or an error text.
-        """
-        from ..utils.legacy_index_schedule_migration import index_restore_refusal, restore_index_schedules
-        settings = this.module.descriptor.config.get("scheduler", {}).get("schedules", {})
-        refusal = index_restore_refusal(settings)
-        if refusal:
-            return {"error": refusal}
-        report = restore_index_schedules(int(project_id))
-        log.info("schedules_restore_legacy_index_schedules: project_id=%s restored=%s errors=%s "
-                 "without_original_trigger=%s", project_id, len(report["restored"]), len(report["errors"]),
-                 report["without_original_trigger"])
-        return report
-
     # The old name stays: scheduler rows stored before the generic tick still call it. A second method,
     # so each name has its own registration whatever web.rpc stores on a function. Pylon binds `self` to the
     # plugin Module, not to this class, so the method calls the module function and never a sibling method

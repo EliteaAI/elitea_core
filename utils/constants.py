@@ -5,8 +5,7 @@ PROMPT_LIB_MODE = 'prompt_lib'
 # The old index schedule routes answer with it for one more release; they write the Schedules rows or the old settings key
 DEPRECATION_HEADERS = {'Deprecation': 'true'}
 
-# A missing `legacy_index_step_enabled` reads as off in the tick, the restore RPC and the restore task: an operator
-# moves the legacy index schedules on purpose, after a dry run
+# A missing `legacy_index_step_enabled` reads as off: an operator moves the legacy index schedules on purpose
 LEGACY_INDEX_STEP_DEFAULT = False
 
 # The Swagger tag and the pinned path of the Schedules routes (EL-7011 US-55); register_api_class
