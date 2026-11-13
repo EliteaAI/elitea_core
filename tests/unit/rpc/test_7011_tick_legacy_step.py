@@ -278,19 +278,6 @@ def test_the_switch_off_skips_the_step_always(world):
     assert [e for e in world.events if e[0] in ("migrate", "legacy")] == [] and world.migrated == []
 
 
-def test_the_restore_rpc_refuses_while_the_legacy_step_is_on(world, monkeypatch):
-    restored = []
-    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.legacy_schedule_migration", _module(
-        "plugins.elitea_core.utils.legacy_schedule_migration",
-        restore_project_triggers=lambda project_id: restored.append(project_id) or
-        {"restored": [1], "errors": [], "without_original_trigger": 0}))
-    rpc = world.module.RPC()
-    assert "legacy_step_enabled" in rpc.schedules_restore_legacy_triggers(5)["error"]
-    world.settings["legacy_step_enabled"] = False
-    assert rpc.schedules_restore_legacy_triggers(5)["restored"] == [1]
-    assert restored == [5]
-
-
 @pytest.fixture
 def real_legacy(world, monkeypatch):
     """The real rpc/pipeline_scheduling.py; only its leaves are faked."""

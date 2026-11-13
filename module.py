@@ -587,10 +587,6 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
-                "restore_legacy_index_schedules", self.restore_legacy_index_schedules,
-                group="R-2.0.9",
-            )
-            this.for_module("admin").module.register_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding,
                 group="R-2.0.8",
             )
@@ -1539,9 +1535,6 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_legacy_index_schedules", self.migrate_legacy_index_schedules
-            )
-            this.for_module("admin").module.unregister_admin_task(
-                "restore_legacy_index_schedules", self.restore_legacy_index_schedules
             )
             this.for_module("admin").module.unregister_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding

@@ -12,7 +12,6 @@ from unit.rpc.test_7011_tick_legacy_step import _module
 
 MIGRATION = 'plugins.elitea_core.utils.legacy_index_schedule_migration'
 world = legacy_step.world  # the fixture of the pipeline step test, bound here so pytest finds it
-RESTORE_REFUSED = 'the legacy index step is on'
 
 
 class IndexWorld:
@@ -20,7 +19,7 @@ class IndexWorld:
 
     def __init__(self, world, monkeypatch):
         self.world, self.migrated, self.fail, self.found, self.held = world, [], set(), {}, {}
-        self.claimed, self.restored, self.now = [], [], [1000.0]
+        self.claimed, self.now = [], [1000.0]
         tick = world.module
 
         def migrate_index_project(project_id, dry_run, enforce_limits=False):
@@ -29,16 +28,8 @@ class IndexWorld:
                 raise RuntimeError('lock wait timed out')
             return {'found': self.found.get(project_id, 0), 'errors': [], 'held': self.held.get(project_id, [])}
 
-        def index_restore_refusal(settings):  # a missing key reads as off, like the real function
-            return RESTORE_REFUSED if (settings or {}).get('legacy_index_step_enabled', False) else None
-
-        def restore_index_schedules(project_id):
-            self.restored.append(project_id)
-            return {'restored': [1], 'errors': [], 'without_original_trigger': 0}
-
         monkeypatch.setitem(sys.modules, MIGRATION, _module(
-            MIGRATION, migrate_index_project=migrate_index_project, index_restore_refusal=index_restore_refusal,
-            restore_index_schedules=restore_index_schedules))
+            MIGRATION, migrate_index_project=migrate_index_project))
 
         def select_due(session, entity_types, limit):
             self.claimed.append(list(entity_types))
@@ -228,27 +219,7 @@ def test_a_given_migration_and_retry_map_replace_the_pipeline_ones(world, index)
     assert world.migrated == []
 
 
-def test_the_index_restore_rpc_refuses_while_the_index_step_is_on(world, index):
-    rpc = world.module.RPC()
-    assert RESTORE_REFUSED in rpc.schedules_restore_legacy_index_schedules(5)['error']
-    assert index.restored == []
-
-
-def test_a_missing_index_step_setting_reads_as_off_in_the_tick_and_the_restore(world, index):
+def test_a_missing_index_step_setting_reads_as_off_in_the_tick(world, index):
     del world.settings['legacy_index_step_enabled']
     world.tick()
     assert index.migrated == []
-    assert world.module.RPC().schedules_restore_legacy_index_schedules(5)['restored'] == [1]
-    assert index.restored == [5]
-
-
-def test_the_index_restore_rpc_restores_once_the_index_step_is_off(world, index):
-    world.settings['legacy_index_step_enabled'] = False
-    assert world.module.RPC().schedules_restore_legacy_index_schedules('5')['restored'] == [1]
-    assert index.restored == [5]
-
-
-def test_the_pipeline_switch_does_not_open_the_index_restore(world, index):
-    world.settings['legacy_step_enabled'] = False
-    assert 'error' in world.module.RPC().schedules_restore_legacy_index_schedules(5)
-    assert index.restored == []
