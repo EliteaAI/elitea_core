@@ -31,10 +31,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return result, 400
         except ValidationError as e:
             for err in e.errors(include_url=False, include_context=False, include_input=False):
-                if err.get('type') == 'connection_error':
-                    result['connection_errors'].append(err)
-                else:
-                    result['toolkit_errors'].append(err)
+                result['toolkit_errors'].append(err)
             return result, 400
         except Exception as e:
             result['error'] = str(e)

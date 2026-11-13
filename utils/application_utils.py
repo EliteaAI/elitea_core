@@ -1080,8 +1080,9 @@ def _toolkit_connection_entry(tool_id, err_input, connection_errors) -> dict | N
     if refusal is not None:
         return {'type': 'value_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
                 'ctx': {'error': refusal}}
-    return {'type': 'connection_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
-            'ctx': connection_errors}
+    # 'connection_error' is not a valid pydantic type and ctx must be a dict
+    return {'type': 'value_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
+            'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})}}
 
 
 def _governed_connection_error(config: dict, project_id, user_id) -> dict | None:
@@ -1397,11 +1398,12 @@ def _validate_version_toolkits(session, version_toolkits, project_id, user_id, _
                             'ctx': {'error': refusal},
                         })
                     elif connection_errors is not None:
+                        # 'connection_error' is not a valid pydantic type and ctx must be a dict
                         application_toolkit_errors.append({
-                            'type': 'connection_error',
+                            'type': 'value_error',
                             'loc': ('tools', tool['id'], '__root__'),
                             'input': err.get('input'),
-                            'ctx': connection_errors,
+                            'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})},
                         })
                     else:
                         application_toolkit_errors.append({
