@@ -11,7 +11,8 @@ from tools import db, auth, serialize, this, VaultClient, rpc_tools, config as c
 import redis
 from pydantic import ValidationError
 from pydantic.utils import deep_update
-from sqlalchemy import asc, desc, String, func
+from sqlalchemy import asc, desc, Integer, String, func
+from sqlalchemy.exc import IntegrityError
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
@@ -39,7 +40,7 @@ from ..utils.run_status import RunStatus, build_notice, send_notice
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError, emit_refusal
-from ..utils.conversation_access import check_post_access
+from ..utils.conversation_access import check_mentions, check_post_access
 from ..utils.application_utils import build_skill_mappings_list
 from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
 from ..utils.project_skills import UnknownSkillMentionError
@@ -1377,11 +1378,27 @@ class RPC:
                     )
                 return {"error": denied_error}
 
+            mentioned_user_ids, mention_refusal = check_mentions(
+                parsed.project_id, conversation, current_user['id'], parsed.mentioned_user_ids,
+            )
+            if mention_refusal:
+                if sid:
+                    raise SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error=mention_refusal['error'],
+                        stream_id=parsed.conversation_uuid,
+                        message_id=parsed.question_id,
+                        details={'rejected_user_ids': mention_refusal['rejected_user_ids']},
+                    )
+                return mention_refusal
+
             context_management_enabled = get_context_manager_feature_flag(
                 parsed.project_id,
             )
 
-            if parsed.participant_id is None and not parsed.user_ids:
+            if parsed.participant_id is None and not parsed.user_ids and not mentioned_user_ids:
                 dummy_participant, _ = get_or_create_one(
                     session=session,
                     entity_name=ParticipantTypes.dummy,
@@ -1708,6 +1725,7 @@ class RPC:
                     to=sid,
                 )
 
+            notified_user_ids = set()
             if parsed.user_ids:
                 mentioned_participants = session.query(Participant).filter(
                     Participant.id.in_(parsed.user_ids),
@@ -1717,6 +1735,7 @@ class RPC:
                     auth_user_id = participant.entity_meta.get('id')
                     if not auth_user_id:
                         continue
+                    notified_user_ids.add(str(auth_user_id))
                     try:
                         notify_user_mentioned_in_conversation(
                             project_id=parsed.project_id,
@@ -1727,6 +1746,24 @@ class RPC:
                         )
                     except Exception as e:
                         log.warning(f'Failed to notify mentioned user (participant {participant.id}): {e}')
+
+            if mentioned_user_ids:
+                # Another message may add one of these people first; the retry skips them, a second miss only delays their participant entry
+                if not self.add_mentioned_users_as_participants(session, conversation, mentioned_user_ids, room):
+                    self.add_mentioned_users_as_participants(session, conversation, mentioned_user_ids, room)
+                for user_id in mentioned_user_ids:
+                    if str(user_id) in notified_user_ids:
+                        continue
+                    try:
+                        notify_user_mentioned_in_conversation(
+                            project_id=parsed.project_id,
+                            user_id=user_id,
+                            conversation=conversation,
+                            initiator_id=current_user['id'],
+                            message_id=parsed.question_id
+                        )
+                    except Exception as e:
+                        log.warning(f'Failed to notify mentioned user {user_id}: {e}')
 
             if msg_group.sent_to_id:
                 # here we need to generate payload
@@ -1837,6 +1874,55 @@ class RPC:
                             "response_message_group_id": response_msg.id,
                         }
                     return result
+
+    @web.method()
+    def add_mentioned_users_as_participants(self, session, conversation, user_ids, room) -> bool:
+        """Add the mentioned people missing from the chat in one commit; False when a duplicate participant mapping rolled it back."""
+        present_user_ids = {
+            str((p.entity_meta or {}).get('id'))
+            for p in conversation.participants
+            if p.entity_name == ParticipantTypes.user.value
+        }
+        missing_user_ids = [uid for uid in user_ids if str(uid) not in present_user_ids]
+        if not missing_user_ids:
+            return True
+        known_participants = {
+            str(participant.entity_meta.get('id')): participant
+            for participant in session.query(Participant).filter(
+                Participant.entity_name == ParticipantTypes.user.value,
+                Participant.entity_meta['id'].astext.cast(Integer).in_(missing_user_ids),
+            ).all()
+        }
+        authors = {author['id']: author for author in get_authors_data(missing_user_ids)}
+        new_participants = []
+        for user_id in missing_user_ids:
+            author = authors.get(user_id) or {}
+            user_meta = {'user_name': author.get('name'), 'user_avatar': author.get('avatar')}
+            participant = known_participants.get(str(user_id))
+            if participant is None:
+                participant = Participant(
+                    entity_name=ParticipantTypes.user.value,
+                    entity_meta=ParticipantEntityUser(id=user_id).dict(),
+                    meta=user_meta,
+                )
+                session.add(participant)
+            elif not participant.meta:
+                participant.meta = user_meta
+            new_participants.append(participant)
+        conversation.participants.extend(new_participants)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            log.warning("Mentioned users %s were added to conversation %s concurrently", missing_user_ids, conversation.id)
+            return False
+        for participant in new_participants:
+            self.context.sio.emit(
+                event=SioEvents.chat_participant_update,
+                data=ParticipantBase.from_orm(participant).dict(),
+                room=room,
+            )
+        return True
 
     @web.method()
     def _store_blocked_turn(self, session, conversation, author_participant, parsed, blocked, room, sid):
