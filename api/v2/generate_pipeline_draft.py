@@ -180,7 +180,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             user_input = _repair_request(req.user_description, outcome.pipeline_yaml, outcome.findings)
 
         parsed = outcome.parsed
-        apply_offered_origins(parsed, project_id, agents, pipelines, skills)
+        apply_offered_origins(parsed, project_id, agents, pipelines, skills, current_config=current_config)
 
         try:
             draft = GeneratePipelineDraftResponse.model_validate(parsed)

@@ -248,10 +248,12 @@ class TestOfferAttached:
             CURRENT_CONFIG, [], [], [{'id': 41, 'name': 'pinned-b'}, {'id': 1, 'name': 's1'}], 50)
         assert [s['id'] for s in skills] == [40, 41, 1]
 
-    def test_catalog_item_sharing_an_attached_id_is_kept(self, utils):
+    def test_catalog_item_sharing_an_attached_id_is_still_offered(self, utils):
         catalog = {'id': 40, 'name': 'catalog', 'project_id': PUBLIC_PROJECT}
-        _, _, skills = utils.offer_attached_resources(CURRENT_CONFIG, [], [], [catalog], 50)
+        catalog_agent = {'application_id': 9, 'name': 'catalog', 'type': 'agent', 'project_id': PUBLIC_PROJECT}
+        agents, _, skills = utils.offer_attached_resources(CURRENT_CONFIG, [catalog_agent], [], [catalog], 50)
         assert skills == ATTACHED_SKILLS + [catalog]
+        assert agents == [ATTACHED_AGENT, catalog_agent]
 
     def test_skills_are_capped_at_the_limit(self, utils):
         ranked = [{'id': i, 'name': f's{i}'} for i in range(1, 10)]
@@ -301,6 +303,39 @@ class TestEditDraftKeepsAttached:
                                        {'id': 2, 'project_id': PUBLIC_PROJECT, 'description': 'invented'}]}
         draft_utils.apply_offered_origins(parsed, PROJECT, [], [], offered)
         assert [s['description'] for s in parsed['suggested_skills']] == ['full text ' * 200, None]
+
+    def _offered_with_twins(self, utils):
+        catalog_skill = {'id': 40, 'name': 'catalog', 'project_id': PUBLIC_PROJECT}
+        catalog_agent = {'application_id': 9, 'name': 'catalog', 'type': 'agent', 'project_id': PUBLIC_PROJECT}
+        return utils.offer_attached_resources(CURRENT_CONFIG, [catalog_agent], [], [catalog_skill], 50)
+
+    def test_attached_items_echoed_without_project_resolve_to_the_local_item(self, utils, draft_utils):
+        agents, pipelines, skills = self._offered_with_twins(utils)
+        assert {s.get('project_id') for s in skills if s['id'] == 40} == {None, PUBLIC_PROJECT}
+        parsed = {'suggested_skills': [{'id': 40}, {'id': 41}],
+                  'suggested_agents': [{'application_id': 9, 'type': 'agent'}]}
+        draft_utils.apply_offered_origins(parsed, PROJECT, agents, pipelines, skills, current_config=CURRENT_CONFIG)
+        assert [(s['id'], s['project_id']) for s in parsed['suggested_skills']] == [(40, None), (41, None)]
+        assert [(a['application_id'], a['project_id']) for a in parsed['suggested_agents']] == [(9, None)]
+
+    def test_catalog_twin_echoed_with_its_project_is_kept_as_the_catalog_item(self, utils, draft_utils):
+        agents, pipelines, skills = self._offered_with_twins(utils)
+        parsed = {'suggested_skills': [{'id': 40, 'project_id': PROJECT}, {'id': 40, 'project_id': PUBLIC_PROJECT}]}
+        draft_utils.apply_offered_origins(parsed, PROJECT, agents, pipelines, skills, current_config=CURRENT_CONFIG)
+        assert [s['project_id'] for s in parsed['suggested_skills']] == [None, PUBLIC_PROJECT]
+        assert parsed['suggested_skills'][1]['description'] is None
+
+    def test_without_an_edit_config_an_ambiguous_echo_is_still_dropped(self, utils, draft_utils):
+        agents, pipelines, skills = self._offered_with_twins(utils)
+        parsed = {'suggested_skills': [{'id': 40}], 'suggested_agents': [{'application_id': 9, 'type': 'agent'}]}
+        draft_utils.apply_offered_origins(parsed, PROJECT, agents, pipelines, skills)
+        assert parsed['suggested_skills'] == [] and parsed['suggested_agents'] == []
+
+    def test_an_unattached_ambiguous_id_is_dropped_in_edit_mode_too(self, utils, draft_utils):
+        skills = [{'id': 77, 'name': 'own'}, {'id': 77, 'name': 'catalog', 'project_id': PUBLIC_PROJECT}]
+        parsed = {'suggested_skills': [{'id': 77}]}
+        draft_utils.apply_offered_origins(parsed, PROJECT, [], [], skills, current_config=CURRENT_CONFIG)
+        assert parsed['suggested_skills'] == []
 
     def test_an_id_never_offered_is_still_dropped(self, utils, draft_utils):
         agents, pipelines, skills = utils.offer_attached_resources(CURRENT_CONFIG, [], [], [], 50)

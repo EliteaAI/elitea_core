@@ -213,7 +213,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 422
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
-        apply_offered_origins(parsed, project_id, agents, pipelines, skills)
+        apply_offered_origins(
+            parsed, project_id, agents, pipelines, skills,
+            current_config=current_config if req.is_edit_mode else None,
+        )
 
         try:
             draft = GenerateApplicationDraftResponse.model_validate(
