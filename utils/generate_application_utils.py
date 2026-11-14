@@ -14,7 +14,6 @@ _MAX_TOOLKITS = 5
 _MAX_MCP = 5
 _MAX_AGENTS = 5
 _MAX_PIPELINES = 5
-_MAX_SKILLS = 5
 _MAX_EXISTING_DIMENSIONS = 50
 _MAX_AGENT_TOOLS = 100
 
@@ -66,10 +65,33 @@ def _ranked(query, query_tokens: set, *columns, limit: int = _CANDIDATE_POOL):
     return query.order_by(_relevance(query_tokens, *columns).desc()).limit(limit).all()
 
 
-def _by_score(query_tokens: set, items: list, *fields) -> list:
+def _ranked_named_first(query, user_description: str, query_tokens: set, name_column, *columns, limit: int):
+    """Rows whose full name appears in the user's text first, then the best token matches."""
+    from sqlalchemy import case, func, literal  # noqa: PLC0415
+
+    named = case((func.strpos(literal(user_description.lower()), func.lower(name_column)) > 0, 1), else_=0)
+    return query.order_by(named.desc(), _relevance(query_tokens, name_column, *columns).desc()).limit(limit).all()
+
+
+def _is_named_in(item: dict, text: str) -> bool:
+    name = (item.get("name") or "").lower()
+    return bool(name) and name in text.lower()
+
+
+def _named_first(items: list, text: str) -> list:
+    return sorted(items, key=lambda item: not _is_named_in(item, text))
+
+
+def _by_score(query_tokens: set, items: list, *fields, named_in: str = "") -> list:
     return [
         item for _, item in sorted(
-            ((_score_item(query_tokens, *(item.get(f) or "" for f in fields)), item) for item in items),
+            (
+                (
+                    (_is_named_in(item, named_in), _score_item(query_tokens, *(item.get(f) or "" for f in fields))),
+                    item,
+                )
+                for item in items
+            ),
             key=lambda x: x[0],
             reverse=True,
         )
@@ -187,22 +209,25 @@ def _fetch_catalog_agents(
 
 def _fetch_catalog_skills(
     public_project_id: int,
+    user_description: str,
     query_tokens: set,
     forked_skill_ids: set,
+    max_skills: int,
 ) -> List[dict]:
     """Published catalog skills, best matches first, excluding ones already forked here."""
     try:
         with db.with_project_schema_session(public_project_id) as session:
-            rows = _ranked(
+            rows = _ranked_named_first(
                 session.query(Skill.id, Skill.name, Skill.description)
                 .filter(Skill.versions.any(SkillVersion.status == PublishStatus.published)),
-                query_tokens, Skill.name, Skill.description,
+                user_description, query_tokens, Skill.name, Skill.description,
+                limit=max(_CANDIDATE_POOL, max_skills),
             )
             return _by_score(query_tokens, [
                 {"id": r.id, "name": r.name, "description": r.description, "project_id": public_project_id}
                 for r in rows
                 if (public_project_id, r.id) not in forked_skill_ids
-            ], "name", "description")[:_MAX_SKILLS]
+            ], "name", "description", named_in=user_description)[:max_skills]
     except Exception:  # pylint: disable=W0703
         log.warning("fetch_project_resources: failed to query catalog skills from project %d", public_project_id)
         return []
@@ -211,8 +236,9 @@ def _fetch_catalog_skills(
 def fetch_project_resources(
     project_id: int,
     user_description: str,
+    max_skills: int,
 ) -> Tuple[List[dict], List[dict], List[dict], List[dict], List[dict]]:
-    """Fetch project resources split by type.
+    """Fetch project resources split by type; skills fill up to ``max_skills``, the agent skill limit.
 
     Returns:
         Tuple of (toolkits, mcp, agents, pipelines, skills).
@@ -272,13 +298,14 @@ def fetch_project_resources(
         agents = _first_fitting(apps_by_type["agent"], fits, _MAX_AGENTS)
         pipelines = _first_fitting(apps_by_type["pipeline"], fits, _MAX_PIPELINES)
 
-        skill_rows = _ranked(
+        skill_rows = _ranked_named_first(
             session.query(Skill.id, Skill.name, Skill.description),
-            query_tokens, Skill.name, Skill.description,
+            user_description, query_tokens, Skill.name, Skill.description,
+            limit=max(_CANDIDATE_POOL, max_skills),
         )
         skills = _by_score(query_tokens, [
             {"id": r.id, "name": r.name, "description": r.description} for r in skill_rows
-        ], "name", "description")[:_MAX_SKILLS]
+        ], "name", "description", named_in=user_description)[:max_skills]
 
     # Fill remaining capacity with published catalog items; the project's own take priority
     try:
@@ -288,13 +315,34 @@ def fetch_project_resources(
             catalog_apps = _fetch_catalog_agents(public_project_id, query_tokens, forked_agent_ids)
             agents = (agents + [a for a in catalog_apps if a["type"] == "agent"])[:_MAX_AGENTS]
             pipelines = (pipelines + [a for a in catalog_apps if a["type"] == "pipeline"])[:_MAX_PIPELINES]
-            skills = (
-                skills + _fetch_catalog_skills(public_project_id, query_tokens, forked_skill_ids)
-            )[:_MAX_SKILLS]
+            skills = _named_first(
+                skills + _fetch_catalog_skills(
+                    public_project_id, user_description, query_tokens, forked_skill_ids, max_skills,
+                ),
+                user_description,
+            )[:max_skills]
     except Exception:  # pylint: disable=W0703
         log.warning("fetch_project_resources: failed to include catalog resources")
 
     return toolkits, mcp, agents, pipelines, skills
+
+
+def offer_attached_resources(
+    current_config: dict, agents: list, pipelines: list, skills: list, max_skills: int,
+) -> Tuple[List[dict], List[dict], List[dict]]:
+    """Offer the version's attached agents, pipelines and skills first, so an edit draft can keep them."""
+    def _front(attached, ranked, id_key):
+        attached_ids = {item[id_key] for item in attached}
+        return list(attached) + [
+            item for item in ranked if item.get("project_id") or item[id_key] not in attached_ids
+        ]
+
+    attached_skills = current_config.get("attached_skills") or []
+    return (
+        _front(current_config.get("attached_agents") or [], agents, "application_id"),
+        _front(current_config.get("attached_pipelines") or [], pipelines, "application_id"),
+        _front(attached_skills, skills, "id")[:max(max_skills, len(attached_skills))],
+    )
 
 
 def _format_toolkit_lines(toolkits: list) -> list:
@@ -358,10 +406,12 @@ def build_system_prompt(
     pipelines: list,
     skills: list,
     max_conversation_starters: int,
+    max_skills_per_agent: int,
 ) -> str:
     # str.format ignores unused kwargs, so prompts seeded before the placeholder still render
     return template.format(
         max_conversation_starters=max_conversation_starters,
+        max_skills_per_agent=max_skills_per_agent,
         **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills),
     )
 
@@ -421,7 +471,10 @@ def fetch_application_for_edit(
                 # Extract application_id from settings for subagents/pipelines
                 settings = t.get("settings", {})
                 app_id = settings.get("application_id")
-                app_type = settings.get("agent_type", "agent")
+                linked_version_id = settings.get("application_version_id")
+                linked_version = session.get(ApplicationVersion, linked_version_id) if linked_version_id else None
+                linked_agent_type = linked_version.agent_type if linked_version else settings.get("agent_type")
+                app_type = "pipeline" if linked_agent_type == "pipeline" else "agent"
                 linked_app = session.get(Application, app_id) if app_id else None
                 app_info = {
                     "application_id": app_id,
@@ -472,10 +525,12 @@ def build_edit_system_prompt(
     pipelines: list,
     skills: list,
     max_conversation_starters: int,
+    max_skills_per_agent: int,
 ) -> str:
     return template.format(
         current_config=json.dumps(current_config, indent=2),
         max_conversation_starters=max_conversation_starters,
+        max_skills_per_agent=max_skills_per_agent,
         **format_resource_sections(project_id, toolkits, mcp, agents, pipelines, skills),
     )
 
