@@ -45,6 +45,15 @@ class EvalDatasetAgentNotFoundError(EvalLibraryError):
         self.agent_id = agent_id
 
 
+class EvalDatasetNotSharedError(EvalLibraryError):
+    """The project default must be shared, or the agents it falls back to could not read it."""
+    http_status = 400
+
+    def __init__(self, dataset_id: int):
+        super().__init__(f'Eval dataset with id {dataset_id} must be shared to be the project default')
+        self.dataset_id = dataset_id
+
+
 class EvalDatasetCaseNotFoundError(EvalLibraryError):
     http_status = 404
 
@@ -182,7 +191,7 @@ def create_dataset(project_id: int, data: EvalDatasetCreateModel, owner_id: int,
             agent_id=data.agent_id,
             is_shared=data.is_shared,
             owner_id=owner_id,
-            meta=data.meta,
+            meta=_without_system_keys(data.meta),
         )
         s.add(dataset)
         s.flush()
@@ -198,8 +207,19 @@ def update_dataset(
         # require_owner=True: is_shared is an authoring decision the owner opts into, not
         # something another agent should be able to flip just because it was shared with them.
         dataset = _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True)
+        was_shared = dataset.is_shared
+        system_meta = _system_keys(dataset.meta)
         for key, value in data.model_dump(exclude_unset=True).items():
+            if key == 'meta':
+                # The system flags are set only by their owners (set_project_default_dataset, the
+                # scheduled evaluation's copies); an edit of the dataset neither sets nor drops them.
+                value = {**_without_system_keys(value), **system_meta}
             setattr(dataset, key, value)
+        if was_shared and not dataset.is_shared:
+            # Unsharing takes the dataset away from the agents that made it their default,
+            # and from the project, whose default must be readable by every agent.
+            _clear_default_dataset(s, dataset_id, keep_agent_id=dataset.agent_id)
+            _drop_project_default(dataset)
         s.flush()
         s.refresh(dataset)
         return dataset
@@ -210,7 +230,78 @@ def delete_dataset(
 ) -> None:
     with _session(session, project_id) as s:
         dataset = _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True)
+        # A shared dataset may be the default of other agents too; a dangling default would
+        # make the scheduled evaluation fail them instead of falling to the next tier.
+        _clear_default_dataset(s, dataset_id)
         s.delete(dataset)  # cases cascade (delete-orphan)
+
+
+PROJECT_DEFAULT_KEY = 'project_default'
+# Marks the scheduled evaluation's per-agent copy of the platform probes, which a resync rewrites.
+GENERATED_KEY = 'auto_eval_generated'
+SYSTEM_META_KEYS = (PROJECT_DEFAULT_KEY, GENERATED_KEY)
+
+
+def is_project_default(dataset: EvalDataset) -> bool:
+    return (dataset.meta or {}).get(PROJECT_DEFAULT_KEY) is True
+
+
+def _without_project_default(meta: Optional[dict]) -> dict:
+    return {key: value for key, value in (meta or {}).items() if key != PROJECT_DEFAULT_KEY}
+
+
+def _system_keys(meta: Optional[dict]) -> dict:
+    return {key: value for key, value in (meta or {}).items() if key in SYSTEM_META_KEYS}
+
+
+def _without_system_keys(meta: Optional[dict]) -> dict:
+    return {key: value for key, value in (meta or {}).items() if key not in SYSTEM_META_KEYS}
+
+
+def _drop_project_default(dataset: EvalDataset) -> None:
+    if is_project_default(dataset):
+        dataset.meta = _without_project_default(dataset.meta)
+
+
+def get_project_default_dataset(project_id: int, session=None) -> Optional[EvalDataset]:
+    """The dataset the scheduled evaluation falls back to for agents with none of their own."""
+    with _session(session, project_id) as s:
+        return s.query(EvalDataset).filter(
+            EvalDataset.meta[PROJECT_DEFAULT_KEY].astext == 'true'
+        ).order_by(EvalDataset.id.asc()).first()
+
+
+def set_project_default_dataset(project_id: int, dataset_id: Optional[int], session=None) -> Optional[EvalDataset]:
+    """Makes ``dataset_id`` the project's only default dataset, or clears it with ``None``.
+
+    The dataset must be shared: the project default runs on every agent without a dataset,
+    and an agent may only read its own datasets and shared ones.
+    """
+    with _session(session, project_id) as s:
+        target = None
+        if dataset_id is not None:
+            target = s.query(EvalDataset).filter(EvalDataset.id == dataset_id).first()
+            if target is None:
+                raise EvalDatasetNotFoundError(dataset_id)
+            if not target.is_shared:
+                raise EvalDatasetNotSharedError(dataset_id)
+        for current in s.query(EvalDataset).filter(EvalDataset.meta[PROJECT_DEFAULT_KEY].astext == 'true'):
+            if current is not target:
+                _drop_project_default(current)
+        if target is not None and not is_project_default(target):
+            target.meta = {**(target.meta or {}), PROJECT_DEFAULT_KEY: True}
+        s.flush()
+        return target
+
+
+def _clear_default_dataset(s, dataset_id: int, keep_agent_id: Optional[int] = None) -> None:
+    for application in s.query(Application).filter(
+            Application.meta['default_eval_dataset_id'].astext == str(dataset_id)):
+        if keep_agent_id is not None and application.id == keep_agent_id:
+            continue
+        meta = dict(application.meta or {})
+        meta.pop('default_eval_dataset_id', None)
+        application.meta = meta
 
 
 # ----------------------------------------------------------------------------

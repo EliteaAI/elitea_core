@@ -40,6 +40,10 @@ scheduler:
   index_scheduling:
     enabled: true
     cron: "* * * * *"
+  # The environment-wide scheduled evaluation; the job's scope and limits are set on its Admin page
+  eval_auto_run:
+    enabled: false
+    cron: "17 2 * * 0"
   schedules:
     min_interval_minutes: 5
     max_enabled_per_project: 50

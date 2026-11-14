@@ -66,10 +66,11 @@ def admin_schema():
     return json.loads((PLUGIN_ROOT / "admin_schema.json").read_text())["properties"]
 
 
-def test_both_scheduler_rows_are_declared(bindings):
+def test_every_scheduler_row_is_declared(bindings):
     assert set(bindings.SCHEDULER_CONFIG_BINDINGS) == {
         "index_scheduling",
         "pipeline_scheduling",
+        "eval_auto_run",
     }
 
 
@@ -88,7 +89,7 @@ def test_every_declared_field_exists_in_the_admin_schema(bindings, admin_schema)
 
 
 def test_cron_props_declare_the_cron_format(admin_schema):
-    for field in ("index_scheduling_cron", "pipeline_scheduling_cron"):
+    for field in ("index_scheduling_cron", "pipeline_scheduling_cron", "eval_auto_run_cron"):
         assert admin_schema[field].get("format") == "cron"
 
 
@@ -110,7 +111,7 @@ def test_malformed_scheduler_structures_do_not_raise(bindings):
                 {"index_scheduling": 5}):
         plan = bindings.build_scheduler_sync_plan(cfg)
         assert {e["name"] for e in plan} == set(bindings.SCHEDULER_CONFIG_BINDINGS), cfg
-        assert all(e["cron"] == "* * * * *" for e in plan), cfg
+        assert all(e["cron"] == bindings.SCHEDULER_CONFIG_DEFAULTS[e["name"]]["cron"] for e in plan), cfg
 
 
 def test_non_boolean_enabled_falls_back_instead_of_coercing(bindings):
@@ -155,6 +156,11 @@ def test_r4_4_el_7011_pipeline_row_is_bound_to_the_generic_tick(bindings):
     assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["pipeline_scheduling"] in _rpc_names(
         "entity_schedules_check.py"
     )
+
+
+def test_eval_auto_row_is_bound_to_its_tick_and_ships_disabled(bindings):
+    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["eval_auto_run"] in _rpc_names("eval_auto.py")
+    assert bindings.SCHEDULER_CONFIG_DEFAULTS["eval_auto_run"]["enabled"] is False
 
 
 def test_r3_4_el_7011_pipeline_scheduling_off_makes_the_tick_row_inactive(bindings):
@@ -552,7 +558,7 @@ def test_enabled_props_declare_strict_type(bindings, admin_schema):
         assert admin_schema[field].get("strict_type") is True, field
 
 
-def test_creation_declares_its_own_identity_rather_than_asking_the_registry():
+def test_creation_declares_its_own_identity_rather_than_asking_the_registry(bindings):
     bootstrap = _method("_bootstrap_platform_schedules")
     payloads = [
         node for node in ast.walk(bootstrap) if isinstance(node, ast.Dict)
@@ -567,7 +573,8 @@ def test_creation_declares_its_own_identity_rather_than_asking_the_registry():
             for k in d.keys
         )
     ]
-    assert len(owned) == 2, "the config-owned payloads do not declare their identity"
+    assert len(owned) == len(bindings.SCHEDULER_CONFIG_BINDINGS), \
+        "the config-owned payloads do not declare their identity"
 
 
 def _explode(_name):
@@ -717,7 +724,8 @@ def test_an_unreachable_plugin_stops_at_the_first_timeout(bindings):
 def test_it_still_reconciles_with_a_real_plan_after_a_timeout(bindings):
     _, reconciled = _drive_bootstrap(bindings, config=CONFIGURED)
     assert len(reconciled) == 1
-    assert _drive_apply(bindings, plan=reconciled[0]) == _expected_pushes(
+    pushed = _drive_apply(bindings, plan=reconciled[0])
+    assert sorted(pushed, key=lambda e: e["name"]) == _expected_pushes(
         bindings, CONFIGURED
     )
 
@@ -743,6 +751,8 @@ BOOTSTRAPPED_SCHEDULES = [
     "skill_scratch_sweep",
     "pat_expiration_check",
     "pipeline_scheduling",
+    "eval_auto_run",
+    "eval_auto_drain",
 ]
 
 
@@ -761,7 +771,8 @@ def test_a_row_that_no_longer_validates_does_not_stop_the_others(bindings):
 def test_a_failing_create_still_reaches_the_reconcile(bindings):
     _, reconciled = _drive_bootstrap(bindings, error=RuntimeError, config=CONFIGURED)
     assert len(reconciled) == 1
-    assert _drive_apply(bindings, plan=reconciled[0]) == _expected_pushes(
+    pushed = _drive_apply(bindings, plan=reconciled[0])
+    assert sorted(pushed, key=lambda e: e["name"]) == _expected_pushes(
         bindings, CONFIGURED
     )
 
@@ -815,6 +826,7 @@ CONFIGURED = {
     "scheduler": {
         "index_scheduling": {"cron": "*/15 * * * *", "enabled": True},
         "pipeline_scheduling": {"cron": "0 * * * *", "enabled": False},
+        "eval_auto_run": {"cron": "17 3 * * 1", "enabled": True},
     },
 }
 
@@ -860,7 +872,7 @@ def test_one_unhappy_row_does_not_cost_the_other_its_cadence(bindings):
     pushed = _drive_apply(
         bindings, config=CONFIGURED, raise_on="index_scheduling",
     )
-    assert [call["name"] for call in pushed] == ["pipeline_scheduling"]
+    assert {call["name"] for call in pushed} == set(bindings.SCHEDULER_CONFIG_BINDINGS) - {"index_scheduling"}
 
 
 def _drive_reconfig(bindings, apply_raises=False):
@@ -1027,34 +1039,34 @@ def test_a_registration_hands_over_the_bindings_and_logs_nothing(bindings):
 
 @pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling"])
 def test_an_unusable_cron_names_the_field_and_the_fallback(bindings, logged, name):
-    other, = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
+    others = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
     bindings.build_scheduler_sync_plan({name: {"cron": "9 *"}})
     line = _only(logged, "error")
     assert "unusable cron" in line.template
     assert "Features -> Schedules" in line.template
     assert line.args == (name, bindings.SCHEDULER_CONFIG_DEFAULTS[name]["cron"])
-    assert other not in line.rendered
+    assert not any(other in line.rendered for other in others)
 
 
 @pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling"])
 def test_a_non_boolean_flag_names_the_field_and_the_fallback(bindings, logged, name):
-    other, = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
+    others = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
     bindings.build_scheduler_sync_plan({name: {"enabled": "false"}})
     line = _only(logged, "error")
     assert "non-boolean enabled flag" in line.template
     assert "Features -> Schedules" in line.template
     assert line.args == (name, bindings.SCHEDULER_CONFIG_DEFAULTS[name]["enabled"])
-    assert other not in line.rendered
+    assert not any(other in line.rendered for other in others)
 
 
 @pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling"])
 def test_a_scalar_where_a_block_belongs_names_the_field(bindings, logged, name):
-    other, = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
+    others = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
     bindings.build_scheduler_sync_plan({name: "* * * * *"})
     line = _only(logged, "error")
     assert "not a mapping" in line.template
     assert line.args == (name,)
-    assert other not in line.rendered
+    assert not any(other in line.rendered for other in others)
 
 
 def test_a_healthy_config_logs_nothing(bindings, logged):

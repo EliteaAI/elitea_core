@@ -418,6 +418,14 @@ class Module(module.ModuleModel):
         self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
 
+        # The scheduled evaluation's probes and dimensions; a failure only leaves the platform
+        # tier without them until the admin task is run.
+        try:
+            from .utils.eval_auto_service import seed_platform_health_check
+            seed_platform_health_check()
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to seed the evaluation health check')
+
         # ORM create_all() creates missing tenant tables but never expands an
         # existing one. Apply the transactionally committed compatibility guard
         # before any chat callback can write the normalized step rows.
@@ -632,6 +640,10 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "close_stuck_chat_runs", self.close_stuck_chat_runs,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "seed_eval_health_check", self.seed_eval_health_check,
                 group="R-2.0.9",
             )
         except Exception as e:
@@ -1256,7 +1268,7 @@ class Module(module.ModuleModel):
         self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget, feature_budget, user_feature_budget
-        from .models import evaluation, eval_platform_dimension
+        from .models import evaluation, eval_platform_dimension, eval_auto
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
         from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
@@ -1662,6 +1674,22 @@ class Module(module.ModuleModel):
                     'cron': managed['pipeline_scheduling']['cron'],
                     'active': managed['pipeline_scheduling']['active'],
                     'match_handler': True,
+                },
+                {
+                    'rpc_func': managed['eval_auto_run']['rpc_func'],
+                    'rpc_kwargs': {},
+                    'name': 'eval_auto_run',
+                    'cron': managed['eval_auto_run']['cron'],
+                    'active': managed['eval_auto_run']['active'],
+                    'match_handler': True,
+                },
+                {
+                    # Settles finished runs and starts queued ones; a no-op with no job open
+                    'rpc_func': 'elitea_core_eval_auto_drain',
+                    'rpc_kwargs': {},
+                    'name': 'eval_auto_drain',
+                    'cron': '* * * * *',
+                    'active': True,
                 },
             ]
         except Exception:  # pylint: disable=W0703
