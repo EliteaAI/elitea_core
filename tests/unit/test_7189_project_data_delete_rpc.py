@@ -7,19 +7,17 @@ import ast
 import datetime
 import itertools
 import pathlib
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import create_model
+from pydantic import SecretStr, create_model
 
 from fixtures.bus_frame import assert_bus_safe
 from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
-SECRET_FIELD = PLUGIN_ROOT.parent / 'shared' / 'tools' / 'secret_field.py'
 APPLICATION_RPC = PLUGIN_ROOT / 'rpc' / 'application.py'
 APPLICATION_TOOLS = PLUGIN_ROOT / 'utils' / 'application_tools.py'
 
@@ -362,23 +360,20 @@ def test_no_time_budget_runs_to_the_end(harness):
     assert result == {'deleted': 2, 'failed': 0, 'skipped': 0, 'remaining': 0}
 
 
-def _unreadable_vault(**_kwargs):
-    def unsecret(_reference):
+class VaultReferencedSecret(SecretStr):
+    """Like shared's SecretString: its value is a vault reference, resolved by a read that fails here."""
+
+    def get_secret_value(self):
         raise RuntimeError('vault unreachable')
-    return SimpleNamespace(unsecret=unsecret, project_id=None)
 
 
 @pytest.fixture
 def detail_with_bus_unsafe_fields(isolated_sys_modules):
-    """A detail model typed like ApplicationDetailModel: real PublishStatus and SecretString, a vault that fails."""
-    vault_tools = ModuleType('plugins.shared.tools.vault_tools')
-    vault_tools.VaultClient = _unreadable_vault
-    sys.modules[vault_tools.__name__] = vault_tools
-    secret_field = load_module_with_stubs(SECRET_FIELD, 'plugins.shared.tools.secret_field')
+    """A detail model typed like ApplicationDetailModel: the real PublishStatus and a vault-referenced secret."""
     enums = load_module_with_stubs(PLUGIN_ROOT / 'models' / 'enums' / 'all.py', 'plugins.elitea_core.models.enums.all')
     detail = create_model(
         'Detail', id=(int, ...), status=(enums.PublishStatus, ...), created_at=(datetime.datetime, ...),
-        webhook_secret=(Optional[secret_field.SecretString], None),
+        webhook_secret=(Optional[VaultReferencedSecret], None),
     )
     return SimpleNamespace(from_orm=lambda app: detail(
         id=app.id, status='draft', created_at=datetime.datetime(2026, 11, 15), webhook_secret='{{secret.webhook}}',
