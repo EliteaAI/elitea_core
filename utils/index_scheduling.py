@@ -822,7 +822,7 @@ def handle_failed_index_schedule(
             # int(None) raises; a missing author must fall through to notify's own
             # "cannot notify without a user_id" guard, not crash here.
             'user_id': int(user_id) if user_id is not None else None,
-            'initiator': InitiatorType.schedule
+            'initiator': InitiatorType.schedule.value
         })
     except Exception as e:  # pylint: disable=W0703
         # The history entry is committed by now and Index History renders it with the raw

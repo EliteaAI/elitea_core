@@ -8,6 +8,7 @@ import types
 
 import pytest
 
+from fixtures.bus_frame import assert_bus_safe
 from unit._tool_spend_loader import load
 
 # Other suites leave stubs under these names; load the real enum fresh so the order does not matter
@@ -72,3 +73,13 @@ def test_member_feature_alert_goes_to_that_member_only():
 @pytest.mark.parametrize("value,text", [(0.05, "$0.05"), (0.005, "$0.005"), (12, "$12.00"), (0.0001, "$0.0001")])
 def test_sub_cent_limits_keep_their_digits(value, text):
     assert notif.usd(value) == text
+
+
+@pytest.mark.parametrize("kind", ["threshold", "limit"])
+@pytest.mark.parametrize("user_id", [None, 7], ids=["project", "member"])
+@pytest.mark.parametrize("feature", [None, "web_search"], ids=["budget", "tool_spend"])
+def test_every_budget_alert_is_a_frame_every_pylon_can_load(kind, user_id, feature):
+    """#7499: pylon_auth has no elitea_core, so a NotificationEventTypes member in the frame fails to unpickle there."""
+    instance, fake = module({3: ["admin"]})
+    assert instance.notify(1, kind, pct=85, user_id=user_id, feature=feature) == 1
+    assert_bus_safe("notifications_stream", fake.fired[0])

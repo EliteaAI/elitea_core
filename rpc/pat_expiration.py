@@ -57,7 +57,7 @@ class RPC:
                     {
                         'project_id': private_project_id,
                         'user_id': user_id,
-                        'event_type': NotificationEventTypes.personal_access_token_expiring,
+                        'event_type': NotificationEventTypes.personal_access_token_expiring.value,
                         'meta': {
                             'token_name': token_name,
                             'token_uuid': token_uuid,

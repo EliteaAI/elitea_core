@@ -1320,7 +1320,7 @@ def notify_skill_author_unpublished(
         event_manager.fire_event(
             'notifications_stream',
             {
-                'event_type': NotificationEventTypes.skill_unpublished,
+                'event_type': NotificationEventTypes.skill_unpublished.value,
                 'project_id': source_project_id,
                 'user_id': author_id,
                 'meta': meta,

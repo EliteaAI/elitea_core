@@ -784,7 +784,8 @@ def test_the_hourly_pat_task_sweeps_first_and_a_failing_sweep_does_not_stop_the_
     pkg = admission_env.PKG
     enums = sys.modules[f"{pkg}.models.enums.all"]
     monkeypatch.setattr(enums, "NotificationEventTypes",
-                        types.SimpleNamespace(personal_access_token_expiring="pat_expiring"), raising=False)
+                        types.SimpleNamespace(personal_access_token_expiring=types.SimpleNamespace(value="pat_expiring")),
+                        raising=False)
     sys.modules.setdefault(f"{pkg}.rpc", types.ModuleType(f"{pkg}.rpc")).__path__ = []
     pylon_tools = sys.modules["pylon.core.tools"]
     monkeypatch.setattr(pylon_tools, "web", types.SimpleNamespace(rpc=lambda *names: (lambda func: func)), raising=False)

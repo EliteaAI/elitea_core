@@ -260,7 +260,9 @@ def _delete_application(module, session, project_id: int, application: Applicati
             'version_details': None,
         }
     else:
-        application_data = ApplicationDetailModel.from_orm(application).model_dump()
+        application_data = ApplicationDetailModel.from_orm(application).model_dump(
+            mode='json', exclude={'webhook_secret'},
+        )
     application_data['project_id'] = project_id
     if application_data.get('version_details') is None and agent_type:
         application_data['version_details'] = {'agent_type': agent_type}
@@ -278,7 +280,7 @@ def _delete_application(module, session, project_id: int, application: Applicati
 
     try:
         module.context.event_manager.fire_event(
-            ApplicationEvents.application_deleted, application_data
+            ApplicationEvents.application_deleted.value, application_data
         )
     except Exception:
         log.exception("application_deleted handlers failed for application %s of project %s",
@@ -1466,7 +1468,7 @@ class RPC:
                     continue
                 # The toolkit is gone already: a failing handler is logged, it does not stop the rest
                 try:
-                    self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted, toolkit_data)
+                    self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted.value, toolkit_data)
                 except Exception:
                     log.exception(
                         "toolkits_delete_by_kind: toolkit_deleted handlers failed for toolkit %s of project %s",
@@ -2722,7 +2724,7 @@ class RPC:
             _notify_version_schedules_disabled(project_id, disabled_schedules)
 
             self.context.event_manager.fire_event(
-                ApplicationEvents.application_version_deleted, version_data
+                ApplicationEvents.application_version_deleted.value, version_data
             )
 
             return {

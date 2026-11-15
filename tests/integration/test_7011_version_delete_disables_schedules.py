@@ -110,7 +110,9 @@ def env(monkeypatch):
         '__package__': f'{PACKAGE}.rpc', 'db': types.SimpleNamespace(get_session=get_session),
         'ApplicationVersion': ApplicationVersion, 'EliteATool': MagicMock(), 'EntityToolMapping': MagicMock(),
         'Integer': MagicMock(), 'PublishStatus': types.SimpleNamespace(published='published', embedded='embedded'),
-        'ApplicationEvents': types.SimpleNamespace(application_version_deleted='version_deleted'),
+        'ApplicationEvents': types.SimpleNamespace(
+            application_version_deleted=types.SimpleNamespace(value='version_deleted'),
+        ),
         'detach_skills_for_entity_versions': lambda session, ids: None,
         'log': types.SimpleNamespace(info=lambda *a, **k: None),
     }

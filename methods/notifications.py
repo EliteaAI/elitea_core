@@ -103,7 +103,7 @@ class Method:
                     'initiator': initiator,
                     'message': build_index_notification_message(index_data_status, initiator),
                 },
-                'event_type': NotificationEventTypes.index_data_changed
+                'event_type': NotificationEventTypes.index_data_changed.value
             }
         )
 
@@ -133,9 +133,9 @@ class Method:
                     'message': payload.get('message'),
                 },
                 'event_type': (
-                    NotificationEventTypes.index_schedule_expired
+                    NotificationEventTypes.index_schedule_expired.value
                     if payload.get('expired')
-                    else NotificationEventTypes.index_schedule_expiring
+                    else NotificationEventTypes.index_schedule_expiring.value
                 ),
             }
         )
