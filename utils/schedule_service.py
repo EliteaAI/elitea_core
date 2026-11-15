@@ -200,18 +200,20 @@ def read_index_configuration(session, project_id: int, toolkit, index_name: str,
     return configuration if isinstance(configuration, dict) else {}
 
 
-def check_index_rights(project_id: int, toolkit_id: int | None, scope: ScheduleScope) -> None:
-    """Raise unless the caller may write the folder of the toolkit and holds the index edit permission.
+def check_index_rights(project_id: int, toolkit_id: int | None, scope: ScheduleScope,
+                       permission: str = INDEX_EDIT_PERMISSION) -> None:
+    """Raise unless the caller may write the folder of the toolkit and holds the index permission.
 
     The folder answers first, so a hidden toolkit stays a 404; a missing permission answers like a read-only folder.
     """
     from .folder_access import TOOLKIT_ENTITY_TYPES  # late: only an index schedule needs the toolkit folder types
     if toolkit_id is not None:
-        access_error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True)
+        access_error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True,
+                                           user_id=scope.user_id)
         if access_error:
             body, status = access_error
             raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
-    if INDEX_EDIT_PERMISSION not in scope.permissions:  # an admin too: the run re-checks it for the owner
+    if permission not in scope.permissions:  # an admin too: the run re-checks it for the owner
         raise ScheduleError('read_only', INDEX_READ_ONLY, 403)
 
 

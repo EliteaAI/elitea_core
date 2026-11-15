@@ -75,7 +75,7 @@ def get_summary(api, monkeypatch, rows, query="true"):
         yield types.SimpleNamespace(query=lambda *columns: FakeQuery(rows))
 
     module = api.index_meta
-    monkeypatch.setattr(module, "load_and_validate_toolkit_for_index", lambda config: ("3", "conn", None))
+    monkeypatch.setattr(module, "load_toolkit_for_index", lambda *args: ("3", "conn", None))
     monkeypatch.setattr(module, "inspect", lambda engine: types.SimpleNamespace(has_table=lambda *args, **kwargs: True))
     monkeypatch.setattr(module, "get_session_for_schema", session_for_schema)
     api.request.args = {"summary": query}
@@ -97,7 +97,7 @@ def test_a_failing_summary_answers_400_without_the_error_text(api, monkeypatch):
         raise RuntimeError("secret connection detail")
 
     monkeypatch.setattr(api.index_meta, "_index_summary", broken)
-    monkeypatch.setattr(api.index_meta, "load_and_validate_toolkit_for_index", lambda config: ("3", "conn", None))
+    monkeypatch.setattr(api.index_meta, "load_toolkit_for_index", lambda *args: ("3", "conn", None))
     monkeypatch.setattr(api.index_meta, "inspect", lambda engine: types.SimpleNamespace(has_table=lambda *a, **k: True))
     api.request.args = {"summary": "true"}
     body, status = api.index_meta.PromptLibAPI().get(7, 3)

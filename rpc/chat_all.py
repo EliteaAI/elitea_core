@@ -757,6 +757,7 @@ def generate_toolkit_participant_payload(
         'type': toolkit_type,
         'toolkit_name': toolkit_name,
         'toolkit_id': toolkit_id,
+        'project_id': toolkit_project_id,
         'settings': toolkit_settings
     }
     

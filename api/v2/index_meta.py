@@ -10,7 +10,7 @@ from ...models.elitea_tools import EliteATool
 from ...models.entity_schedule import EntitySchedule
 from ...models.indexer import EmbeddingStore, IndexRun
 from ...utils.application_tools import (
-    load_and_validate_toolkit_for_index,
+    load_toolkit_for_index,
     get_session_for_schema,
     get_pending_index_run_heartbeats,
     resolve_index_staleness,
@@ -25,7 +25,6 @@ from ...utils.application_tools import (
 )
 from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
 from ...utils.index_schedule_compat import save_index_schedule
-from ...utils.predict_utils import get_toolkit_config
 from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
@@ -96,14 +95,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id')
     def get(self, project_id: int, toolkit_id: int, **kwargs):
-        toolkit_config = get_toolkit_config(project_id, auth.current_user()['id'], toolkit_id)
-        toolkit_name_id, connection_string, validation_error = load_and_validate_toolkit_for_index(toolkit_config)
+        toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
+            project_id, auth.current_user()['id'], toolkit_id)
         if validation_error:
             return validation_error
         #
-        engine = _get_pgvector_engine(connection_string)
-        inspector = inspect(engine)
-        table_exists = inspector.has_table("langchain_pg_embedding", schema=toolkit_name_id)
+        try:
+            table_exists = inspect(_get_pgvector_engine(connection_string)).has_table(
+                "langchain_pg_embedding", schema=toolkit_name_id)
+        except Exception as e:
+            log.error(f"Error occurred while reaching the index store of toolkit {toolkit_id}: {e}")
+            return {"ok": False, "error": "Error occurred while fetching index_meta"}, 400
         if not table_exists:
             log.warning(f"Table {toolkit_name_id}.langchain_pg_embedding does not exist. Probably no data has been indexed yet.")
             return [], 200
@@ -188,7 +190,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     })
                 return serialize(result), 200
         except Exception as e:
-            session.rollback()
             log.error(f"Error occurred while fetching index_meta: {e}")
             return {"ok": False, "error": "Error occurred while fetching index_meta"}, 400
 
@@ -201,8 +202,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def delete(self, project_id: int, toolkit_id: int, index_meta_id: str):
-        toolkit_config = get_toolkit_config(project_id, auth.current_user()['id'], toolkit_id)
-        toolkit_name_id, connection_string, validation_error = load_and_validate_toolkit_for_index(toolkit_config)
+        toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
+            project_id, auth.current_user()['id'], toolkit_id)
         if validation_error:
             return validation_error
         #
@@ -241,11 +242,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except NoResultFound:
             return {"ok": False, "error": f"index_meta {index_meta_id} not found"}, 404
         except OperationalError as e:
-            session.rollback()
             log.warning(f"Lock timeout while deleting index_meta {index_meta_id}: {e}")
             return {"ok": False, "error": str(IndexMetaLockTimeoutError(index_name or index_meta_id))}, 409
         except Exception as e:
-            session.rollback()
             log.error(f"Error occurred while deleting index_meta {index_meta_id}: {e}")
             return {"ok": False, "error": "Error occurred while deleting index_meta"}, 400
 
