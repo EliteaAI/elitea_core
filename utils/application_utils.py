@@ -355,7 +355,7 @@ def application_update(project_id: int, application_id: int, update_data: Applic
     session.commit()
 
     context.event_manager.fire_event(
-        ApplicationEvents.application_updated,
+        ApplicationEvents.application_updated.value,
         {
             "id": application_id,
             "owner_id": project_id,

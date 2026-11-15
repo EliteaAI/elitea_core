@@ -289,7 +289,7 @@ def notify_user_added_to_conversation(
                     else f"You were added to [{conversation.name}]()"
                 ),
             },
-            'event_type': NotificationEventTypes.chat_user_added
+            'event_type': NotificationEventTypes.chat_user_added.value
         }
     )
 
@@ -328,7 +328,7 @@ def notify_user_mentioned_in_conversation(
                     else f"You were mentioned in [{conversation.name}]()"
                 ),
             },
-            'event_type': NotificationEventTypes.chat_user_mentioned
+            'event_type': NotificationEventTypes.chat_user_mentioned.value
         }
     )
 

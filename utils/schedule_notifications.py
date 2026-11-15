@@ -92,7 +92,7 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         if event_type == Types.schedule_owner_changed:
             meta.update(old_owner_id=extra.get('old_owner_id'), new_owner_id=extra.get('new_owner_id'))
         rpc_tools.EventManagerMixin().event_manager.fire_event('notifications_stream', {
-            'project_id': project_id, 'user_id': owner_id, 'meta': meta, 'event_type': event_type,
+            'project_id': project_id, 'user_id': owner_id, 'meta': meta, 'event_type': Types(event_type).value,
         })
         return True
     except Exception as e:  # noqa: BLE001 -- a notice must never break the caller (R1.4)

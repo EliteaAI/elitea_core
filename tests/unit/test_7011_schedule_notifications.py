@@ -9,6 +9,7 @@ import sys
 import types
 
 import pytest
+from fixtures.bus_frame import assert_bus_safe
 from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -394,3 +395,16 @@ class Test7401CredentialExpired:
                                             extra={'credential': 'crm', 'private': True, 'more': 2, 'schedule_ids': [7, 8, 9]})
 
         assert '"[On push]()" and 2 more switched off' in recorder.fired[0][1]['meta']['message']
+
+
+@pytest.mark.parametrize('event_type', ALWAYS_SENT)
+@pytest.mark.parametrize('as_member', [False, True], ids=['string', 'member'])
+def test_every_notice_is_a_frame_every_pylon_can_load(notifications, recorder, event_type, as_member):
+    """#7499: callers pass members and strings alike, and pylon_auth cannot unpickle a member."""
+    sent_type = notifications.Types(event_type) if as_member else event_type
+
+    assert _send(notifications, sent_type, run=RUN) is True
+
+    name, payload = recorder.fired[0]
+    assert payload['event_type'] == event_type
+    assert_bus_safe(name, payload)

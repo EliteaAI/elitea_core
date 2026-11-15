@@ -2530,7 +2530,7 @@ def notify_author_unpublished(
         event_manager.fire_event(
             'notifications_stream',
             {
-                'event_type': NotificationEventTypes.agent_unpublished,
+                'event_type': NotificationEventTypes.agent_unpublished.value,
                 'project_id': source_project_id,
                 'user_id': author_id,
                 'meta': meta,

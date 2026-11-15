@@ -11,6 +11,7 @@ Run via:
 """
 
 import ast
+import enum
 import importlib.util
 import json
 import pathlib
@@ -845,7 +846,7 @@ def index_scheduling(application_tools):
         PLUGIN_ROOT / "utils" / "index_scheduling.py",
     )
     enums_pkg = types.ModuleType("plugins.elitea_core.models.enums")
-    enums_pkg.InitiatorType = types.SimpleNamespace(schedule="schedule", user="user")
+    enums_pkg.InitiatorType = enum.StrEnum("InitiatorType", {"schedule": "schedule", "user": "user"})
     sys.modules["plugins.elitea_core.models.enums"] = enums_pkg
     tools_pkg = sys.modules["tools"]
     tools_pkg.rpc_tools = types.SimpleNamespace(
@@ -1445,7 +1446,9 @@ def notifications(application_tools):
             return str(self)
 
     enums = types.ModuleType("plugins.elitea_core.models.enums.all")
-    enums.NotificationEventTypes = types.SimpleNamespace(index_data_changed="index_data_changed")
+    enums.NotificationEventTypes = types.SimpleNamespace(
+        index_data_changed=types.SimpleNamespace(value="index_data_changed"),
+    )
     enums.IndexDataStatus = types.SimpleNamespace(
         completed=_State("completed"), failed=_State("failed"), created=_State("created"),
         scheduled_reindex=_State("scheduled_reindex"), partly_indexed=_State("partly_indexed"),

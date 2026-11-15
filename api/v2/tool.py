@@ -109,7 +109,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if tool := session.query(EliteATool).get(tool_id):
                 toolkit_data = delete_toolkit(session, project_id, tool)
                 self.module.context.event_manager.fire_event(
-                    ApplicationEvents.toolkit_deleted, toolkit_data
+                    ApplicationEvents.toolkit_deleted.value, toolkit_data
                 )
                 return '', 204
             return {"ok": False, "error": "Tool is not found"}, 400
@@ -295,7 +295,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             toolkit_data = new_tool_parsed.dict()
             toolkit_data['project_id'] = project_id
             self.module.context.event_manager.fire_event(
-                ApplicationEvents.toolkit_updated,
+                ApplicationEvents.toolkit_updated.value,
                 {
                     "id": tool_id,
                     "owner_id": project_id,

@@ -4,12 +4,18 @@ The helpers and RPC methods are compiled from source with the ORM faked: rpc/app
 the whole pylon runtime to import. The fakes only tell which filter a query was built with.
 """
 import ast
+import datetime
 import itertools
 import pathlib
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import SecretStr, create_model
+
+from fixtures.bus_frame import assert_bus_safe
+from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 APPLICATION_RPC = PLUGIN_ROOT / 'rpc' / 'application.py'
@@ -190,13 +196,14 @@ def harness():
 
     state = SimpleNamespace(session=FakeSession(APPS), events=[], fail_events=set(), clock=[0.0])
     detail = MagicMock()
-    detail.from_orm.side_effect = lambda app: SimpleNamespace(model_dump=lambda: {'id': app.id})
+    detail.from_orm.side_effect = lambda app: SimpleNamespace(model_dump=lambda **_: {'id': app.id})
     namespace = {
         'Application': Application, 'ApplicationVersion': ApplicationVersion, 'Skill': Skill,
         'SkillVersion': SkillVersion, 'EliteATool': EliteATool, 'PublishStatus': PublishStatus,
         'AgentTypes': AgentTypes, 'ApplicationDetailModel': detail,
         'ApplicationEvents': SimpleNamespace(
-            application_deleted='application_deleted', toolkit_deleted='toolkit_deleted',
+            application_deleted=SimpleNamespace(value='application_deleted'),
+            toolkit_deleted=SimpleNamespace(value='toolkit_deleted'),
         ),
         'detach_skills_for_entity_versions': lambda session, ids: None,
         'application_webhook_uuids': lambda session, application_id: [],  # #7404, own tests
@@ -351,3 +358,36 @@ def test_no_time_budget_runs_to_the_end(harness):
     result = harness.ns['toolkits_delete_by_kind'](harness.module, 7, 'mcp')
 
     assert result == {'deleted': 2, 'failed': 0, 'skipped': 0, 'remaining': 0}
+
+
+class VaultReferencedSecret(SecretStr):
+    """Like shared's SecretString: its value is a vault reference, resolved by a read that fails here."""
+
+    def get_secret_value(self):
+        raise RuntimeError('vault unreachable')
+
+
+@pytest.fixture
+def detail_with_bus_unsafe_fields(isolated_sys_modules):
+    """A detail model typed like ApplicationDetailModel: the real PublishStatus and a vault-referenced secret."""
+    enums = load_module_with_stubs(PLUGIN_ROOT / 'models' / 'enums' / 'all.py', 'plugins.elitea_core.models.enums.all')
+    detail = create_model(
+        'Detail', id=(int, ...), status=(enums.PublishStatus, ...), created_at=(datetime.datetime, ...),
+        webhook_secret=(Optional[VaultReferencedSecret], None),
+    )
+    return SimpleNamespace(from_orm=lambda app: detail(
+        id=app.id, status='draft', created_at=datetime.datetime(2026, 11, 15), webhook_secret='{{secret.webhook}}',
+    ))
+
+
+def test_single_delete_sends_a_frame_every_pylon_can_load_without_reading_the_webhook_secret(
+        harness, detail_with_bus_unsafe_fields):
+    """#7499: pylon_auth cannot unpickle PublishStatus or SecretString, and json mode would read the secret."""
+    harness.ns['ApplicationDetailModel'] = detail_with_bus_unsafe_fields
+
+    assert harness.ns['_delete_application'](harness.module, harness.session, 7, APPS[1]) is True
+
+    sent = harness.payloads[-1]
+    assert (sent['id'], sent['status'], sent['project_id']) == (1, 'draft', 7)
+    assert 'webhook_secret' not in sent
+    assert_bus_safe('application_deleted', sent)
