@@ -478,21 +478,26 @@ def resolve_draft_llm_settings(
 
 def apply_offered_origins(
     parsed: dict, current_project_id: int, agents: list, pipelines: list, skills: list,
+    current_config: Optional[dict] = None,
 ) -> None:
     """Keep only suggestions that were offered, stamping each with the project it came from.
 
     Ids are only unique within one project schema, so the user's own agent 5 and catalog agent 5
     can both be on offer. The prompt prints each item's ``project_id`` and the model echoes it back;
     a suggestion is accepted only when its ``(project_id, id)`` pair was offered. One that omits
-    ``project_id`` is accepted only when that id was offered from a single project, and anything
-    else is dropped rather than guessed at. Items from the current project are stamped ``None``,
-    which is how the response models spell "this project".
+    ``project_id`` is accepted only when that id was offered from a single project, or, in edit mode
+    (``current_config`` given), when it is one of the version's attached items: those are always local,
+    and the model often echoes them without ``project_id``. Anything else is dropped rather than
+    guessed at. Items from the current project are stamped ``None``, which is how the response models
+    spell "this project".
     """
+    attached = current_config or {}
     def _origin(item):
         return item.get("project_id") or current_project_id
 
-    def _filter(key, offered_items, id_key):
-        offered = {(_origin(item), item.get(id_key)) for item in offered_items}
+    def _filter(key, offered_items, id_key, attached_items):
+        attached_ids = {item.get(id_key) for item in attached_items or []}
+        offered = {(_origin(item), item.get(id_key)): item for item in offered_items}
         projects_by_id: dict = {}
         for project, item_id in offered:
             projects_by_id.setdefault(item_id, set()).add(project)
@@ -506,13 +511,19 @@ def apply_offered_origins(
                 project = echoed if (echoed, item_id) in offered else None
             else:
                 projects = projects_by_id.get(item_id) or set()
-                project = next(iter(projects)) if len(projects) == 1 else None
+                if len(projects) == 1:
+                    project = next(iter(projects))
+                elif item_id in attached_ids and current_project_id in projects:
+                    project = current_project_id
+                else:
+                    project = None
             if project is None:
                 continue
             item["project_id"] = None if project == current_project_id else project
+            item["description"] = offered[(project, item_id)].get("description")
             kept.append(item)
         parsed[key] = kept
 
-    _filter("suggested_agents", agents, "application_id")
-    _filter("suggested_pipelines", pipelines, "application_id")
-    _filter("suggested_skills", skills, "id")
+    _filter("suggested_agents", agents, "application_id", attached.get("attached_agents"))
+    _filter("suggested_pipelines", pipelines, "application_id", attached.get("attached_pipelines"))
+    _filter("suggested_skills", skills, "id", attached.get("attached_skills"))

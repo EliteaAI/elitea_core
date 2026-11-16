@@ -43,12 +43,12 @@ class TestSameIdInBothProjects:
     def test_own_item_echoed_with_current_project_stays_unstamped(self, utils):
         parsed = _apply(utils, {'suggested_agents': [{'application_id': 5, 'project_id': PROJECT}]},
                         agents=[OWN_AGENT_5, CATALOG_AGENT_5])
-        assert parsed['suggested_agents'] == [{'application_id': 5, 'project_id': None}]
+        assert parsed['suggested_agents'] == [{'application_id': 5, 'project_id': None, 'description': None}]
 
     def test_catalog_item_echoed_with_catalog_project_is_stamped(self, utils):
         parsed = _apply(utils, {'suggested_agents': [{'application_id': 5, 'project_id': PUBLIC_PROJECT}]},
                         agents=[OWN_AGENT_5, CATALOG_AGENT_5])
-        assert parsed['suggested_agents'] == [{'application_id': 5, 'project_id': PUBLIC_PROJECT}]
+        assert parsed['suggested_agents'] == [{'application_id': 5, 'project_id': PUBLIC_PROJECT, 'description': None}]
 
     def test_ambiguous_id_without_project_is_dropped(self, utils):
         parsed = _apply(utils, {'suggested_agents': [{'application_id': 5}]},
@@ -65,7 +65,7 @@ class TestSameIdInBothProjects:
 class TestOfferedOnly:
     def test_unambiguous_id_without_project_is_accepted(self, utils):
         parsed = _apply(utils, {'suggested_agents': [{'application_id': 5}]}, agents=[CATALOG_AGENT_5])
-        assert parsed['suggested_agents'] == [{'application_id': 5, 'project_id': PUBLIC_PROJECT}]
+        assert parsed['suggested_agents'] == [{'application_id': 5, 'project_id': PUBLIC_PROJECT, 'description': None}]
 
     def test_pair_that_was_never_offered_is_dropped(self, utils):
         parsed = _apply(utils, {'suggested_agents': [{'application_id': 5, 'project_id': 99}]},

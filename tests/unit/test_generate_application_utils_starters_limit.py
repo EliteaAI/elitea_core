@@ -1,4 +1,4 @@
-"""The application draft prompt builders fill the Chat Starters limit into the seeded templates.
+"""The application draft prompt builders fill the Chat Starters and skill limits into the seeded templates.
 
 The templates mirror the placeholder set of the seeded ``generate_application_draft`` and
 ``edit_application_draft`` prompts (configurations plugin), so a placeholder rename on either side
@@ -17,10 +17,13 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = 'draftpkg_prompt_builder_test'
 
 RESOURCES = 'Toolkits:\n{toolkits}\nMCP:\n{mcp}\nAgents:\n{agents}\nPipelines:\n{pipelines}\nSkills:\n{skills}\n'
-CREATE_TEMPLATE = RESOURCES + '"conversation_starters": [<string>] (max {max_conversation_starters} items)\n{{"name": "x"}}'
+CREATE_TEMPLATE = (
+    RESOURCES + '"conversation_starters": [<string>] (max {max_conversation_starters} items)\n'
+    'Maximum {max_skills_per_agent} skills.\n{{"name": "x"}}'
+)
 EDIT_TEMPLATE = 'Current:\n{current_config}\n' + CREATE_TEMPLATE
-# A prompt seeded before the placeholder existed
-LEGACY_TEMPLATE = RESOURCES + '"conversation_starters": [<string>] (max 4 items)'
+# A prompt seeded before the placeholders existed
+LEGACY_TEMPLATE = RESOURCES + '"conversation_starters": [<string>] (max 4 items)\nMaximum 5 skills.'
 
 
 def _load_builder():
@@ -91,18 +94,23 @@ def utils():
             del sys.modules[name]
 
 
-def test_create_prompt_gets_the_limit(utils):
-    prompt = utils.build_system_prompt(CREATE_TEMPLATE, 1, [], [], [], [], [], max_conversation_starters=7)
-    assert '(max 7 items)' in prompt and '{"name": "x"}' in prompt
-
-
-def test_edit_prompt_gets_the_limit_and_config(utils):
-    prompt = utils.build_edit_system_prompt(
-        EDIT_TEMPLATE, 1, {'name': 'agent'}, [], [], [], [], [], max_conversation_starters=9,
+def test_create_prompt_gets_the_limits(utils):
+    prompt = utils.build_system_prompt(
+        CREATE_TEMPLATE, 1, [], [], [], [], [], max_conversation_starters=7, max_skills_per_agent=37,
     )
-    assert '(max 9 items)' in prompt and '"name": "agent"' in prompt
+    assert '(max 7 items)' in prompt and 'Maximum 37 skills.' in prompt and '{"name": "x"}' in prompt
 
 
-def test_legacy_prompt_without_placeholder_still_renders(utils):
-    prompt = utils.build_system_prompt(LEGACY_TEMPLATE, 1, [], [], [], [], [], max_conversation_starters=7)
-    assert '(max 4 items)' in prompt
+def test_edit_prompt_gets_the_limits_and_config(utils):
+    prompt = utils.build_edit_system_prompt(
+        EDIT_TEMPLATE, 1, {'name': 'agent'}, [], [], [], [], [],
+        max_conversation_starters=9, max_skills_per_agent=41,
+    )
+    assert '(max 9 items)' in prompt and 'Maximum 41 skills.' in prompt and '"name": "agent"' in prompt
+
+
+def test_legacy_prompt_without_placeholders_still_renders(utils):
+    prompt = utils.build_system_prompt(
+        LEGACY_TEMPLATE, 1, [], [], [], [], [], max_conversation_starters=7, max_skills_per_agent=37,
+    )
+    assert '(max 4 items)' in prompt and 'Maximum 5 skills.' in prompt

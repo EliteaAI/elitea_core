@@ -3,10 +3,10 @@ from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, mode
 
 from .predict_llm import LLMSettingsRequest
 
-MAX_SUGGESTED_SKILLS = 5
-# Mirrors utils.conversation_starters_utils; kept local so this model imports without the runtime.
-# The API always passes the live limit through the validation context.
+# Mirror utils.conversation_starters_utils and utils.skill_utils; kept local so this model imports
+# without the runtime. The API always passes the live limits through the validation context.
 DEFAULT_MAX_CONVERSATION_STARTERS = 4
+DEFAULT_MAX_SKILLS_PER_AGENT = 50
 
 
 class GenerateApplicationDraftRequest(BaseModel):
@@ -137,17 +137,15 @@ class GenerateApplicationDraftResponse(BaseModel):
     )
     suggested_skills: List[SkillSuggestion] = Field(
         default_factory=list,
-        description=f"Skills the agent may want to use (max {MAX_SUGGESTED_SKILLS})",
+        description="Skills the agent may want to use (at most the agent skill limit)",
     )
 
     @field_validator("suggested_skills", mode="before")
     @classmethod
-    def limit_suggested_skills(cls, v):
+    def limit_suggested_skills(cls, v, info: ValidationInfo):
         if v is None:
             return []
-        if len(v) > MAX_SUGGESTED_SKILLS:
-            v = v[:MAX_SUGGESTED_SKILLS]
-        return v
+        return v[:(info.context or {}).get('max_skills_per_agent', DEFAULT_MAX_SKILLS_PER_AGENT)]
 
     @field_validator("suggested_toolkits", mode="before")
     @classmethod
