@@ -45,16 +45,16 @@ def _is_analytics_enabled():
 
 
 def _usage_mode_settings():
-    """Mode plus warning-dismissibility in a single RPC hop; both live in the usage config."""
+    """Mode, warning-dismissibility and complexity gate in a single RPC hop (usage config)."""
     try:
         settings = rpc_tools.RpcMixin().rpc.timeout(5).usage_mode_settings()
     except Exception:  # pylint: disable=W0703
-        return None, True
+        return None, True, False
     #
     mode = settings.get("mode")
     return (mode if mode in ("enforce", "observe") else None), settings.get(
         "warnings_dismissible", True
-    ) is not False
+    ) is not False, settings.get("complexity_enabled") is True
 
 
 def _tool_spend_availability():
@@ -106,7 +106,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         UI visibility and functionality availability.
         """
         # One RPC hop for both: mode and dismissibility live in the same usage config
-        budgets_mode, warning_dismissible = _usage_mode_settings()
+        budgets_mode, warning_dismissible, complexity_enabled = _usage_mode_settings()
         #
         settings = {
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
@@ -119,6 +119,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # that requests are about to become unavailable would not be true there.
             "cost_budgets_enforcing": budgets_mode == "enforce",
             "cost_budgets_warning_dismissible": warning_dismissible,
+            # Complexity switch on AND metering on; resolved by the usage plugin
+            "complexity_enabled": complexity_enabled,
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
