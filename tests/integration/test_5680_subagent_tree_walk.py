@@ -24,9 +24,17 @@ class _Criterion:
         self.value = value
 
 
+class _InCriterion:
+    def __init__(self, values):
+        self.values = set(values)
+
+
 class _IdColumn:
     def __eq__(self, other):
         return _Criterion(other)
+
+    def in_(self, values):
+        return _InCriterion(values)
 
 
 class _AgentTypes:
@@ -122,33 +130,61 @@ class FakeVersion:
 
 
 class _Query:
-    def __init__(self, registry):
+    def __init__(self, registry, session=None):
         self._registry = registry
+        self._session = session
         self._vid = None
+        self._vids = None
 
     def filter(self, *criteria):
         for c in criteria:
             if hasattr(c, 'value'):
                 self._vid = c.value
+            elif hasattr(c, 'values'):
+                self._vids = c.values
         return self
 
     def options(self, *_a, **_k):
         return self
 
     def first(self):
+        if self._session is not None and self._vid in self._session._fail_on:
+            self._session.broken = True
+            raise RuntimeError('connection dropped')
         return self._registry.get(self._vid)
+
+    def all(self):
+        if self._session is not None and self._session._fail_bulk:
+            self._session.broken = True
+            raise RuntimeError('connection dropped')
+        return [self._registry[v] for v in sorted(self._vids or ()) if v in self._registry]
 
 
 class FakeSession:
-    """registry maps version_id -> FakeVersion."""
+    """registry maps version_id -> FakeVersion.
 
-    def __init__(self, registry):
+    ``fail_on`` is a set of version ids whose single-version load raises like a dropped
+    connection; once one does, the session stays broken (every query raises) until
+    ``rollback()``, the way a failed transaction behaves.
+    """
+
+    def __init__(self, registry, fail_on=(), fail_bulk=False):
         self._registry = registry
+        self._fail_on = set(fail_on)
+        self._fail_bulk = fail_bulk
         self.query_count = 0
+        self.rollback_count = 0
+        self.broken = False
 
     def query(self, _model):
         self.query_count += 1
-        return _Query(self._registry)
+        if self.broken:
+            raise RuntimeError('current transaction is aborted')
+        return _Query(self._registry, self)
+
+    def rollback(self):
+        self.rollback_count += 1
+        self.broken = False
 
 
 def _collect(pu, registry, root_id):
@@ -630,3 +666,44 @@ class TestFillListAgentNestingTiers:
         pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
         assert apps[0].agent_subtree_tiers is None
         assert apps[1].agent_subtree_tiers == 1
+
+    def test_query_count_does_not_grow_with_the_number_of_rows(self, pu):
+        def run(rows):
+            # every row's default version uses the same sub-agent (version 10)
+            registry = {10: FakeVersion(10, tools=[])}
+            apps = []
+            for i in range(rows):
+                registry[100 + i] = FakeVersion(100 + i, tools=[FakeTool(1, 10)])
+                apps.append(_FakeListApp(i, [_ListVersion(100 + i, 'base')]))
+            session = FakeSession(registry)
+            pu.fill_list_agent_nesting_tiers(1, apps, session=session)
+            assert all(app.agent_subtree_tiers == 2 for app in apps)
+            return session.query_count
+
+        # one bulk load of the default versions + the shared sub-agent loaded once
+        assert run(3) == run(50) == 2
+
+    def test_a_database_error_rolls_back_so_later_rows_still_get_their_tiers(self, pu):
+        registry = {
+            10: FakeVersion(10, tools=[]),
+            40: FakeVersion(40, tools=[FakeTool(7, 777)]),  # its sub-agent load will fail
+            777: FakeVersion(777, tools=[]),
+        }
+        apps = [
+            _FakeListApp(4, [_ListVersion(40, 'base')]),
+            _FakeListApp(1, [_ListVersion(10, 'base')]),
+        ]
+        session = FakeSession(registry, fail_on={777})
+        pu.fill_list_agent_nesting_tiers(1, apps, session=session)
+
+        assert apps[0].agent_subtree_tiers is None
+        assert apps[1].agent_subtree_tiers == 1
+        assert session.rollback_count == 1
+
+    def test_a_failed_bulk_load_leaves_every_row_empty_without_raising(self, pu):
+        apps = [_FakeListApp(1, [_ListVersion(10, 'base')])]
+        session = FakeSession(self._registry(), fail_bulk=True)
+        pu.fill_list_agent_nesting_tiers(1, apps, session=session)
+
+        assert apps[0].agent_subtree_tiers is None
+        assert session.rollback_count == 1

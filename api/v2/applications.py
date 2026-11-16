@@ -31,6 +31,9 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
 
+# Largest page served with `include_nesting_tiers` (the pickers ask for 20)
+MAX_NESTING_TIERS_PAGE_SIZE = 50
+
 
 def get_enabled_agent_internal_tools(personalization) -> list:
     """
@@ -127,7 +130,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "ids", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Comma-separated list of application IDs to filter by. When provided, returns only applications with these IDs (max 100). Used for folder contents."},
             {"name": "include_nesting_tiers", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
-             "description": "If true, each row carries agent_subtree_tiers (nesting depth of its default version) and max_agent_nesting_tiers. Costs extra queries per row."},
+             "description": "If true, each row carries agent_subtree_tiers (nesting depth of its default version) and max_agent_nesting_tiers. Costs extra queries, so the page size is capped at 50 when set."},
         ],
         available_to_users=True,
     )
@@ -144,13 +147,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int | None = None, **kwargs):
         agents_type = request.args.get('agents_type')
         ids_param = request.args.get('ids')
+        include_nesting_tiers = str(request.args.get('include_nesting_tiers', '')).lower() in ('1', 'true')
+        limit = request.args.get("limit", default=10, type=int)
+        if include_nesting_tiers:
+            # Each row costs a sub-agent tree walk, so a page of them stays small
+            limit = min(limit, MAX_NESTING_TIERS_PAGE_SIZE)
         with db.get_session(project_id) as session:
             some_result = list_applications_api(
                 project_id=project_id,
                 tags=request.args.get('tags'),
                 author_id=request.args.get('author_id'),
                 q=request.args.get('query'),
-                limit=request.args.get("limit", default=10, type=int),
+                limit=limit,
                 offset=request.args.get("offset", default=0, type=int),
                 sort_by=request.args.get("sort_by", default="created_at"),
                 sort_order=request.args.get("sort_order", default='desc'),
@@ -173,7 +181,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             # Opt-in: walking each default version's sub-agent tree costs queries per row, so only
             # the add-agent pickers ask for it
-            if str(request.args.get('include_nesting_tiers', '')).lower() in ('1', 'true'):
+            if include_nesting_tiers:
                 with db.get_session(project_id) as tiers_session:
                     fill_list_agent_nesting_tiers(project_id, parsed.applications, session=tiers_session)
 
