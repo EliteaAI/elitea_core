@@ -209,6 +209,25 @@ class TestSkillPool:
         first_order = str(session.skill_order[0][0])
         assert 'strpos' in first_order.lower()
 
+    @pytest.mark.parametrize('name, text, named', [
+        ('all-caps', 'Attach all-caps, haiku-format.', True),
+        ('weather-reporter', 'use weather-reporter.', True),
+        ('pdf', 'Read the PDF and summarise it', True),
+        ('pr', 'Write a better prompt', False),
+        ('trip', 'strip the whitespace', False),
+        ('caps', 'Attach all-caps', False),
+        ('joke-maker', 'Attach joke-maker123', False),
+    ])
+    def test_a_name_counts_only_as_a_whole_word(self, utils, name, text, named):
+        assert utils._is_named_in({'name': name}, text) is named
+
+    def test_sql_matches_the_name_against_the_whole_word_text(self, load):
+        session = _Session(SKILL_ROWS)
+        module = load(session)
+        module.fetch_project_resources(PROJECT, 'Attach all-caps, please', 6)
+        params = session.skill_order[0][0].compile().params
+        assert ' attach all-caps please ' in [value for value in params.values() if isinstance(value, str)]
+
     def test_named_catalog_skill_is_not_crowded_out_by_own_skills(self, load):
         own = [types.SimpleNamespace(id=i, name=f'own-{i}', description='') for i in range(1, 11)]
         catalog = [types.SimpleNamespace(id=500, name='weather-reporter', description='')]

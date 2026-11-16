@@ -34,6 +34,7 @@ _MAX_QUERY_TOKENS = 12
 # rows fetched per kind before Python re-scores them; ranking happens in SQL first, so this
 # only needs to cover the top of the list plus what the nesting check may reject
 _CANDIDATE_POOL = 50
+_NOT_NAME_CHARS = re.compile(r"[^a-z0-9_-]+")
 
 
 def _score_item(query_tokens: set, name: str, description: str, extra: str = "") -> int:
@@ -65,17 +66,23 @@ def _ranked(query, query_tokens: set, *columns, limit: int = _CANDIDATE_POOL):
     return query.order_by(_relevance(query_tokens, *columns).desc()).limit(limit).all()
 
 
+def _as_words(text: str) -> str:
+    """The text lowercased, split on anything a skill name cannot hold and padded, so names match whole words."""
+    return f" {_NOT_NAME_CHARS.sub(' ', text.lower())} "
+
+
 def _ranked_named_first(query, user_description: str, query_tokens: set, name_column, *columns, limit: int):
     """Rows whose full name appears in the user's text first, then the best token matches."""
     from sqlalchemy import case, func, literal  # noqa: PLC0415
 
-    named = case((func.strpos(literal(user_description.lower()), func.lower(name_column)) > 0, 1), else_=0)
+    padded_name = func.concat(" ", func.lower(name_column), " ")
+    named = case((func.strpos(literal(_as_words(user_description)), padded_name) > 0, 1), else_=0)
     return query.order_by(named.desc(), _relevance(query_tokens, name_column, *columns).desc()).limit(limit).all()
 
 
 def _is_named_in(item: dict, text: str) -> bool:
     name = (item.get("name") or "").lower()
-    return bool(name) and name in text.lower()
+    return bool(name) and f" {name} " in _as_words(text)
 
 
 def _named_first(items: list, text: str) -> list:
