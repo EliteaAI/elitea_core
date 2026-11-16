@@ -590,6 +590,7 @@ def _walk_sub_agent_tree_in_session(
     start_depth: int = 1,
     enforce_constraints: bool = True,
     root_version=None,
+    cache: Optional[Dict[int, object]] = None,
 ) -> Tuple[int, List[_SubAgentWalkNode]]:
     """Load one nesting tree with canonical tier, cycle, and backstop semantics.
 
@@ -598,8 +599,14 @@ def _walk_sub_agent_tree_in_session(
 
     ``enforce_constraints=False`` is the advisory tier-calculation mode: malformed, missing,
     cyclic, or over-backstop branches are ignored rather than making a detail response fail.
+
+    ``cache`` lets several walks share one version load cache (a list of agents that reuse the same
+    sub-agents loads each of them once); it is created per walk when omitted.
     """
-    cache: Dict[int, object] = {version_id: root_version} if root_version is not None else {}
+    if cache is None:
+        cache = {}
+    if root_version is not None:
+        cache.setdefault(version_id, root_version)
     root = _load_version_with_tools(session, version_id, cache)
     if root is None:
         raise ValueError(f"Version {version_id} not found in project {project_id}")
@@ -815,6 +822,7 @@ def compute_agent_subtree_tiers(
     session=None,
     max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
     root_version=None,
+    cache: Optional[Dict[int, object]] = None,
 ) -> int:
     """Return the AGENT-only nesting depth of a version's subtree.
 
@@ -839,6 +847,7 @@ def compute_agent_subtree_tiers(
                 session=project_session,
                 max_depth=max_depth,
                 root_version=root_version,
+                cache=cache,
             )
 
     root_tiers, walked = _walk_sub_agent_tree_in_session(
@@ -849,6 +858,7 @@ def compute_agent_subtree_tiers(
         start_depth=1,
         enforce_constraints=False,
         root_version=root_version,
+        cache=cache,
     )
 
     def _deepest(nodes: List[_SubAgentWalkNode], current: int) -> int:
@@ -876,6 +886,87 @@ def get_agent_nesting_metadata(
         ),
         'max_agent_nesting_tiers': MAX_AGENT_NESTING_TIERS,
     }
+
+
+# Largest page served with `include_nesting_tiers` (the pickers ask for 20)
+MAX_NESTING_TIERS_PAGE_SIZE = 50
+
+
+def cap_nesting_tiers_page_size(limit: Optional[int]) -> int:
+    """Page size for a list that also measures nesting depth (each row costs a tree walk).
+
+    The list code treats a falsy limit as "no limit", so 0 must not pass through; a negative one
+    is not a page size either. Both land on the cap, as does a missing value.
+
+    Note: the ``ids`` filter in ``list_applications_api`` raises the limit to the number of ids it
+    was given, after this cap. That is deliberate (folder contents ask for exactly their ids) and
+    bounded, since ``ids`` takes at most 100 of them.
+    """
+    if not limit or limit < 0:
+        return MAX_NESTING_TIERS_PAGE_SIZE
+    return min(limit, MAX_NESTING_TIERS_PAGE_SIZE)
+
+
+def _default_version_id(application) -> Optional[int]:
+    """The version the add flow binds: meta.default_version_id, else the 'base' version."""
+    versions = list(getattr(application, 'versions', None) or [])
+    default_version_id = (application.meta or {}).get('default_version_id')
+    default_version = next((v for v in versions if v.id == default_version_id), None) or next(
+        (v for v in versions if v.name == 'base'), None
+    )
+    return default_version.id if default_version is not None else None
+
+
+def fill_list_agent_nesting_tiers(project_id: int, applications, session) -> None:
+    """Set the nesting contribution of each listed application's default version, in place.
+
+    The add flow binds an agent's DEFAULT version (default_version_id, else 'base'), so that is
+    the version measured. Query cost does not grow with the number of rows: the default versions
+    (with their tools) load in ONE query, and every walk shares one version cache, so a sub-agent
+    reused by several rows is loaded once.
+
+    Advisory like the detail response: an application whose depth cannot be computed keeps
+    ``None`` and the UI falls back to the backend check on add. After a database error the
+    session is rolled back (it would otherwise stay in a failed transaction and fail every
+    later row the same way) and the cache is dropped, as rollback expires what it holds.
+    """
+    version_ids = {vid for vid in map(_default_version_id, applications) if vid is not None}
+    if not version_ids:
+        return
+
+    cache: Dict[int, object] = {}
+
+    def _reset_after_error(err: Exception, what: str) -> None:
+        log.warning(f"Could not compute agent_subtree_tiers for {what}: {err}")
+        try:
+            session.rollback()
+        except Exception as rollback_err:  # pylint: disable=broad-except
+            log.warning(f"Rollback after agent_subtree_tiers failure also failed: {rollback_err}")
+        cache.clear()
+
+    try:
+        for version in (
+            session.query(ApplicationVersion)
+            .filter(ApplicationVersion.id.in_(version_ids))
+            .options(selectinload(ApplicationVersion.tools))
+            .all()
+        ):
+            cache[version.id] = version
+    except Exception as err:  # pylint: disable=broad-except
+        _reset_after_error(err, 'the listed default versions')
+        return
+
+    for application in applications:
+        version_id = _default_version_id(application)
+        if version_id is None:
+            continue
+        try:
+            application.agent_subtree_tiers = compute_agent_subtree_tiers(
+                project_id, version_id, session=session, cache=cache
+            )
+            application.max_agent_nesting_tiers = MAX_AGENT_NESTING_TIERS
+        except Exception as err:  # pylint: disable=broad-except
+            _reset_after_error(err, f'application {application.id}')
 
 
 # ---------------------------------------------------------------------------
