@@ -25,6 +25,7 @@ from ...utils.conversation_starters_utils import (
     limit_error_response,
 )
 from ...utils.application_utils import list_applications_api
+from ...utils.publish_utils import fill_list_agent_nesting_tiers
 from ...utils.utils import get_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -125,6 +126,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "If true, return only agents/pipelines liked by the current user."},
             {"name": "ids", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Comma-separated list of application IDs to filter by. When provided, returns only applications with these IDs (max 100). Used for folder contents."},
+            {"name": "include_nesting_tiers", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
+             "description": "If true, each row carries agent_subtree_tiers (nesting depth of its default version) and max_agent_nesting_tiers. Costs extra queries per row."},
         ],
         available_to_users=True,
     )
@@ -167,6 +170,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         )
         try:
             parsed = list_model(applications=some_result['applications'])
+
+            # Opt-in: walking each default version's sub-agent tree costs queries per row, so only
+            # the add-agent pickers ask for it
+            if str(request.args.get('include_nesting_tiers', '')).lower() in ('1', 'true'):
+                with db.get_session(project_id) as tiers_session:
+                    fill_list_agent_nesting_tiers(project_id, parsed.applications, session=tiers_session)
 
             # Enrich with folder info (bulk query) - non-blocking
             try:

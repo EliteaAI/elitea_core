@@ -570,3 +570,63 @@ class TestCollectReachableVersionIds:
         registry = {1: FakeVersion(1, tools=[])}
         reachable = self._reachable_vids(pu, registry, 1)
         assert reachable == set()
+
+
+class _FakeListApp:
+    """The slice of a listed application the nesting-tier fill reads and writes."""
+
+    def __init__(self, app_id, versions, meta=None):
+        self.id = app_id
+        self.versions = versions
+        self.meta = meta or {}
+        self.agent_subtree_tiers = None
+        self.max_agent_nesting_tiers = None
+
+
+class _ListVersion:
+    def __init__(self, ver_id, name):
+        self.id = ver_id
+        self.name = name
+
+
+class TestFillListAgentNestingTiers:
+    """List rows carry the default version's depth so the picker can disable too-deep agents."""
+
+    @staticmethod
+    def _registry():
+        return {
+            # 10: leaf, 20: container of leaves, 30: three-tier chain (30 -> 20 -> 10)
+            10: FakeVersion(10, tools=[]),
+            20: FakeVersion(20, tools=[FakeTool(1, 10)]),
+            30: FakeVersion(30, tools=[FakeTool(2, 20)]),
+        }
+
+    def test_measures_the_default_version(self, pu):
+        apps = [
+            _FakeListApp(
+                2, [_ListVersion(20, 'base'), _ListVersion(30, 'v2')], meta={'default_version_id': 30}
+            ),
+        ]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers == 3
+        assert apps[0].max_agent_nesting_tiers == pu.MAX_AGENT_NESTING_TIERS
+
+    def test_falls_back_to_base_without_a_default(self, pu):
+        apps = [_FakeListApp(2, [_ListVersion(30, 'v2'), _ListVersion(20, 'base')])]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers == 2
+
+    def test_leaves_the_fields_empty_when_there_is_no_version_to_measure(self, pu):
+        apps = [_FakeListApp(2, [])]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers is None
+        assert apps[0].max_agent_nesting_tiers is None
+
+    def test_one_bad_row_does_not_fail_the_list(self, pu):
+        apps = [
+            _FakeListApp(1, [_ListVersion(999, 'base')]),  # version missing from the registry
+            _FakeListApp(2, [_ListVersion(10, 'base')]),
+        ]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers is None
+        assert apps[1].agent_subtree_tiers == 1

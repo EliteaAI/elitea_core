@@ -878,6 +878,32 @@ def get_agent_nesting_metadata(
     }
 
 
+def fill_list_agent_nesting_tiers(project_id: int, applications, session=None) -> None:
+    """Set the nesting contribution of each listed application's default version, in place.
+
+    The add flow binds an agent's DEFAULT version (default_version_id, else 'base'), so that is
+    the version measured. Advisory like the detail response: an application whose depth cannot be
+    computed keeps ``None`` and the UI falls back to the backend check on add.
+    """
+    for application in applications:
+        versions = list(getattr(application, 'versions', None) or [])
+        default_version_id = (application.meta or {}).get('default_version_id')
+        default_version = next((v for v in versions if v.id == default_version_id), None) or next(
+            (v for v in versions if v.name == 'base'), None
+        )
+        if default_version is None:
+            continue
+        try:
+            application.agent_subtree_tiers = compute_agent_subtree_tiers(
+                project_id, default_version.id, session=session
+            )
+            application.max_agent_nesting_tiers = MAX_AGENT_NESTING_TIERS
+        except Exception as depth_err:  # never fail a list over an advisory field
+            log.warning(
+                f"Could not compute agent_subtree_tiers for application {application.id}: {depth_err}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Snapshot creation
 # ---------------------------------------------------------------------------

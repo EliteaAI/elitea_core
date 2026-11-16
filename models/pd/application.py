@@ -163,6 +163,10 @@ class ApplicationListModel(BaseModel):
     agent_type: Optional[AgentTypes] = None
     has_interrupt: bool = False
     has_swarm: bool = False
+    # Nesting depth of the default version; only filled when the list is asked for it
+    # (`include_nesting_tiers`), so the UI can disable agents that are too deep to add.
+    agent_subtree_tiers: Optional[int] = None
+    max_agent_nesting_tiers: Optional[int] = None
     is_pinned: bool = False
     folder_id: Optional[int] = None
     folder_name: Optional[str] = None
