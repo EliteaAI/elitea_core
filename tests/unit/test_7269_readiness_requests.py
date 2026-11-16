@@ -713,7 +713,7 @@ def test_the_platform_settings_say_governance_is_enforced_only_while_it_is(ns, m
     monkeypatch.setattr(ns.tools, "rpc_tools", types.SimpleNamespace(), raising=False)
     settings = load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / "platform_settings.py",
                                       f"{PKG}.api.v2.platform_settings")
-    monkeypatch.setattr(settings, "_usage_mode_settings", lambda: (None, True))
+    monkeypatch.setattr(settings, "_usage_mode_settings", lambda: (None, True, False))
     monkeypatch.setattr(settings, "_tool_spend_availability", lambda: {})
     answers = {}
     for governed in (False, True):
