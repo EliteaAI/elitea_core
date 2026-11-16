@@ -15,11 +15,10 @@ from typing import List, Optional
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from sqlalchemy import func, or_, text
-from sqlalchemy.orm import selectinload
 
 from tools import context, db  # pylint: disable=E0401
 
-from ..models.all import Application
+from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.eval_auto import (
     EvalAutoConfig, EvalAutoItem, EvalAutoItemState, EvalAutoJob, EvalAutoTrigger,
@@ -57,6 +56,9 @@ MAX_ATTEMPTS = 5
 # A claimed item with no run after this long lost its drain (a restart, a failed commit); it is
 # queued again so it neither holds a slot nor keeps its job open forever.
 STALE_CLAIM = timedelta(minutes=15)
+# A launched run the pool never started (the process died between accept and start) stays
+# ``created``, which the run reaper does not look at; past this it is closed as unstarted.
+UNSTARTED_RUN = timedelta(minutes=30)
 RUN_PERMISSION = 'models.applications.evaluation.run.create'
 # Serialises opening a job: a "Run now" racing the scheduled tick, or two pods, must not queue twice.
 _JOB_LOCK = text("SELECT pg_advisory_xact_lock(hashtext('eval-auto-job'))")
@@ -332,8 +334,7 @@ def _open_job(session) -> Optional[EvalAutoJob]:
 def _last_scored(session, project_id: int) -> dict:
     """``application_id -> {application_version_id, finished_at}`` of each agent's latest verdict.
 
-    Not Evaluated items are left out: whatever stopped them (budget, owner, sign-in) is retried
-    on the next tick instead of being carried forward.
+    Not Evaluated items are left out: they never count as a result to carry forward.
     """
     rows = session.query(
         EvalAutoItem.application_id, EvalAutoItem.application_version_id, EvalAutoItem.finished_at,
@@ -347,45 +348,64 @@ def _last_scored(session, project_id: int) -> dict:
                                  'finished_at': row.finished_at} for row in rows}
 
 
-def _candidates(project_id: int, last: dict, now: datetime, settings: dict) -> List[dict]:
-    """The project's agents due for evaluation, with why. Pipelines are not evaluated."""
+def _last_attempt(session, project_id: int) -> dict:
+    """``application_id -> {application_version_id, finished_at, status, reason_code}`` of each
+    agent's latest finished item, Not Evaluated included: what the back-off is decided on."""
+    rows = session.query(
+        EvalAutoItem.application_id, EvalAutoItem.application_version_id, EvalAutoItem.finished_at,
+        EvalAutoItem.status, EvalAutoItem.reason_code,
+    ).filter(
+        EvalAutoItem.project_id == project_id,
+        EvalAutoItem.state == EvalAutoItemState.done,
+    ).distinct(EvalAutoItem.application_id).order_by(
+        EvalAutoItem.application_id, EvalAutoItem.finished_at.desc()).all()
+    return {row.application_id: {'application_version_id': row.application_version_id,
+                                 'finished_at': row.finished_at, 'status': row.status,
+                                 'reason_code': row.reason_code} for row in rows}
+
+
+def _default_versions(session) -> List[tuple]:
+    """``(application, version)`` for each agent, loading only the versions that can be default."""
+    applications = session.query(Application.id, Application.name, Application.meta).all()
+    default_ids = {(row.meta or {}).get('default_version_id') for row in applications} - {None}
+    by_application = {}
+    for version in session.query(
+            ApplicationVersion.id, ApplicationVersion.application_id, ApplicationVersion.name,
+            ApplicationVersion.author_id, ApplicationVersion.agent_type,
+    ).filter(or_(ApplicationVersion.id.in_(sorted(default_ids)), ApplicationVersion.name == 'base')):
+        by_application.setdefault(version.application_id, []).append(version._asdict())
+    pairs = []
+    for application in applications:
+        version = rules.pick_default_version((application.meta or {}).get('default_version_id'),
+                                             by_application.get(application.id, []))
+        if version is not None:
+            pairs.append((application, version))
+    return pairs
+
+
+def _candidates(project_id: int, last: dict, attempts: dict, now: datetime, settings: dict) -> List[dict]:
+    """The project's agents with whether each is due, and why. Pipelines are not evaluated."""
     due = []
     with db.get_session(project_id) as session:
-        for application in session.query(Application).options(selectinload(Application.versions)):
-            version = application.get_default_version()
-            if version is None or version.agent_type == AgentTypes.pipeline.value:
+        for application, version in _default_versions(session):
+            if version['agent_type'] == AgentTypes.pipeline.value:
                 continue
             previous = last.get(application.id)
-            queue, why = rules.needs_evaluation(version.id, previous, now, settings['reevaluate_after_days'])
+            queue, why = rules.needs_evaluation(version['id'], previous, now, settings['reevaluate_after_days'],
+                                                last_attempt=attempts.get(application.id))
             due.append({
                 'project_id': project_id, 'application_id': application.id,
-                'application_version_id': version.id, 'agent_name': application.name,
+                'application_version_id': version['id'], 'agent_name': application.name,
                 # ``Application.owner_id`` holds the project id; the user the run acts as is the
                 # default version's author, as with scheduled index runs.
-                'owner_id': version.author_id, 'queue': queue, 'why': why,
+                'owner_id': version['author_id'], 'queue': queue, 'why': why,
                 'last_finished_at': (previous or {}).get('finished_at'),
             })
     return due
 
 
-def tick(trigger: str = EvalAutoTrigger.scheduled, started_by: Optional[int] = None) -> dict:
-    """Open a job and queue the agents due for evaluation. A job already open is left to finish."""
-    settings = get_config()
-    if is_maintenance_active():
-        return {'started': False, 'reason': 'maintenance'}
-    if trigger == EvalAutoTrigger.scheduled and not rules.in_window(settings['window'], datetime.now()):
-        return {'started': False, 'reason': 'outside_window'}
-
-    with db.with_project_schema_session(None) as session:
-        session.execute(_JOB_LOCK)
-        running = _open_job(session)
-        if running is not None:
-            return {'started': False, 'reason': 'job_running', 'job_id': running.id}
-        job = EvalAutoJob(trigger=trigger, started_by=started_by, settings=settings, counters={})
-        session.add(job)
-        session.commit()
-        job_id = job.id
-
+def _enumerate(settings: dict) -> tuple:
+    """Every in-scope agent with its due decision, and the projects that could not be read."""
     now = _now()
     candidates, failed_projects = [], []
     for project in context.rpc_manager.timeout(120).project_list(filter_={'create_success': True}):
@@ -394,38 +414,68 @@ def tick(trigger: str = EvalAutoTrigger.scheduled, started_by: Optional[int] = N
         project_id = int(project['id'])
         try:
             with db.with_project_schema_session(None) as session:
-                last = _last_scored(session, project_id)
-            candidates.extend(_candidates(project_id, last, now, settings))
+                last, attempts = _last_scored(session, project_id), _last_attempt(session, project_id)
+            candidates.extend(_candidates(project_id, last, attempts, now, settings))
         except Exception:  # pylint: disable=broad-except
             # One unreadable tenant schema must not stop the others from being evaluated.
             log.exception('eval auto tick: project %s could not be enumerated', project_id)
             failed_projects.append(project_id)
+    return candidates, failed_projects
 
+
+def tick(trigger: str = EvalAutoTrigger.scheduled, started_by: Optional[int] = None) -> dict:
+    """Open a job and queue the agents due for evaluation. A job already open is left to finish."""
+    settings = get_config()
+    if is_maintenance_active():
+        return {'started': False, 'reason': 'maintenance'}
+    if trigger == EvalAutoTrigger.scheduled and not rules.in_window(settings['window'], _now()):
+        return {'started': False, 'reason': 'outside_window'}
+
+    with db.with_project_schema_session(None) as session:
+        running = _open_job(session)
+    if running is not None:
+        return {'started': False, 'reason': 'job_running', 'job_id': running.id}
+
+    # Enumerated before the job exists: a drain closes any open job with nothing pending, so a job
+    # committed ahead of its items would be closed under it, and a failed listing would leave a
+    # job behind.
+    candidates, failed_projects = _enumerate(settings)
     due = rules.oldest_first([item for item in candidates if item['queue']])
     queued, deferred = due[:settings['max_agents_per_job']], due[settings['max_agents_per_job']:]
+    blocked = sum(1 for item in candidates if item['why'] == 'blocked')
+
     with db.with_project_schema_session(None) as session:
+        # The job and its items are one commit under the lock, so a second tick that enumerated at
+        # the same time finds this job and stops.
+        session.execute(_JOB_LOCK)
+        running = _open_job(session)
+        if running is not None:
+            return {'started': False, 'reason': 'job_running', 'job_id': running.id}
+        job = EvalAutoJob(trigger=trigger, started_by=started_by, settings=settings, counters={
+            'agents': len(candidates), 'queued': len(queued), 'deferred': len(deferred),
+            'carried_forward': len(candidates) - len(due) - blocked, 'blocked': blocked,
+            'failed_projects': failed_projects,
+        })
+        if not queued:
+            job.finished_at = _now()
+        session.add(job)
+        session.flush()
         for item in queued:
             session.add(EvalAutoItem(
-                job_id=job_id, project_id=item['project_id'], application_id=item['application_id'],
+                job_id=job.id, project_id=item['project_id'], application_id=item['application_id'],
                 application_version_id=item['application_version_id'], agent_name=item['agent_name'],
                 owner_id=item['owner_id'], state=EvalAutoItemState.pending, trigger=trigger,
                 meta={'why': item['why']},
             ))
-        job = session.query(EvalAutoJob).get(job_id)
-        job.counters = {
-            'agents': len(candidates), 'queued': len(queued), 'deferred': len(deferred),
-            'carried_forward': len(candidates) - len(due), 'failed_projects': failed_projects,
-        }
-        if not queued:
-            job.finished_at = _now()
         session.commit()
-        counters = dict(job.counters)
+        job_id, counters = job.id, dict(job.counters)
     log.info('eval auto tick: job %s %s', job_id, counters)
     return {'started': True, 'job_id': job_id, 'counters': counters}
 
 
 def run_now(user_id: Optional[int] = None) -> dict:
-    """A manual job: the same enumeration, outside the window and whether or not it is enabled."""
+    """A manual job: the same enumeration, whether or not it is enabled. Its items launch outside
+    the window too (see ``drain``)."""
     return tick(trigger=EvalAutoTrigger.manual, started_by=user_id)
 
 
@@ -447,6 +497,10 @@ def _settle(item: EvalAutoItem, settings: dict) -> bool:
         run = session.query(EvalRun).filter(EvalRun.id == item.eval_run_id).first()
         if run is None:
             _finish(item, rules.NOT_EVALUATED, rules.OTHER, 'The evaluation run was deleted')
+            return True
+        if run.status == EvalRunStatus.created and item.started_at and item.started_at < _now() - UNSTARTED_RUN:
+            mark_run_unstarted(item.project_id, run.id, 'The evaluation run was never started', session=session)
+            _finish(item, rules.NOT_EVALUATED, rules.OTHER, 'The evaluation run was never started')
             return True
         if run.status not in _FINAL_RUN_STATUSES:
             return False
@@ -639,17 +693,21 @@ def _launch(item: EvalAutoItem, settings: dict, eval_task_node) -> str:
     return 'launched'
 
 
-def _claim(settings: dict) -> List[int]:
-    """Move up to the free run slots of pending items to running, without two drains sharing one."""
+def _claim(settings: dict, manual_only: bool = False) -> List[int]:
+    """Move up to the free run slots of pending items to running, without two drains sharing one.
+
+    ``manual_only`` claims only the items of a "Run now" job (outside the window).
+    """
     with db.with_project_schema_session(None) as session:
         running = session.query(func.count(EvalAutoItem.id)).filter(
             EvalAutoItem.state == EvalAutoItemState.running).scalar() or 0
         slots = settings['max_concurrent_runs'] - running
         if slots <= 0:
             return []
-        rows = session.query(EvalAutoItem).filter(
-            EvalAutoItem.state == EvalAutoItemState.pending
-        ).order_by(EvalAutoItem.created_at.asc(), EvalAutoItem.id.asc()
+        pending = session.query(EvalAutoItem).filter(EvalAutoItem.state == EvalAutoItemState.pending)
+        if manual_only:
+            pending = pending.filter(EvalAutoItem.trigger == EvalAutoTrigger.manual)
+        rows = pending.order_by(EvalAutoItem.created_at.asc(), EvalAutoItem.id.asc()
                    ).with_for_update(skip_locked=True).limit(slots).all()
         for row in rows:
             row.state = EvalAutoItemState.running
@@ -731,9 +789,12 @@ def drain(eval_task_node) -> dict:
         session.commit()
 
     outcomes = []
-    # Settling always happens; new runs start only when one may.
-    if not is_maintenance_active() and rules.in_window(settings['window'], datetime.now()):
-        outcomes = [_process_claimed(item_id, settings, eval_task_node) for item_id in _claim(settings)]
+    # Settling always happens; new runs start only when one may. An admin's "Run now" is not held
+    # to the window, scheduled items are.
+    if not is_maintenance_active():
+        manual_only = not rules.in_window(settings['window'], _now())
+        outcomes = [_process_claimed(item_id, settings, eval_task_node)
+                    for item_id in _claim(settings, manual_only=manual_only)]
 
     with db.with_project_schema_session(None) as session:
         closed = _close_finished_jobs(session)

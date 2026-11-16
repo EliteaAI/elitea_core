@@ -38,6 +38,9 @@ NO_DATASET = 'NO_DATASET'
 OTHER = 'OTHER'
 REASON_CODES = (HITL_REQUIRED, OAUTH_REQUIRED, AGENT_BROKEN, TIMEOUT, OWNER_UNAVAILABLE,
                 BUDGET_BLOCKED, NO_DATASET, OTHER)
+# Not Evaluated for a reason that the next job would only meet again: retried when the default
+# version changes or the result is stale, not on every job, so such agents do not fill the cap.
+DETERMINISTIC_REASONS = (HITL_REQUIRED, OAUTH_REQUIRED, NO_DATASET, AGENT_BROKEN)
 
 PASSED = 'passed'
 WARNING = 'warning'
@@ -58,7 +61,7 @@ DEFAULT_SETTINGS = {
     'coverage_threshold': 80.0,
     'classify_threshold': 0.5,
     'reevaluate_after_days': 28,
-    # {'start': 'HH:MM', 'end': 'HH:MM'} in server time, or None for "any time"
+    # {'start': 'HH:MM', 'end': 'HH:MM'} in UTC, or None for "any time"
     'window': None,
 }
 
@@ -234,12 +237,25 @@ def project_in_scope(project: dict, settings: dict) -> bool:
 
 
 def needs_evaluation(version_id: Optional[int], last: Optional[dict], now: datetime,
-                     reevaluate_after_days: int) -> Tuple[bool, str]:
-    """Whether an agent is queued again, and why: ``new`` | ``changed`` | ``stale`` | ``fresh``.
+                     reevaluate_after_days: int, last_attempt: Optional[dict] = None) -> Tuple[bool, str]:
+    """Whether an agent is queued again, and why.
 
-    ``last`` is the agent's latest finished item (``{'application_version_id', 'finished_at'}``).
+    ``new`` | ``changed`` | ``stale`` | ``retry`` are queued; ``fresh`` and ``blocked`` are not.
+
+    ``last`` is the agent's latest scored item (``{'application_version_id', 'finished_at'}``).
     An unchanged agent with a recent result keeps it ("carried forward") and costs nothing.
+    ``last_attempt`` is its latest finished item of any status (adds ``status``, ``reason_code``).
+    When that is a newer Not Evaluated, a deterministic reason waits for a new version or for the
+    staleness age (``blocked``); any other reason is tried again (``retry``).
     """
+    if _not_evaluated_since(last_attempt, last):
+        if last_attempt.get('application_version_id') != version_id:
+            return True, 'changed'
+        if last_attempt.get('reason_code') not in DETERMINISTIC_REASONS:
+            return True, 'retry'
+        if now - last_attempt['finished_at'] < timedelta(days=reevaluate_after_days):
+            return False, 'blocked'
+        return True, 'stale'
     if not last or last.get('finished_at') is None:
         return True, 'new'
     if last.get('application_version_id') != version_id:
@@ -249,10 +265,31 @@ def needs_evaluation(version_id: Optional[int], last: Optional[dict], now: datet
     return False, 'fresh'
 
 
+def _not_evaluated_since(last_attempt: Optional[dict], last: Optional[dict]) -> bool:
+    if not last_attempt or last_attempt.get('status') != NOT_EVALUATED or last_attempt.get('finished_at') is None:
+        return False
+    return not last or last.get('finished_at') is None or last_attempt['finished_at'] > last['finished_at']
+
+
+# Never-attempted agents first, retries of a passing problem last: a fleet of agents that keep
+# ending Not Evaluated must not crowd out the ones whose result is getting old.
+_QUEUE_RANK = {'new': 0, 'retry': 2}
+
+
 def oldest_first(candidates: List[dict]) -> List[dict]:
-    """Never-evaluated agents first, then by the age of their last result."""
-    return sorted(candidates, key=lambda item: (item.get('last_finished_at') is not None,
+    """New agents first, then changed and stale ones by the age of their last result, then retries."""
+    return sorted(candidates, key=lambda item: (_QUEUE_RANK.get(item.get('why'), 1),
+                                                item.get('last_finished_at') is not None,
                                                 item.get('last_finished_at') or datetime.min))
+
+
+def pick_default_version(default_version_id: Optional[int], versions: List[dict]) -> Optional[dict]:
+    """The version ``Application.get_default_version`` would return, from ``{'id', 'name'}`` dicts."""
+    if default_version_id:
+        for version in versions:
+            if version['id'] == default_version_id:
+                return version
+    return next((version for version in versions if version['name'] == 'base'), None)
 
 
 def stable_case_sample(case_ids: Iterable[int], cap: int, salt: str = '') -> List[int]:

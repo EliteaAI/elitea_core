@@ -112,7 +112,7 @@ def test_the_run_acts_as_the_version_author_not_the_application_owner():
     owner = next(value for node in ast.walk(candidates) if isinstance(node, ast.Dict)
                  for key, value in zip(node.keys, node.values)
                  if isinstance(key, ast.Constant) and key.value == "owner_id")
-    assert ast.unparse(owner) == "version.author_id"
+    assert ast.unparse(owner) == "version['author_id']"
 
 
 def _service_function(name):
@@ -132,7 +132,45 @@ def test_a_drain_that_died_after_claiming_does_not_hold_the_job_open():
 
 def test_opening_a_job_is_serialised():
     tick = _service_function("tick")
-    assert tick.index("session.execute(_JOB_LOCK)") < tick.index("_open_job(session)")
+    lock = tick.index("session.execute(_JOB_LOCK)")
+    assert lock < tick.rindex("_open_job(session)") < tick.index("EvalAutoJob(")
+
+
+def test_a_job_is_committed_with_its_items():
+    # A drain closes any open job with nothing pending; a job committed before its items, or one
+    # left behind by a failed listing, would be closed early or never get items.
+    tick = _service_function("tick")
+    assert tick.index("_enumerate(settings)") < tick.index("session.execute(_JOB_LOCK)")
+    after_job = tick[tick.index("EvalAutoJob("):]
+    assert after_job.count("session.commit()") == 1
+    assert after_job.index("session.add(EvalAutoItem(") < after_job.index("session.commit()")
+    assert "project_list" not in tick
+
+
+def test_run_now_items_launch_outside_the_window():
+    drain = _service_function("drain")
+    assert "manual_only = not rules.in_window(" in drain
+    assert "_claim(settings, manual_only=manual_only)" in drain
+    assert "EvalAutoItem.trigger == EvalAutoTrigger.manual" in _service_function("_claim")
+
+
+def test_a_run_the_pool_never_started_is_settled():
+    # The run reaper only closes ``running`` runs, so a ``created`` one would hold its slot forever.
+    settle = _service_function("_settle")
+    assert "run.status == EvalRunStatus.created" in settle and "UNSTARTED_RUN" in settle
+    assert settle.index("mark_run_unstarted(") < settle.index("_FINAL_RUN_STATUSES")
+
+
+def test_only_the_versions_that_can_be_default_are_loaded():
+    source = (PLUGIN_ROOT / "utils" / "eval_auto_service.py").read_text()
+    assert "selectinload" not in source
+    assert "ApplicationVersion.name == 'base'" in _service_function("_default_versions")
+
+
+def test_the_back_off_reads_not_evaluated_attempts():
+    attempt = _service_function("_last_attempt")
+    assert "EvalAutoItem.status.in_" not in attempt and "EvalAutoItem.reason_code" in attempt
+    assert "last_attempt=attempts.get(application.id)" in _service_function("_candidates")
 
 
 def test_a_refused_start_closes_the_run_it_created():

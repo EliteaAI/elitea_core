@@ -104,10 +104,80 @@ def test_needs_evaluation(rules):
 
 
 def test_oldest_first_puts_never_evaluated_first(rules):
-    items = [{'id': 1, 'last_finished_at': datetime(2026, 11, 1)},
-             {'id': 2, 'last_finished_at': None},
-             {'id': 3, 'last_finished_at': datetime(2026, 10, 1)}]
+    items = [{'id': 1, 'why': 'stale', 'last_finished_at': datetime(2026, 11, 1)},
+             {'id': 2, 'why': 'new', 'last_finished_at': None},
+             {'id': 3, 'why': 'stale', 'last_finished_at': datetime(2026, 10, 1)}]
     assert [item['id'] for item in rules.oldest_first(items)] == [2, 3, 1]
+
+
+def _not_evaluated(version_id, reason, finished_at):
+    return {'application_version_id': version_id, 'finished_at': finished_at,
+            'status': 'not_evaluated', 'reason_code': reason}
+
+
+@pytest.mark.parametrize('reason', ['HITL_REQUIRED', 'OAUTH_REQUIRED', 'NO_DATASET', 'AGENT_BROKEN'])
+def test_a_deterministic_not_evaluated_waits_for_a_change_or_the_staleness_age(rules, reason):
+    now = datetime(2026, 11, 11)
+    recent = _not_evaluated(5, reason, now - timedelta(days=3))
+    assert rules.needs_evaluation(5, None, now, 28, last_attempt=recent) == (False, 'blocked')
+    assert rules.needs_evaluation(6, None, now, 28, last_attempt=recent) == (True, 'changed')
+    old = _not_evaluated(5, reason, now - timedelta(days=28))
+    assert rules.needs_evaluation(5, None, now, 28, last_attempt=old) == (True, 'stale')
+
+
+@pytest.mark.parametrize('reason', ['BUDGET_BLOCKED', 'OWNER_UNAVAILABLE', 'TIMEOUT', 'OTHER', None])
+def test_a_passing_not_evaluated_is_retried(rules, reason):
+    now = datetime(2026, 11, 11)
+    attempt = _not_evaluated(5, reason, now - timedelta(days=3))
+    assert rules.needs_evaluation(5, None, now, 28, last_attempt=attempt) == (True, 'retry')
+
+
+def test_a_scored_result_newer_than_the_not_evaluated_one_wins(rules):
+    now = datetime(2026, 11, 11)
+    scored = {'application_version_id': 5, 'finished_at': now - timedelta(days=2)}
+    older_attempt = _not_evaluated(5, 'HITL_REQUIRED', now - timedelta(days=10))
+    assert rules.needs_evaluation(5, scored, now, 28, last_attempt=older_attempt) == (False, 'fresh')
+    # The latest attempt being the scored one itself reads the same.
+    same = {**scored, 'status': rules.PASSED, 'reason_code': None}
+    assert rules.needs_evaluation(5, scored, now, 28, last_attempt=same) == (False, 'fresh')
+
+
+def test_unevaluable_agents_do_not_starve_the_fleet(rules):
+    # 250 agents that keep ending Not Evaluated and 300 stale ones, with a cap of 200: before the
+    # back-off the 250 read as "new" and took the whole cap every job.
+    now = datetime(2026, 11, 11)
+    candidates = []
+    for index in range(250):
+        reason = 'HITL_REQUIRED' if index % 2 else 'BUDGET_BLOCKED'
+        queue, why = rules.needs_evaluation(1, None, now, 28,
+                                            last_attempt=_not_evaluated(1, reason, now - timedelta(days=7)))
+        candidates.append({'id': f'ne{index}', 'queue': queue, 'why': why, 'last_finished_at': None})
+    for index in range(300):
+        last = {'application_version_id': 1, 'finished_at': now - timedelta(days=30 + index)}
+        queue, why = rules.needs_evaluation(1, last, now, 28)
+        candidates.append({'id': f'ok{index}', 'queue': queue, 'why': why,
+                           'last_finished_at': last['finished_at']})
+    due = rules.oldest_first([item for item in candidates if item['queue']])
+    assert sum(1 for item in candidates if item['why'] == 'blocked') == 125
+    assert len(due) == 425
+    assert all(item['why'] == 'stale' for item in due[:200])
+    assert all(item['why'] == 'retry' for item in due[300:])
+
+
+def test_oldest_first_orders_new_then_aged_then_retries(rules):
+    items = [{'id': 1, 'why': 'retry', 'last_finished_at': None},
+             {'id': 2, 'why': 'changed', 'last_finished_at': datetime(2026, 11, 1)},
+             {'id': 3, 'why': 'new', 'last_finished_at': None},
+             {'id': 4, 'why': 'stale', 'last_finished_at': datetime(2026, 9, 1)}]
+    assert [item['id'] for item in rules.oldest_first(items)] == [3, 4, 2, 1]
+
+
+def test_pick_default_version_matches_get_default_version(rules):
+    versions = [{'id': 1, 'name': 'base'}, {'id': 2, 'name': 'v2'}]
+    assert rules.pick_default_version(2, versions)['id'] == 2
+    assert rules.pick_default_version(9, versions)['id'] == 1
+    assert rules.pick_default_version(None, versions)['id'] == 1
+    assert rules.pick_default_version(None, [{'id': 2, 'name': 'v2'}]) is None
 
 
 def test_stable_case_sample(rules):
