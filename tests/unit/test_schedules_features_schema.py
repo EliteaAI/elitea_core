@@ -29,6 +29,7 @@ CARDS = {
         'index_scheduling_enabled',
         'index_scheduling_cron',
     ],
+    'Agent Evaluation': ['eval_auto_run_enabled', 'eval_auto_run_cron'],
 }
 
 # the Webhooks section has one card with the same title
@@ -53,6 +54,8 @@ MOVED = {
     'schedules_legacy_step_enabled': ('scheduler.schedules.legacy_step_enabled', 'boolean', True, None, None, None),
     'index_scheduling_enabled': ('scheduler.index_scheduling.enabled', 'boolean', True, None, None, None),
     'index_scheduling_cron': ('scheduler.index_scheduling.cron', 'string', '* * * * *', None, None, None),
+    'eval_auto_run_enabled': ('scheduler.eval_auto_run.enabled', 'boolean', False, None, None, None),
+    'eval_auto_run_cron': ('scheduler.eval_auto_run.cron', 'string', '17 2 * * 0', None, None, None),
     'schedules_webhook_max_concurrent_runs': ('scheduler.schedules.webhook_max_concurrent_runs', 'integer', 3, 1, 1000, False),
     'schedules_webhook_max_concurrent_runs_limit': ('scheduler.schedules.webhook_max_concurrent_runs_limit', 'integer', 20, 1, 1000, False),
     'schedules_webhook_project_max_concurrent_runs': ('scheduler.schedules.webhook_project_max_concurrent_runs', 'integer', 10, 1, 1000, False),
@@ -65,6 +68,7 @@ MOVED = {
 CRON_SWITCHES = {
     'pipeline_scheduling_cron': 'pipeline_scheduling_enabled',
     'index_scheduling_cron': 'index_scheduling_enabled',
+    'eval_auto_run_cron': 'eval_auto_run_enabled',
 }
 
 
@@ -77,14 +81,14 @@ def _section_keys(properties, section):
     return [key for key, field in properties.items() if field.get('section') == section]
 
 
-def test_the_schedules_and_webhooks_sections_hold_the_nineteen_scheduler_settings(properties):
+def test_the_schedules_and_webhooks_sections_hold_the_twenty_one_scheduler_settings(properties):
     schedule_keys = _section_keys(properties, 'schedules')
     webhook_keys = _section_keys(properties, 'webhooks')
 
     assert sorted(schedule_keys + webhook_keys) == sorted(MOVED)
-    assert len(schedule_keys) == 15
+    assert len(schedule_keys) == 17
     assert len(webhook_keys) == 4
-    assert len(MOVED) == 19
+    assert len(MOVED) == 21
 
 
 def test_the_webhooks_section_lists_its_four_settings_in_order(properties):
@@ -109,7 +113,7 @@ def test_each_card_lists_its_keys_in_schema_order(properties):
         assert positions == sorted(positions), title
     assert {title: len(keys) for title, keys in CARDS.items()} == {
         'Schedule Settings': 6, 'Agent Schedules': 1, 'Pipeline Schedules': 3,
-        'Index Schedules': 5,
+        'Index Schedules': 5, 'Agent Evaluation': 2,
     }
 
 
