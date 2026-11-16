@@ -47,7 +47,7 @@ WARNING = 'warning'
 FAILED = 'failed'
 NOT_EVALUATED = 'not_evaluated'
 
-# Whether it runs, and when, is the Runtime config's eval_auto_run_enabled and _cron: one switch.
+# Whether it runs, and when, is the Features -> Schedules eval_auto_run_enabled and _cron: one switch.
 DEFAULT_SETTINGS = {
     'project_scope_mode': SCOPE_ALL,
     'project_ids': [],

@@ -1,4 +1,4 @@
-"""Features → Schedules owns these two schedules.
+"""Features → Schedules owns these three schedules.
 
 The elitea_core config is re-pushed onto the `schedule` rows at every boot and
 reconfig, so the Admin Portal's Schedules tab must show them as read-only. The
@@ -74,10 +74,10 @@ def test_every_scheduler_row_is_declared(bindings):
     }
 
 
-def test_both_managed_schedules_name_the_schedules_section(bindings):
+def test_every_managed_schedule_names_the_schedules_section(bindings):
     assert {
         name: binding["section"] for name, binding in bindings.SCHEDULER_CONFIG_BINDINGS.items()
-    } == {"index_scheduling": "schedules", "pipeline_scheduling": "schedules"}
+    } == {"index_scheduling": "schedules", "pipeline_scheduling": "schedules", "eval_auto_run": "schedules"}
 
 
 def test_every_declared_field_exists_in_the_admin_schema(bindings, admin_schema):
@@ -1037,7 +1037,7 @@ def test_a_registration_hands_over_the_bindings_and_logs_nothing(bindings):
     assert logs == []
 
 
-@pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling"])
+@pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling", "eval_auto_run"])
 def test_an_unusable_cron_names_the_field_and_the_fallback(bindings, logged, name):
     others = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
     bindings.build_scheduler_sync_plan({name: {"cron": "9 *"}})
@@ -1048,7 +1048,7 @@ def test_an_unusable_cron_names_the_field_and_the_fallback(bindings, logged, nam
     assert not any(other in line.rendered for other in others)
 
 
-@pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling"])
+@pytest.mark.parametrize("name", ["index_scheduling", "pipeline_scheduling", "eval_auto_run"])
 def test_a_non_boolean_flag_names_the_field_and_the_fallback(bindings, logged, name):
     others = set(bindings.SCHEDULER_CONFIG_BINDINGS) - {name}
     bindings.build_scheduler_sync_plan({name: {"enabled": "false"}})

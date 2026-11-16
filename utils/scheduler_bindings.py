@@ -14,7 +14,7 @@ SCHEDULER_CONFIG_BINDINGS = {
         'fields': ['pipeline_scheduling_enabled', 'pipeline_scheduling_cron'],
     },
     'eval_auto_run': {
-        'section': 'runtime',
+        'section': 'schedules',
         'fields': ['eval_auto_run_enabled', 'eval_auto_run_cron'],
     },
 }
