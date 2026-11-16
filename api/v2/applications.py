@@ -25,14 +25,11 @@ from ...utils.conversation_starters_utils import (
     limit_error_response,
 )
 from ...utils.application_utils import list_applications_api
-from ...utils.publish_utils import fill_list_agent_nesting_tiers
+from ...utils.publish_utils import cap_nesting_tiers_page_size, fill_list_agent_nesting_tiers
 from ...utils.utils import get_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
-
-# Largest page served with `include_nesting_tiers` (the pickers ask for 20)
-MAX_NESTING_TIERS_PAGE_SIZE = 50
 
 
 def get_enabled_agent_internal_tools(personalization) -> list:
@@ -150,8 +147,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         include_nesting_tiers = str(request.args.get('include_nesting_tiers', '')).lower() in ('1', 'true')
         limit = request.args.get("limit", default=10, type=int)
         if include_nesting_tiers:
-            # Each row costs a sub-agent tree walk, so a page of them stays small
-            limit = min(limit, MAX_NESTING_TIERS_PAGE_SIZE)
+            # Each row costs a sub-agent tree walk, so a page of them stays small. A limit of 0 or
+            # below must not mean "no limit" here. The `ids` filter may still raise the page to
+            # the number of ids given (deliberate, at most 100) inside list_applications_api.
+            limit = cap_nesting_tiers_page_size(limit)
         with db.get_session(project_id) as session:
             some_result = list_applications_api(
                 project_id=project_id,

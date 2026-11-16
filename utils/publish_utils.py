@@ -888,6 +888,25 @@ def get_agent_nesting_metadata(
     }
 
 
+# Largest page served with `include_nesting_tiers` (the pickers ask for 20)
+MAX_NESTING_TIERS_PAGE_SIZE = 50
+
+
+def cap_nesting_tiers_page_size(limit: Optional[int]) -> int:
+    """Page size for a list that also measures nesting depth (each row costs a tree walk).
+
+    The list code treats a falsy limit as "no limit", so 0 must not pass through; a negative one
+    is not a page size either. Both land on the cap, as does a missing value.
+
+    Note: the ``ids`` filter in ``list_applications_api`` raises the limit to the number of ids it
+    was given, after this cap. That is deliberate (folder contents ask for exactly their ids) and
+    bounded, since ``ids`` takes at most 100 of them.
+    """
+    if not limit or limit < 0:
+        return MAX_NESTING_TIERS_PAGE_SIZE
+    return min(limit, MAX_NESTING_TIERS_PAGE_SIZE)
+
+
 def _default_version_id(application) -> Optional[int]:
     """The version the add flow binds: meta.default_version_id, else the 'base' version."""
     versions = list(getattr(application, 'versions', None) or [])

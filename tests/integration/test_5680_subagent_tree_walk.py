@@ -707,3 +707,24 @@ class TestFillListAgentNestingTiers:
 
         assert apps[0].agent_subtree_tiers is None
         assert session.rollback_count == 1
+
+
+class TestCapNestingTiersPageSize:
+    """The page size of a list that measures nesting depth can never be unbounded."""
+
+    @pytest.mark.parametrize('limit, expected', [
+        (20, 20),    # the pickers' page size is kept
+        (50, 50),
+        (51, 50),    # above the cap
+        (100000, 50),
+        (1, 1),
+        (0, 50),     # falsy limit means "no limit" downstream, so it lands on the cap
+        (-1, 50),    # not a page size
+        (-100, 50),
+        (None, 50),  # nothing given
+    ])
+    def test_limit_is_bounded(self, pu, limit, expected):
+        assert pu.cap_nesting_tiers_page_size(limit) == expected
+
+    def test_the_cap_is_fifty(self, pu):
+        assert pu.MAX_NESTING_TIERS_PAGE_SIZE == 50
