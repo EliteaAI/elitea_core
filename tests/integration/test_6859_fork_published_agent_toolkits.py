@@ -425,3 +425,231 @@ def test_toolkits_planted_in_editable_meta_are_not_forked(modules, monkeypatch, 
     assert payload['toolkits'] == []
     assert version['tools'] == []
     assert modules.export_import.PUBLISHED_TOOLKITS_META_KEY not in version['meta']
+
+
+# ---------------------------------------------------------------------------
+# Issue #7062 — pipelines attached to a published agent are carried by a fork.
+# Publishing keeps a credential-free graph of the attached pipelines (and everything they use) in the
+# version meta; only a fork export of a published or embedded version in the public project restores it.
+# ---------------------------------------------------------------------------
+
+JIRA_TOOL = {
+    'id': 21, 'type': 'jira', 'name': 'Team Jira', 'author_id': AUTHOR_ID,
+    'created_at': datetime(2026, 10, 1, 9, 30),
+    'settings': {'base_url': 'https://jira.example.com', 'api_key': 'jira_must_not_leak',
+                 'selected_tools': ['search']},
+    'meta': {'parent_entity_id': 4, 'parent_project_id': 9},
+}
+
+
+def _link(app_id, version_id, name):
+    return {
+        'id': 900 + version_id, 'type': 'application', 'name': name, 'author_id': AUTHOR_ID,
+        'created_at': datetime(2026, 10, 1, 9, 30),
+        'settings': {'application_id': app_id, 'application_version_id': version_id, 'variables': []},
+        'meta': {},
+    }
+
+
+def _version(version_id, app_id, name, agent_type, tools, **extra):
+    data = {
+        'id': version_id, 'name': 'base', 'instructions': f'{name} instructions', 'agent_type': agent_type,
+        'llm_settings': {'model_name': 'gpt-4o'}, 'variables': [{'name': 'topic', 'value': 'x', 'id': 5}],
+        'tags': [], 'meta': {'step_limit': 10, 'parent_entity_id': 3, 'internal_tools': []},
+        'tools': deepcopy(tools), 'pipeline_settings': {'nodes': [name]} if agent_type == 'pipeline' else {},
+        **extra,
+    }
+    app = types.SimpleNamespace(id=app_id, name=name)
+    return types.SimpleNamespace(to_dict=lambda: deepcopy(data), application=app, **data)
+
+
+# agent 10 (published) -> pipeline P1 -> {toolkit github, agent A1 -> toolkit jira, pipeline P2 -> toolkit jira}
+VERSIONS = {
+    41: _version(41, 401, 'P1', 'pipeline', [GITHUB_TOOL, _link(402, 42, 'A1'), _link(403, 43, 'P2')]),
+    42: _version(42, 402, 'A1', 'openai', [JIRA_TOOL]),
+    43: _version(43, 403, 'P2', 'pipeline', [JIRA_TOOL, _link(401, 41, 'P1')]),  # closes a cycle
+}
+SOURCE_TOOLS = [_link(401, 41, 'P1'), _link(402, 42, 'A1')]  # A1 is also a plain sub-agent
+
+
+@pytest.fixture
+def snapshot_meta(modules, monkeypatch):
+    pu = modules.publish_utils
+    source = {'id': 79, 'name': 'base', 'instructions': 'Help.', 'meta': {'step_limit': 25},
+              'tools': deepcopy(SOURCE_TOOLS)}
+    monkeypatch.setattr(pu, 'db', _sessions(_orm_version(source, _orm_application(10))))
+    monkeypatch.setattr(pu, '_load_version_with_tools', lambda session, version_id, cache=None: VERSIONS.get(version_id))
+    snapshot = pu.create_publish_snapshot(SOURCE_PROJECT_ID, 79, AUTHOR_ID)
+    published = pu._build_published_version_dict(
+        snapshot['version'], 'v1', AUTHOR_ID, PUBLIC_PROJECT_ID, snapshot['source'],
+    )
+    assert 'tools' not in published, 'the public copy itself must stay toolless'
+    return published['meta']
+
+
+def _fork(modules, monkeypatch, meta, **kwargs):
+    return _export_public_version(modules, monkeypatch, meta, forked=True, **kwargs)
+
+
+def _by_name(items):
+    return {item['name']: item for item in items}
+
+
+def test_snapshot_keeps_the_whole_pipeline_graph_in_version_meta(modules, snapshot_meta):
+    graph = snapshot_meta[modules.export_import.PUBLISHED_PIPELINES_META_KEY]
+
+    assert [node['name'] for node in graph['nodes']] == ['P1', 'A1', 'P2']
+    assert len(graph['attached']) == 1, 'only the pipeline is attached; the plain sub-agent is embedded'
+    p1, a1, p2 = graph['nodes']
+    assert [t['name'] for t in p1['toolkits']] == ['Team GitHub']
+    assert [t['name'] for t in a1['toolkits']] == ['Team Jira']
+    assert [t['name'] for t in p2['toolkits']] == ['Team Jira']
+    assert {link['key'] for link in p1['links']} == {a1['key'], p2['key']}
+    assert p2['links'] == [{'key': p1['key'], 'variables': []}], 'a cycle ends where it closes'
+
+
+def test_snapshot_holds_no_secret_source_id_or_lineage(modules, snapshot_meta):
+    dumped = json.dumps(snapshot_meta[modules.export_import.PUBLISHED_PIPELINES_META_KEY])
+
+    for leaked in ('ghp_must_not_leak', 'jira_must_not_leak', 'parent_entity_id', 'parent_project_id',
+                   '"application_id"', '"application_version_id"', 'schedules'):
+        assert leaked not in dumped
+    assert _json_roundtrip(snapshot_meta) == snapshot_meta
+
+
+def test_agent_without_a_pipeline_gets_no_pipeline_snapshot(modules, monkeypatch):
+    pu = modules.publish_utils
+    source = {'id': 79, 'name': 'base', 'instructions': 'Help.', 'meta': {}, 'tools': [_link(402, 42, 'A1')]}
+    monkeypatch.setattr(pu, 'db', _sessions(_orm_version(source, _orm_application(10))))
+    monkeypatch.setattr(pu, '_load_version_with_tools', lambda session, version_id, cache=None: VERSIONS.get(version_id))
+
+    meta = pu.create_publish_snapshot(SOURCE_PROJECT_ID, 79, AUTHOR_ID)['version']['meta']
+
+    assert modules.export_import.PUBLISHED_PIPELINES_META_KEY not in meta
+
+
+def test_fork_creates_the_pipeline_attached_to_the_agent_as_a_sub_agent(modules, monkeypatch, snapshot_meta):
+    payload = _fork(modules, monkeypatch, snapshot_meta)
+
+    applications = _by_name(payload['applications'])
+    assert set(applications) == {'Release Helper', 'P1', 'A1', 'P2'}
+    [main_version] = applications['Release Helper']['versions']
+    toolkits = {t['import_uuid']: t for t in payload['toolkits']}
+    [link] = [toolkits[ref['import_uuid']] for ref in main_version['tools']
+              if toolkits[ref['import_uuid']]['type'] == 'application']
+    assert link['settings']['import_uuid'] == applications['P1']['import_uuid']
+    assert link['settings']['import_version_uuid'] == applications['P1']['versions'][0]['import_version_uuid']
+    assert applications['P1']['versions'][0]['agent_type'] == 'pipeline'
+    assert applications['P1']['versions'][0]['pipeline_settings'] == {'nodes': ['P1']}
+
+
+def test_fork_links_nested_agents_pipelines_and_their_toolkits(modules, monkeypatch, snapshot_meta):
+    payload = _fork(modules, monkeypatch, snapshot_meta)
+
+    applications = _by_name(payload['applications'])
+    toolkits = {t['import_uuid']: t for t in payload['toolkits']}
+
+    def tools_of(name):
+        return [toolkits[ref['import_uuid']] for ref in applications[name]['versions'][0]['tools']]
+
+    assert [t['name'] for t in tools_of('P1') if t['type'] != 'application'] == ['Team GitHub']
+    assert [t['name'] for t in tools_of('A1')] == ['Team Jira']
+    assert {t['name'] for t in tools_of('P1') if t['type'] == 'application'} == {'A1', 'P2'}
+    assert {t['name'] for t in tools_of('P2') if t['type'] == 'application'} == {'P1'}
+    for tool in toolkits.values():
+        if tool['type'] == 'application':
+            targets = {a['import_uuid'] for a in payload['applications']}
+            assert tool['settings']['import_uuid'] in targets
+    github = next(t for t in payload['toolkits'] if t['type'] == 'github')
+    assert github['selected_tools'] == ['get_issue', 'create_pr']
+
+
+def test_snapshot_nodes_and_fork_links_tell_an_agent_from_a_pipeline(modules, monkeypatch, snapshot_meta):
+    graph = snapshot_meta[modules.export_import.PUBLISHED_PIPELINES_META_KEY]
+    assert {n['name']: n['agent_type'] for n in graph['nodes']} == {'P1': 'pipeline', 'A1': 'openai', 'P2': 'pipeline'}
+
+    payload = _fork(modules, monkeypatch, snapshot_meta)
+
+    links = {t['name']: t['agent_type'] for t in payload['toolkits'] if t['type'] == 'application'}
+    assert links == {'P1': 'pipeline', 'A1': 'openai', 'P2': 'pipeline'}
+
+
+def test_fork_export_fills_agent_type_on_every_application_link(modules, monkeypatch):
+    tool_module = modules.export_import.ToolForkDetails
+    seen = []
+
+    def set_agent_type(self, project_id):
+        seen.append((self.type, project_id))
+        if self.type == 'application':
+            self.agent_type = 'pipeline'
+
+    monkeypatch.setattr(tool_module, 'set_agent_type', set_agent_type)
+
+    link = modules.export_import.export_version_toolkit(
+        deepcopy(SUB_AGENT_TOOL), PUBLIC_PROJECT_ID, AUTHOR_ID, forked=True,
+    )
+    plain = modules.export_import.export_version_toolkit(
+        deepcopy(SUB_AGENT_TOOL), PUBLIC_PROJECT_ID, AUTHOR_ID, forked=False,
+    )
+
+    assert link['agent_type'] == 'pipeline'
+    assert plain.get('agent_type') is None, 'only a fork export needs the type'
+    assert seen == [('application', PUBLIC_PROJECT_ID)]
+
+
+def test_fork_keeps_a_shared_toolkit_once(modules, monkeypatch, snapshot_meta):
+    payload = _fork(modules, monkeypatch, snapshot_meta)
+
+    uuids = [t['import_uuid'] for t in payload['toolkits']]
+    assert len(uuids) == len(set(uuids))
+    assert [t['name'] for t in payload['toolkits'] if t['type'] == 'jira'] == ['Team Jira']
+
+
+def test_fork_payload_has_no_secret_and_no_snapshot_key(modules, monkeypatch, snapshot_meta):
+    payload = _fork(modules, monkeypatch, snapshot_meta)
+
+    dumped = json.dumps(payload, default=str)
+    assert 'ghp_must_not_leak' not in dumped and 'jira_must_not_leak' not in dumped
+    assert modules.export_import.PUBLISHED_PIPELINES_META_KEY not in dumped
+    assert all(a['original_exported'] is False for a in payload['applications'][1:])
+
+
+def test_fork_of_an_embedded_copy_carries_its_pipeline(modules, monkeypatch, snapshot_meta):
+    payload = _fork(modules, monkeypatch, snapshot_meta, status='embedded')
+
+    assert 'P1' in _by_name(payload['applications'])
+
+
+@pytest.mark.parametrize('status, project_id', [
+    pytest.param('draft', PUBLIC_PROJECT_ID, id='draft-in-public-project'),
+    pytest.param('published', SOURCE_PROJECT_ID, id='team-project-version'),
+])
+def test_pipelines_planted_in_editable_meta_are_not_forked(modules, monkeypatch, snapshot_meta, status, project_id):
+    payload = _fork(modules, monkeypatch, snapshot_meta, status=status, project_id=project_id)
+
+    assert [a['name'] for a in payload['applications']] == ['Release Helper']
+    assert payload['toolkits'] == []
+    assert modules.export_import.PUBLISHED_PIPELINES_META_KEY not in json.dumps(payload, default=str)
+
+
+def test_plain_export_neither_restores_pipelines_nor_leaks_the_snapshot(modules, monkeypatch, snapshot_meta):
+    payload = _export_public_version(modules, monkeypatch, snapshot_meta, forked=False)
+
+    assert [a['name'] for a in payload['applications']] == ['Release Helper']
+    assert payload['toolkits'] == []
+    assert modules.export_import.PUBLISHED_PIPELINES_META_KEY not in json.dumps(payload, default=str)
+
+
+def test_validation_rule_9_no_longer_claims_dependencies_are_dropped(modules):
+    rules = modules.publish_utils._DEFAULT_VALIDATION_RULES
+
+    assert 'will not be included' not in rules
+    assert 'not available on the published agent' in rules
+
+
+def test_exporting_twice_gives_the_same_ids(modules, monkeypatch, snapshot_meta):
+    first = _fork(modules, monkeypatch, snapshot_meta)
+    second = _fork(modules, monkeypatch, snapshot_meta)
+
+    assert [a['import_uuid'] for a in first['applications']] == [a['import_uuid'] for a in second['applications']]
+    assert [t['import_uuid'] for t in first['toolkits']] == [t['import_uuid'] for t in second['toolkits']]

@@ -81,8 +81,10 @@ def pu():
         'plugins.elitea_core.utils.skill_frontmatter': {'FRONTMATTER_META_KEY': 'frontmatter'},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': None},
         'plugins.elitea_core.utils.export_import': {
-            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': None,
+            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'PUBLISHED_PIPELINES_META_KEY': 'fork_pipelines',
+            'export_version_toolkit': None,
         },
+        'plugins.elitea_core.utils.trigger_write_rule': {'strip_trigger_secrets': lambda settings: dict(settings)},
         'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': None},
         'plugins.elitea_core.utils.conversation_starters_utils': {'get_max_conversation_starters': lambda: 4},
     }.items():
