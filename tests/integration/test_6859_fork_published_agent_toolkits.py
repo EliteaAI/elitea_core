@@ -597,6 +597,29 @@ def test_fork_export_fills_agent_type_on_every_application_link(modules, monkeyp
     assert seen == [('application', PUBLIC_PROJECT_ID)]
 
 
+def test_toolkit_shared_by_the_agent_and_its_pipeline_is_listed_once(modules, monkeypatch):
+    # P1 uses the same GitHub toolkit as the published agent itself
+    pu = modules.publish_utils
+    source = {'id': 79, 'name': 'base', 'instructions': 'Help.', 'meta': {},
+              'tools': [deepcopy(GITHUB_TOOL), _link(401, 41, 'P1')]}
+    monkeypatch.setattr(pu, 'db', _sessions(_orm_version(source, _orm_application(10))))
+    monkeypatch.setattr(pu, '_load_version_with_tools', lambda session, version_id, cache=None: VERSIONS.get(version_id))
+    snapshot = pu.create_publish_snapshot(SOURCE_PROJECT_ID, 79, AUTHOR_ID)
+    meta = pu._build_published_version_dict(
+        snapshot['version'], 'v1', AUTHOR_ID, PUBLIC_PROJECT_ID, snapshot['source'],
+    )['meta']
+
+    payload = _fork(modules, monkeypatch, meta)
+
+    uuids = [t['import_uuid'] for t in payload['toolkits']]
+    assert len(uuids) == len(set(uuids)), 'a shared toolkit must not be listed twice'
+    [main_version] = payload['applications'][0]['versions']
+    p1 = _by_name(payload['applications'])['P1']['versions'][0]
+    github_uuid = next(t['import_uuid'] for t in payload['toolkits'] if t['type'] == 'github')
+    assert {'import_uuid': github_uuid} in main_version['tools']
+    assert {'import_uuid': github_uuid} in p1['tools'], 'the pipeline still links to the shared toolkit'
+
+
 def test_fork_keeps_a_shared_toolkit_once(modules, monkeypatch, snapshot_meta):
     payload = _fork(modules, monkeypatch, snapshot_meta)
 

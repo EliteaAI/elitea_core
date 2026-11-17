@@ -265,7 +265,10 @@ def _add_fork_pipelines(result: dict, data_done: dict) -> dict:
     if not result.get('ok'):
         return result
     result['applications'].extend(data_done.get(_FORK_PIPELINE_APPLICATIONS, {}).values())
-    result['toolkits'].extend(data_done.get(_FORK_PIPELINE_TOOLKITS, {}).values())
+    # _post_export already removed duplicates, so one the agent and a pipeline share is kept once here too.
+    result['toolkits'] = _deduplicate_by_import_uuid(
+        result['toolkits'] + list(data_done.get(_FORK_PIPELINE_TOOLKITS, {}).values())
+    )
     return result
 
 
