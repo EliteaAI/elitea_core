@@ -2490,6 +2490,19 @@ def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, inde
         )
 
 
+def load_toolkit_for_index(project_id: int, user_id: Optional[int], toolkit_id: int):
+    """(schema, connection_string, error) of an index endpoint's toolkit; a credential the caller cannot use is a 400."""
+    from ..utils.predict_utils import get_toolkit_config
+    try:
+        toolkit_config = get_toolkit_config(project_id, user_id, toolkit_id)
+    except ConfigurationExpandError as e:
+        log.warning(f"Toolkit {toolkit_id} credentials cannot be resolved for user {user_id}: {e.errors}")
+        return None, None, (
+            {"ok": False, "error": "This toolkit's credentials can't be used — check its configuration"}, 400
+        )
+    return load_and_validate_toolkit_for_index(toolkit_config)
+
+
 def resolve_toolkit_index_connection(project_id: int, toolkit_id: int, user_id: Optional[int] = None):
     """Resolve (connection_string, toolkit_name_id) from ids for flows whose event lacks
     toolkit_config (the agent/chat path). Called only at Stop time, never per event.

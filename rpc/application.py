@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from pylon.core.tools import web, log
 from sqlalchemy import Integer, and_
 from sqlalchemy.orm import joinedload, selectinload
-from tools import db, serialize, auth, store_secrets, VaultClient, this, rpc_tools
+from tools import db, serialize, auth, store_secrets, VaultClient, this, rpc_tools, config as c
 
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
@@ -69,6 +69,9 @@ from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
 from ..utils.sio_guards import ensure_sio_user_in_project
+from ..utils.folder_access import NO_ACCESS_ERROR
+from ..utils.schedule_access import INDEX_WRITE_TOOLS, ScheduleScope
+from ..utils.schedule_service import ScheduleError, check_index_rights
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
 from ..utils.internal_tools import (
     require_internal_mcp_pat,
@@ -325,6 +328,40 @@ def _toolkit_run_refused(module, sid, sio_event, data, message_id, denied):
             message_id=message_id,
         )
     return {"code": denied.reason_code, "error": denied.message}
+
+
+def _stored_index_toolkit(project_id: int, toolkit_config: dict) -> Optional[dict]:
+    """The saved toolkit of this project an index write runs, as the dispatch payload carries it; else None."""
+    toolkit_id = toolkit_config.get('toolkit_id')
+    if toolkit_id is None or toolkit_config.get('project_id', project_id) != project_id:
+        return None
+    with db.get_session(project_id) as session:
+        toolkit = session.query(EliteATool).where(EliteATool.id == toolkit_id).first()
+        if toolkit is None:
+            return None
+        details = serialize(ToolDetails.from_orm(toolkit))
+    return {
+        'type': details.get('type'),
+        'toolkit_name': details.get('name') or details.get('toolkit_name'),
+        'toolkit_id': toolkit_id,
+        'settings': details.get('settings') or {},
+    }
+
+
+def _index_write_refusal(project_id: int, sid, user_id, toolkit: Optional[dict],
+                         permission: str) -> Optional[AdmissionDenied]:
+    """Why the caller may not make this index write, or None: the index editor's rule, on the toolkit that runs."""
+    if toolkit is None:
+        return AdmissionDenied("INDEX_NOT_FOUND", NO_ACCESS_ERROR)
+    auth_data = {'auth_data': auth.sio_users[sid]} if sid else {}
+    permissions = frozenset(auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id, **auth_data))
+    try:
+        check_index_rights(project_id, toolkit['toolkit_id'],
+                           ScheduleScope(user_id=user_id, is_admin=False, permissions=permissions), permission)
+    except ScheduleError as refused:
+        body, _ = refused.response
+        return AdmissionDenied(f"INDEX_{body['code'].upper()}", body['error'])
+    return None
 
 
 class RPC:
@@ -1881,6 +1918,17 @@ class RPC:
         # The saved toolkit the run tests (its stored row is what admission holds the dispatch to), read before the
         # expansion below rewrites toolkit_config
         toolkit_id = (data.get('toolkit_config') or {}).get('toolkit_id')
+
+        index_permission = INDEX_WRITE_TOOLS.get(tool_name)
+        if index_permission:
+            stored_toolkit = _stored_index_toolkit(project_id, data.get('toolkit_config') or {})
+            denied = _index_write_refusal(project_id, sid, user_id, stored_toolkit, index_permission)
+            if denied:
+                log.info("Index write %s refused for user %s in project %s: %s",
+                         tool_name, user_id, project_id, denied.reason_code)
+                placeholder_id = (start_event_content or {}).get('question_id') or data.get('message_id')
+                return _toolkit_run_refused(self, sid, sio_event, data, placeholder_id, denied)
+            data['toolkit_config'] = stored_toolkit
 
         try:
             if not (run_identity_applies(sid) and not platform_read):   # an admitted run uses the run token (#7229)

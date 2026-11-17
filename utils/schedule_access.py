@@ -11,6 +11,8 @@ _ADMIN_ONLY = ("admin", "export", "import")
 SCHEDULE_PERMISSIONS = {action: _PREFIX + action for action in _VERBS + _ADMIN_ONLY}
 # Saving an index schedule changes the index settings, so it needs the same permission as the index editor
 INDEX_EDIT_PERMISSION = "models.applications.index_meta.edit"
+INDEX_DELETE_PERMISSION = "models.applications.index_meta.delete"
+INDEX_WRITE_TOOLS = {"index_data": INDEX_EDIT_PERMISSION, "remove_index": INDEX_DELETE_PERMISSION}
 
 _EDITOR_ROLES = {"admin": True, "editor": True, "viewer": False}
 _ADMIN_ROLES = {"admin": True, "editor": False, "viewer": False}

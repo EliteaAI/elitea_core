@@ -2,11 +2,10 @@ from tools import api_tools, auth, config as c, log
 from ...utils.application_tools import (
     IndexMetaLockTimeoutError,
     get_toolkit_index_meta,
-    load_and_validate_toolkit_for_index,
+    load_toolkit_for_index,
     get_session_for_schema,
     cancel_toolkit_index_meta,
 )
-from ...utils.predict_utils import get_toolkit_config
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
@@ -25,8 +24,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if task_id == 'null':
             task_id = None
 
-        toolkit_config = get_toolkit_config(project_id, auth.current_user()['id'], toolkit_id)
-        toolkit_name_id, connection_string, validation_error = load_and_validate_toolkit_for_index(toolkit_config)
+        toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
+            project_id, auth.current_user()['id'], toolkit_id)
         if validation_error:
             return validation_error
         #
