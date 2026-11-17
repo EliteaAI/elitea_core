@@ -123,8 +123,10 @@ def pu():
             'release_unreferenced_contents': noop,
         },
         'plugins.elitea_core.utils.export_import': {
-            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': noop,
+            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'PUBLISHED_PIPELINES_META_KEY': 'fork_pipelines',
+            'export_version_toolkit': noop,
         },
+        'plugins.elitea_core.utils.trigger_write_rule': {'strip_trigger_secrets': lambda settings: dict(settings)},
         'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': lambda meta: meta or {}},
         'plugins.elitea_core.utils.conversation_starters_utils': {'get_max_conversation_starters': lambda: 4},
     }

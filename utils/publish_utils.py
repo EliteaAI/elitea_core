@@ -37,7 +37,8 @@ from ..models.pd.version import ApplicationVersionForkCreateModel
 from ..models.pd.publish import PublishAIResult
 from ..models.skill import EntitySkillMapping, Skill, SkillVersion
 from .create_utils import create_application, create_version
-from .export_import import PUBLISHED_TOOLKITS_META_KEY, export_version_toolkit
+from .export_import import PUBLISHED_PIPELINES_META_KEY, PUBLISHED_TOOLKITS_META_KEY, export_version_toolkit
+from .trigger_write_rule import strip_trigger_secrets
 from .toolkit_meta import drop_index_schedules
 from .llm_judge import run_llm_judge
 from .utils import get_public_project_id
@@ -215,11 +216,14 @@ _DEFAULT_VALIDATION_RULES = """\
      with the parent agent's stated goal
 
 9. **Toolkit Dependencies** (Toolkits, MCP, Pipelines)
+   - note: toolkits and pipelines attached to the agent are not active on the published agent,
+     but they are carried into a fork of it, so never claim they are dropped or lost
    - warning: instructions reference toolkits, MCP servers, or pipelines but neither provide
      fallback behavior in the instructions nor guidance in the welcome message on how to
-     proceed without these dependencies after publishing; the issue message should explicitly
-     indicate that these toolkits, MCP servers, and pipelines will not be included with the
-     agent after publishing
+     proceed when these dependencies are not available to the person using the published
+     agent (they are not active on the published agent; credentials are never carried over, so
+     a fork needs its toolkits reconfigured); the issue message should explicitly indicate that
+     these toolkits, MCP servers, and pipelines are not available on the published agent
 
 Only flag an issue when it clearly violates a rule above. A clean result with all empty lists
 is valid — return it when the agent meets all criteria. Do NOT flag format, length, or
@@ -999,6 +1003,91 @@ def _snapshot_fork_toolkits(tools: List[dict], project_id: int, user_id: int) ->
     return fork_toolkits
 
 
+def _pipeline_node_content(version_dict: dict) -> dict:
+    content = {key: deepcopy(version_dict[key]) for key in _VERSION_ALLOWLIST if key in version_dict and key != 'name'}
+    content['meta'] = {key: deepcopy(value) for key, value in (version_dict.get('meta') or {}).items()
+                       if key in _META_ALLOWLIST}
+    content['variables'] = [
+        {'name': variable.get('name'), 'value': variable.get('value')}
+        for variable in content.get('variables') or []
+    ]
+    content['tags'] = [{'name': tag.get('name'), 'data': tag.get('data')} for tag in content.get('tags') or []]
+    if version_dict.get('pipeline_settings'):
+        content['pipeline_settings'] = strip_trigger_secrets(version_dict['pipeline_settings'])
+    return serialize(content)
+
+
+def _collect_pipeline_graph(project_id: int, version_dicts: List[dict]) -> dict:
+    """Read the pipelines attached to a version, with everything they use, as flat nodes.
+
+    A node is a pipeline or an agent reached from one, at any depth; it lists its own toolkits and
+    the nodes it calls. Nodes get opaque keys, so the public copy carries no source project ids,
+    and a node reached through several paths appears once. A cycle ends where it closes.
+    """
+    keys: Dict[int, str] = {}
+    raw_nodes: List[dict] = []
+
+    def load(session, link_tool: dict):
+        settings = link_tool.get('settings') or {}
+        target_id = settings.get('application_version_id')
+        if target_id is None:
+            return None
+        version = _load_version_with_tools(session, target_id)
+        if version is None:
+            return None
+        return target_id, version.to_dict(), getattr(version.application, 'name', None)
+
+    def build(session, target_id: int, version_dict: dict, app_name: str, depth: int) -> str:
+        if target_id in keys:
+            return keys[target_id]
+        key = f'n{len(keys) + 1}'
+        keys[target_id] = key
+        node = {
+            'key': key, 'name': app_name or version_dict.get('name') or key,
+            'version': version_dict, 'tools': [], 'links': [],
+        }
+        raw_nodes.append(node)
+        for tool in version_dict.get('tools') or []:
+            if not _is_sub_agent_link(tool):
+                node['tools'].append(tool)
+                continue
+            if depth >= MAX_SUB_AGENT_VALIDATION_DEPTH:
+                continue
+            loaded = load(session, tool)
+            if loaded is None:
+                continue
+            child_key = build(session, *loaded[:2], loaded[2], depth + 1)
+            node['links'].append({'key': child_key, 'variables': (tool.get('settings') or {}).get('variables') or []})
+        return key
+
+    attached = []
+    with db.get_session(project_id) as session:
+        for tool in version_dicts:
+            if not _is_sub_agent_link(tool):
+                continue
+            loaded = load(session, tool)
+            if loaded is None or loaded[1].get('agent_type') != AgentTypes.pipeline.value:
+                continue
+            key = build(session, loaded[0], loaded[1], loaded[2], 1)
+            attached.append({'key': key, 'variables': (tool.get('settings') or {}).get('variables') or []})
+    return {'attached': attached, 'nodes': raw_nodes}
+
+
+def _snapshot_fork_pipelines(tools: List[dict], project_id: int, user_id: int) -> dict:
+    graph = _collect_pipeline_graph(project_id, tools)
+    nodes = []
+    for node in graph['nodes']:
+        nodes.append({
+            'key': node['key'],
+            'name': node['name'],
+            'agent_type': node['version'].get('agent_type'),
+            'version': _pipeline_node_content(node['version']),
+            'toolkits': _snapshot_fork_toolkits(node['tools'], project_id, user_id),
+            'links': node['links'],
+        })
+    return {'attached': graph['attached'], 'nodes': nodes} if graph['attached'] else {}
+
+
 def create_publish_snapshot(
     project_id: int,
     version_id: int,
@@ -1037,6 +1126,9 @@ def create_publish_snapshot(
     fork_toolkits = _snapshot_fork_toolkits(version_dict.get('tools') or [], project_id, user_id)
     if fork_toolkits:
         sanitised_meta[PUBLISHED_TOOLKITS_META_KEY] = fork_toolkits
+    fork_pipelines = _snapshot_fork_pipelines(version_dict.get('tools') or [], project_id, user_id)
+    if fork_pipelines:
+        sanitised_meta[PUBLISHED_PIPELINES_META_KEY] = fork_pipelines
     sanitised_version['meta'] = sanitised_meta
 
     # Log stripped content for auditing

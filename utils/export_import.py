@@ -127,6 +127,7 @@ def export_version_toolkit(
     details = result_model.model_validate(tool, context=validation_context)
     if forked:
         details.owner_id = project_id
+        details.set_agent_type(project_id)
     details.fix_name(project_id)
     toolkit_dict = details.model_dump()
     if 'settings' in toolkit_dict and toolkit_dict['settings'].get('selected_tools'):
@@ -156,6 +157,119 @@ def _attach_toolkits(version: dict, published_toolkits: list, toolkits: list) ->
         toolkits.append(deepcopy(toolkit))
         version_tools.append({'import_uuid': toolkit['import_uuid']})
     version['tools'] = version_tools
+
+
+PUBLISHED_PIPELINES_META_KEY = 'fork_pipelines'
+_FORK_PIPELINE_APPLICATIONS = 'fork_pipeline_applications'
+_FORK_PIPELINE_TOOLKITS = 'fork_pipeline_toolkits'
+_FORK_NODE_VERSION_FIELDS = (
+    'instructions', 'agent_type', 'llm_settings', 'variables', 'tags',
+    'welcome_message', 'conversation_starters', 'pipeline_settings',
+)
+
+
+def _pop_published_pipelines(version: dict) -> dict:
+    pipelines = (version.get('meta') or {}).pop(PUBLISHED_PIPELINES_META_KEY, None)
+    return pipelines if isinstance(pipelines, dict) else {}
+
+
+def _fork_uuid(*parts) -> str:
+    """Stable per-published-version id, so a fork payload links the same way on every export."""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, ':'.join(str(part) for part in parts)))
+
+
+def _fork_pipeline_application(node: dict, app_uuid: str, version_uuid: str, tool_refs: list) -> dict:
+    version = {key: deepcopy(node['version'][key]) for key in _FORK_NODE_VERSION_FIELDS if key in node['version']}
+    meta = deepcopy(node['version'].get('meta') or {})
+    meta['icon_meta'] = {}
+    return {
+        'name': node['name'],
+        'description': node.get('description') or '',
+        'import_uuid': app_uuid,
+        'original_exported': False,
+        'versions': [{
+            **version,
+            'name': 'base',
+            'import_version_uuid': version_uuid,
+            'meta': meta,
+            'tools': tool_refs,
+        }],
+    }
+
+
+def _attach_pipelines(version: dict, pipelines: dict, data_done: dict) -> None:
+    """Add a published version's pipeline graph to a fork export, linked to the forked agent as sub-agents.
+
+    The graph lives in the version meta as flat nodes (a pipeline or an agent each) that name their
+    toolkits and the nodes they call, so a node reached twice is created once. The ids it carries are
+    local to the snapshot; the ones the payload needs are derived from the published version id.
+    """
+    attached = pipelines.get('attached') or []
+    nodes = {
+        node['key']: node for node in pipelines.get('nodes') or []
+        if isinstance(node, dict) and node.get('key') and isinstance(node.get('version'), dict) and node.get('name')
+    }
+    if not attached or not nodes:
+        return
+    scope = version.get('id')
+    applications = data_done[_FORK_PIPELINE_APPLICATIONS]
+    toolkits = data_done[_FORK_PIPELINE_TOOLKITS]
+    in_progress = set()
+
+    def add_application(key: str) -> None:
+        app_uuid = _fork_uuid('app', scope, key)
+        if app_uuid in applications or key in in_progress:
+            return
+        in_progress.add(key)
+        node = nodes[key]
+        tool_refs = []
+        for toolkit in node.get('toolkits') or []:
+            toolkits.setdefault(toolkit['import_uuid'], deepcopy(toolkit))
+            tool_refs.append({'import_uuid': toolkit['import_uuid']})
+        for link in node.get('links') or []:
+            if link.get('key') in nodes:
+                tool_refs.append({'import_uuid': add_link(key, link)})
+        applications[app_uuid] = _fork_pipeline_application(
+            node, app_uuid, _fork_uuid('version', scope, key), tool_refs,
+        )
+        in_progress.discard(key)
+
+    def add_link(parent_key: str, link: dict) -> str:
+        add_application(link['key'])
+        tool_uuid = _fork_uuid('link', scope, parent_key, link['key'])
+        toolkits.setdefault(tool_uuid, {
+            'type': 'application',
+            'name': nodes[link['key']]['name'],
+            'agent_type': nodes[link['key']].get('agent_type') or nodes[link['key']]['version'].get('agent_type'),
+            'import_uuid': tool_uuid,
+            'original_exported': False,
+            'settings': {
+                'import_uuid': _fork_uuid('app', scope, link['key']),
+                'import_version_uuid': _fork_uuid('version', scope, link['key']),
+                'variables': deepcopy(link.get('variables') or []),
+            },
+            'selected_tools': [],
+            'meta': {},
+        })
+        return tool_uuid
+
+    version_tools = version.get('tools') or []
+    for link in attached:
+        if link.get('key') in nodes:
+            version_tools.append({'import_uuid': add_link('root', link)})
+    version['tools'] = version_tools
+
+
+def _add_fork_pipelines(result: dict, data_done: dict) -> dict:
+    """Append the pipeline entities collected during a fork export; skipped when the export failed."""
+    if not result.get('ok'):
+        return result
+    result['applications'].extend(data_done.get(_FORK_PIPELINE_APPLICATIONS, {}).values())
+    # _post_export already removed duplicates, so one the agent and a pipeline share is kept once here too.
+    result['toolkits'] = _deduplicate_by_import_uuid(
+        result['toolkits'] + list(data_done.get(_FORK_PIPELINE_TOOLKITS, {}).values())
+    )
+    return result
 
 
 def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None):
@@ -222,8 +336,10 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
     for app in result:
         for version in app['versions']:
             published_toolkits = _pop_published_toolkits(version)
+            published_pipelines = _pop_published_pipelines(version)
             if forked and _holds_publish_snapshot(project_id, version_statuses.get(version.get('id'))):
                 _attach_toolkits(version, published_toolkits, toolkits)
+                _attach_pipelines(version, published_pipelines, data_done)
 
     for app in result:
         data_done['application_id'][app['id']] = app['import_uuid']
@@ -459,12 +575,12 @@ def export_application(project_id: int, user_id: int, application_ids: List[int]
         else:
             app['original_exported'] = False
 
-    return _post_export(
+    return _add_fork_pipelines(_post_export(
         project_id-project_id,
         result=result,
         data_done=data_done,
         forked=forked
-    )
+    ), data_done)
 
 
 def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = False):

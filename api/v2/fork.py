@@ -37,7 +37,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         # Set fork parent metadata on each version (this makes is_forked = true)
         for entity in entities:
-            if entity.get('entity') in ('agents', 'skills'):
+            # A pipeline carried by a published agent has no source entity of its own, so no lineage.
+            if entity.get('entity') in ('agents', 'skills') and entity.get('id') is not None:
                 for version in entity.get('versions', []):
                     meta = version.get('meta') or {}
                     meta.update({
