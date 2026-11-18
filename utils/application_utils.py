@@ -86,6 +86,26 @@ def _nested_governed_refusal(ex) -> str | None:
     return None
 
 
+def _nested_connection_errors(ex) -> list | None:
+    """The connection errors a sub-agent's validation raised, when they are all it raised (``Value error, <json>``)."""
+    if not isinstance(ex, ValidationError):
+        return None
+    sentinel = ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
+    collected = []
+    for err in ex.errors(include_url=False, include_context=False, include_input=False):
+        message = err.get('msg') or ''
+        body = message[len('Value error, '):] if message.startswith('Value error, ') else ''
+        try:
+            found = json.loads(body) if body.startswith('{') else None
+        except ValueError:
+            found = None
+        if not (isinstance(found, dict) and set(found) == {sentinel} and isinstance(found[sentinel], list)
+                and all(isinstance(error, dict) for error in found[sentinel])):
+            return None
+        collected.extend(found[sentinel])
+    return collected or None
+
+
 def apply_selected_tools_intersection(tools, tool_mappings):
     """
     Apply selected_tools intersection from tool_mappings to tools.
@@ -1252,10 +1272,14 @@ def _validate_toolkit_type_application(
         refusal = _nested_governed_refusal(ex)   # the sub-agent's credential was refused: say what, and where (#7281)
         if refusal is not None:
             found = json.loads(refusal)
-            refusal = json.dumps({'code': found['code'], 'error': f"{agent_name}: {found['error']}"})
-        raise ValueError(
-            refusal or f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}"
-        ) from None
+            raise ValueError(json.dumps({'code': found['code'], 'error': f"{agent_name}: {found['error']}"})) from None
+        connection_errors = _nested_connection_errors(ex)
+        if connection_errors is not None:
+            raise ValueError(json.dumps({ToolValidatedDetails.CONNECTION_ERROR_SENTINEL: [
+                {**error, 'message': f"{agent_name}: {error.get('message') or 'Connection error'}"}
+                for error in connection_errors
+            ]})) from None
+        raise ValueError(f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}") from None
 
     return True
 
