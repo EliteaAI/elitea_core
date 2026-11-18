@@ -204,6 +204,15 @@ def _search_conversations_by_name(
     return [str(row[0]) for row in rows[:limit]], len(rows) > limit
 
 
+def _search_application_ids(project_id: int, name_search: str, limit: int) -> list:
+    """Ids of applications whose name contains name_search, case-insensitively, newest first."""
+    with db.get_session(project_id) as session:
+        rows = session.query(Application.id).filter(
+            Application.name.ilike(f"%{_escape_like(name_search)}%", escape="\\"),
+        ).order_by(Application.id.desc()).limit(limit).all()
+    return [row[0] for row in rows]
+
+
 def _fetch_non_chat_uuids(project_id: int, limit: int = 5000) -> tuple:
     """(UUIDs, truncated) of conversations that are NOT user chats: hidden, or any source other
     than the chat sources (pipeline, support, system, agent test chats, ...).
@@ -229,6 +238,8 @@ class RPC:
             fetch_non_chat_uuids: bool = False,
             conversation_name_search: str | None = None,
             conversation_search_limit: int = 1000,
+            application_name_search: str | None = None,
+            application_search_limit: int = 1000,
             requester_id: int | None = None,
     ) -> dict:
         """Names and agent/pipeline kind for the ids usage analytics grouped by (#6678).
@@ -257,18 +268,27 @@ class RPC:
             result["scoped_skills"] = []
         if conversation_uuids is not None or conversation_name_search is not None:
             result["conversations"] = []
+        if application_name_search is not None:
+            result["matched_applications"] = []
         if fetch_non_chat_uuids:
             result["non_chat_uuids"] = []
             result["non_chat_truncated"] = False
         if (
             not wants_applications and not wanted_skills and not conversation_uuids
-            and not fetch_non_chat_uuids and not conversation_name_search
+            and not fetch_non_chat_uuids and not conversation_name_search and not application_name_search
         ):
             return result
         try:
             public_project_id = get_public_project_id()
             if fetch_non_chat_uuids:
                 result["non_chat_uuids"], result["non_chat_truncated"] = _fetch_non_chat_uuids(project_id)
+            if application_name_search:
+                # Public agents run here are stored under the public project's schema
+                for schema in dict.fromkeys((project_id, public_project_id)):
+                    result["matched_applications"] += [
+                        {"project_id": schema, "id": app_id}
+                        for app_id in _search_application_ids(schema, application_name_search, application_search_limit)
+                    ]
             if wanted_skills:
                 result["scoped_skills"] = fetch_scoped_skills(project_id, public_project_id, wanted_skills)
             if conversation_name_search:
