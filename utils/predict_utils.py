@@ -496,6 +496,7 @@ def generate_predict_payload(
         },
         'internal_tools': parsed.internal_tools or [],
         'project_context': getattr(parsed, 'project_context', None),
+        'builder': getattr(parsed, 'builder', None),
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
         'mcp_tokens': parsed.mcp_tokens or {},
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],

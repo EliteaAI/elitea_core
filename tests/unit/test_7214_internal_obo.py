@@ -584,6 +584,14 @@ EXPOSED_WRITES = [
     ("PUT", "social/folder/{mode}/{project_id}/{folder_id}", "build"),
     ("PUT", "social/move_to_folder/{mode}/{project_id}", "build"),
     ("PUT", "notifications/notification/{mode}/{project_id}/{notification_id}", "build"),
+    ("DELETE", "elitea_core/application/{mode}/{project_id}/{application_id}", "build"),
+    ("PUT", "elitea_core/application/{mode}/{project_id}/{application_id}", "build"),
+    ("DELETE", "elitea_core/skill/{mode}/{project_id}/{skill_id}", "build"),
+    ("POST", "elitea_core/builder_find/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_read/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_propose/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_ref/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_apply/{mode}/{project_id}", "build"),
 ]
 
 
@@ -898,7 +906,8 @@ def test_every_write_the_live_registry_exposes_is_in_the_map(ns):
             unmapped.append(name)
     assert unmapped == []
     stale = set(obo(ns).ENDPOINT_OPERATIONS) - {
-        tuple(entry.split(" ", 1)) for entries in REGISTRY["write_tools"].values() for entry in entries}
+        tuple(entry.split(" ", 1)) for entries in REGISTRY["write_tools"].values() for entry in entries} - {
+        tuple(entry.split(" ", 1)) for entry in REGISTRY.get("builder_dispatched_writes", [])}
     assert stale == set()
 
 

@@ -76,7 +76,7 @@ from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
     inject_mcp_toolkits, should_inject_runtime_context,
-    get_mcp_entity_link_instructions, resolve_builder_scope_project_id,
+    get_builder_payload, resolve_builder_scope_project_id,
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context
@@ -254,6 +254,28 @@ _BARE_REFUSAL = {
     "error": "This run acts as another user: only a plain approve or reject (authorize or skip for a sign-in) is accepted",
     "field": "hitl_action", "status": 400,
 }
+
+
+def _confirm_builder_changesets(pending, decisions, parsed, decider_id, resume_user_id) -> bool:
+    """Mark every Elitea Builder changeset the user applied as confirmed (#7383), in the project it was stored in.
+    False when one can't be confirmed (expired, already applied, or decided by someone the run doesn't act for)."""
+    from ..utils.builder.runtime import confirm_changeset  # pylint: disable=C0415
+    by_identity = {interrupt_identity(item): item for item in pending or []}
+    if decisions:
+        chosen = [(by_identity.get(str(d.get('interrupt_id') or '')), d.get('action')) for d in decisions]
+    else:
+        chosen = [(pending[0], parsed.hitl_action)] if len(pending or []) == 1 else []
+    for interrupt, action in chosen:
+        if not interrupt or interrupt.get('guardrail_type') != 'builder_changeset' or action != 'apply':
+            continue
+        if decider_id != resume_user_id:
+            return False
+        project_id = interrupt.get('builder_project_id') or parsed.project_id
+        if not interrupt.get('changeset_id') or not confirm_changeset(
+            project_id, resume_user_id, interrupt['changeset_id'],
+        ):
+            return False
+    return True
 
 
 def _bare_decision_refusal(parsed) -> dict | None:
@@ -885,7 +907,7 @@ def generate_application_version_payload(
     agent_internal_tools = app_version_details.get('meta', {}).get('internal_tools', [])
 
     # Also get internal_tools from conversation meta and merge with agent's
-    # This allows conversation-level settings (like 'internal_mcp' from support assistant)
+    # This allows conversation-level settings (like 'elitea_builder' from support assistant)
     # to be applied even when chatting with agents
     conversation_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
     merged_internal_tools = list(set(agent_internal_tools + conversation_internal_tools))
@@ -1064,13 +1086,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                     combined_tools.append(tool)
             result['internal_tools'] = combined_tools
 
-            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
-            # Skip for pipelines: their instructions are YAML, not a text prompt
-            mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
-            if mcp_link_addon and not _is_pipeline:
-                _vd = result.get('version_details') or {}
-                _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
-                result['version_details'] = _vd
+            # Elitea Builder: the SDK BuilderMiddleware places its prompt; pipelines get none
+            if builder_block := get_builder_payload(combined_tools, _is_pipeline):
+                result['builder'] = builder_block
         # case ParticipantTypes.pipeline:
         #     # TODO: handle as simplified application, but should not ?
         #     entity_settings = EntitySettingsApplication.parse_obj(participant_chat_settings.entity_settings)
@@ -1137,10 +1155,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             else:
                 result['_routing_projection']['instructions'] = result['instructions']
 
-            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
-            mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)
-            if mcp_link_addon:
-                result['instructions'] = (result.get('instructions') or '') + mcp_link_addon
+            if builder_block := get_builder_payload(llm_chat_internal_tools):
+                result['builder'] = builder_block
 
             if predict_payload.llm_settings:
                 result['llm_settings'] = merge_llm_selection_override(
@@ -2630,6 +2646,17 @@ class RPC:
                             parsed.hitl_action,
                             parsed.hitl_value,
                         )
+                # Elitea Builder (#7383): an Apply click is the only thing that confirms a destructive changeset
+                if not _confirm_builder_changesets(
+                    pending, decisions, parsed, current_user['id'], resume_user_id,
+                ):
+                    raise SioValidationError(
+                        sio=self.context.sio, sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error='This change can no longer be applied; ask for it again.',
+                        stream_id=str(parsed.conversation_uuid),
+                        message_id=parsed.message_id,
+                    )
                 response_msg.meta = retire_interrupts(
                     response_msg.meta, resolved_ids,
                 )

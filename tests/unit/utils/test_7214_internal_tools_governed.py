@@ -83,6 +83,7 @@ def loaded():
     base = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_base_url.py", f"{PKG}.utils.internal_base_url")
     base.host_resolves = lambda host: True   # no real DNS in a unit test
     load_module_with_stubs(PLUGIN_ROOT / "utils" / "platform_buckets.py", f"{PKG}.utils.platform_buckets")
+    load_module_with_stubs(PLUGIN_ROOT / "utils" / "builder_keys.py", f"{PKG}.utils.builder_keys")
     internal_tools = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_tools.py", f"{PKG}.utils.internal_tools")
     status_api = load_module_with_stubs(PLUGIN_ROOT / "api" / "v2" / "internal_mcp_pat_status.py",
                                         f"{PKG}.api.v2.internal_mcp_pat_status")
@@ -96,7 +97,7 @@ def governed(loaded, on=True):
 
 
 def test_off_injects_the_personal_token_exactly_as_before(loaded):
-    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp"])
+    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["elitea_builder"])
     assert tools and all(tool["settings"]["headers"] == {"Authorization": "Bearer pat-9"} for tool in tools)
     assert ("list_tokens", 42) in loaded.auth.calls
 
@@ -104,10 +105,10 @@ def test_off_injects_the_personal_token_exactly_as_before(loaded):
 def test_enforce_injects_the_toolkits_with_no_token_and_looks_none_up(loaded):
     governed(loaded)
     loaded.auth.tokens = []   # a user without a PAT: no system token is created on their behalf either
-    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp"])
+    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["elitea_builder"])
     assert len(tools) == len(loaded.it.MCP_ENDPOINT_CONFIGS)
     assert all(tool["settings"]["headers"] == {} for tool in tools)
-    assert all("/app/5/mcp/" in tool["settings"]["url"] for tool in tools)
+    assert all("/app/1/mcp/elitea_core/builder" in tool["settings"]["url"] for tool in tools)
     assert loaded.auth.calls == []
 
 
@@ -165,12 +166,10 @@ def test_internal_toolkits_use_base_url_else_pylon_main_else_app_host(loaded, co
     loaded.base.host_resolves = lambda host: resolves
     loaded.base.log = types.SimpleNamespace(info=logged.append)
     loaded.base.internal_base_url(config)   # module init
-    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp", "skill_builder"],
+    tools = loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["elitea_builder"],
                                           scope_project_id=7)
     urls = {tool["name"]: tool["settings"]["url"] for tool in tools}
-    assert urls["Elitea Applications"] == f"{base}/app/5/mcp/elitea_core/applications?scope_project_id=7"
-    assert urls["Elitea Skills"] == f"{base}/app/1/mcp/elitea_core/skills?scope_project_id=7"
-    assert urls["Secrets"] == f"{base}/app/5/mcp/secrets"
+    assert urls == {"Elitea Builder": f"{base}/app/1/mcp/elitea_core/builder?scope_project_id=7"}
     assert logged == [f"Internal MCP base URL: {base} ({reason})"]
 
 
@@ -178,5 +177,5 @@ def test_the_host_lookup_runs_once_per_process(loaded):
     lookups = []
     loaded.base.host_resolves = lambda host: lookups.append(host) or True
     for _ in range(3):
-        loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["internal_mcp"])
+        loaded.it.inject_mcp_toolkits(42, current_project_id=1, internal_tools=["elitea_builder"])
     assert lookups == ["pylon_main"] and loaded.it._get_internal_base_url() == "http://pylon_main:8080"

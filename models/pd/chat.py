@@ -100,6 +100,10 @@ class ApplicationChatRequest(MergeUpdateBase):
         default=None,
         description="Enabled Project Context prepared for SDK-side on-demand loading.",
     )
+    builder: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Elitea Builder block (#7383, builder_v2): core prompt for the SDK BuilderMiddleware.",
+    )
     invoked_skills: Optional[List[dict]] = Field(
         default=None,
         description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
@@ -188,6 +192,10 @@ class LLMChatRequest(MergeUpdateBase):
     project_context: Optional[Dict[str, str]] = Field(
         default=None,
         description="Enabled Project Context prepared for SDK-side on-demand loading.",
+    )
+    builder: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Elitea Builder block (#7383, builder_v2): core prompt for the SDK BuilderMiddleware.",
     )
     invoked_skills: Optional[List[dict]] = Field(
         default=None,

@@ -82,7 +82,7 @@ def conv(**kw):
     {'name': 'renamed'},
     # UI resends the whole meta with unchanged persona when toggling steps_limit / internal tools
     {'meta': {'persona': 'generic', 'steps_limit': 50}},
-    {'meta': {'internal_tools': ['internal_mcp']}},
+    {'meta': {'internal_tools': ['elitea_builder']}},
     {'instructions': 'keep', 'is_private': True, 'is_hidden': False},
     {'instructions': None, 'is_private': None, 'is_hidden': None},
     {'folder_id': None},

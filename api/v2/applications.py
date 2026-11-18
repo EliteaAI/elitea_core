@@ -56,9 +56,7 @@ def get_enabled_agent_internal_tools(personalization) -> list:
     
     # Map personalization field names to internal tool names
     field_to_tool_map = {
-        'default_agent_internal_mcp_enabled': 'internal_mcp',
-        'default_agent_skill_builder_enabled': 'skill_builder',
-        'default_agent_project_context_builder_enabled': 'project_context_builder',
+        'default_agent_elitea_builder_enabled': 'elitea_builder',
         'default_agent_ask_user_enabled': 'ask_user',
         'default_agent_image_generation_enabled': 'image_generation',
         'default_agent_web_search_enabled': 'web_search',

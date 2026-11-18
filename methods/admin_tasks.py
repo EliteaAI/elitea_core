@@ -706,6 +706,52 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": False}
 
     @web.method()
+    def migrate_elitea_builder_keys(self, *args, **kwargs):
+        """Admin task: merge the three builder modules into Elitea Builder (R-2.0.9, #7383). Idempotent.
+
+        Rewrites internal_mcp, skill_builder and project_context_builder to elitea_builder in the meta of every
+        agent version and conversation (other keys and their order are kept), and fills the Elitea Builder module
+        defaults (OR of the old Chats / Agents defaults, legacy personalization as fallback). A project is one
+        transaction; a failing project is listed and the run goes on.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"                - dry run across all projects (default; changes nothing)
+            "project_id=all;dry_run=false"  - migrate everywhere
+        """
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from ..models.all import ApplicationVersion  # pylint: disable=C0415
+        from ..models.conversation import Conversation  # pylint: disable=C0415
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.builder_keys import migrate_rows, run_builder_keys_migration  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_elitea_builder_keys: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        def migrate_project(pid, dry_run):
+            with db.get_session(pid) as session:
+                versions = migrate_rows(session.query(ApplicationVersion).all(), dry_run, flag_modified)
+                conversations = migrate_rows(session.query(Conversation).all(), dry_run, flag_modified)
+                if not dry_run:
+                    session.commit()
+            return versions, conversations
+
+        def migrate_settings(pid, dry_run):
+            return self.context.rpc_manager.timeout(30).social_migrate_builder_module_settings(pid, dry_run)
+
+        result = run_builder_keys_migration(project_ids, migrate_project, migrate_settings, dry_run_flag(param))
+        for pid in result["failed_projects"]:
+            log.error("migrate_elitea_builder_keys: project %s failed", pid)
+        log.info("migrate_elitea_builder_keys: %s", result)
+        return result
+
+    @web.method()
     def close_stuck_chat_runs(self, *args, **kwargs):
         """Admin task: end chat answers stuck "streaming" that nothing will end any more (R-2.0.9, EL-7385).
 

@@ -20,6 +20,7 @@ from .utils.binding_api import (
     registration as binding_registration,
 )
 from .models.skill import SKILL_FILE_TABLES
+from .models.builder_changeset import BUILDER_TABLES
 from .utils.agent_identity_schema import apply_tables, project_ids_missing_tables
 from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
@@ -643,6 +644,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_elitea_builder_keys", self.migrate_elitea_builder_keys,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "seed_eval_health_check", self.seed_eval_health_check,
                 group="R-2.0.9",
             )
@@ -652,6 +657,7 @@ class Module(module.ModuleModel):
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
         self._ensure_skill_file_schema()
+        self._ensure_builder_schema()
         self._ensure_schedule_streak_column()
         self._ensure_agent_identity_schema()
         self._start_governance()
@@ -934,6 +940,21 @@ class Module(module.ModuleModel):
                 )
             except Exception:  # pylint: disable=W0703
                 log.exception("skill file schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
+    def _ensure_builder_schema(self):
+        """Startup safety net: create the Elitea Builder changeset table in project schemas that predate it (#7383).
+        Off-thread; a catalog check keeps steady-state boots DDL-free. New projects are covered by create_all."""
+        def _run():
+            try:
+                pending = project_ids_missing_tables(BUILDER_TABLES)
+                if not pending:
+                    return
+                migrated, failed = apply_tables(pending, BUILDER_TABLES)
+                log.info("builder schema: migrated=%s failed=%s", len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("builder schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
 
@@ -1268,7 +1289,7 @@ class Module(module.ModuleModel):
         self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget, feature_budget, user_feature_budget
-        from .models import evaluation, eval_platform_dimension, eval_auto
+        from .models import evaluation, eval_platform_dimension, eval_auto, builder_changeset
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
         from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
