@@ -77,8 +77,8 @@ def harness(isolated_sys_modules):
 
 
 def _get_reference(harness, **args):
-    harness.args.clear()
-    harness.args.update(args)
+    from werkzeug.datastructures import MultiDict
+    harness.reference.request.args = MultiDict(args)  # Flask's request.args type
     return harness.reference.PromptLibAPI().get(project_id=PROJECT_ID)
 
 
@@ -99,6 +99,37 @@ def test_reference_serves_the_requested_topics(harness):
     body, _ = _get_reference(harness, topics='node:toolkit,node:router')
     assert body['reference'].startswith('# toolkit') and '# router' in body['reference']
     assert '**Required:** `tool`' in body['reference']
+
+
+def _mcp_executor_function(name, namespace):
+    """One McpApiToolExecutor function, unchanged, without the module's database imports."""
+    import ast
+    source = (PLUGIN_ROOT / 'utils' / 'mcp_service.py').read_text()
+    executor = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.ClassDef) and node.name == 'McpApiToolExecutor')
+    func = next(node for node in executor.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    func.decorator_list = []
+    exec(compile(ast.Module(body=[func], type_ignores=[]), f'<{name}>', 'exec'), namespace)  # pylint: disable=exec-used
+    return namespace[name]
+
+
+@pytest.mark.parametrize('topics', [['overview', 'node:llm'], 'overview,node:llm'])
+def test_reference_serves_every_topic_sent_through_the_mcp_layer(harness, topics):
+    """A list (as the tool description shows it) and a string both reach the endpoint whole."""
+    from urllib.parse import parse_qsl, urlencode
+    from werkzeug.datastructures import MultiDict
+
+    parse = _mcp_executor_function('_parse_arguments', {
+        'log': types.SimpleNamespace(warning=lambda *a, **k: None),
+        'sanitize_property_name': lambda name: name,
+        '_is_blank': lambda v: v is None or (isinstance(v, str) and not v.strip()),
+    })
+    parameters = harness.openapi[f'{PACKAGE}.api.v2.builder_reference']['parameters']
+    _, query, _ = parse({'topics': topics}, parameters)
+    # _build_wsgi_environ's QUERY_STRING (urlencode doseq), read back as Flask builds request.args
+    harness.reference.request.args = MultiDict(parse_qsl(urlencode(query, doseq=True)))
+    body, _ = harness.reference.PromptLibAPI().get(project_id=PROJECT_ID)
+    assert body['reference'].startswith('# Pipeline YAML: the shape') and '# llm' in body['reference']
 
 
 def test_reference_no_longer_needs_the_service_prompt(harness):
@@ -184,6 +215,13 @@ def test_patch_allows_an_edit_to_a_pipeline_that_already_had_errors():
     edited = yaml.safe_load(_yaml(old))
     edited['nodes'][0]['input_mapping']['task']['value'] = 'a better prompt'
     assert check(_yaml(old), _yaml(edited)) == []
+
+
+@pytest.mark.parametrize('before', ['', 'nodes: ['])
+def test_patch_refuses_a_text_that_is_still_not_a_pipeline(before):
+    # An empty or broken original must not excuse a patched text that is still not a pipeline.
+    check = _errors_the_patch_introduced()
+    assert [f['rule'] for f in check(before, 'entry_point: [')] == ['R20']
 
 
 def test_patch_refuses_a_new_error_next_to_an_old_one():

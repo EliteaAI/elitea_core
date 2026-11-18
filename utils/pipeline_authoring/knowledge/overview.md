@@ -8,7 +8,7 @@ A pipeline is a graph of nodes. The runtime starts at `entry_point`, runs a node
 edge, and stops when a path reaches `END`.
 
 ```yaml
-entry_point: classify          # id of the first node; required, never a router/decision/hitl
+entry_point: classify          # id of the first node; required (a router/decision/hitl first is allowed)
 state:                         # optional; variables the nodes read and write
   input: {type: str}           # the user's message (always present)
   messages: {type: list}       # chat history (always present); keep it when you declare state
@@ -67,7 +67,8 @@ List every `{var}` you use in the node's `input`. Write literal braces as `{{` a
 
 ## State
 
-- `input` and `messages` always exist. Other variables need a `state` entry with a type
+- `input` and `messages` always exist, and so do `last_tool_outcome` and `tool_outcomes` (set by
+  every tool node; read them, never write them). Other variables need a `state` entry with a type
   (`str`, `int`, `float`, `bool`, `list`, `dict`).
 - Pass intermediate results through typed variables. Write `messages` only in the node that
   produces the answer the user sees: every llm or agent node that reads `messages` re-sends the

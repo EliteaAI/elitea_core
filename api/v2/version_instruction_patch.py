@@ -31,7 +31,10 @@ def errors_the_patch_introduced(before: str, after: str) -> list:
     def key(finding):
         return finding["rule"], finding["node_id"], finding["field"]
 
-    existing = {key(f) for f in validate_pipeline(before)["errors"]}
+    # "not a pipeline at all" (empty, not YAML, not a mapping) shares one key; an empty or
+    # broken original must not excuse a patched text that is still not a pipeline.
+    document_level = ("R20", None, None)
+    existing = {key(f) for f in validate_pipeline(before)["errors"] if key(f) != document_level}
     return [f for f in validate_pipeline(after)["errors"] if key(f) not in existing]
 
 

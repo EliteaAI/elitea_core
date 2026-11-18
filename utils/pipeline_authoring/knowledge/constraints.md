@@ -21,7 +21,9 @@ Things that build fine and then misbehave when the pipeline runs.
   repeats until the step limit. Keep large content in artifacts.
 - **printer and hitl wait for a person.** In a scheduled or webhook pipeline, or one called by an
   agent, they wait forever.
-- **Inline `condition:` blocks on a node are not applied**; use a router.
+- **Inline `condition:` on a node is deprecated.** It routes only when the node has no
+  `transition`/`decision`, which is how the UI writes it. Keep it working when editing; use a
+  router in new pipelines.
 - **Pipeline input with escaped newlines** may arrive with real newlines inside JSON strings, which
   makes `json.loads` fail with "Invalid control character". Re-escape newlines inside strings
   before parsing.

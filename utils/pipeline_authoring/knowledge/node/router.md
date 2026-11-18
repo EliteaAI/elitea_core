@@ -14,7 +14,7 @@ Use for branching on state values without a model: a flag, a status, a count, a 
 - The rendered text is stripped of everything except letters, digits, `_`, `-` and `.`, then
   compared with `routes`; anything else, including an empty result, goes to `default_output`
   (END when not set).
-- A router has no `transition`, and cannot be the `entry_point`.
+- A router has no `transition`. As the `entry_point` it routes on the user's first message only.
 
 ## Example
 

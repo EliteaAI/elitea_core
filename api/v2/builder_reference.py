@@ -58,8 +58,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     })
     @api_tools.endpoint_metrics
     def get(self, project_id: int):
+        # A list from the MCP client arrives as repeated `topics=` keys (urlencode doseq), a
+        # string as one comma-separated value; joining covers both.
         return {
-            "reference": builder_reference(request.args.get("topics") or None),
+            "reference": builder_reference(",".join(request.args.getlist("topics")) or None),
             "node_types": node_types("current"),
             "version": "2.0",
         }, 200

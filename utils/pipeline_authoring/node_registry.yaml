@@ -194,8 +194,8 @@ nodes:
 # Routing written on the node itself rather than as a separate node.
 inline_constructs:
   condition:
-    status: removed
-    summary: Inline `condition:` block on a non-router node.
+    status: deprecated
+    summary: Inline `condition:` block on a non-router node; routes only when the node has no transition/decision (ignored on printer/hitl).
     replacement: a separate router node
   decision:
     status: deprecated

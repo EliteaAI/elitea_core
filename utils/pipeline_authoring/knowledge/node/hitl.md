@@ -15,8 +15,8 @@ webhook pipeline, or one that runs as another agent's tool.
 - `routes` maps the action to the next node: `approve`, `reject`, `edit`. Without `approve` the
   approve button is not offered.
 - `edit` writes the person's text into `edit_state_key` and continues at `routes.edit`.
-- A hitl node has no `transition`, and should not be the `entry_point` (the user's first message
-  is already in `input`).
+- A hitl node has no `transition`. It can be the `entry_point`, but it rarely helps: the user's
+  first message is already in `input`.
 
 ## Example
 

@@ -22,8 +22,11 @@ import yaml
 
 from .registry import END, inline_construct, node_spec, node_types, required_paths
 
-# State channels create_graph always defines; never "undeclared", never "unused".
-RUNTIME_STATE_VARS = frozenset({'input', 'messages', 'router_output'})
+# State channels create_graph always defines (langchain/utils.py create_state); never
+# "undeclared", never "unused".
+RUNTIME_STATE_VARS = frozenset({'input', 'messages', 'router_output', 'tool_outcomes', 'last_tool_outcome'})
+# The runtime writes these itself; a node or hitl edit that writes them is overwritten.
+RUNTIME_WRITTEN_VARS = frozenset({'router_output', 'tool_outcomes', 'last_tool_outcome'})
 MAPPING_TYPES = ('fixed', 'variable', 'fstring')
 HITL_ACTIONS = ('approve', 'reject', 'edit')
 TRIGGERS_WITHOUT_A_PERSON = frozenset({'schedule', 'scheduled', 'webhook'})
@@ -250,9 +253,11 @@ def _r22_entry_point(doc, by_id, findings):
         return
     spec = node_spec(node.get('type')) or {}
     if spec.get('routing') == 'own':
-        findings.error('R22', f'`entry_point` is a `{node.get("type")}` node; routing nodes cannot start a pipeline.',
-                       'Start with a node that does work (llm, code, toolkit, ...) and route after it.',
-                       node_id=entry.strip(), field='entry_point')
+        # It builds and runs (the UI lets a user pick one); it can only route on the first input.
+        findings.warning('R22', f'`entry_point` is a `{node.get("type")}` node; it routes on the initial '
+                                '`input`/state only.',
+                         'Fine if intended; otherwise start with a node that does work and route after it.',
+                         node_id=entry.strip(), field='entry_point')
 
 
 def _r23_node_status(nid, node, findings) -> bool:
@@ -284,8 +289,10 @@ def _r23_node_status(nid, node, findings) -> bool:
     for name in ('condition', 'decision'):
         if name in node and not (name == 'condition' and node_type == 'router'):
             construct = inline_construct(name) or {}
-            add = findings.error if construct.get('status') == 'removed' else findings.warning
-            why = (' (the runtime accepts it but does not route on it)' if name == 'condition' else '')
+            ignored = name == 'condition' and _inline_condition_is_ignored(node, spec)
+            add = findings.error if ignored or construct.get('status') == 'removed' else findings.warning
+            why = (' that is ignored: this node routes by its `transition`/`decision` or its own routes'
+                   if ignored else '')
             add('R23', f'Node `{nid}` has an inline `{name}:` block{why}.',
                 f'Use instead: {construct.get("replacement", "a separate routing node")}.',
                 node_id=nid, field=name)
@@ -327,6 +334,13 @@ _REQUIRED_HINTS = {
 }
 
 
+def _inline_condition_is_ignored(node: dict, spec: dict) -> bool:
+    """create_graph follows `transition`, then `decision`, then `condition`; printer, hitl, router
+    and decision nodes install their own edges and never reach that step."""
+    return bool(node.get('transition') or node.get('decision') or spec.get('routing') == 'own'
+                or node.get('type') == 'printer')
+
+
 def _route_targets(node: dict) -> List[Tuple[str, Any]]:
     """(field, target) for every edge the runtime builds from this node."""
     node_type = node.get('type')
@@ -343,12 +357,20 @@ def _route_targets(node: dict) -> List[Tuple[str, Any]]:
                 targets += [(f'nodes[{i}]', v) for i, v in enumerate(_as_list(node.get('nodes')))]
             targets.append(('default_output', node.get('default_output', END)))
         return targets
-    if 'transition' in node:
+    # The runtime's order: the first of these that is set is the only edge it builds.
+    if node.get('transition'):
         targets.append(('transition', node.get('transition')))
-    decision = node.get('decision')
-    if isinstance(decision, dict):
+    elif isinstance(node.get('decision'), dict):
+        decision = node['decision']
         targets += [(f'decision.nodes[{i}]', v) for i, v in enumerate(_as_list(decision.get('nodes')))]
         targets.append(('decision.default_output', decision.get('default_output', END)))
+    elif isinstance(node.get('condition'), dict) and node_type != 'printer':
+        condition = node['condition']
+        targets += [(f'condition.conditional_outputs[{i}]', o.get('node', o) if isinstance(o, dict) else o)
+                    for i, o in enumerate(_as_list(condition.get('conditional_outputs')))]
+        targets.append(('condition.default_output', condition.get('default_output', END)))
+    elif 'transition' in node:
+        targets.append(('transition', node.get('transition')))  # present but empty: R2 reports it
     return targets
 
 
@@ -382,7 +404,7 @@ def _r25_reachability(doc, nodes, ids, findings):
     for nid, node in zip(ids, nodes):
         spec = node_spec(node.get('type')) or {}
         outs = [t.strip() for _, t in _route_targets(node) if isinstance(t, str)]
-        if spec.get('routing') != 'own' and not any(f == 'transition' or f.startswith('decision.')
+        if spec.get('routing') != 'own' and not any(f == 'transition' or f.startswith(('decision.', 'condition.'))
                                                     for f, _ in _route_targets(node)):
             outs.append(END)  # no transition: the runtime adds no edge, LangGraph ends the run here
         edges[nid] = [o for o in outs if not _is_end(o)]
@@ -431,7 +453,11 @@ def _r4_declared_state(state, nodes, ids, findings):
                                f'Write `{field}: [name1, name2]`, not a list of objects.', node_id=nid, field=field)
                 continue
             for name in values:
-                if name not in declared:
+                if field == 'output' and name in RUNTIME_WRITTEN_VARS:
+                    findings.warning('R4', f'Node `{nid}` writes `{name}`, which the runtime sets itself; '
+                                           'the next routing or tool node overwrites it.',
+                                     f'Write a variable of your own instead of `{name}`.', node_id=nid, field=field)
+                elif name not in declared:
                     findings.error('R4', f'Node `{nid}` uses `{name}` in `{field}`, which is not declared in `state`.',
                                    f'Add `{name}: {{type: str}}` (or its real type) under `state`.',
                                    node_id=nid, field=field)
@@ -455,6 +481,10 @@ def _r1_unused_state(state, nodes, findings):
         if isinstance(node.get('edit_state_key'), str):
             used.add(node['edit_state_key'])
         texts = [node.get('condition'), node.get('template'), _code_source(node)]
+        condition = node.get('condition')
+        if isinstance(condition, dict):  # inline condition: reads condition_input, renders the definition
+            used.update(v for v in _as_list(condition.get('condition_input')) if isinstance(v, str))
+            texts.append(condition.get('condition_definition'))
         for _, entry in _mapping_entries(node):
             if isinstance(entry, dict):
                 if entry.get('type') == 'variable':
@@ -591,6 +621,10 @@ def _r35_hitl_routes(nid, node, state, findings):
                                   'the edit action fails at run time.',
                            'Set `edit_state_key` to the state variable the person edits.',
                            node_id=nid, field='edit_state_key')
+        elif key in RUNTIME_WRITTEN_VARS:
+            findings.warning('R35', f'HITL node `{nid}` edits `{key}`, which the runtime sets itself; '
+                                    'the edit is overwritten by the next routing or tool node.',
+                             'Edit a variable of your own.', node_id=nid, field='edit_state_key')
         elif state and key not in state and key not in RUNTIME_STATE_VARS:
             findings.error('R35', f'HITL node `{nid}` edits `{key}`, which is not declared in `state`.',
                            f'Declare `{key}` under `state`.', node_id=nid, field='edit_state_key')

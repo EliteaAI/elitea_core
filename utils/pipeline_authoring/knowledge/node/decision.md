@@ -13,8 +13,8 @@ template over state can decide.
 - `nodes` lists the candidate node ids; `description` tells the model when to pick each.
 - The model sees the variables in `input` (or `decisional_inputs`).
 - An answer that is not in `nodes` goes to `default_output` (END when not set).
-- A decision has no `transition`, cannot be the `entry_point`, and should not follow another
-  decision directly.
+- A decision has no `transition` and should not follow another decision directly. As the
+  `entry_point` it decides on the user's first message only.
 
 ## Example
 
