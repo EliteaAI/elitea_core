@@ -156,9 +156,9 @@ def rpc_module(isolated_sys_modules):
     sys.modules['tools'] = types.SimpleNamespace(
         db=types.SimpleNamespace(get_session=contextlib.contextmanager(lambda project_id: (yield session))),
         config=mock.MagicMock(), auth=mock.MagicMock(), serialize=mock.MagicMock(),
-        rpc_tools=mock.MagicMock(), MinioClient=mock.MagicMock(),
+        rpc_tools=mock.MagicMock(), MinioClient=mock.MagicMock(), this=mock.MagicMock(),
     )
-    for name in ('models.enums.all', 'models.pd.conversation', 'models.pd.participant', 'models.pd.message',
+    for name in ('models.all', 'models.pd.participant', 'utils.sio_utils', 'models.enums.all', 'models.pd.conversation', 'models.pd.participant', 'models.pd.message',
                  'models.message_group', 'models.message_items.text', 'utils.conversation_utils',
                  'utils.participant_utils', 'utils.chat_feature_flags', 'utils.context_analytics',
                  'utils.exceptions', 'utils.model_defaults', 'utils.chat_usage',
@@ -179,6 +179,8 @@ def rpc_module(isolated_sys_modules):
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_test_runs.py', f'{PACKAGE}.utils.schedule_test_runs')
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
+    # The real module, so the execution type filter reads the same TriggerType values as the list rows
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_execution.py', f'{PACKAGE}.utils.pipeline_execution')
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
                                     f'{PACKAGE}.rpc.chat_conversation')
     module.session = session
@@ -526,3 +528,61 @@ def test_valid_run_options_reach_the_rpc(api):
 def test_the_trigger_option_does_not_take_the_old_query_name(api):
     _get(api, trigger_type='test')
     assert api.calls[0]['run_trigger'] is None
+
+
+STORED_TYPE = "chat_conversations.meta ->> 'execution_type'"
+
+
+@pytest.mark.parametrize('execution_type', ['api', 'mcp'])
+def test_the_execution_type_filter_compares_the_stored_type(rpc_module, execution_type):
+    sql = _run_filter_sql(rpc_module, execution_type=execution_type)
+    assert f"({STORED_TYPE}) = '{execution_type}'" in sql
+    assert 'entity_schedule_runs' not in sql
+
+
+def test_the_chat_filter_keeps_the_rows_that_read_as_chat_without_a_stored_type(rpc_module):
+    """A row without a known stored type and without scheduled_run lists as chat: the filter keeps it too."""
+    sql = _run_filter_sql(rpc_module, execution_type='chat')
+    assert f"({STORED_TYPE}) = 'chat'" in sql
+    assert f"({STORED_TYPE}) IS NULL" in sql
+    assert (f"({STORED_TYPE}) NOT IN ('chat', 'api', 'mcp', 'webhook', 'scheduled', 'schedule_manual', "
+            "'manual', 'schedule_test')") in sql
+    assert ("jsonb_typeof((chat_conversations.meta -> 'scheduled_run')) IS DISTINCT FROM 'boolean' OR "
+            "(chat_conversations.meta ->> 'scheduled_run') IS DISTINCT FROM 'true'") in sql
+    assert 'entity_schedule_runs' not in sql
+
+
+def test_the_chat_filter_excludes_every_known_type_but_chat(rpc_module):
+    trigger_type = sys.modules[f'{PACKAGE}.utils.pipeline_execution'].TriggerType
+    sql = _run_filter_sql(rpc_module, execution_type='chat')
+    for value in trigger_type.VALUES:
+        assert f"'{value}'" in sql
+
+
+def test_a_list_without_an_execution_type_reads_no_stored_type(rpc_module):
+    assert 'execution_type' not in _run_filter_sql(rpc_module)
+
+
+def test_the_execution_type_combines_with_the_run_options(rpc_module):
+    sql = _run_filter_sql(rpc_module, execution_type='api', run_status='failed')
+    assert f"({STORED_TYPE}) = 'api'" in sql
+    assert "entity_schedule_runs.status = 'failed'" in sql
+
+
+@pytest.mark.parametrize('value', ['chat', 'api', 'mcp'])
+def test_a_valid_execution_type_reaches_the_rpc(api, value):
+    _, status = _get(api, execution_type=value)
+    assert status == 200
+    assert api.calls[0]['execution_type'] == value
+
+
+def test_a_list_without_an_execution_type_passes_none(api):
+    _get(api)
+    assert api.calls[0]['execution_type'] is None
+
+
+@pytest.mark.parametrize('value', ['webhook', 'scheduled', 'schedule_manual', 'manual', 'CHAT', ''])
+def test_an_unknown_execution_type_is_400_and_the_rpc_is_not_called(api, value):
+    body, status = _get(api, execution_type=value)
+    assert (status, body['code'], body['field']) == (400, 'invalid_input', 'execution_type')
+    assert api.calls == []
