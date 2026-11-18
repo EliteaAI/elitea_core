@@ -439,7 +439,17 @@ class SentResponse:
 
 @pytest.fixture
 def package_routes(harness):
-    calls = types.SimpleNamespace(imported=[], unzipped=[], zip_error=None, export={})
+    calls = types.SimpleNamespace(imported=[], unzipped=[], zip_error=None, export={}, plugin=None,
+                                  plugin_imports=[])
+
+    def read_plugin_zip(data):
+        if calls.zip_error:
+            raise calls.zip_error
+        return calls.plugin
+
+    def import_plugin_skills(project_id, packages, author_id):
+        calls.plugin_imports.append((project_id, packages, author_id))
+        return [{'id': 3}, {'id': 4}]
 
     def read_skill_zip(data):
         calls.unzipped.append(data)
@@ -458,6 +468,7 @@ def package_routes(harness):
     module = types.ModuleType(f'{PACKAGE}.utils.skill_export_import')
     module.__dict__.update(
         read_skill_zip=read_skill_zip, import_skill_md=import_skill_md,
+        read_plugin_zip=read_plugin_zip, import_plugin_skills=import_plugin_skills,
         is_skill_package=lambda filename: filename.lower().endswith(('.zip', '.skill')),
         validate_skill_import_filename=validate_skill_import_filename,
         export_skill_md=lambda **kwargs: calls.export,
@@ -492,6 +503,15 @@ class TestSkillPackageRoutes:
         assert package_routes.unzipped == [b'PK\x03\x04zip']
         assert package_routes.imported == [{'project_id': 7, 'content': '---\nname: forms\n---\nbody', 'author_id': 1,
                                             'files': ['entry']}]
+
+    def test_a_plugin_zip_imports_every_skill_it_holds_and_answers_with_all_of_them(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.create'}
+        harness.files['file'] = NamedUpload('engineering.zip', b'PK\x03\x04zip')
+        package_routes.plugin = [('skills/a/SKILL.md', 'a', []), ('commands/b.md', 'b', [])]
+
+        assert package_routes.importer.post(project_id=7) == ({'skills': [{'id': 3}, {'id': 4}]}, 201)
+        assert package_routes.plugin_imports == [(7, package_routes.plugin, 1)]
+        assert package_routes.unzipped == [] and package_routes.imported == []
 
     def test_a_markdown_upload_imports_without_files(self, harness, package_routes):
         harness.user_permissions = {'models.applications.skills.create'}

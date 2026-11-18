@@ -1,7 +1,9 @@
 import json
+import re
 import uuid
 import zipfile
 import zlib
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
@@ -10,7 +12,7 @@ import yaml
 from sqlalchemy.orm import selectinload
 
 from ..models.skill import Skill, SkillVersion
-from ..models.pd.skill import SkillExportModel, validate_skill_name
+from ..models.pd.skill import RESERVED_NAME_WORDS, SkillExportModel, validate_skill_name
 from .export_import_utils import slugify
 from .skill_files import (
     add_version_files,
@@ -29,12 +31,16 @@ from .skill_frontmatter import (
     list_unused_frontmatter_keys,
 )
 from .skill_utils import (
+    SkillError,
     SkillFileError,
     _skill_session,
     get_max_file_bytes,
+    get_max_package_bytes,
+    get_max_package_files,
     get_skill_details,
     import_skill,
     validate_instructions_length,
+    validate_new_skill_fields,
 )
 from .zip_safety import is_encrypted_zip_member, is_unsafe_zip_member
 
@@ -557,45 +563,176 @@ def _find_skill_md(members: list) -> zipfile.ZipInfo:
     return found[0]
 
 
-def read_skill_zip(data: bytes) -> tuple:
-    """The SKILL.md text and the file entries of a skill ZIP, refusing anything that could escape or overflow."""
+def _open_skill_archive(data: bytes) -> zipfile.ZipFile:
     try:
-        archive = zipfile.ZipFile(BytesIO(data))
+        return zipfile.ZipFile(BytesIO(data))
     except ZIP_READ_ERRORS as exc:
         raise SkillFileError('The file is not a valid ZIP archive') from exc
-    with archive:
-        members = [
-            info for info in archive.infolist()
-            if not info.is_dir()
-            and not info.filename.startswith(ZIP_LITTER_PREFIXES)
-            and PurePosixPath(info.filename).name not in ZIP_LITTER_NAMES
-        ]
-        for info in members:
-            if is_unsafe_zip_member(info):
-                raise SkillFileError(f"'{info.filename}' cannot be unpacked safely")
-            if is_encrypted_zip_member(info):
-                raise SkillFileError(f"'{info.filename}' is encrypted; export the skill without a password")
+
+
+def _package_members(archive: zipfile.ZipFile) -> list:
+    """The archive's file members without OS litter."""
+    return [
+        info for info in archive.infolist()
+        if not info.is_dir()
+        and not info.filename.startswith(ZIP_LITTER_PREFIXES)
+        and PurePosixPath(info.filename).name not in ZIP_LITTER_NAMES
+    ]
+
+
+def _refuse_unsafe_members(members: list) -> None:
+    """Refuse members that could escape the skill folder or are encrypted."""
+    for info in members:
+        if is_unsafe_zip_member(info):
+            raise SkillFileError(f"'{info.filename}' cannot be unpacked safely")
+        if is_encrypted_zip_member(info):
+            raise SkillFileError(f"'{info.filename}' is encrypted; export the skill without a password")
+
+
+def _read_member_text(archive: zipfile.ZipFile, info: zipfile.ZipInfo, label: str) -> str:
+    if info.file_size > get_max_file_bytes():
+        raise SkillFileError(
+            f"{label} is {describe_size(info.file_size)}; "
+            f'a skill file can be at most {describe_size(get_max_file_bytes())}'
+        )
+    try:
+        content = _read_zip_member(archive, info).decode('utf-8-sig')
+    except UnicodeDecodeError as exc:
+        raise SkillFileError(f"{label} is not UTF-8 text") from exc
+    if not content.strip():
+        raise SkillFileError(f"{label} is empty")
+    return content
+
+
+def _read_skill_package(archive: zipfile.ZipFile, skill_md: zipfile.ZipInfo, files: list, label: str) -> tuple:
+    """The SKILL.md text and the file entries of the skill whose folder holds ``skill_md``."""
+    root = skill_md.filename[:-len(SKILL_MD_NAME)]
+    validate_package([{'path': info.filename[len(root):], 'size': info.file_size} for info in files])
+    content = _read_member_text(archive, skill_md, label)
+    entries = [build_file_entry(info.filename[len(root):], _read_zip_member(archive, info)) for info in files]
+    validate_package(entries)
+    return content, entries
+
+
+def read_skill_zip(data: bytes) -> tuple:
+    """The SKILL.md text and the file entries of a skill ZIP, refusing anything that could escape or overflow."""
+    with _open_skill_archive(data) as archive:
+        members = _package_members(archive)
+        _refuse_unsafe_members(members)
         skill_md = _find_skill_md(members)
         root = skill_md.filename[:-len(SKILL_MD_NAME)]
         files = [info for info in members if info is not skill_md]
         outside = next((info.filename for info in files if not info.filename.startswith(root)), None)
         if outside:
             raise SkillFileError(f"'{outside}' is outside the skill folder '{root.rstrip('/')}'")
-        if skill_md.file_size > get_max_file_bytes():
-            raise SkillFileError(
-                f'SKILL.md is {describe_size(skill_md.file_size)}; '
-                f'a skill file can be at most {describe_size(get_max_file_bytes())}'
-            )
-        validate_package([{'path': info.filename[len(root):], 'size': info.file_size} for info in files])
-        entries = [build_file_entry(info.filename[len(root):], _read_zip_member(archive, info)) for info in files]
-        validate_package(entries)
-        try:
-            content = _read_zip_member(archive, skill_md).decode('utf-8-sig')
-        except UnicodeDecodeError as exc:
-            raise SkillFileError('SKILL.md is not UTF-8 text') from exc
-    if not content.strip():
-        raise SkillFileError('SKILL.md is empty')
-    return content, entries
+        return _read_skill_package(archive, skill_md, files, SKILL_MD_NAME)
+
+
+def _find_plugin_root(members: list) -> Optional[str]:
+    """The folder holding ``.claude-plugin/plugin.json``: the archive root, or one top-level folder."""
+    roots = sorted(
+        info.filename.removesuffix('.claude-plugin/plugin.json') for info in members
+        if info.filename == '.claude-plugin/plugin.json'
+        or (info.filename.endswith('/.claude-plugin/plugin.json') and info.filename.count('/') == 2)
+    )
+    if len(roots) > 1:
+        raise SkillFileError('The ZIP holds more than one plugin; import them one at a time')
+    return roots[0] if roots else None
+
+
+def _is_plugin_skill_md(filename: str, skills_dir: str) -> bool:
+    relative = filename[len(skills_dir):]
+    return filename.startswith(skills_dir) and relative.count('/') == 1 \
+        and PurePosixPath(relative).name.lower() == SKILL_MD_NAME.lower()
+
+
+def _is_plugin_command(filename: str, commands_dir: str) -> bool:
+    return filename.startswith(commands_dir) and filename.lower().endswith('.md')
+
+
+def _command_skill_name(path: str) -> str:
+    """The command's path under commands/ as an Agent Skills name: lowercase words joined by hyphens, reserved words
+    left out, so commands of different folders keep different names."""
+    name = re.sub(r'[^a-z0-9]+', '-', path[:-len('.md')].lower())
+    for word in RESERVED_NAME_WORDS:
+        name = name.replace(word, '-')
+    name = re.sub(r'-+', '-', name).strip('-')[:64].rstrip('-')
+    if not name:
+        raise ValueError('the file name leaves no valid skill name')
+    return name
+
+
+def command_to_skill_document(path: str, content: str) -> dict:
+    """A plugin command as a skill's frontmatter and body: named after its path, described by its first line of text
+    when undescribed, or by its name when it has no such line."""
+    if content.lstrip('\ufeff').lstrip().startswith('---'):
+        parsed = parse_skill_md(content)
+        frontmatter, body = parsed['frontmatter'], parsed['body']
+    else:
+        frontmatter, body = {}, content.replace('\r\n', '\n').replace('\r', '\n').strip()
+    if not body:
+        raise ValueError('Skill instructions (Markdown body) are required and cannot be empty')
+    name = _command_skill_name(path)
+    first_text = next((text for text in (line.lstrip('#').strip() for line in body.splitlines()) if text), name)
+    description = frontmatter.get('description') or first_text[:2304]
+    return {'frontmatter': {**frontmatter, 'name': name, 'description': description}, 'body': body}
+
+
+def _validate_plugin_size(members: list) -> None:
+    """Refuse, before any member is read, a plugin whose skills together exceed what one skill version may hold."""
+    total = sum(info.file_size for info in members)
+    if total > get_max_package_bytes():
+        raise SkillFileError(
+            f"the plugin's skills and commands are {describe_size(total)}; "
+            f'a plugin can hold at most {describe_size(get_max_package_bytes())}'
+        )
+    if len(members) > get_max_package_files():
+        raise SkillFileError(f'a plugin can hold at most {get_max_package_files()} skill and command files')
+
+
+def read_plugin_zip(data: bytes) -> Optional[list]:
+    """Every skill and command of a Claude plugin ZIP as ``(source path, parsed skill document, file entries)``,
+    or None when the archive holds no plugin skills and so is read as a single skill."""
+    with _open_skill_archive(data) as archive:
+        members = _package_members(archive)
+        root = _find_plugin_root(members)
+        if root is None:
+            return None
+        skills_dir = f'{root}skills/'
+        commands_dir = f'{root}commands/'
+        members = [
+            info for info in members
+            if info.filename.startswith(skills_dir) or _is_plugin_command(info.filename, commands_dir)
+        ]
+        _refuse_unsafe_members(members)
+        _validate_plugin_size(members)
+        packages = []
+        for skill_md in members:
+            if not _is_plugin_skill_md(skill_md.filename, skills_dir):
+                continue
+            folder = skill_md.filename[:-len(SKILL_MD_NAME)]
+            files = [info for info in members if info.filename.startswith(folder) and info is not skill_md]
+            content, entries = _read_skill_package(archive, skill_md, files, f"'{skill_md.filename}'")
+            with _failures_named_after(skill_md.filename):
+                packages.append((skill_md.filename, parse_skill_md(content), entries))
+        for command in members:
+            if _is_plugin_command(command.filename, commands_dir):
+                text = _read_member_text(archive, command, f"'{command.filename}'")
+                with _failures_named_after(command.filename):
+                    document = command_to_skill_document(command.filename[len(commands_dir):], text)
+                packages.append((command.filename, document, []))
+    return packages or None
+
+
+def _validate_skill_document(document: dict) -> tuple:
+    """The validated frontmatter, instructions and kept keys of a parsed skill document."""
+    raw_frontmatter = document['frontmatter']
+    body = document['body']
+    passthrough = extract_non_elitea_frontmatter(raw_frontmatter)
+    frontmatter = {**raw_frontmatter, **decode_elitea_metadata(raw_frontmatter.get('metadata') or {})}
+    validate_skill_frontmatter(frontmatter)
+    validate_instructions_length(body)
+    return frontmatter, body, passthrough
 
 
 def import_skill_md(
@@ -605,7 +742,19 @@ def import_skill_md(
     session=None,
     files: tuple = (),
 ) -> dict:
-    """Import a skill from Markdown content (parse -> validate -> upsert), with the file entries of its ZIP.
+    """Import a skill from Markdown content (parse -> validate -> upsert), with the file entries of its ZIP."""
+    return _import_skill_document(project_id, parse_skill_md(content), author_id, session=session, files=files)
+
+
+def _import_skill_document(
+    project_id: int,
+    document: dict,
+    author_id: int,
+    session=None,
+    files: tuple = (),
+    staged: Optional[dict] = None,
+) -> dict:
+    """Import a parsed skill document, with the file entries of its ZIP.
 
     The imported skill is always created with version 'base', regardless of
     what version name was in the exported file's frontmatter. This ensures
@@ -613,13 +762,7 @@ def import_skill_md(
     names from the source.
     """
 
-    parsed = parse_skill_md(content)
-    raw_frontmatter = parsed['frontmatter']
-    body = parsed['body']
-    passthrough = extract_non_elitea_frontmatter(raw_frontmatter)
-    frontmatter = {**raw_frontmatter, **decode_elitea_metadata(raw_frontmatter.get('metadata') or {})}
-    validate_skill_frontmatter(frontmatter)
-    validate_instructions_length(body)
+    frontmatter, body, passthrough = _validate_skill_document(document)
 
     # Always use 'base' as the version name for imports. The elitea_version
     # field in the frontmatter is only informational (indicates which version
@@ -639,7 +782,8 @@ def import_skill_md(
         version['meta'] = {FRONTMATTER_META_KEY: passthrough}
 
     entries = list(files)
-    staged = stage_version_files(project_id, entries)
+    if staged is None:
+        staged = stage_version_files(project_id, entries)
     with _skill_session(session, project_id) as s:
         imported = import_skill(
             project_id=project_id,
@@ -653,3 +797,31 @@ def import_skill_md(
             add_version_files(s, project_id, imported.versions[DEFAULT_VERSION_NAME], entries, staged)
         result = get_skill_details(project_id=project_id, skill_id=imported.id, session=s)
         return {**result.get('data'), 'unused_frontmatter_keys': list_unused_frontmatter_keys(passthrough)}
+
+
+@contextmanager
+def _failures_named_after(source: str):
+    try:
+        yield
+    except (SkillError, ValueError) as exc:
+        error = SkillFileError(f"'{source}': {exc}")
+        error.http_status = getattr(exc, 'http_status', SkillFileError.http_status)
+        raise error from exc
+
+
+def import_plugin_skills(project_id: int, packages: list, author_id: int) -> list:
+    """Import every skill of a plugin in one transaction, so a plugin is imported whole or not at all. Every skill is
+    validated, and every file stored, before the transaction starts, so a refused plugin stores nothing."""
+    for source, document, _ in packages:
+        with _failures_named_after(source):
+            frontmatter = _validate_skill_document(document)[0]
+            validate_new_skill_fields(frontmatter['name'], frontmatter['description'] or frontmatter['name'])
+    staged = stage_version_files(project_id, [entry for _, _, files in packages for entry in files])
+    with _skill_session(None, project_id) as s:
+        imported = []
+        for source, document, files in packages:
+            with _failures_named_after(source):
+                imported.append(
+                    _import_skill_document(project_id, document, author_id, session=s, files=files, staged=staged)
+                )
+        return imported
