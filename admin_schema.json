@@ -1526,6 +1526,24 @@
         ],
         "minimum": 0
       }
+    },
+    "project_membership_on_added": {
+      "type": "boolean",
+      "title": "Notify users when added to a team project",
+      "description": "Send an in-app notification when a user is added through Project Settings → Users.",
+      "path": "notifications.project_membership.on_added",
+      "section": "notifications",
+      "default": true,
+      "requires_restart": false
+    },
+    "project_membership_on_removed": {
+      "type": "boolean",
+      "title": "Notify users when removed from a team project",
+      "description": "Send an in-app notification when a user is removed through Project Settings → Users.",
+      "path": "notifications.project_membership.on_removed",
+      "section": "notifications",
+      "default": false,
+      "requires_restart": false
     }
 }
 }
