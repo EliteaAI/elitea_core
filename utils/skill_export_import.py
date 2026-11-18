@@ -46,7 +46,8 @@ from .zip_safety import is_encrypted_zip_member, is_unsafe_zip_member
 
 
 DEFAULT_VERSION_NAME = 'base'
-ALLOWED_SKILL_EXTENSIONS = {'.md', '.zip'}
+SKILL_PACKAGE_EXTENSIONS = ('.zip', '.skill')
+ALLOWED_SKILL_EXTENSIONS = ('.md', *SKILL_PACKAGE_EXTENSIONS)
 SKILL_MD_NAME = 'SKILL.md'
 MD_MIMETYPE = 'text/markdown; charset=utf-8'
 ZIP_MIMETYPE = 'application/zip'
@@ -524,14 +525,18 @@ def unpack_embedded_skill_frontmatter(version: dict) -> dict:
     return unpacked
 
 
+def is_skill_package(filename: Optional[str]) -> bool:
+    """Whether the file is a skill ZIP: ``.zip``, or ``.skill`` as Claude's skill creator saves it."""
+    return (filename or '').lower().endswith(SKILL_PACKAGE_EXTENSIONS)
+
+
 def validate_skill_import_filename(filename: Optional[str]) -> None:
-    """Validate the import file extension: ``.md``, or ``.zip`` for a skill with files."""
+    """Validate the import file extension: ``.md``, or ``.zip``/``.skill`` for a skill with files."""
     if not filename:
         return
-    lowered = filename.lower()
-    if not any(lowered.endswith(ext) for ext in ALLOWED_SKILL_EXTENSIONS):
+    if not filename.lower().endswith(ALLOWED_SKILL_EXTENSIONS):
         raise ValueError(
-            'Invalid file extension. Skill import only accepts .md or .zip files.'
+            'Invalid file extension. Skill import only accepts .md, .zip or .skill files.'
         )
 
 

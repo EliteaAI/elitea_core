@@ -322,13 +322,22 @@ class TestImport:
 
         assert env.session_of(PROJECT).rows[FakeSkillVersionFile] == [] and env.storage.objects == {}
 
-    @pytest.mark.parametrize('filename, accepted', [('forms.md', True), ('forms.ZIP', True), ('forms.txt', False)])
-    def test_the_import_accepts_markdown_and_zip(self, env, filename, accepted):
+    @pytest.mark.parametrize('filename, accepted', [
+        ('forms.md', True), ('forms.ZIP', True), ('forms.skill', True), ('forms.SKILL', True),
+        ('forms.txt', False), ('forms.skills', False),
+    ])
+    def test_the_import_accepts_markdown_zip_and_skill(self, env, filename, accepted):
         if accepted:
             env.export.validate_skill_import_filename(filename)
         else:
-            with pytest.raises(ValueError, match='.md or .zip'):
+            with pytest.raises(ValueError, match=r'\.md, \.zip or \.skill'):
                 env.export.validate_skill_import_filename(filename)
+
+    @pytest.mark.parametrize('filename, package', [
+        ('forms.zip', True), ('forms.Skill', True), ('forms.md', False), ('forms.skill.md', False), (None, False),
+    ])
+    def test_zip_and_skill_files_are_read_as_packages(self, env, filename, package):
+        assert env.export.is_skill_package(filename) is package
 
 
 class ExportModel:
