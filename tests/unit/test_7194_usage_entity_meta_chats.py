@@ -46,6 +46,12 @@ class FakeConversation(Base):
     created_at = Column(String)
 
 
+class FakeApplication(Base):
+    __tablename__ = 'application'
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+
+
 class FakeParticipant(Base):
     __tablename__ = 'participant'
     id = Column(Integer, primary_key=True)
@@ -95,7 +101,7 @@ def rpc(monkeypatch, engine):
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
     models = {
-        f'{PKG}.models.all': {'Application': mock.MagicMock(), 'ApplicationVersion': mock.MagicMock()},
+        f'{PKG}.models.all': {'Application': FakeApplication, 'ApplicationVersion': mock.MagicMock()},
         f'{PKG}.models.conversation': {'Conversation': FakeConversation},
         f'{PKG}.models.participants': {
             'Participant': FakeParticipant, 'ParticipantMapping': FakeParticipantMapping,
@@ -239,3 +245,37 @@ class TestParticipantTypes:
         self.add_application_participant(engine, 1, {'agent_type': 'openai'}, {})
 
         assert self.types_of(rpc, conv) == ['agent']
+
+
+class TestApplicationNameSearch:
+    """#7581: complexity list search resolves matching agent ids in this and the public project."""
+
+    def add(self, engine, *apps):
+        with Session(engine) as session:
+            session.add_all(FakeApplication(id=i, name=n) for i, n in apps)
+            session.commit()
+
+    def test_matches_case_insensitively_in_both_schemas(self, rpc, engine):
+        self.add(engine, (1, 'Code Review Bot'), (2, 'Other'))
+        result = call(rpc, application_name_search='review')
+        # The test session factory ignores the schema, so the same row comes back per project
+        assert result['matched_applications'] == [
+            {'project_id': PROJECT_ID, 'id': 1}, {'project_id': 1, 'id': 1},
+        ]
+
+    def test_wildcards_are_literal(self, rpc, engine):
+        self.add(engine, (1, 'plain'), (2, '100% bot'))
+        assert {m['id'] for m in call(rpc, application_name_search='%')['matched_applications']} == {2}
+
+    def test_no_search_leaves_the_key_out(self, rpc, engine):
+        assert 'matched_applications' not in call(rpc)
+
+    def test_a_capped_search_is_reported_not_silently_cut(self, rpc, engine):
+        self.add(engine, *[(i, f'bot {i}') for i in range(1, 6)])
+        result = call(rpc, application_name_search='bot', application_search_limit=3)
+        assert result['matched_applications_truncated'] is True
+        assert [m['id'] for m in result['matched_applications'] if m['project_id'] == PROJECT_ID] == [5, 4, 3]
+
+    def test_an_uncapped_search_is_not_truncated(self, rpc, engine):
+        self.add(engine, (1, 'bot'))
+        assert call(rpc, application_name_search='bot')['matched_applications_truncated'] is False
