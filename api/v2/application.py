@@ -173,7 +173,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 include_input=False,
             ), 400
 
-        if update_data.version.application_id != application_id:
+        if update_data.version and update_data.version.application_id != application_id:
             return {'error': f"{application_id=} mismatch with version payload value"}, 400
 
         if update_data.version and not update_data.version.author_id:

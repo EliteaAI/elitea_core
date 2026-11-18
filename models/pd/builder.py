@@ -27,7 +27,7 @@ class BuilderProposeModel(_Strict):
     type: EntityType
     op: Literal['create', 'update', 'delete', 'call']
     id: Optional[Union[int, str]] = Field(None, description="Target id from builder_find; op_id for type operation.")
-    name: Optional[str] = Field(None, description="Target by exact name instead of id.")
+    name: Optional[str] = Field(None, description="Target by exact name instead of id. For create: the new entity's name.")
     version_id: Optional[int] = None
     changes: dict = Field(
         default_factory=dict,

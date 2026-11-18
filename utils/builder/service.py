@@ -93,11 +93,15 @@ class BuilderService:
                                                      'ambiguous': False})
         if entity_type in LOOKUP:
             rows = self.call(LOOKUP_OPS[entity_type], {'query': query})
-            rows = rows.get('rows', rows) if isinstance(rows, dict) else rows
+            if isinstance(rows, dict):
+                if rows.get('error'):
+                    return {'status': 'error', 'message': str(rows['error'])}
+                rows = rows.get('rows', rows.get('items', []))
             wanted = (query or '').lower()
             candidates = [
                 {'id': r.get('id'), 'name': r.get('name') or r.get('label') or r.get('display_name')}
-                for r in rows or [] if wanted in str(r.get('name') or r.get('label') or '').lower()
+                for r in rows or [] if isinstance(r, dict)
+                and wanted in str(r.get('name') or r.get('label') or r.get('display_name') or '').lower()
             ][:limit]
             return {'status': 'ok', 'candidates': candidates, 'ambiguous': False}
         op = 'list_skills' if entity_type == 'skill' else 'list_applications'
@@ -204,6 +208,8 @@ class BuilderService:
         if op not in ('create', 'update', 'delete'):
             return _invalid("op must be create, update or delete")
         if op == 'create':
+            if entity_name and not changes.get('name'):
+                changes = {**changes, 'name': entity_name}
             return self._propose_create(entity_type, changes)
 
         entity_id, version_id, stop = self._resolve_target(entity_type, entity_id, version_id, entity_name)

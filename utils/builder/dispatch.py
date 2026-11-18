@@ -27,7 +27,7 @@ ROUTES = {
     'get_project_context': ('GET', f'{BASE}/project_context/{{mode}}/{{project_id}}/project-context', 'query'),
     'put_project_context': ('PUT', f'{BASE}/project_context/{{mode}}/{{project_id}}/project-context', 'body'),
     'delete_project_context': ('DELETE', f'{BASE}/project_context/{{mode}}/{{project_id}}/project-context', 'query'),
-    'list_toolkits': ('GET', f'{BASE}/toolkits/{{mode}}/{{project_id}}', 'query'),
+    'list_toolkits': ('GET', f'{BASE}/tools/{{mode}}/{{project_id}}', 'query'),
     'list_models': ('GET', '/api/v2/configurations/models/{project_id}', 'query'),
     'list_configurations': ('GET', '/api/v2/configurations/configurations/{project_id}', 'query'),
 }

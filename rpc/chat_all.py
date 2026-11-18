@@ -943,6 +943,13 @@ def generate_application_version_payload(
     return app_version_details
 
 
+def _builder_for_run(builder_block: dict, conversation) -> dict:
+    """A scheduled run has no one to click the Changes card: the Builder refuses a change that needs it (#7383)."""
+    if (getattr(conversation, 'meta', None) or {}).get('schedule_run_id'):
+        return {**builder_block, 'interactive': False}
+    return builder_block
+
+
 def _resolve_application_llm_settings(
     version_details: dict,
     entity_settings: 'EntitySettingsApplication',
@@ -1088,7 +1095,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
 
             # Elitea Builder: the SDK BuilderMiddleware places its prompt; pipelines get none
             if builder_block := get_builder_payload(combined_tools, _is_pipeline):
-                result['builder'] = builder_block
+                result['builder'] = _builder_for_run(builder_block, msg_group.conversation)
         # case ParticipantTypes.pipeline:
         #     # TODO: handle as simplified application, but should not ?
         #     entity_settings = EntitySettingsApplication.parse_obj(participant_chat_settings.entity_settings)
@@ -1156,7 +1163,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 result['_routing_projection']['instructions'] = result['instructions']
 
             if builder_block := get_builder_payload(llm_chat_internal_tools):
-                result['builder'] = builder_block
+                result['builder'] = _builder_for_run(builder_block, msg_group.conversation)
 
             if predict_payload.llm_settings:
                 result['llm_settings'] = merge_llm_selection_override(

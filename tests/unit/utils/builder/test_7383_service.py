@@ -35,6 +35,8 @@ class Calls:
             return dict(self.versions[(args['application_id'], args['version_id'])])
         if op == 'get_project_context':
             return dict(self.project_context)
+        if op == 'list_models':
+            return {'total': 2, 'items': [{'name': 'gpt-5-mini'}, {'name': 'text-embedding-3-large'}]}
         self.writes.append((op, args))
         if op == 'patch_instructions':
             return {'mcp_backup_version': {'id': 99, 'name': 'mcp-backup-10-x'}, 'instructions_sha256': 'c' * 64}
@@ -56,6 +58,11 @@ def service(builder, calls):
 
 
 class TestFind:
+
+    def test_finds_models_from_an_items_answer(self, service):
+        found = service.find('model', 'embedding')
+        assert found['status'] == 'ok'
+        assert [c['name'] for c in found['candidates']] == ['text-embedding-3-large']
 
     def test_finds_agents_by_name(self, service):
         result = service.find('agent', 'daily')
@@ -132,6 +139,11 @@ class TestProposeApplyAgent:
         proposal = service.propose('agent', 'create', {'instructions': 'x'})
         assert proposal['status'] == 'needs_input'
         assert proposal['questions'][0]['header'] == 'Name'
+
+    def test_create_takes_the_top_level_name(self, service):
+        proposal = service.propose('agent', 'create', {'instructions': 'x'}, entity_name='GitHub PR Reviewer')
+        assert proposal['status'] == 'ready'
+        assert 'GitHub PR Reviewer' in proposal['summary']
 
     def test_create_applies_without_confirmation(self, service, calls):
         proposal = service.propose('agent', 'create', {'name': 'Helper', 'instructions': 'Help.'})
