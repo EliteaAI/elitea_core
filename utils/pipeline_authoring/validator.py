@@ -26,7 +26,9 @@ from .registry import END, inline_construct, node_spec, node_types, required_pat
 # "undeclared", never "unused".
 RUNTIME_STATE_VARS = frozenset({'input', 'messages', 'router_output', 'tool_outcomes', 'last_tool_outcome'})
 # The runtime writes these itself; a node or hitl edit that writes them is overwritten.
-RUNTIME_WRITTEN_VARS = frozenset({'router_output', 'tool_outcomes', 'last_tool_outcome'})
+RUNTIME_WRITTEN_VARS = frozenset({'router_output', 'last_tool_outcome'})
+# Merged per tool node by a dict reducer (langchain/utils.py create_state); any other write fails the run.
+TOOL_ONLY_VARS = frozenset({'tool_outcomes'})
 MAPPING_TYPES = ('fixed', 'variable', 'fstring')
 HITL_ACTIONS = ('approve', 'reject', 'edit')
 TRIGGERS_WITHOUT_A_PERSON = frozenset({'schedule', 'scheduled', 'webhook'})
@@ -290,12 +292,18 @@ def _r23_node_status(nid, node, findings) -> bool:
         if name in node and not (name == 'condition' and node_type == 'router'):
             construct = inline_construct(name) or {}
             ignored = name == 'condition' and _inline_condition_is_ignored(node, spec)
-            add = findings.error if ignored or construct.get('status') == 'removed' else findings.warning
+            malformed = name == 'condition' and not ignored and _malformed_inline_condition(node['condition'])
+            add = findings.error if ignored or malformed or construct.get('status') == 'removed' else findings.warning
             why = (' that is ignored: this node routes by its `transition`/`decision` or its own routes'
-                   if ignored else '')
+                   if ignored else f' the runtime cannot build: {malformed}' if malformed else '')
             add('R23', f'Node `{nid}` has an inline `{name}:` block{why}.',
                 f'Use instead: {construct.get("replacement", "a separate routing node")}.',
                 node_id=nid, field=name)
+            if name == 'condition' and not ignored and not malformed and not node['condition'].get('conditional_outputs'):
+                findings.warning('R23', f'Node `{nid}` has an inline `condition:` with no `conditional_outputs`: the run '
+                                        'goes to whatever the template renders, and `default_output` is never used.',
+                                 'List every target in `conditional_outputs`, or use a router node.',
+                                 node_id=nid, field='condition.conditional_outputs')
     return status not in ('removed', 'ui_only')
 
 
@@ -341,6 +349,17 @@ def _inline_condition_is_ignored(node: dict, spec: dict) -> bool:
                 or node.get('type') == 'printer')
 
 
+def _malformed_inline_condition(condition: Any) -> str:
+    """Why create_graph cannot build, or would misread, a routed inline `condition:`; '' when it can."""
+    if not isinstance(condition, dict):
+        return 'it must be a mapping with `condition_definition` and `conditional_outputs`'
+    for key in ('condition_input', 'conditional_outputs'):
+        value = condition.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            return f'`{key}` must be a list of names'
+    return ''
+
+
 def _route_targets(node: dict) -> List[Tuple[str, Any]]:
     """(field, target) for every edge the runtime builds from this node."""
     node_type = node.get('type')
@@ -365,10 +384,13 @@ def _route_targets(node: dict) -> List[Tuple[str, Any]]:
         targets += [(f'decision.nodes[{i}]', v) for i, v in enumerate(_as_list(decision.get('nodes')))]
         targets.append(('decision.default_output', decision.get('default_output', END)))
     elif isinstance(node.get('condition'), dict) and node_type != 'printer':
+        # The runtime uses default_output only when conditional_outputs is non-empty
+        # (ConditionalEdge.invoke); with none, the rendered template is the target.
         condition = node['condition']
-        targets += [(f'condition.conditional_outputs[{i}]', o.get('node', o) if isinstance(o, dict) else o)
-                    for i, o in enumerate(_as_list(condition.get('conditional_outputs')))]
-        targets.append(('condition.default_output', condition.get('default_output', END)))
+        outputs = _as_list(condition.get('conditional_outputs'))
+        targets += [(f'condition.conditional_outputs[{i}]', o) for i, o in enumerate(outputs)]
+        if outputs:
+            targets.append(('condition.default_output', condition.get('default_output', END)))
     elif 'transition' in node:
         targets.append(('transition', node.get('transition')))  # present but empty: R2 reports it
     return targets
@@ -453,7 +475,10 @@ def _r4_declared_state(state, nodes, ids, findings):
                                f'Write `{field}: [name1, name2]`, not a list of objects.', node_id=nid, field=field)
                 continue
             for name in values:
-                if field == 'output' and name in RUNTIME_WRITTEN_VARS:
+                if field == 'output' and name in TOOL_ONLY_VARS:
+                    findings.error('R4', f'Node `{nid}` writes `{name}`, which only tool nodes write; the run fails.',
+                                   f'Write a variable of your own instead of `{name}`.', node_id=nid, field=field)
+                elif field == 'output' and name in RUNTIME_WRITTEN_VARS:
                     findings.warning('R4', f'Node `{nid}` writes `{name}`, which the runtime sets itself; '
                                            'the next routing or tool node overwrites it.',
                                      f'Write a variable of your own instead of `{name}`.', node_id=nid, field=field)
@@ -621,6 +646,9 @@ def _r35_hitl_routes(nid, node, state, findings):
                                   'the edit action fails at run time.',
                            'Set `edit_state_key` to the state variable the person edits.',
                            node_id=nid, field='edit_state_key')
+        elif key in TOOL_ONLY_VARS:
+            findings.error('R35', f'HITL node `{nid}` edits `{key}`, which only tool nodes write; the edit fails the run.',
+                           'Edit a variable of your own.', node_id=nid, field='edit_state_key')
         elif key in RUNTIME_WRITTEN_VARS:
             findings.warning('R35', f'HITL node `{nid}` edits `{key}`, which the runtime sets itself; '
                                     'the edit is overwritten by the next routing or tool node.',
