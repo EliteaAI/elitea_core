@@ -204,13 +204,13 @@ def _search_conversations_by_name(
     return [str(row[0]) for row in rows[:limit]], len(rows) > limit
 
 
-def _search_application_ids(project_id: int, name_search: str, limit: int) -> list:
-    """Ids of applications whose name contains name_search, case-insensitively, newest first."""
+def _search_application_ids(project_id: int, name_search: str, limit: int) -> tuple:
+    """(ids, truncated) of applications whose name contains name_search, case-insensitively, newest first."""
     with db.get_session(project_id) as session:
         rows = session.query(Application.id).filter(
             Application.name.ilike(f"%{_escape_like(name_search)}%", escape="\\"),
-        ).order_by(Application.id.desc()).limit(limit).all()
-    return [row[0] for row in rows]
+        ).order_by(Application.id.desc()).limit(limit + 1).all()
+    return [row[0] for row in rows[:limit]], len(rows) > limit
 
 
 def _fetch_non_chat_uuids(project_id: int, limit: int = 5000) -> tuple:
@@ -239,7 +239,7 @@ class RPC:
             conversation_name_search: str | None = None,
             conversation_search_limit: int = 1000,
             application_name_search: str | None = None,
-            application_search_limit: int = 1000,
+            application_search_limit: int = 50000,
             requester_id: int | None = None,
     ) -> dict:
         """Names and agent/pipeline kind for the ids usage analytics grouped by (#6678).
@@ -270,6 +270,7 @@ class RPC:
             result["conversations"] = []
         if application_name_search is not None:
             result["matched_applications"] = []
+            result["matched_applications_truncated"] = False
         if fetch_non_chat_uuids:
             result["non_chat_uuids"] = []
             result["non_chat_truncated"] = False
@@ -285,10 +286,9 @@ class RPC:
             if application_name_search:
                 # Public agents run here are stored under the public project's schema
                 for schema in dict.fromkeys((project_id, public_project_id)):
-                    result["matched_applications"] += [
-                        {"project_id": schema, "id": app_id}
-                        for app_id in _search_application_ids(schema, application_name_search, application_search_limit)
-                    ]
+                    ids, truncated = _search_application_ids(schema, application_name_search, application_search_limit)
+                    result["matched_applications"] += [{"project_id": schema, "id": app_id} for app_id in ids]
+                    result["matched_applications_truncated"] |= truncated
             if wanted_skills:
                 result["scoped_skills"] = fetch_scoped_skills(project_id, public_project_id, wanted_skills)
             if conversation_name_search:

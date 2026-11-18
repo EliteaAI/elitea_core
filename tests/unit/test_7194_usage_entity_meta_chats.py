@@ -269,3 +269,13 @@ class TestApplicationNameSearch:
 
     def test_no_search_leaves_the_key_out(self, rpc, engine):
         assert 'matched_applications' not in call(rpc)
+
+    def test_a_capped_search_is_reported_not_silently_cut(self, rpc, engine):
+        self.add(engine, *[(i, f'bot {i}') for i in range(1, 6)])
+        result = call(rpc, application_name_search='bot', application_search_limit=3)
+        assert result['matched_applications_truncated'] is True
+        assert [m['id'] for m in result['matched_applications'] if m['project_id'] == PROJECT_ID] == [5, 4, 3]
+
+    def test_an_uncapped_search_is_not_truncated(self, rpc, engine):
+        self.add(engine, (1, 'bot'))
+        assert call(rpc, application_name_search='bot')['matched_applications_truncated'] is False
