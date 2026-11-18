@@ -226,6 +226,10 @@ def create_binding(ns, env, actor="admin_a", mode=DEFAULT):
 
 
 def act(ns, env, binding_id, action, expected, actor="admin_a", mode=DEFAULT, **more):
+    if action == "activate" and "definition_digest" not in more:   # (#7228) the digest the approver reviewed
+        with ns.sa_orm.Session(env.engine(1)) as session:
+            row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(str(binding_id)))
+            more["definition_digest"] = row.definition_digest if row is not None else "adv1:" + "0" * 64
     return hit(ns, env, "agent_identity_action", "post", actor=actor, mode=mode,
                binding_id=uuid.UUID(str(binding_id)), body={"action": action, "expected_state": expected, **more})
 
@@ -563,20 +567,26 @@ def test_a_project_without_an_admin_escalates_everything_waiting(ns, env):
 
 
 def test_escalated_true_filters_in_sql_so_the_page_and_its_total_agree(ns, env):
+    """(#7228) a binding escalates when every project admin made its current request (the requester's rule): created
+    by admin_a and brought up to date by admin_b is not escalated, admin_a approves it."""
     first = pending_binding(ns, env, "admin_a")   # admin_b may approve: not escalated
     env.add_version(1, 72, 7, "v3")
     env.digests[72] = DIGEST
     other = str(env.add_binding(1, 7, 72, state="pending_approval", digest=DIGEST))
-    with ns.sa_orm.Session(env.engine(1)) as session:   # created by admin_a, last changed by admin_b: nobody left
+    with ns.sa_orm.Session(env.engine(1)) as session:   # the reviewer's row: made by A, re-requested by B
         row = session.get(ns.models.AgentIdentityBinding, uuid.UUID(other))
         row.created_by, row.state_changed_by = ADMIN_A, ADMIN_B
         session.commit()
     page, _ = hit(ns, env, "agent_identities", "get", actor="platform_admin", mode=ADMINISTRATION,
                   args={"escalated": "true"})
-    assert [row["id"] for row in page["rows"]] == [other] and page["total"] == 1
-    page, _ = hit(ns, env, "agent_identities", "get", actor="admin_a", args={"escalated": "true"})
-    assert [row["id"] for row in page["rows"]] == [other]
-    assert first not in [row["id"] for row in page["rows"]]
+    assert page["rows"] == [] and page["total"] == 0
+    env.membership.roles[1] = {**env.membership.roles[1], ADMIN_B: ["editor"]}   # admin_a is the only admin now
+    page, _ = hit(ns, env, "agent_identities", "get", actor="platform_admin", mode=ADMINISTRATION,
+                  args={"escalated": "true"})
+    assert [row["id"] for row in page["rows"]] == [first] and page["total"] == 1   # admin_a requested it
+    page, _ = hit(ns, env, "agent_identities", "get", actor="admin_a")
+    by_id = {row["id"]: row for row in page["rows"]}
+    assert (by_id[first]["escalated"], by_id[other]["escalated"]) == (True, False)
 
 
 def test_a_mandate_escalates_when_the_admins_are_its_creator_and_its_owner(ns, env):
@@ -661,3 +671,63 @@ def test_the_module_registers_the_request_permission():
     text = (PLUGIN_ROOT / "module.py").read_text()
     assert '{"permissions": [BINDING_REQUEST], "recommended_roles": BINDING_REQUEST_ROLES}' in text
     assert text.index("BINDING_REQUEST_ROLES}") < text.index("self.task_node.start()")
+
+
+def stored_operations(ns, env):
+    """The binding's ``allowed_platform_operations`` as stored (a deferred column, read on its own)."""
+    model = ns.models.AgentIdentityBinding
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        return session.execute(ns.sa.select(model.allowed_platform_operations)).scalar_one()
+
+
+# --- #7228 fix round 2: the operations an approval keeps -------------------------------------------------------
+
+def proposed_binding(ns, env, operations):
+    body, status = hit(ns, env, "agent_identities", "post", actor="admin_a", mode=DEFAULT,
+                       body={"application_id": 7, "version_id": 70, "identity_mode": "elitea_native",
+                             "platform_operations": operations})
+    assert status == 200, body
+    assert act(ns, env, body["id"], "submit", "draft", actor="admin_a")[1] == 200
+    return body["id"]
+
+
+def test_an_approval_keeps_part_of_the_proposed_operations_and_the_run_token_gets_that(ns, env):
+    binding_id = proposed_binding(ns, env, ["read", "build", "credentials", "run"])
+    payload, status = act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b",
+                          platform_operations=["read", "run"], **APPROVAL)
+    assert (status, payload["state"]) == (200, "active"), payload
+    assert stored_operations(ns, env) == ["read", "run"]
+    [row] = bindings(env, ns)
+    assert ns.internal_obo.binding_operations(1, str(row.id)) == ("read", "run")   # what a run token is minted from
+    listed, _ = hit(ns, env, "agent_identities", "get", actor="admin_b", mode=DEFAULT)
+    assert listed["rows"][0]["platform_operations"] == ["read", "run"]
+
+
+def test_an_approval_without_operations_keeps_the_proposal(ns, env):
+    binding_id = proposed_binding(ns, env, ["read", "build", "credentials", "run"])
+    assert act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b", **APPROVAL)[1] == 200
+    assert stored_operations(ns, env) == ["read", "build", "credentials", "run"]
+
+
+@pytest.mark.parametrize("proposed, kept", [(["read", "build"], ["read", "credentials"]), (None, ["read", "build"])])
+def test_an_approval_never_widens_what_was_proposed(ns, env, proposed, kept):
+    binding_id = proposed_binding(ns, env, proposed)
+    payload, status = act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b",
+                          platform_operations=kept, **APPROVAL)
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST")
+    [row] = bindings(env, ns)
+    assert row.state == "pending_approval"
+
+
+@pytest.mark.parametrize("action, expected", [("suspend", "active"), ("submit", "draft")])
+def test_operations_belong_to_an_activation_only(ns, env, action, expected):
+    body, _ = create_binding(ns, env)
+    payload, status = act(ns, env, body["id"], action, expected, actor="admin_a", platform_operations=["read"])
+    assert (status, payload["code"]) == (400, "INVALID_REQUEST")
+
+
+def test_an_unknown_operation_is_refused_by_the_body(ns, env):
+    binding_id = proposed_binding(ns, env, ["read"])
+    payload, status = act(ns, env, binding_id, "activate", "pending_approval", actor="admin_b",
+                          platform_operations=["admin"], **APPROVAL)
+    assert status == 400

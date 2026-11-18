@@ -44,7 +44,8 @@ def mcp_service_module(monkeypatch):
     tools_pkg.db = types.SimpleNamespace(get_session=lambda pid: None)
     tools_pkg.auth = types.SimpleNamespace(current_user=lambda: {"id": 1})
     tools_pkg.this = types.SimpleNamespace()
-    tools_pkg.openapi_registry = types.SimpleNamespace(get_mcp_api_tools=lambda *a, **k: [])
+    tools_pkg.openapi_registry = types.SimpleNamespace(get_mcp_api_tools=lambda *a, **k: [],
+                                                       get_combined_spec=lambda full=True: {"paths": {}})
     tools_pkg.sanitize_property_name = lambda name: name
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
 
@@ -118,12 +119,14 @@ def service(mcp_service_module, monkeypatch):
             super().__init__(code)
             self.code, self.message = code, "readable text"
 
-    def check_operation(operation, target, tool_name):
-        checks.append((operation, target, tool_name))
+    def check_operation(operation, target, tool_name, material=False):
+        checks.append((operation, target, tool_name) + (("material",) if material else ()))
         if operation is None:
             raise Refused("INTERNAL_OPERATION_UNKNOWN")
         if operation not in flask.g.internal_obo["scope"]:
             raise Refused("INTERNAL_SCOPE_DENIED")
+        if material:
+            raise Refused("CREDENTIALS_VIA_FORM")
 
     obo = types.ModuleType("plugins.elitea_core.utils.internal_obo")
     obo.VERIFIED_ENVIRON_KEY = "elitea.internal_obo.claims"
@@ -134,12 +137,36 @@ def service(mcp_service_module, monkeypatch):
     tree = ast.parse((PLUGIN_ROOT / "utils" / "internal_obo.py").read_text())
     wanted = [node for node in tree.body if (
         isinstance(node, ast.Assign) and any(getattr(t, "id", None) in (
-            "ENDPOINT_OPERATIONS", "READ_METHODS", "MAX_BODY_DEPTH", "MAX_BODY_NODES", "MAX_NESTED_JSON_CHARS")
+            "ENDPOINT_OPERATIONS", "READ_METHODS", "MAX_BODY_DEPTH", "MAX_BODY_NODES", "MAX_NESTED_JSON_CHARS",
+            "MATERIAL_IN", "MATERIAL_OUT", "MATERIAL_NONE", "MATERIAL_PER_REQUEST", "DECLARED_MATERIAL",
+            "MAX_SCHEMA_WALK", "_MATERIALS", "PER_REQUEST_FIELDS", "MATERIAL_UNREVIEWED", "MATERIAL_UNKNOWN",
+            "TOOLKIT_WRITES", "VERSION_WRITES", "PIPELINE_SECRET_KEYS", "SECRET_REFERENCE", "SECRET_NAME",
+            "REVIEWED_FIELD_NAMES", "MAX_REDACT_NODES", "HEADER_MAP", "MAX_SETTINGS_DEPTH")
             for t in node.targets))
-        or (isinstance(node, ast.FunctionDef) and node.name in ("endpoint_key", "operation_of", "projects_named_in"))]
-    namespace = {"Optional": __import__("typing").Optional, "json": __import__("json")}
+        or (isinstance(node, ast.FunctionDef) and node.name in (
+            "endpoint_key", "operation_of", "projects_named_in", "material_of", "material_of_call", "listed_for_run",
+            "_registry_materials", "schema_material", "_secret_typed", "_operation_schemas", "_secret_named",
+            "_plain_value", "_pipeline_holds_secret", "_version_holds_secret", "redact_for_run"))]
+    namespace = {"Optional": __import__("typing").Optional, "json": __import__("json"), "re": __import__("re"),
+                 "log": sys.modules["pylon.core.tools"].log}
     exec(compile(ast.Module(wanted, []), "internal_obo.py", "exec"), namespace)  # pylint: disable=W0122
+    # (#7228) a configuration body's secret fields: the configurations plugin's answer, faked per test
+    holds = {"github": {"access_token"}}
+    namespace["_configuration_holds_secret"] = lambda config_type, data: config_type not in holds or bool(
+        set(data) & holds[config_type])
+    namespace["_stored_configuration_type"] = lambda project_id, config_id: "github"
+    # a toolkit's typed secret: the real rule is tested on the real package (test_7228_credential_material); here a
+    # token at ``token`` or an Authorization header stands for it
+    namespace["toolkit_holds_secret"] = lambda tool_type, settings, project_id, user_id: bool(
+        isinstance(settings, dict) and (settings.get("token") or (settings.get("headers") or {}).get("Authorization")))
+    namespace["_stored_toolkit_type"] = lambda project_id, tool_id: "github"
+    namespace["_redact_settings"] = lambda settings, tool_type, project_id, user_id: {
+        **settings, **({"headers": {k: "governed-reference" for k in settings["headers"]}} if settings.get("headers")
+                       else {})}
     obo.operation_of = namespace["operation_of"]
+    obo.material_of_call = namespace["material_of_call"]
+    obo.listed_for_run = namespace["listed_for_run"]
+    obo.redact_for_run = namespace["redact_for_run"]
 
     def check_targets(arguments, target, tool_name):
         if any(p not in flask.g.internal_obo["tgt"] for p in namespace["projects_named_in"](arguments)):
@@ -279,3 +306,169 @@ def test_a_refused_agent_call_over_the_mcp_server_says_why(mcp_service_module, m
     reply = __import__("json").loads(sent[0])["result"]
     assert reply["isError"] is True
     assert reply["content"][0]["text"] == "IDENTITY_KIND_NOT_ADMITTED: Runs started with an unscoped API token are refused."
+
+
+# --- #7228: credential material never on the model path ----------------------------------------------------------
+
+def secret_tool(method, path, *extra):
+    found = tool(method, path)
+    found["parameters"] += [{"name": name, "in": "path", "schema": {"type": "string"}} for name in extra]
+    return found
+
+
+ALL_SCOPES = ["read", "build", "credentials", "run"]
+
+
+@pytest.mark.parametrize("method, path, extra, arguments", [
+    ("POST", "/api/v2/secrets/secrets/{mode}/{project_id}", (), {"name": "GH", "value": "made-up-not-a-secret"}),
+    ("PUT", "/api/v2/secrets/secret/{mode}/{project_id}/{secret}", ("secret",),
+     {"secret": "GH", "name": "GH", "value": "made-up-not-a-secret"}),
+    ("POST", "/api/v2/configurations/configurations/{project_id}", (),
+     {"type": "github", "elitea_title": "gh", "label": "gh", "data": {"access_token": "made-up-not-a-secret"}}),
+    ("PUT", "/api/v2/configurations/configuration/{project_id}/{config_id}", ("config_id",),
+     {"config_id": 4, "data": {"access_token": "made-up-not-a-secret"}}),
+    ("POST", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}", (), {}),
+    ("POST", "/api/v2/elitea_core/applications/{mode}/{project_id}", (), {"name": "a", "webhook_secret": "made-up"}),
+    ("PUT", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}", ("access_key_id",),
+     {"access_key_id": "AKIDEXAMPLE7228"}),
+])
+def test_a_credential_value_never_moves_on_a_credentials_scoped_run_token_and_nothing_is_written(
+        service, method, path, extra, arguments):
+    service.flask.g.internal_obo = dict(CLAIMS, scope=ALL_SCOPES)
+    result = service.executor.execute(secret_tool(method, path, *extra), {"project_id": 1, **arguments})
+    assert result["error"].startswith("CREDENTIALS_VIA_FORM") and service.sent == []
+    assert service.checks[0][-1] == "material"
+
+
+def test_reading_a_secret_value_is_a_credentials_operation_and_refused_as_material(service):
+    service.flask.g.internal_obo = dict(CLAIMS, scope=ALL_SCOPES)
+    result = service.executor.execute(secret_tool("GET", "/api/v2/secrets/secret/{mode}/{project_id}/{secret}",
+                                                  "secret"), {"project_id": 1, "secret": "GH"})
+    assert result["error"].startswith("CREDENTIALS_VIA_FORM") and service.sent == []
+
+
+def test_a_read_only_binding_meets_its_scope_first(service):
+    service.flask.g.internal_obo = dict(CLAIMS, scope=["read"])
+    result = service.executor.execute(secret_tool("POST", "/api/v2/secrets/secrets/{mode}/{project_id}"),
+                                      {"project_id": 1, "name": "GH", "value": "made-up-not-a-secret"})
+    assert result["error"].startswith("INTERNAL_SCOPE_DENIED") and service.sent == []
+
+
+@pytest.mark.parametrize("arguments", [
+    {"type": "llm_model", "elitea_title": "m", "label": "m",
+     "data": {"name": "gpt", "ai_credentials": {"elitea_title": "azure", "private": False}}},
+    {"type": "github", "elitea_title": "gh", "label": "gh", "data": {"base_url": "https://api.github.com"}},
+])
+def test_a_model_definition_pointing_at_an_existing_credential_still_runs_under_the_credentials_scope(
+        service, arguments):
+    service.flask.g.internal_obo = dict(CLAIMS, scope=ALL_SCOPES)
+    holds = {"llm_model": set(), "github": {"access_token"}}
+    obo = sys.modules["plugins.elitea_core.utils.internal_obo"]
+    obo.material_of_call.__globals__["_configuration_holds_secret"] = lambda config_type, data: bool(
+        set(data) & holds[config_type])
+    result = service.executor.execute(tool("POST", "/api/v2/configurations/configurations/{project_id}"),
+                                      {"project_id": 1, **arguments})
+    assert result == {"result": {}} and len(service.sent) == 1
+    assert service.checks == [("credentials", "POST /api/v2/configurations/configurations/1", "post_tool")]
+
+
+def test_without_a_run_token_a_credential_write_is_not_touched(service):
+    result = service.executor.execute(secret_tool("POST", "/api/v2/secrets/secrets/{mode}/{project_id}"),
+                                      {"project_id": 1, "name": "GH", "value": "made-up-not-a-secret"})
+    assert result == {"result": {}} and service.checks == []
+
+
+def test_the_run_token_is_not_shown_the_tools_it_may_never_call(service, mcp_service_module):
+    obo = sys.modules["plugins.elitea_core.utils.internal_obo"]
+    listed = {(m, p): obo.listed_for_run(m, p) for m, p in [
+        ("POST", "/api/v2/secrets/secrets/{mode}/{project_id}"),
+        ("PUT", "/api/v2/secrets/secret/{mode}/{project_id}/{secret}"),
+        ("POST", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}"),
+        ("PUT", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}"),
+        ("POST", "/api/v2/configurations/configurations/{project_id}"),
+        ("GET", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}"),
+        ("POST", "/api/v2/elitea_core/applications/{mode}/{project_id}")]}
+    assert [key for key, shown in listed.items() if not shown] == [
+        ("POST", "/api/v2/secrets/secrets/{mode}/{project_id}"),
+        ("PUT", "/api/v2/secrets/secret/{mode}/{project_id}/{secret}"),
+        ("POST", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}"),
+        ("PUT", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}")]
+    tools = [{"method": m, "path": p, "label": f"{m}_{i}", "value": f"{m.lower()}_{i}", "args_schema": {},
+              "description": ""} for i, (m, p) in enumerate(listed)]
+    registry = sys.modules["tools"].openapi_registry
+    registry.get_mcp_api_tools = lambda *a, **k: tools
+    session = types.SimpleNamespace(project_id=1, tags=None, entity_category=None, resource_type=None,
+                                    resource_id=None)
+    mcp = mcp_service_module.McpService(session)
+    service.flask.g.internal_obo = dict(CLAIMS, scope=ALL_SCOPES)
+    with_token = [t.name for t in mcp._McpService__get_all_tools()]  # pylint: disable=W0212
+    del service.flask.g.internal_obo
+    without = [t.name for t in mcp._McpService__get_all_tools()]  # pylint: disable=W0212
+    assert len(without) == 7 and with_token == ["post_4", "get_5", "post_6"]
+
+
+def test_a_change_a_run_makes_is_filed_for_its_user_and_the_model_reads_what_happens_next(
+        service, mcp_service_module, monkeypatch):
+    """(#7228 item 8) a PUT/PATCH of a run is handed to ``file_for_run`` with its path parameters; the model's tool
+    result carries the summary and its one sentence (kinds, titles, states only)."""
+    asked = []
+    summary = {"entity_kind": "toolkit", "entity_id": 3, "filed": [{"key": "grant:3:u", "kind": "grant", "id": "g"}],
+               "items": [], "next": "Requested for approval: your use of the credential."}
+    requests = types.ModuleType("plugins.elitea_core.utils.governance_requests")
+    requests.file_for_run = lambda *args: asked.append(args) or summary
+    monkeypatch.setitem(sys.modules, requests.__name__, requests)
+    monkeypatch.setattr(mcp_service_module.this, "module", types.SimpleNamespace(), raising=False)
+    service.flask.g.internal_obo = dict(CLAIMS, scope=ALL_SCOPES)
+    put = secret_tool("PUT", "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}", "tool_id")
+    result = service.executor.execute(put, {"project_id": 1, "tool_id": "3", "settings": {}})
+    assert result == {"result": {}, "governance_requests": summary}
+    [(_, claims, method, path, project_id, answer, path_params)] = asked
+    assert (method, path_params["tool_id"], project_id) == ("PUT", "3", 1)
+    assert mcp_service_module._with_governance(result) == {"governance_requests": summary}   # pylint: disable=W0212
+    assert mcp_service_module._with_governance({"result": [1]}) == [1]   # pylint: disable=W0212
+    assert mcp_service_module._with_governance({"result": [1], "governance_requests": summary}) == {   # pylint: disable=W0212
+        "result": [1], "governance_requests": summary}
+
+
+# --- fix round (review M-1, M-2) ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method, path, extra, arguments", [
+    ("POST", "/api/v2/elitea_core/tools/{mode}/{project_id}", (),
+     {"type": "github", "name": "gh", "settings": {"token": "made-up-not-a-secret"}}),
+    ("PUT", "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}", ("tool_id",),
+     {"tool_id": "3", "settings": {"headers": {"Authorization": "Bearer made-up"}}}),
+    ("PUT", "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+     ("application_id", "version_id"),
+     {"application_id": "2", "version_id": "2", "pipeline_settings": {"trigger": {"webhook_secret": "made-up"}}}),
+    ("POST", "/api/v2/elitea_core/versions/{mode}/{project_id}/{application_id}", ("application_id",),
+     {"application_id": "2", "pipeline_settings": {"trigger": {"webhook_signing_secret": "made-up"}}}),
+])
+def test_a_build_write_with_a_typed_secret_is_refused_and_nothing_is_written(service, method, path, extra, arguments):
+    service.flask.g.internal_obo = dict(CLAIMS)   # read and build only: the build scope does not help
+    result = service.executor.execute(secret_tool(method, path, *extra), {"project_id": 1, **arguments})
+    assert result["error"].startswith("CREDENTIALS_VIA_FORM") and service.sent == []
+    assert service.checks[0][0] == "build" and service.checks[0][-1] == "material"
+
+
+def test_a_toolkit_selecting_a_stored_credential_is_built_as_before(service):
+    service.flask.g.internal_obo = dict(CLAIMS)
+    result = service.executor.execute(tool("POST", "/api/v2/elitea_core/tools/{mode}/{project_id}"), {
+        "project_id": 1, "type": "github", "name": "gh",
+        "settings": {"github_configuration": {"elitea_title": "gh", "private": False}}})
+    assert result == {"result": {}} and len(service.sent) == 1
+
+
+def test_a_run_tokens_read_of_a_version_is_served_with_its_toolkit_secrets_redacted(service, monkeypatch):
+    stored = {"id": 73, "tools": [{"type": "mcp", "settings": {"url": "https://x",
+                                                               "headers": {"Authorization": "Bearer made-up-26"}}}]}
+    monkeypatch.setattr(service.executor, "_execute_wsgi_request",
+                        staticmethod(lambda environ: (200, __import__("json").dumps(stored))))
+    read = secret_tool("GET", "/api/v2/elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}",
+                       "application_id", "version_id")
+    service.flask.g.internal_obo = dict(CLAIMS, scope=["read"])
+    on_token = service.executor.execute(read, {"project_id": 1, "application_id": "58", "version_id": "73"})
+    assert "made-up-26" not in __import__("json").dumps(on_token)
+    assert on_token["result"]["tools"][0]["settings"]["headers"] == {"Authorization": "governed-reference"}
+    del service.flask.g.internal_obo   # the same read in the person's own session: unchanged
+    in_session = service.executor.execute(read, {"project_id": 1, "application_id": "58", "version_id": "73"})
+    assert in_session == {"result": stored}

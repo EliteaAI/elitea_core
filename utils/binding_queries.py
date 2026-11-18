@@ -6,10 +6,12 @@ not found. Nothing here returns instruction text or toolkit settings.
 """
 from pylon.core.tools import log
 from sqlalchemy import func, select
+from sqlalchemy.orm import undefer
 from tools import auth, db
 
 from ..models.agent_identity import AgentIdentityBinding as Binding
 from .governance_inbox import escalated, escalated_clause
+from .binding_state import REQUESTER, requester_of
 from .definition_digest import (
     DigestError, digest_for_version, digest_inputs_for_version, digests_for_versions, read_definition,
 )
@@ -73,6 +75,8 @@ def _row(binding, application_name, version_name, users):
         "policy_revision": binding.policy_revision,
         "approval_ref": binding.approval_ref,
         "revocation_epoch": binding.revocation_epoch,
+        # (#7228) what the agent may do on the platform through the internal MCP; null: read only
+        "platform_operations": binding.allowed_platform_operations,
         "created_by": users.get(binding.created_by),
         "state_changed_by": users.get(binding.state_changed_by),
         "created_at": _iso(binding.created_at),
@@ -88,6 +92,7 @@ def _select(project_id):
         .outerjoin(application, application.id == Binding.application_id)
         .outerjoin(version, version.id == Binding.version_id)
         .where(Binding.project_id == project_id)
+        .options(undefer(Binding.allowed_platform_operations))   # (#7228) shown on the row
     ), application
 
 
@@ -99,8 +104,7 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
     statement, application = _select(project_id)
     conditions = []
     if admins is not None and escalated_only:
-        conditions.append(escalated_clause(admins, Binding.state == "pending_approval",
-                                           Binding.created_by, Binding.state_changed_by))
+        conditions.append(escalated_clause(admins, Binding.state == "pending_approval", REQUESTER))
     if state:
         conditions.append(Binding.state == state)
     if identity_mode:
@@ -124,10 +128,11 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
     for binding, application_name, version_name in page:
         item = _row(binding, application_name, version_name, users)
         item["definition_digest"] = digest_prefix(binding.definition_digest)
+        item["definition_digest_full"] = binding.definition_digest   # (#7228) what an approval of this row approves
         item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
         if admins is not None:
-            item["escalated"] = binding.state == "pending_approval" and escalated(
-                admins, binding.created_by, binding.state_changed_by)
+            item["escalated"] = binding.state == "pending_approval" and escalated(   # (#7228) the requester's rule
+                admins, requester_of(binding.state_changed_by, binding.created_by))
         rows.append(item)
     return {"total": total, "rows": rows}
 

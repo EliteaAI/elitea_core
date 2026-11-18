@@ -82,13 +82,31 @@ def _file_binding(module, session, tracing, project_id, plan, actor):
         raise RequestRefused("VERSION_NOT_FOUND", "binding")
     binding_id = plan.get("binding_id")
     if plan["action"] == "create":
-        binding_id = create_binding(session, tracing, {**values, "action": "create"}, actor)["binding_ref"]
+        create = {**values, "action": "create"}
+        if plan.get("platform_operations") is not None:   # (#7228) what the agent is configured to use, proposed
+            create["platform_operations"] = list(plan["platform_operations"])
+        binding_id = create_binding(session, tracing, create, actor)["binding_ref"]
     action = "rebind" if plan["action"] == "rebind" else "submit"
-    # a member rebinds an active binding only (never a suspended one) and submits a draft only: anything else since
-    # readiness is CONCURRENT_CHANGE, nothing written
+    # a member rebinds an active or a waiting binding (never a suspended one) and submits a draft only: anything else
+    # since readiness is CONCURRENT_CHANGE, nothing written
+    expected = "draft"
+    if action == "rebind":
+        expected = plan.get("binding_state") if plan.get("binding_state") in ("active", "pending_approval") else "active"
+    # (#7228, C9-SEC-100/101) a request the platform files makes the member its actor only when they may approve it:
+    # an approver who edits and files never approves their own edit; a member who may not approve never displaces
+    # the creator as the one excluded
+    takes = _may_approve(project_id, actor)
     change_binding(module, session, tracing, {**values, "action": action, "binding_id": uuid.UUID(str(binding_id)),
-                                              "expected_state": "active" if action == "rebind" else "draft"}, actor)
+                                              "expected_state": expected, "takes_request": takes,
+                                              "mover_kind": "deliberate" if takes else "automatic"}, actor)
     return str(binding_id)
+
+
+def _may_approve(project_id, user_id):
+    """Whether ``user_id`` may approve bindings in the project (the project mode's permission, as the inbox checks)."""
+    from .binding_api import APPROVE  # pylint: disable=C0415
+    from .governance_readiness import _permissions  # pylint: disable=C0415
+    return APPROVE in _permissions(user_id, project_id)
 
 
 def _file_mandate(module, session, tracing, project_id, plan, actor, delegated):
@@ -195,16 +213,34 @@ def file_requests(module, project_id, kind, entity_id, actor, keys=None, run_id=
 # answer names: the new agent's first version, the new toolkit, the new credential configuration
 CREATIONS = {
     ("POST", "elitea_core/applications/{mode}/{project_id}"): "version",
+    ("POST", "elitea_core/versions/{mode}/{project_id}/{application_id}"): "version",   # (#7228) a new version
     ("POST", "elitea_core/tools/{mode}/{project_id}"): "toolkit",
     ("POST", "configurations/configurations/{project_id}"): "configuration",
 }
+# (#7228 item 8) the changing writes, and the path parameter naming the changed entity: a toolkit given a credential, a
+# version given a toolkit (its readiness is asked again and what is now missing is filed: a rebind, a new grant)
+# Every ``build`` write of ``internal_obo.ENDPOINT_OPERATIONS`` that changes a toolkit or a version (a toolkit linked
+# to a version by ``PATCH tool`` changes that version's definition too: see ``file_for_run``)
+UPDATES = {
+    ("PUT", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): ("toolkit", "tool_id"),
+    ("PATCH", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): ("toolkit", "tool_id"),
+    ("PUT", "elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}"): ("version", "version_id"),
+    ("PATCH", "elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}"):
+        ("version", "version_id"),
+    ("POST", "elitea_core/version_instruction_patch/{mode}/{project_id}/{application_id}/{version_id}"):
+        ("version", "version_id"),
+}
+MAX_TOOLKIT_VERSIONS = 16   # the versions using a changed toolkit whose requests are filed with it
+WAITING_TEXT = {"binding": "the agent's identity", "reference": "the credential", "grant": "your use of the credential",
+                "mandate": "the schedule's mandate"}
 
 
 def _created_id(kind, answer):
     answer = answer if isinstance(answer, dict) else {}
     if kind == "version":
         details = answer.get("version_details") if isinstance(answer.get("version_details"), dict) else {}
-        value = details.get("id")
+        # an agent's create answers its first version's details; a version create answers the version itself
+        value = details.get("id") if details else (answer.get("id") if "application_id" in answer else None)
     elif kind == "toolkit":
         value = answer.get("id")
     else:
@@ -235,30 +271,122 @@ def _file_reference(project_id, configuration_uuid, actor, subject, run_id):
     return [{**item, "id": made["id"]}]
 
 
-def file_for_run(module, claims, method, path, project_id, answer):
-    """After a governed run's internal MCP created an agent, a toolkit or a credential: its readiness for the run's
-    subject (the user, never the agent) and the request of what that user may request, filed as theirs with the run as
-    its origin. A run never approves. ``None`` for any other call, or when governance is not enforced; never raises."""
+def next_step(summary) -> str:
+    """One sentence for the model to tell the person what happens next (#7228): what waits for whom, what still needs
+    them, or that nothing does. Names kinds and titles only."""
+    if summary.get("refused"):
+        return ("The governance requests for it could not be filed automatically; the card in the chat lets you "
+                "request what is missing.")
+    filed = {item.get("key") for item in summary.get("filed") or []}
+    items = summary.get("items") or []
+    waiting = [item for item in items if item.get("state") in ("pending", "validated", "pending_approval",
+                                                               "provisioning") or item.get("key") in filed]
+    yours = [item for item in items if item.get("state") == "needs_value" and item.get("for") == "me"]
+    open_ = [item for item in items if item.get("requestable") and item.get("key") not in filed]
+    if yours:
+        return f"Your own value for '{yours[0].get('title')}' is still needed; write it in the card in the chat."
+    if open_:
+        return "Some of what it needs could not be requested automatically; the card in the chat lets you request it."
+    if waiting:
+        named = ", ".join(dict.fromkeys(WAITING_TEXT.get(item.get("kind"), item.get("kind")) for item in waiting))
+        who = "a platform operator" if any(item.get("escalated") for item in waiting) else "a project admin"
+        return (f"Requested for approval: {named}. It can be used once {who} approves; nothing more is needed from "
+                "you.")
+    if items:
+        return "Some of what it needs cannot be requested from here; the card in the chat says what."
+    if summary.get("filed"):
+        named = ", ".join(dict.fromkeys(WAITING_TEXT.get(item.get("kind"), item.get("kind"))
+                                        for item in summary["filed"]))
+        return f"Requested for approval: {named}. It can be used once a project admin approves."
+    return "Everything it needs to run governed is in place."
+
+
+def _changed_id(name, path_params):
+    value = (path_params or {}).get(name)
+    try:
+        value = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 2**31 - 1 else None
+
+
+def _toolkit_versions(project_id, tool_id) -> tuple:
+    """``(ids, more)``: the agent versions a toolkit is linked to (at most ``MAX_TOOLKIT_VERSIONS``, agents only, as the
+    definition digest reads them), and how many more there are beyond the cap (#7228: said, never silently dropped)."""
+    from ..models.elitea_tools import EntityToolMapping  # pylint: disable=C0415
+    from sqlalchemy import func, select  # pylint: disable=C0415
+    linked = select(EntityToolMapping.entity_version_id).where(
+        EntityToolMapping.tool_id == tool_id, EntityToolMapping.entity_type == "agent").distinct()
+    with db.get_session(project_id) as session:
+        rows = session.execute(linked.order_by(EntityToolMapping.entity_version_id)
+                               .limit(MAX_TOOLKIT_VERSIONS)).scalars().all()
+        total = len(rows) if len(rows) < MAX_TOOLKIT_VERSIONS else session.execute(
+            select(func.count()).select_from(linked.subquery())).scalar_one()
+    return [int(value) for value in rows if isinstance(value, int)], max(0, total - len(rows))
+
+
+def _file_entity(module, project_id, kind, entity_id, user_id, run_id):
+    """What one entity now needs, filed for the run's user (only what is requestable now: a repeated call files
+    nothing more), and its readiness after."""
+    try:
+        filed = file_requests(module, project_id, kind, entity_id, user_id, run_id=run_id)
+        items = readiness(module, project_id, kind, entity_id, user_id).items
+        return {"entity_kind": kind, "entity_id": entity_id, "filed": filed, "items": items}
+    except RequestRefused as exc:
+        return {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": exc.code}
+    except Exception as exc:  # pylint: disable=W0703
+        # (#7228) one version whose readiness cannot be read is refused alone, not the toolkit's other versions
+        log.error("governance requests: an entity's request was not filed (%s)", type(exc).__name__)
+        return {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": "DEPENDENCY_UNAVAILABLE"}
+
+
+def file_for_run(module, claims, method, path, project_id, answer, path_params=None):  # pylint: disable=R0913
+    """After a governed run's internal MCP created or changed an agent version, a toolkit or a credential: its
+    readiness for the run's subject (the user, never the agent) and the request of what that user may request, filed as
+    theirs with the run as its origin (``caller_ref run:<id>``). A run never approves. ``None`` for any other call, or
+    when governance is not enforced; never raises. The answer carries ``next``, one sentence for the model."""
     from .internal_obo import endpoint_key  # pylint: disable=C0415
-    kind = CREATIONS.get((str(method or "").upper(), endpoint_key(path)))
+    key = (str(method or "").upper(), endpoint_key(path))
+    kind, param = CREATIONS.get(key), None
+    if kind is None and key in UPDATES:
+        kind, param = UPDATES[key]
     if kind is None or not isinstance(claims, dict) or not is_governed(module):
         return None
-    user_id, run_id = claims.get("uid"), claims.get("run")
+    user_id, run_id, entity_id = claims.get("uid"), claims.get("run"), None
     try:
         project_id = int(project_id)
-        entity_id = _created_id(kind, answer)
+        entity_id = _changed_id(param, path_params) if param else _created_id(kind, answer)
         if entity_id is None or not isinstance(user_id, int):
             return None
         if kind == "configuration":
             from .governance_readiness import _person  # pylint: disable=C0415
             subject = _person(user_id)
-            return {"filed": _file_reference(project_id, entity_id, user_id, subject, run_id) if subject else [],
-                    "items": []}
-        filed = file_requests(module, project_id, kind, entity_id, user_id, run_id=run_id)
-        items = readiness(module, project_id, kind, entity_id, user_id).items
-        return {"entity_kind": kind, "entity_id": entity_id, "filed": filed, "items": items}
+            summary = {"filed": _file_reference(project_id, entity_id, user_id, subject, run_id) if subject else [],
+                       "items": []}
+        else:
+            summary = _file_entity(module, project_id, kind, entity_id, user_id, run_id)
+            if kind == "toolkit":   # (#7228) every version using the toolkit changed with it: its rebind, its grants
+                linked, more = _toolkit_versions(project_id, entity_id)
+                versions = [_file_entity(module, project_id, "version", version_id, user_id, run_id)
+                            for version_id in linked]
+                if versions:
+                    summary["versions"] = versions
+                if more:   # beyond the cap: said, so the person opens them
+                    summary["versions_more"] = more
     except RequestRefused as exc:
-        return {"entity_kind": kind, "filed": [], "refused": exc.code}
+        summary = {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": exc.code}
     except Exception as exc:  # pylint: disable=W0703
         log.error("governance requests: the run's request was not filed (%s)", type(exc).__name__)
-        return {"entity_kind": kind, "filed": [], "refused": "DEPENDENCY_UNAVAILABLE"}
+        summary = {"entity_kind": kind, "entity_id": entity_id, "filed": [],
+                   "refused": "DEPENDENCY_UNAVAILABLE"}
+    whole = summary
+    if summary.get("versions"):   # one sentence for everything the change filed
+        parts = [summary, *summary["versions"]]
+        whole = {"filed": [item for part in parts for item in part.get("filed") or []],
+                 "items": [item for part in parts for item in part.get("items") or []],
+                 "refused": next((part["refused"] for part in parts if part.get("refused")), None)}
+    summary["next"] = next_step(whole)
+    if summary.get("versions_more"):
+        summary["next"] += (f" {summary['versions_more']} more agents use this toolkit: open them to request what "
+                            "they need.")
+    return summary

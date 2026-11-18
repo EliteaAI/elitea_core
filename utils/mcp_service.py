@@ -70,19 +70,57 @@ def _run_token_claims():
     return claims if isinstance(claims, dict) else None
 
 
-def _refused_by_run_token(operation, target, tool_name, arguments=None):
+def _refused_by_run_token(operation, target, tool_name, arguments=None, material=False):
     """A call under a run token (#7214): the readable refusal when its arguments name a project outside the token's
-    targets, or its scope does not allow ``operation`` (or a write cannot be recorded), else None after recording a
-    write. A call without a run token: None, nothing read."""
+    targets, or its scope does not allow ``operation`` (or a write cannot be recorded), or it carries credential
+    material (#7228), else None after recording a write. A call without a run token: None, nothing read."""
     if _run_token_claims() is None:
         return None
     from . import internal_obo  # pylint: disable=C0415
     try:
         internal_obo.check_targets(arguments or {}, target, tool_name)
-        internal_obo.check_operation(operation, target, tool_name)
+        # a body classification may read (a stored type): only for a call its targets allow
+        internal_obo.check_operation(operation, target, tool_name, material=material() if callable(material) else material)
     except internal_obo.OperationRefused as exc:
         return internal_obo.refusal_text(exc)
     return None
+
+
+def _record_audit_only_material(method, path, path_params, body_params, url_path, api_tool):
+    """Audit only (#7228): what enforce would refuse on a run token (a credential-material call) is recorded as
+    would-deny and the call goes on. Under off and enforce nothing is read here."""
+    try:
+        from .governance import is_auditing  # pylint: disable=C0415
+        if not is_auditing(this.module):
+            return
+        from . import internal_obo  # pylint: disable=C0415
+        if not internal_obo.material_of_call(method, path, path_params, body_params):
+            return
+        project_id = path_params.get("project_id")
+        project_id = int(project_id) if str(project_id or "").isdigit() else None
+        internal_obo.record_would_deny_material(this.module, project_id, auth.current_user().get("id"),
+                                                f"{method} {url_path}", api_tool.get("label", ""))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("MCP: an audit-only material check failed (%s)", type(exc).__name__)
+
+
+def _with_governance(result) -> object:
+    """The model's tool result: the API's answer, and (#7228 item 8 e) what a governed run's create or change filed for
+    its user, with one sentence on what happens next (kinds, titles and states only; never a value)."""
+    answer, governance = result.get("result"), result.get("governance_requests")
+    if not isinstance(governance, dict):
+        return answer
+    return {**answer, "governance_requests": governance} if isinstance(answer, dict) \
+        else {"result": answer, "governance_requests": governance}
+
+
+def _listed(api_tool) -> bool:
+    """Whether an API tool is listed: to a run token, never one that can only ever carry credential material (#7228).
+    Without a run token every tool is listed, nothing read."""
+    if _run_token_claims() is None:
+        return True
+    from .internal_obo import listed_for_run  # pylint: disable=C0415
+    return listed_for_run(api_tool.get("method"), api_tool.get("path"))
 
 
 class McpApiToolExecutor:
@@ -113,12 +151,16 @@ class McpApiToolExecutor:
             )
             url_path = McpApiToolExecutor._build_url_path(path, path_params)
             if _run_token_claims() is not None:
-                from .internal_obo import operation_of  # pylint: disable=C0415
+                from .internal_obo import material_of_call, operation_of  # pylint: disable=C0415
                 refused = _refused_by_run_token(   # classified by the tool's own path template, not the call's values
                     operation_of(method, path), f"{method} {url_path}", api_tool.get("label", ""),
-                    {**query_params, **body_params})
+                    {**query_params, **body_params},
+                    material=lambda: material_of_call(method, path, path_params, body_params,
+                                                      _run_token_claims().get("uid")))
                 if refused:
                     return {"error": refused}
+            else:
+                _record_audit_only_material(method, path, path_params, body_params, url_path, api_tool)
 
             log.debug(f"Calling API tool: {method} {url_path} query={query_params} body={body_params}")
 
@@ -129,13 +171,17 @@ class McpApiToolExecutor:
 
             parsed = McpApiToolExecutor._parse_response(status_code, body_data)
             claims = _run_token_claims()
-            if claims is not None and "result" in parsed and method == "POST":
+            if claims is not None and method in ("GET", "HEAD") and "result" in parsed:
+                # (#7228) a stored toolkit secret never reaches a run token's read: redacted, the read itself served
+                from .internal_obo import redact_for_run  # pylint: disable=C0415
+                parsed["result"] = redact_for_run(parsed["result"], path_params.get("project_id"), claims.get("uid"))
+            if claims is not None and "result" in parsed and method in ("POST", "PUT", "PATCH"):
                 # (#7269) what a governed run created is requested for its user, as theirs, with the run as origin;
                 # the call's own answer stands whatever happens here
                 try:
                     from .governance_requests import file_for_run  # pylint: disable=C0415
                     governance = file_for_run(this.module, claims, method, path, path_params.get("project_id"),
-                                              parsed["result"])
+                                              parsed["result"], path_params)
                 except Exception as exc:  # pylint: disable=W0703
                     log.error("MCP: the run's governance request was not filed (%s)", type(exc).__name__)
                     governance = None
@@ -448,7 +494,7 @@ class McpService:
                     self.__session_scoped_path_params()
                 )
                 if "error" not in result:
-                    response_content = json.dumps(result["result"])
+                    response_content = json.dumps(_with_governance(result))
             else:
                 result = {"error": f"Version matching failure for {request.params.name}"}
         except _RunTokenRefusal as e:
@@ -525,6 +571,8 @@ class McpService:
 
         if openapi_tag:
             for api_tool in openapi_registry.get_mcp_api_tools(filter_tags=[openapi_tag]):
+                if not _listed(api_tool):
+                    continue
                 tool_name = _build_agent_identifier(api_tool.get("value", api_tool.get("label", "")))
                 if tool_name in known_tool_names:
                     log.warning("Skipping API tool with colliding name: %s -> %s", api_tool.get("label"), tool_name)
@@ -706,6 +754,8 @@ class McpService:
 
         api_tools = openapi_registry.get_mcp_api_tools()
         for api_tool in api_tools:
+            if not _listed(api_tool):
+                continue
             tool_name = _build_agent_identifier(api_tool.get("value", api_tool.get("label", "")))
 
             if tool_name in known_tool_names:

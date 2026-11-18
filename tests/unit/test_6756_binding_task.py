@@ -379,13 +379,31 @@ def values_of(ns, param, **more):
     return {**values, **more}
 
 
-def test_the_creator_cannot_approve_their_own_binding(ns, env):
+def test_the_creator_cannot_approve_the_request_they_made(ns, env):
     run(ns, env, f"{ONE};action=create")
-    run(ns, env, f"{ONE};action=submit", actor=APPROVER)
+    run(ns, env, f"{ONE};action=submit")   # the creator's own request
     events = len(env.recorded)
     result = run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)
     assert result["error"].startswith("SELF_APPROVAL")
     assert (binding(env, ns).state, len(env.recorded)) == ("pending_approval", events)
+
+
+def test_a_creator_who_did_not_make_the_current_request_may_approve_it(ns, env):
+    """(#7228) Four eyes on the request: created by 7, the request made by 8 (submitted, or brought up to date in
+    place). In a two-admin project 7 approves it; before, both were refused (the dead end of browser row 2)."""
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit", actor=APPROVER)
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
+
+
+def test_whoever_brought_a_waiting_binding_up_to_date_cannot_approve_it_and_its_creator_may(ns, env):
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST
+    run(ns, env, f"{ONE};action=rebind", actor=9)   # the current request is 9's now
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
 
 
 def test_whoever_submitted_the_binding_cannot_approve_it(ns, env):
@@ -440,13 +458,12 @@ def test_a_rebound_binding_admits_nothing_until_it_is_approved_again(ns, env):
     assert ns.adm.admit_execution(env.module(), env.request(), run_id="run-3").context_ref
 
 
-def test_a_rebound_binding_is_approved_by_neither_the_creator_nor_the_rebinder(ns, env):
+def test_a_rebound_binding_is_not_approved_by_its_rebinder(ns, env):
     activate(ns, env)
     run(ns, env, f"{ONE};action=rebind", actor=9)
-    for actor in (7, 9):
-        assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=actor)["error"].startswith("SELF_APPROVAL")
-    # the first approver (8) may approve the new definition: they did not create or rebind it
-    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    # (#7228) the creator (7) did not make this request: they may approve it, as the first approver (8) may
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"
 
 
 def test_a_rebind_is_approved_for_the_new_definition_only(ns, env):
@@ -469,7 +486,7 @@ def test_rebind_works_from_suspended_and_raises_the_epoch_once_more(ns, env):
     assert reasons(env)[-2:] == ["BINDING_SUSPENDED", "BINDING_REBIND_PENDING_APPROVAL"]
 
 
-@pytest.mark.parametrize("state", ["draft", "pending_approval", "retired"])
+@pytest.mark.parametrize("state", ["draft", "retired"])
 def test_rebind_is_refused_where_there_is_nothing_live_to_rebind(ns, env, state):
     run(ns, env, f"{ONE};action=create")
     if state != "draft":
@@ -479,6 +496,49 @@ def test_rebind_is_refused_where_there_is_nothing_live_to_rebind(ns, env, state)
     before = (binding(env, ns).state, binding(env, ns).definition_digest, len(env.recorded))
     assert run(ns, env, f"{ONE};action=rebind") == {"error": f"cannot rebind a binding in state '{state}'"}
     assert (binding(env, ns).state, binding(env, ns).definition_digest, len(env.recorded)) == before
+
+
+# --- (#7228) a waiting binding for an older definition, and a retired one requested again --------------
+
+def test_a_waiting_binding_is_brought_up_to_date_in_place_and_then_approved(ns, env):
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST   # a toolkit was attached while it waited
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["error"].startswith(
+        "BINDING_DIGEST_MISMATCH")
+    assert run(ns, env, f"{ONE};action=rebind", actor=9)["state"] == "pending_approval"
+    row = binding(env, ns)
+    assert (row.state, row.definition_digest, row.revocation_epoch, row.approval_ref) == (
+        "pending_approval", NEW_DIGEST, 0, None)   # nothing raised: it was never in use
+    assert reasons(env)[-1] == "BINDING_BROUGHT_UP_TO_DATE"   # its own code: it was never taken out of use (D2-N2)
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_retired_binding_is_requested_again_on_the_same_row_and_approved(ns, env):
+    activate(ns, env)
+    first = binding(env, ns).id
+    run(ns, env, f"{ONE};action=retire")
+    epoch = binding(env, ns).revocation_epoch
+    env.digests[70] = NEW_DIGEST
+    result = run(ns, env, f"{ONE};action=create;platform_operations=read", actor=9)
+    assert (result["binding_ref"], result["state"], result["definition_digest"]) == (str(first), "draft", NEW_DIGEST)
+    row = binding(env, ns)   # still one row per version and mode: one audit chain
+    assert (row.state, row.created_by, row.approval_ref, row.policy_revision, row.revocation_epoch) == (
+        "draft", 9, None, None, epoch)   # its epoch stays raised: nothing admitted before is accepted again
+    assert reasons(env)[-1] == "BINDING_REVIVED"
+    assert run(ns, env, f"{ONE};action=create") == {"error": "binding already exists; use another action"}
+    run(ns, env, f"{ONE};action=submit", actor=9)
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_dry_run_create_after_retirement_writes_nothing(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=retire")
+    before = (binding(env, ns).state, len(env.recorded))
+    assert run(ns, env, f"{ONE};action=create;dry_run")["dry_run"] is True
+    assert (binding(env, ns).state, len(env.recorded)) == before
 
 
 def test_rebind_dry_run_reports_the_plan_and_writes_nothing(ns, env):
@@ -755,3 +815,55 @@ def test_the_task_is_documented_for_operators():
     section = doc[doc.index("def manage_agent_identity_binding"):doc.index("def migrate_eval_dataset_columns")]
     for word in ("project_id=N", "application_id=A", "version_id=V", "mode=", "action=", "approval_ref", "policy_revision", "dry_run"):
         assert word in section
+
+
+# --- (#7228 round 5) what the review's mutations showed unpinned, and the requester's kind ---------------------------
+
+def test_a_re_digest_between_the_approvals_read_and_its_write_leaves_the_row_unchanged(ns, env):
+    """(D3-S1) The approving UPDATE repeats the digest it read: a re-digest in place committed between the read and the
+    write makes the write miss (CONCURRENT_CHANGE), nothing is approved."""
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    engine, fired = env.engine(1), []
+
+    def redigest_first(conn, cursor, statement, parameters, context, executemany):  # pylint: disable=R0913
+        if not fired and statement.lstrip().upper().startswith("UPDATE") and "agent_identity_binding" in statement:
+            fired.append(True)
+            cursor.execute("UPDATE agent_identity_binding SET definition_digest = ?", (NEW_DIGEST,))
+    ns.sa.event.listen(engine, "before_cursor_execute", redigest_first)
+    try:
+        result = run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)
+    finally:
+        ns.sa.event.remove(engine, "before_cursor_execute", redigest_first)
+    assert fired and result["error"] == "the binding changed while this ran; read it again and retry"
+    assert binding(env, ns).state == "pending_approval"
+
+
+def test_an_authors_own_edit_requested_by_a_member_is_never_approved_by_the_author(ns, env):
+    """(D3-D1, C9-SEC-100) 7 authors and submits; 7 then edits the agent and a member's Request (the platform's own
+    filing, automatic) brings the waiting binding up to date: the request stays 7's, so 7 is refused and another
+    operator approves. The audit names the request's actor and the mover's kind."""
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST
+    values, _ = ns.binding_admin.parse_binding_param(f"{ONE};action=rebind")
+    values.update(takes_request=False, mover_kind="automatic")
+    assert ns.binding_admin.run_binding_action(env.module(governed=False), values, 9)["state"] == "pending_approval"
+    assert binding(env, ns).state_changed_by is None   # the member did not become the request's actor
+    event = [event for _, event in env.recorded if event["event_type"] == "lifecycle"][-1]
+    assert (event["caller_ref"], event["user_ref"], event["reason_code"]) == (
+        "operator:9", "user:7", "BINDING_BROUGHT_UP_TO_DATE_AUTOMATIC")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_deliberate_re_request_by_another_approver_lets_the_creator_approve(ns, env):
+    """(D3-D1) the two-admin case stays open: another approver moving it deliberately is the request's actor."""
+    for action in ("create", "submit"):
+        run(ns, env, f"{ONE};action={action}")
+    env.digests[70] = NEW_DIGEST
+    run(ns, env, f"{ONE};action=rebind", actor=9)   # the admin task: a deliberate move
+    event = [event for _, event in env.recorded if event["event_type"] == "lifecycle"][-1]
+    assert (event["user_ref"], event["reason_code"]) == ("user:9", "BINDING_BROUGHT_UP_TO_DATE")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)["state"] == "active"

@@ -19,6 +19,7 @@ the grants), given ``governance.request`` and, for a binding, the right to edit 
 """
 import uuid
 from dataclasses import dataclass, field, replace
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,8 +30,9 @@ from tools import auth, db
 from ..models.agent_identity import LIVE_MANDATE_STATES, AgentIdentityBinding
 from .credential_decision import (
     CREDENTIAL_SECTION, DELEGATED_AUTH_MODE, MANDATE_CONSENT_REQUIRED, MANDATE_DELEGATION_UNSUPPORTED,
-    MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, CredentialDecisionContext, authorize_credential_use, collect_credential_uses, grant_key,
-    read_configuration_facts, toolkit_secret_fields, user_may_use_credentials, _governed_uses, _read_decision_facts,
+    PROFILE_DEVELOPMENT, CredentialDecisionContext, authorize_credential_use, collect_credential_uses, grant_key,
+    read_configuration_facts, resolve_title_uses, toolkit_secret_fields, user_may_use_credentials, _governed_uses,
+    _read_decision_facts,
 )
 from .definition_digest import DigestError, digest_for_version, toolkit_rows
 from .governance import is_governed
@@ -69,10 +71,12 @@ class Readiness:
     plan: dict = field(default_factory=dict)
     delegated: bool = False   # a credential of the version acts with a person's Microsoft sign-in
 
-    def add(self, key, kind, title, state, requestable=False, ref=None, for_="shared", **plan):
+    def add(self, key, kind, title, state, requestable=False, ref=None, for_="shared", operations=None, **plan):
         if len(self.items) < MAX_ITEMS and all(item["key"] != key for item in self.items):
             self.items.append({"key": key, "kind": kind, "ref": ref, "title": title, "state": state,
                                "requestable": bool(requestable), "for": for_})
+            if operations is not None:   # (#7228) a binding: what its agent may do on the platform, proposed or held
+                self.items[-1]["operations"] = list(operations)
             if plan:
                 self.plan[key] = plan
 
@@ -102,11 +106,12 @@ def _permissions(user_id, project_id):
 
 def _binding_of(session, project_id, application_id, version_id, current_digest):
     """The version's binding as admission sees it: ``(row, state)``, ``state`` one of missing, draft, provisioning,
-    pending_approval, active, suspended, changed (active but approved for another definition). A suspended binding stays
+    pending_approval, active, suspended, changed (active or waiting, for another definition). A suspended binding stays
     ``suspended`` whatever its definition: a member's rebind never lifts a suspension (an operator resumes it)."""
     rows = session.execute(
         select(AgentIdentityBinding.id, AgentIdentityBinding.state, AgentIdentityBinding.definition_digest,
-               AgentIdentityBinding.created_by, AgentIdentityBinding.state_changed_by)
+               AgentIdentityBinding.created_by, AgentIdentityBinding.state_changed_by,
+               AgentIdentityBinding.allowed_platform_operations)
         .where(AgentIdentityBinding.project_id == project_id, AgentIdentityBinding.application_id == application_id,
                AgentIdentityBinding.version_id == version_id, AgentIdentityBinding.identity_mode.in_(GOVERNED_MODES),
                AgentIdentityBinding.state.notin_(("retiring", "retired")))
@@ -115,9 +120,32 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
     for wanted in ("active", "suspended", "pending_approval", "provisioning", "draft"):
         for row in rows:
             if row.state == wanted:
-                changed = wanted == "active" and row.definition_digest != current_digest
+                # (#7228) a waiting binding for another definition is changed too: its approval would be refused
+                # (BINDING_DIGEST_MISMATCH), so it is brought up to date (a rebind in place) before anyone approves it
+                changed = wanted in ("active", "pending_approval") and row.definition_digest != current_digest
                 return row, "changed" if changed else wanted
     return None, "missing"
+
+
+# (#7228) the version meta keys of the internal Elitea toolkit (``internal_tools.MCP_BUILDER_TOOL_KEYS``)
+INTERNAL_TOOL_KEYS = frozenset({"internal_mcp", "skill_builder", "project_context_builder"})
+
+
+def proposed_operations(version, rows):
+    """What a binding request proposes the agent may do on the platform (#7228): every operation when the version uses
+    the internal Elitea toolkit (its meta's internal tools, or an internal MCP toolkit), else None (read only, as
+    before). The approver may keep part of it."""
+    from .internal_obo import OPERATIONS, _INTERNAL_PATH, client_path  # pylint: disable=C0415
+    meta = getattr(version, "meta", None) if isinstance(getattr(version, "meta", None), dict) else {}
+    if INTERNAL_TOOL_KEYS & set(meta.get("internal_tools") or []):
+        return list(OPERATIONS)
+    for _, tool in rows or []:
+        settings = getattr(tool, "settings", None) if isinstance(getattr(tool, "settings", None), dict) else {}
+        url = settings.get("url")
+        if str(getattr(tool, "type", "")).startswith("mcp") and isinstance(url, str) \
+                and _INTERNAL_PATH.match(client_path(urlsplit(url).path)):
+            return list(OPERATIONS)
+    return None
 
 
 EXPAND_TIMEOUT_S = 5
@@ -130,51 +158,22 @@ def _expand(project_id, settings, user_id):
         project_id=project_id, settings=settings, user_id=user_id, unsecret=False)
 
 
-def _resolve_titles(candidates, rows, user_id):
+def _resolve_titles(candidates, rows, user_id, project_id):
     """A stored selector by title (``{elitea_title, private}``, as the UI saves an index's pgvector) is resolved as the
-    run resolves it, so its section is known: ``(configuration_uuid, configuration_project_id)`` are taken from the
-    answer and the rest of it is dropped. One call per title use, at most ``MAX_GOVERNED_CREDENTIALS_PER_RUN``; a title
-    that resolves to nothing stays a title use (``not_registrable``, as before). Read only."""
-    stored = {str(tool.id): tool.settings for _, tool in rows if isinstance(getattr(tool, "settings", None), dict)}
-    resolved, calls = [], 0
-    for use in candidates:
-        value = (stored.get(use.toolkit_instance_id) or {}).get(use.field)
-        title = (value.get("elitea_title") or value.get("alita_title")) if isinstance(value, dict) else None
-        if use.selector == "title" and isinstance(title, str) and title and calls < MAX_GOVERNED_CREDENTIALS_PER_RUN:
-            calls += 1
-            try:
-                answer = _expand(use.configuration_project_id, {"elitea_title": title,
-                                                                "private": bool(value.get("private"))}, user_id)
-            except (LookupError, ValueError):
-                answer = None
-            except Exception as exc:  # pylint: disable=W0703
-                log.error("governance readiness: a configuration title could not be resolved (%s)", type(exc).__name__)
-                raise ReadinessUnavailable() from None
-            found = _found(answer)
-            if found is not None:
-                use = replace(use, configuration_uuid=found[0], selector="uuid", configuration_project_id=found[1])
-        resolved.append(use)
-    return resolved
-
-
-def _found(answer):
-    if not isinstance(answer, dict):
-        return None
-    project_id = answer.get("configuration_project_id")
+    run resolves it (``credential_decision.resolve_title_uses``, the same resolution admission uses since #7228), so
+    its section is known. Read only."""
     try:
-        cfg_uuid = str(uuid.UUID(str(answer.get("configuration_uuid"))))
-    except ValueError:
-        return None
-    if not isinstance(project_id, int) or isinstance(project_id, bool):
-        return None
-    return cfg_uuid, project_id
+        return resolve_title_uses(candidates, rows, user_id, project_id, expand=lambda *args: _expand(*args))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governance readiness: a configuration title could not be resolved (%s)", type(exc).__name__)
+        raise ReadinessUnavailable() from None
 
 
 def _uses(session, project_id, version_id, user_id, rows):
     """The governed credential uses of the version's stored definition, and the facts of their configurations."""
     candidates = _resolve_titles(collect_credential_uses(
         None, project_id, version_id, None, lambda tool_type: toolkit_secret_fields(tool_type, project_id, user_id),
-        rows=rows), rows, user_id)
+        rows=rows), rows, user_id, project_id)
     configurations = read_configuration_facts(
         (use.configuration_uuid, use.configuration_project_id) for use in candidates)
     return _governed_uses(candidates, configurations), configurations
@@ -200,8 +199,10 @@ def _credential_items(result, ctx, uses, configurations, tools, *, binding_reque
         code = verdict.reason_code
         if use.selector != "uuid" or not config or config.get("section") != CREDENTIAL_SECTION \
                 or config.get("project_id") != ctx.binding_project_id:
-            result.add(f"reference:{use.toolkit_instance_id}:{use.field}", "reference", title,
-                       "not_registrable" if use.selector != "uuid" else "other_project")
+            # (#7228) a title that resolves to nothing for this user is said as such, not as a typed value
+            state = ("not_found" if use.selector == "title" else
+                     "not_registrable" if use.selector != "uuid" else "other_project")
+            result.add(f"reference:{use.toolkit_instance_id}:{use.field}", "reference", title, state)
             continue
         reference = facts.references.get(config.get("id"))
         ref_key = f"reference:{use.configuration_uuid}"
@@ -269,11 +270,15 @@ def _version_items(result, module, session, project_id, version, user_id, subjec
     binding_requestable = may_edit and (state in ("missing", "changed") or own_draft)
     title = " ".join(part for part in (getattr(version, "application_name", None), version.name) if part) or "Agent"
     if state != "active":
+        proposal = proposed_operations(version, rows) if binding is None else None
+        held = binding.allowed_platform_operations if binding is not None else None
         result.add("binding", "binding", title, state, ref=None if binding is None else str(binding.id),
-                   requestable=binding_requestable,
+                   requestable=binding_requestable, operations=proposal if binding is None else held,
                    application_id=version.application_id, version_id=version.id,
-                   binding_id=None if binding is None else str(binding.id), action={
-                       "missing": "create", "changed": "rebind", "draft": "submit"}.get(state))
+                   binding_id=None if binding is None else str(binding.id),
+                   binding_state=None if binding is None else binding.state, action={
+                       "missing": "create", "changed": "rebind", "draft": "submit"}.get(state),
+                   platform_operations=proposal)
     tools = {str(tool.id): tool.name or tool.type for _, tool in rows}
     uses, configurations = _uses(session, project_id, version.id, user_id, rows)
     # a rebind keeps the row, and its grants; with no binding a well-formed id no grant names (the facts refuse a
