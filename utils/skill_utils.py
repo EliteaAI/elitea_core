@@ -2,7 +2,9 @@ import re
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
-from typing import List, Optional, Tuple, Literal
+from typing import Annotated, List, Optional, Tuple, Literal
+
+from pydantic import ConfigDict, TypeAdapter
 
 from sqlalchemy import func, or_, asc, desc, text
 from sqlalchemy.orm import selectinload
@@ -1416,6 +1418,13 @@ def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skil
         .order_by(Skill.id)
         .first()
     )
+
+
+def validate_new_skill_fields(name, description) -> None:
+    """Raise the error creating a skill would raise for this name or description, before anything is stored."""
+    for field, value in (('name', name), ('description', description)):
+        info = SkillCreateModel.model_fields[field]
+        TypeAdapter(Annotated[info.annotation, *info.metadata], config=ConfigDict(title=field)).validate_python(value)
 
 
 def import_skill(

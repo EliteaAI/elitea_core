@@ -59,18 +59,20 @@ def export_import():
     _package(f'{PKG}.utils')
 
     _module(f'{PKG}.models.skill', Skill=object, SkillVersion=object)
-    _module(f'{PKG}.models.pd.skill', SkillExportModel=object, validate_skill_name=None)
+    _module(f'{PKG}.models.pd.skill', RESERVED_NAME_WORDS=(), SkillExportModel=object, validate_skill_name=None)
     _module(f'{PKG}.utils.export_import_utils', slugify=lambda value: value)
     _module(
         f'{PKG}.utils.skill_utils',
         _skill_session=None,
         get_skill_details=None,
         import_skill=None,
+        SkillError=ValueError,
         SkillFileError=ValueError,
         get_max_file_bytes=None,
         get_max_package_bytes=None,
         get_max_package_files=None,
         validate_instructions_length=None,
+        validate_new_skill_fields=None,
     )
     _module(f'{PKG}.utils.skill_files', add_version_files=None, build_file_entry=None, describe_size=None,
             list_version_manifest=None,

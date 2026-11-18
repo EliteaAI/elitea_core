@@ -10,7 +10,10 @@ import importlib.util
 import pathlib
 import sys
 import types
+from typing import Annotated
 from unittest import mock
+
+from pydantic import AfterValidator, BaseModel, Field
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SKILL_NAME_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
@@ -375,6 +378,12 @@ def validate_skill_name(value):
     return value
 
 
+class SkillCreateModel(BaseModel):
+    """The name and description rules of ``models/pd/skill.py``'s create model."""
+    name: Annotated[str, AfterValidator(validate_skill_name)] = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=2304)
+
+
 class PublishStatus:
     draft = 'draft'
     published = 'published'
@@ -494,6 +503,8 @@ def install(monkeypatch, limits: dict):
     monkeypatch.setitem(sys.modules, models_skill.__name__, models_skill)
     sys.modules[f'{PKG}.models.pd.skill_version'].SkillVersionDetailModel = VersionDetail
     sys.modules[f'{PKG}.models.pd.skill'].validate_skill_name = validate_skill_name
+    sys.modules[f'{PKG}.models.pd.skill'].RESERVED_NAME_WORDS = ('claude', 'anthropic')
+    sys.modules[f'{PKG}.models.pd.skill'].SkillCreateModel = SkillCreateModel
     enums = AnyModule(f'{PKG}.models.enums.all')
     enums.PublishStatus = PublishStatus
     monkeypatch.setitem(sys.modules, enums.__name__, enums)
