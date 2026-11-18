@@ -452,12 +452,13 @@ def package_routes(harness):
         return {'id': 3}
 
     def validate_skill_import_filename(filename):
-        if not filename.lower().endswith(('.md', '.zip')):
-            raise ValueError('Skill import only accepts .md or .zip files.')
+        if not filename.lower().endswith(('.md', '.zip', '.skill')):
+            raise ValueError('Skill import only accepts .md, .zip or .skill files.')
 
     module = types.ModuleType(f'{PACKAGE}.utils.skill_export_import')
     module.__dict__.update(
         read_skill_zip=read_skill_zip, import_skill_md=import_skill_md,
+        is_skill_package=lambda filename: filename.lower().endswith(('.zip', '.skill')),
         validate_skill_import_filename=validate_skill_import_filename,
         export_skill_md=lambda **kwargs: calls.export,
     )
@@ -482,9 +483,10 @@ def package_routes(harness):
 
 
 class TestSkillPackageRoutes:
-    def test_a_zip_upload_is_unpacked_and_its_files_go_to_the_import(self, harness, package_routes):
+    @pytest.mark.parametrize('filename', ['forms.ZIP', 'forms.skill'])
+    def test_a_zip_upload_is_unpacked_and_its_files_go_to_the_import(self, harness, package_routes, filename):
         harness.user_permissions = {'models.applications.skills.create'}
-        harness.files['file'] = NamedUpload('forms.ZIP', b'PK\x03\x04zip')
+        harness.files['file'] = NamedUpload(filename, b'PK\x03\x04zip')
 
         assert package_routes.importer.post(project_id=7) == ({'id': 3}, 201)
         assert package_routes.unzipped == [b'PK\x03\x04zip']

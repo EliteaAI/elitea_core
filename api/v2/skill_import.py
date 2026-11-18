@@ -5,6 +5,7 @@ from pylon.core.tools import log
 
 from ...utils.skill_export_import import (
     import_skill_md,
+    is_skill_package,
     read_skill_zip,
     validate_skill_import_filename,
 )
@@ -16,7 +17,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Import a skill from a Markdown file or a skill ZIP",
         description=(
-            "Creates a new skill from an uploaded Markdown (.md) file or a skill ZIP. The file is "
+            "Creates a new skill from an uploaded Markdown (.md) file or a skill ZIP (.zip, or .skill as "
+            "saved by Claude's skill creator). The file is "
             "sent as multipart/form-data under the 'file' field (a raw Markdown "
             "string in the JSON body's 'content' field is also accepted). A ZIP holds SKILL.md at its root "
             "or inside one top-level folder, and every other member becomes a file of the skill version. "
@@ -57,7 +59,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": str(e)}, 400
 
             raw = uploaded.read()
-            if (filename or '').lower().endswith('.zip'):
+            if is_skill_package(filename):
                 try:
                     content, package_files = read_skill_zip(raw)
                 except SkillError as exc:
