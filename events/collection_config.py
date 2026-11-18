@@ -55,8 +55,11 @@ class Event:
             )
             #
             if target_roles:
+                # Joined on sign-in, not by anyone's action (#7504)
                 context.rpc_manager.call.admin_add_user_to_project(
-                    ai_project_id, payload['user_id'], target_roles
+                    ai_project_id, payload['user_id'], target_roles,
+                    audit_ctx={"actor_type": "system", "actor_id": None, "actor_name": "System",
+                               "actor_email": None, "source": "system", "request_id": None},
                 )
         else:
             log.warning('User with non-AI email registered %s', payload)
