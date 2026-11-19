@@ -5,6 +5,7 @@ recording session over real SQLAlchemy columns, so the test compiles the filters
 """
 import contextlib
 import pathlib
+import re
 import sys
 import types
 from unittest import mock
@@ -547,8 +548,10 @@ def test_the_chat_filter_keeps_the_rows_that_read_as_chat_without_a_stored_type(
     assert f"({STORED_TYPE}) IS NULL" in sql
     assert (f"({STORED_TYPE}) NOT IN ('chat', 'api', 'mcp', 'webhook', 'scheduled', 'schedule_manual', "
             "'manual', 'schedule_test')") in sql
-    assert ("jsonb_typeof((chat_conversations.meta -> 'scheduled_run')) IS DISTINCT FROM 'boolean' OR "
-            "(chat_conversations.meta ->> 'scheduled_run') IS DISTINCT FROM 'true'") in sql
+    # SQLAlchemy 2.0 renders the JSONB index as `-> 'key'`, 2.1 as `['key']`: both read the same value
+    assert re.search(r"jsonb_typeof\(\(?chat_conversations\.meta(?: -> 'scheduled_run'|\['scheduled_run'\])\)?\) "
+                     r"IS DISTINCT FROM 'boolean' OR "
+                     r"\(chat_conversations\.meta ->> 'scheduled_run'\) IS DISTINCT FROM 'true'", sql)
     assert 'entity_schedule_runs' not in sql
 
 
