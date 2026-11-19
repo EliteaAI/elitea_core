@@ -35,7 +35,7 @@ def _max_starters():
 
 
 def build_service(project_id, user_id, seen_playbooks=None) -> BuilderService:
-    catalog = Catalog(openapi_registry.get_mcp_api_tools(filter_tags=list(BUILDER_TAGS)))
+    catalog = Catalog(openapi_registry.get_mcp_api_tools(filter_tags=list(BUILDER_TAGS), public_only=True))
     return BuilderService(
         project_id=project_id, user_id=user_id, call=make_call(project_id, catalog), store=DbStore(project_id),
         catalog=catalog, can_write=_can_write(project_id), seen_playbooks=seen_playbooks,
