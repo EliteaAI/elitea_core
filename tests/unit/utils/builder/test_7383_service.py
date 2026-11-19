@@ -290,3 +290,21 @@ def test_operation_arguments_shown_to_the_chat_mask_secret_values(builder, calls
     service.confirm(proposal['changeset_id'], user_id=5)
     service.apply(proposal['changeset_id'])
     assert calls.writes[-1] == ('op:put_secrets_secret', {'secret': 's', 'value': 'v-123', 'project_id': PID})
+
+
+def test_a_secrets_operation_shows_only_the_secret_name(builder, calls):
+    """E2E: the model put the new value into the `secret` path argument; it is masked all the same."""
+    tools = [{'value': 'put_secrets_secret', 'method': 'PUT', 'path': '/api/v2/secrets/secret/{mode}/{project_id}/{secret}',
+              'args_schema': {'type': 'object', 'properties': {'project_id': {'type': 'integer'},
+                                                               'secret': {'type': 'string'},
+                                                               'name': {'type': 'string'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'name': 'tmp', 'secret': 'e2e-value-789'},
+                               entity_id='put_secrets_secret')
+    assert proposal['arguments'] == {'name': 'tmp', 'secret': '****', 'project_id': PID}
+
+
+def test_toolkits_are_not_an_agent_field(service):
+    proposal = service.propose('agent', 'update', {'tools': [{'id': 3}]}, entity_id=1)
+    assert proposal['status'] == 'invalid' and 'tools' in proposal['message']

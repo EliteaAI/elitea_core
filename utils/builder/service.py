@@ -20,7 +20,7 @@ CHANGESET_TTL_S = 30 * 60
 # version (PUT version, instructions through the safe patch). The version's own name is read-only (`version_name`).
 APPLICATION_LEVEL_FIELDS = frozenset({'name', 'description'})
 VERSION_FIELDS = frozenset({
-    'instructions', 'llm_settings', 'tools', 'variables', 'conversation_starters', 'welcome_message',
+    'instructions', 'llm_settings', 'variables', 'conversation_starters', 'welcome_message',
     'pipeline_settings', 'tags', 'meta', 'agent_type', 'notes',
 })
 APPLICATION_FIELDS = APPLICATION_LEVEL_FIELDS | VERSION_FIELDS
@@ -36,12 +36,25 @@ _SECRET_ARG_NAMES = frozenset({'value', 'password', 'token', 'api_key', 'secret_
                                'client_secret', 'private_key'})
 
 
-def _masked(args):
-    """Operation arguments as the chat shows them: secret values never reach the card or the model."""
+def _masked(args, path=''):
+    """Operation arguments as the chat shows them: secret values never reach the card or the model.
+    A secrets operation shows only the secret's name: any other text argument may hold the value."""
     if not isinstance(args, dict):
         return args
-    return {k: '****' if (k.lower() in _SECRET_ARG_NAMES or k.lower().endswith(('_password', '_token', '_secret')))
-            and v not in (None, '') else v for k, v in args.items()}
+    secrets_op = '/secrets/' in f'/{path or ""}'
+
+    def hidden(key, value):
+        if value in (None, '') or key == 'project_id':
+            return False
+        if secrets_op:
+            # the secret's name (`name`, or the `secret` path segment naming it) stays; any other text is the value
+            if key == 'name' or (key == 'secret' and value in (args.get('name'), None)):
+                return False
+            if key == 'secret' and 'name' not in args and 'value' in args:
+                return False
+            return isinstance(value, str)
+        return key.lower() in _SECRET_ARG_NAMES or key.lower().endswith(('_password', '_token', '_secret'))
+    return {k: '****' if hidden(k, v) else v for k, v in args.items()}
 
 
 def _invalid(message, errors=None):
@@ -324,8 +337,14 @@ class BuilderService:
             'summary': self._describe(row),
         }
         if row['op'] == 'call':
-            proposal['arguments'] = _masked(row['after'])
+            proposal['arguments'] = _masked(row['after'], self._op_path(row['entity_id']))
         return proposal
+
+    def _op_path(self, op_id):
+        try:
+            return self.catalog.tool(op_id).get('path') or ''
+        except UnknownOperation:
+            return ''
 
     # --- confirm / apply ----------------------------------------------------------------------------------------
 
