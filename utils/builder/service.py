@@ -312,6 +312,9 @@ class BuilderService:
             return _invalid(f"unknown operation '{op_id}'; use post_elitea_core_builder_find with type 'operation'")
         if errors:
             return _invalid('The arguments do not match the operation schema; nothing was called.', errors)
+        mismatch = self._version_mismatch(dispatch_args)
+        if mismatch:
+            return _invalid(mismatch, [{'field': 'entity_version_id', 'message': mismatch}])
         return self._store({'entity_type': 'operation', 'op': 'call', 'entity_id': op_id, 'before': None,
                             'after': dispatch_args, 'destructive': kind == 'destructive', 'name': op_id})
 
@@ -483,6 +486,20 @@ class BuilderService:
             if chip:
                 result['chip'] = chip
         return result
+
+    def _version_mismatch(self, args):
+        """A link names the agent (entity_id) and one of its versions (entity_version_id); both must match."""
+        entity_id, version_id = args.get('entity_id'), args.get('entity_version_id')
+        if args.get('entity_type') not in ('agent', 'pipeline', 'application') or not entity_id or not version_id:
+            return None
+        app = self.call('get_application', {'application_id': entity_id})
+        versions = (app or {}).get('versions') if isinstance(app, dict) and not app.get('error') else None
+        if versions is None:
+            return f'Agent {entity_id} not found; entity_id is the agent id from builder_find, not a version id.'
+        if version_id not in {v.get('id') for v in versions}:
+            return (f'Version {version_id} does not belong to agent {entity_id}; read the agent and use its '
+                    f'version_id as entity_version_id.')
+        return None
 
     def _linked_entity_chip(self, args):
         """An operation that changed an agent or pipeline version (e.g. linking a toolkit) refreshes its editor."""

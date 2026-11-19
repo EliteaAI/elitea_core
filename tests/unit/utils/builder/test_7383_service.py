@@ -323,3 +323,16 @@ def test_linking_a_toolkit_returns_the_agent_chip(builder, calls):
                                entity_id='patch_elitea_core_tool')
     result = service.apply(proposal['changeset_id'])
     assert result['chip'] == {'type': 'agent', 'id': 1, 'version_id': 10, 'name': 'Daily Summary'}
+
+
+def test_linking_with_a_version_id_as_the_agent_id_is_refused(builder, calls):
+    """E2E: the model sent the version id (819) as entity_id; the link would have gone to no agent."""
+    tools = [{'value': 'patch_elitea_core_tool', 'method': 'PATCH', 'path': '/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}',
+              'args_schema': {'type': 'object', 'properties': {
+                  'project_id': {'type': 'integer'}, 'tool_id': {'type': 'integer'}, 'entity_id': {'type': 'integer'},
+                  'entity_version_id': {'type': 'integer'}, 'entity_type': {'type': 'string'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'tool_id': 9, 'entity_id': 1, 'entity_version_id': 20,
+                                                     'entity_type': 'agent'}, entity_id='patch_elitea_core_tool')
+    assert proposal['status'] == 'invalid' and 'does not belong' in proposal['message']
