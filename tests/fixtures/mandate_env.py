@@ -17,6 +17,12 @@ NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 OWNER = 5
 
 
+def default_valid_until() -> datetime:
+    """30 days past the later of ``NOW`` and the real clock: some tests let admission read the real clock,
+    so a validity counted from the pinned ``NOW`` alone runs out in real time."""
+    return max(NOW, datetime.now(timezone.utc)) + timedelta(days=30)
+
+
 def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:
     ns = admission_env.install(plugin_root, tmp_path)
 
@@ -70,7 +76,7 @@ def add_mandate(env, ns, project_id=1, *, version=70, application=7, state="draf
         agent_binding_ref=binding_ref or uuid.uuid4(), owner_user_id=owner,
         owner_user_ref={"user_id": owner, "issuer": "https://issuer.example", "tid": "tid-1", "oid": f"oid-{owner}"},
         allowed_operations=list(operations), allowed_targets=["*"], max_runtime_s=runtime,
-        valid_until=valid_until or NOW + timedelta(days=30), state=state, suspended_reason=suspended_reason,
+        valid_until=valid_until or default_valid_until(), state=state, suspended_reason=suspended_reason,
         approval_ref="CHG-1" if approved_by else None, policy_revision="rev-1" if approved_by else None,
         created_by=created_by, approved_by=approved_by, revision=revision, revocation_epoch=epoch,
     )
