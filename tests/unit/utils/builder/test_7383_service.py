@@ -36,7 +36,10 @@ class Calls:
         if op == 'get_project_context':
             return dict(self.project_context)
         if op == 'list_models':
-            return {'total': 2, 'items': [{'name': 'gpt-5-mini'}, {'name': 'text-embedding-3-large'}]}
+            self.model_args = args
+            if args.get('section') == 'embedding':
+                return {'total': 1, 'items': [{'name': 'text-embedding-3-large'}]}
+            return {'total': 1, 'items': [{'name': 'gpt-5-mini', 'display_name': 'GPT-5 mini'}]}
         self.writes.append((op, args))
         if op == 'patch_instructions':
             return {'mcp_backup_version': {'id': 99, 'name': 'mcp-backup-10-x'}, 'instructions_sha256': 'c' * 64}
@@ -63,6 +66,11 @@ class TestFind:
         found = service.find('model', 'embedding')
         assert found['status'] == 'ok'
         assert [c['name'] for c in found['candidates']] == ['text-embedding-3-large']
+
+    def test_lists_shared_llm_models_by_display_name(self, service, calls):
+        found = service.find('model', 'gpt-5 mini')
+        assert [c['name'] for c in found['candidates']] == ['gpt-5-mini']
+        assert calls.model_args == {'section': 'llm', 'include_shared': 'true'}
 
     def test_finds_agents_by_name(self, service):
         result = service.find('agent', 'daily')
@@ -265,3 +273,20 @@ class TestResumeReproposes:
         service.apply(first['changeset_id'])
         second = service.propose('agent', 'create', {'name': 'Once', 'instructions': 'x'})
         assert second['changeset_id'] != first['changeset_id']
+
+
+def test_operation_arguments_shown_to_the_chat_mask_secret_values(builder, calls):
+    tools = [{'value': 'put_secrets_secret', 'method': 'PUT', 'path': '/api/v2/secrets/secret/{mode}/{project_id}/{secret}',
+              'description': 'Update a secret.',
+              'args_schema': {'type': 'object', 'properties': {'project_id': {'type': 'integer'},
+                                                               'secret': {'type': 'string'},
+                                                               'value': {'type': 'string'}},
+                              'required': ['project_id', 'secret', 'value']}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'secret': 's', 'value': 'v-123'}, entity_id='put_secrets_secret')
+    assert proposal['status'] == 'needs_confirmation'
+    assert proposal['arguments'] == {'secret': 's', 'value': '****', 'project_id': PID}
+    service.confirm(proposal['changeset_id'], user_id=5)
+    service.apply(proposal['changeset_id'])
+    assert calls.writes[-1] == ('op:put_secrets_secret', {'secret': 's', 'value': 'v-123', 'project_id': PID})

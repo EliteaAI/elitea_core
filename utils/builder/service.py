@@ -32,6 +32,18 @@ PROJECT_CONTEXT_FIELDS = frozenset({'content', 'enabled', 'activation_descriptio
 LOOKUP_OPS = {'toolkit': 'list_toolkits', 'model': 'list_models', 'configuration': 'list_configurations'}
 
 
+_SECRET_ARG_NAMES = frozenset({'value', 'password', 'token', 'api_key', 'secret_value', 'secret_access_key',
+                               'client_secret', 'private_key'})
+
+
+def _masked(args):
+    """Operation arguments as the chat shows them: secret values never reach the card or the model."""
+    if not isinstance(args, dict):
+        return args
+    return {k: '****' if (k.lower() in _SECRET_ARG_NAMES or k.lower().endswith(('_password', '_token', '_secret')))
+            and v not in (None, '') else v for k, v in args.items()}
+
+
 def _invalid(message, errors=None):
     return {'status': 'invalid', 'message': message, 'errors': errors or []}
 
@@ -92,7 +104,11 @@ class BuilderService:
             return self._with_playbook(entity_type, {'status': 'ok', 'candidates': [{'id': 'project'}],
                                                      'ambiguous': False})
         if entity_type in LOOKUP:
-            rows = self.call(LOOKUP_OPS[entity_type], {'query': query})
+            args = {'query': query}
+            if entity_type == 'model':
+                args = {'section': 'embedding' if 'embedding' in (query or '').lower() else 'llm',
+                        'include_shared': 'true'}
+            rows = self.call(LOOKUP_OPS[entity_type], args)
             if isinstance(rows, dict):
                 if rows.get('error'):
                     return {'status': 'error', 'message': str(rows['error'])}
@@ -101,7 +117,8 @@ class BuilderService:
             candidates = [
                 {'id': r.get('id'), 'name': r.get('name') or r.get('label') or r.get('display_name')}
                 for r in rows or [] if isinstance(r, dict)
-                and wanted in str(r.get('name') or r.get('label') or r.get('display_name') or '').lower()
+                and (not wanted or wanted in ' '.join(str(r.get(k) or '') for k in ('name', 'label', 'display_name')).lower()
+                     or (entity_type == 'model' and wanted in ('embedding', 'embeddings')))
             ][:limit]
             return {'status': 'ok', 'candidates': candidates, 'ambiguous': False}
         op = 'list_skills' if entity_type == 'skill' else 'list_applications'
@@ -210,6 +227,8 @@ class BuilderService:
         if op == 'create':
             if entity_name and not changes.get('name'):
                 changes = {**changes, 'name': entity_name}
+            if entity_type == 'skill' and 'body' in changes and not changes.get('instructions'):
+                changes = {**{k: v for k, v in changes.items() if k != 'body'}, 'instructions': changes['body']}
             return self._propose_create(entity_type, changes)
 
         entity_id, version_id, stop = self._resolve_target(entity_type, entity_id, version_id, entity_name)
@@ -252,6 +271,12 @@ class BuilderService:
                             'name': display_name or after.get('name') or state.get('name')})
 
     def _propose_create(self, entity_type, fields):
+        try:
+            fields = cs.apply_changes({}, fields)
+        except cs.ChangeError as exc:
+            return _invalid(str(exc), [{'field': str(exc).split(':')[0], 'message': str(exc)}])
+        if entity_type in ('agent', 'pipeline'):
+            fields.setdefault('llm_settings', {})
         required = {'agent': ('name',), 'pipeline': ('name', 'instructions'), 'skill': ('name', 'description',
                                                                                           'instructions'),
                     'project_context': ('content',)}[entity_type]
@@ -299,7 +324,7 @@ class BuilderService:
             'summary': self._describe(row),
         }
         if row['op'] == 'call':
-            proposal['arguments'] = row['after']
+            proposal['arguments'] = _masked(row['after'])
         return proposal
 
     # --- confirm / apply ----------------------------------------------------------------------------------------
@@ -392,6 +417,10 @@ class BuilderService:
         merged = {}
         for response in responses:
             merged.update(response or {})
+        if app_fields and isinstance(responses[0], dict) and responses[0].get('name'):
+            merged['name'] = responses[0]['name']
+        elif len(responses) > 1 or not app_fields:
+            merged.pop('name', None)
         return merged
 
     @staticmethod

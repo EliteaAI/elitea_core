@@ -61,9 +61,10 @@ def _type_ok(value, json_type) -> bool:
 
 class Catalog:
     def __init__(self, api_tools, tags=BUILDER_TAGS):
+        """api_tools come from the registry already filtered by tag; their dicts may carry no tags."""
         self._ops = {}
         for tool in api_tools or []:
-            if not set(tool.get('tags') or []) & set(tags):
+            if tool.get('tags') and not set(tool['tags']) & set(tags):
                 continue
             op_id = tool.get('value') or tool.get('label')
             if op_id:

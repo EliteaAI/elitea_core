@@ -70,7 +70,7 @@ PLAYBOOKS = {
     'skill': """<playbook entity="skill">
 - name: 1–64 characters, lowercase letters, digits and single hyphens; it can't contain reserved words.
 - description: what the skill does and when an agent should use it; it decides when the skill is loaded.
-- Body: concise imperative steps; examples only if the user gave them.
+- instructions (the skill body): concise imperative steps; examples only if the user gave them.
 - Never rename an existing version. Attach a skill to an agent only when the user asks.
 </playbook>""",
     'project_context': """<playbook entity="project_context">
