@@ -732,6 +732,12 @@ class McpService:
         self.session.dispatch_message(set_level_empty_result_json)
 
     def __get_ver_id_by_agent_name(self, agent_name: str) -> int | None:
+        # An agent-scoped session lists its own agent whatever its tags, so it can call it the same way;
+        # the mcp tag only picks the agents of the project-wide endpoint
+        if self.session.resource_type == "application":
+            if application_id := self.__get_scoped_application_id(agent_name):
+                return self.__get_exposed_version_id(application_id)
+
         with db.get_session(self.session.project_id) as session:
             some_result = list_applications_api(
                 project_id=self.session.project_id,
@@ -742,21 +748,36 @@ class McpService:
 
         for app in some_result.get("applications", []):
             if _build_agent_identifier(app.name) == agent_name:
-                with db.with_project_schema_session(self.session.project_id) as session_2:
-                    application = session_2.query(Application).options(
-                        joinedload(Application.versions).joinedload(ApplicationVersion.tags)
-                    ).get(app.id)
-                    # (#7341) under enforce by rule: the bound version, else the latest published, else the first;
-                    # under off and audit only the first, as before
-                    from .governance import is_governed  # pylint: disable=C0415
-                    from .mcp_exposed_version import bound_version_ids, exposed_version  # pylint: disable=C0415
-                    governed = is_governed(this.module)
-                    bound = bound_version_ids(session_2, self.session.project_id, [app.id]).get(app.id, set()) \
-                        if governed else set()
-                    version, _rule = exposed_version(list(application.versions), bound, governed)
-                    return version.id if version is not None else None
+                return self.__get_exposed_version_id(app.id)
 
         return None
+
+    def __get_scoped_application_id(self, agent_name: str) -> int | None:
+        """The application of the session's version, when ``agent_name`` is the tool it is listed as."""
+        with db.with_project_schema_session(self.session.project_id) as session:
+            version = session.query(ApplicationVersion).options(
+                joinedload(ApplicationVersion.application)
+            ).filter(ApplicationVersion.id == self.session.resource_id).first()
+            if version is None or _build_agent_identifier(version.application.name) != agent_name:
+                return None
+            return version.application_id
+
+    def __get_exposed_version_id(self, application_id: int) -> int | None:
+        with db.with_project_schema_session(self.session.project_id) as session:
+            application = session.query(Application).options(
+                joinedload(Application.versions).joinedload(ApplicationVersion.tags)
+            ).get(application_id)
+            if application is None:
+                return None
+            # (#7341) under enforce by rule: the bound version, else the latest published, else the first;
+            # under off and audit only the first, as before
+            from .governance import is_governed  # pylint: disable=C0415
+            from .mcp_exposed_version import bound_version_ids, exposed_version  # pylint: disable=C0415
+            governed = is_governed(this.module)
+            bound = bound_version_ids(session, self.session.project_id, [application_id]).get(application_id, set()) \
+                if governed else set()
+            version, _rule = exposed_version(list(application.versions), bound, governed)
+            return version.id if version is not None else None
 
     def __get_toolkit_by_name(self, toolkit_name: str) -> dict | None:
         # filter_mcp=None: match against both regular and connected MCP toolkits
