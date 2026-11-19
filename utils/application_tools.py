@@ -1429,6 +1429,7 @@ INDEX_META_LOCK_TIMEOUT = "5s"
 INDEX_META_RETRY_LOCK_TIMEOUT = "15s"
 
 INDEX_META_PRESERVED_KEYS = ("indexed", "updated", "total", "report", "indexed_chunks")
+PREVIOUS_RUN_OUTCOME_KEYS = ("report", "skipped")
 
 
 def lock_toolkit_index_meta(session: Session, index_name: str, lock_timeout: str = INDEX_META_LOCK_TIMEOUT):
@@ -1798,8 +1799,9 @@ def update_toolkit_index_meta_history_with_failed_state(connection_string: str, 
         # groups it under that run in Toolkit History, hiding its error.
         current_metadata['task_id'] = None
         current_metadata['conversation_id'] = None
-        # Update current meta with new data and put the same item to history
-        history.append(current_metadata)# add item with no history
+        history.append({
+            key: value for key, value in current_metadata.items() if key not in PREVIOUS_RUN_OUTCOME_KEYS
+        })
         current_metadata['history'] = json.dumps(history)
         meta.cmetadata = current_metadata
         session.commit()
@@ -1868,8 +1870,10 @@ def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_
                     last_entry.get('created_on') == current_metadata.get('created_on')):
                     # Remove the last in_progress entry and append current failed state instead
                     history.pop()
-                    meta_copy = current_metadata.copy()
-                    meta_copy.pop('history', None)
+                    meta_copy = {
+                        key: value for key, value in current_metadata.items()
+                        if key != 'history' and key not in PREVIOUS_RUN_OUTCOME_KEYS
+                    }
                     history.append(meta_copy)
                     current_metadata['history'] = json.dumps(history)
                     log.debug(
