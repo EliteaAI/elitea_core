@@ -478,4 +478,22 @@ class BuilderService:
             entity_id = row['entity_id'] if row['op'] != 'create' else response.get('id')
             result['chip'] = {'type': row['entity_type'], 'id': entity_id,
                               'version_id': created_version or row.get('version_id'), 'name': name}
+        elif row['op'] == 'call':
+            chip = self._linked_entity_chip(row['after'] or {})
+            if chip:
+                result['chip'] = chip
         return result
+
+    def _linked_entity_chip(self, args):
+        """An operation that changed an agent or pipeline version (e.g. linking a toolkit) refreshes its editor."""
+        entity_type = args.get('entity_type')
+        entity_id, version_id = args.get('entity_id'), args.get('entity_version_id')
+        if entity_type not in ('agent', 'pipeline', 'application') or not entity_id:
+            return None
+        app = self.call('get_application', {'application_id': entity_id}) or {}
+        if not isinstance(app, dict) or app.get('error'):
+            return None
+        agent_type = (app.get('version_details') or {}).get('agent_type')
+        return {'type': 'pipeline' if agent_type == 'pipeline' else 'agent', 'id': entity_id,
+                'version_id': version_id or (app.get('version_details') or {}).get('id'),
+                'name': app.get('name') or ''}
