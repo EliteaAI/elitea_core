@@ -1,4 +1,5 @@
 import time
+from typing import get_args
 
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
@@ -15,9 +16,9 @@ from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
+from ..models.pd.schedule_list import ExecutionType
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
-from ..utils.pipeline_execution import TriggerType
 from ..utils.running_conversations import running_conversation_ids
 from ..utils.schedule_test_runs import UNDEFINED_COLUMN, error_code
 from ..utils.conversation_utils import (
@@ -48,8 +49,13 @@ def _execution_type_condition(execution_type: str):
     """The rows whose list execution_type is this value: the same rule as ConversationListExtended reads it.
 
     A stored known type is kept, `schedule_test` included (it reads as schedule_manual); a row without one
-    is scheduled when meta.scheduled_run is JSON true, and a plain chat otherwise.
+    is scheduled when meta.scheduled_run is JSON true, and a plain chat otherwise. Only the types without a
+    run record (ExecutionType) are accepted: the others are run options.
     """
+    # Late import: that module loads the DB models
+    from ..utils.pipeline_execution import TriggerType
+    if execution_type not in get_args(ExecutionType):
+        raise ValueError(f'Unknown execution type: {execution_type!r}')
     stored = Conversation.meta['execution_type'].astext
     if execution_type != TriggerType.CHAT:
         return stored == execution_type
