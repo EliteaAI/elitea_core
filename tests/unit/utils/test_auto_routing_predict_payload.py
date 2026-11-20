@@ -377,3 +377,23 @@ def test_code_mode_strip_reaches_the_worker_payload(models_path, allowed_project
     assert ('code_mode' in result['internal_tools']) is expect_kept
     # the parsed request is not mutated
     assert value.version_details['meta']['internal_tools'] == ['code_mode', 'pyodide']
+
+
+# #7580 regression: a version with no internal_tools key must keep its meta as is. Writing back None
+# made the SDK's meta.get('internal_tools', []) return None and crash every plain agent on predict.
+def test_version_without_internal_tools_keeps_its_meta(models_path):
+    code_mode_gate['strip'] = lambda tools, project_id, model_name: (
+        [t for t in tools if t != 'code_mode'] if tools else tools)
+    try:
+        build, llm, rpc = builder.__wrapped__(models_path)
+        plain = parsed(llm, agent=True, auto=False)
+        plain.version_details['meta'] = {'step_limit': 40}
+        plain_result = build(plain, 2, skip_expansion=True)
+        tooled = parsed(llm, agent=True, auto=False)
+        tooled.version_details['meta'] = {'internal_tools': ['code_mode', 'planner']}
+        tooled_result = build(tooled, 2, skip_expansion=True)
+    finally:
+        code_mode_gate.clear()
+
+    assert plain_result['application']['version_details']['meta'] == {'step_limit': 40}
+    assert tooled_result['application']['version_details']['meta']['internal_tools'] == ['planner']

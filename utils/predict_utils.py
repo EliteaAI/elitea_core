@@ -690,7 +690,8 @@ def generate_predict_payload(
         )}
     application = payload.get('application')
     version_details = application.get('version_details') if isinstance(application, dict) else None
-    if isinstance(version_details, dict) and isinstance(version_details.get('meta'), dict):
+    if (isinstance(version_details, dict) and isinstance(version_details.get('meta'), dict)
+            and version_details['meta'].get('internal_tools')):
         version_details['meta'] = {**version_details['meta'], 'internal_tools': strip_code_mode(
             version_details['meta'].get('internal_tools'), parsed.project_id, request_model,
         )}
