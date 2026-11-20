@@ -57,6 +57,7 @@ def builder(models_path):
         'attach_subagent_prefetch': lambda payload, project_id, user_id: None,
         'inject_stored_logins': lambda payload, project_id, user_id: None,
         'skill_scratch_for_run': lambda project_id, conversation_uuid, user_id: {},
+        'strip_code_mode': lambda tools, project_id, model_name: tools,
     }
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
     return namespace['generate_predict_payload'], llm, rpc

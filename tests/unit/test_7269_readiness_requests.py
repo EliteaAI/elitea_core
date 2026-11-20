@@ -702,10 +702,13 @@ def test_the_platform_settings_say_governance_is_enforced_only_while_it_is(ns, m
                         ("midturn_injection_utils", ("get_midturn_injection_blocked", "get_midturn_injection_whitelist")),
                         ("skill_publish_utils", ("get_skill_publish_blocked", "get_skill_publish_whitelist")),
                         ("skill_utils", ("get_max_instructions_length",)),
+                        ("code_mode_utils", ("get_code_mode_allowed_models", "get_code_mode_whitelist",
+                                             "is_code_mode_allowed")),
                         ("conversation_starters_utils", ("get_max_conversation_starters",))):
         stub = types.ModuleType(f"{PKG}.utils.{name}")
         for attr in attrs:
             setattr(stub, attr, lambda *a, **k: [])
+        stub.CODE_MODE_LIMITATIONS = []
         monkeypatch.setitem(sys.modules, f"{PKG}.utils.{name}", stub)
     monkeypatch.setattr(ns.tools, "api_tools", types.SimpleNamespace(
         APIModeHandler=ns.tools.api_tools.APIModeHandler, APIBase=ns.tools.api_tools.APIBase,
@@ -715,6 +718,7 @@ def test_the_platform_settings_say_governance_is_enforced_only_while_it_is(ns, m
                                       f"{PKG}.api.v2.platform_settings")
     monkeypatch.setattr(settings, "_usage_mode_settings", lambda: (None, True, False))
     monkeypatch.setattr(settings, "_tool_spend_availability", lambda: {})
+    monkeypatch.setattr(settings, "_code_mode_available", lambda: False)
     answers = {}
     for governed in (False, True):
         monkeypatch.setattr(settings, "this", types.SimpleNamespace(module=module(ns, governed=governed)))

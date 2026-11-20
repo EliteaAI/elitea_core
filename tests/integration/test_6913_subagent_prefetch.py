@@ -264,6 +264,9 @@ def test_expand_calls_the_module_directly_not_rpc(sp, monkeypatch):
     skill_utils.apply_runtime_skills = lambda details: None
     monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.internal_tools', internal_tools)
     monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.skill_utils', skill_utils)
+    code_mode_utils = types.ModuleType('plugins.elitea_core.utils.code_mode_utils')
+    code_mode_utils.strip_code_mode_from_version = lambda details, project_id: None
+    monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.code_mode_utils', code_mode_utils)
 
     result = sp.expand_version_for_runtime(7, 1, 11, 5)
 
