@@ -98,3 +98,9 @@ class TestValidate:
             'patch_tool_mode_project_id_tool_id', {'tool_id': 3, 'entity_version_id': 9, 'project_id': 99},
             project_id=12)
         assert errors == [{'field': 'project_id', 'message': 'only the current project (12) can be changed'}]
+
+
+def test_keeps_registry_tools_that_carry_no_tags(builder):
+    """The registry filters by tag itself and its MCP tool dicts have no `tags` key."""
+    tools = [{k: v for k, v in tool.items() if k != 'tags'} for tool in API_TOOLS[:3]]
+    assert len(builder.catalog.Catalog(tools).find('')) == 3

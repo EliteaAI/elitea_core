@@ -35,6 +35,11 @@ class Calls:
             return dict(self.versions[(args['application_id'], args['version_id'])])
         if op == 'get_project_context':
             return dict(self.project_context)
+        if op == 'list_models':
+            self.model_args = args
+            if args.get('section') == 'embedding':
+                return {'total': 1, 'items': [{'name': 'text-embedding-3-large'}]}
+            return {'total': 1, 'items': [{'name': 'gpt-5-mini', 'display_name': 'GPT-5 mini'}]}
         self.writes.append((op, args))
         if op == 'patch_instructions':
             return {'mcp_backup_version': {'id': 99, 'name': 'mcp-backup-10-x'}, 'instructions_sha256': 'c' * 64}
@@ -56,6 +61,16 @@ def service(builder, calls):
 
 
 class TestFind:
+
+    def test_finds_models_from_an_items_answer(self, service):
+        found = service.find('model', 'embedding')
+        assert found['status'] == 'ok'
+        assert [c['name'] for c in found['candidates']] == ['text-embedding-3-large']
+
+    def test_lists_shared_llm_models_by_display_name(self, service, calls):
+        found = service.find('model', 'gpt-5 mini')
+        assert [c['name'] for c in found['candidates']] == ['gpt-5-mini']
+        assert calls.model_args == {'section': 'llm', 'include_shared': 'true'}
 
     def test_finds_agents_by_name(self, service):
         result = service.find('agent', 'daily')
@@ -132,6 +147,11 @@ class TestProposeApplyAgent:
         proposal = service.propose('agent', 'create', {'instructions': 'x'})
         assert proposal['status'] == 'needs_input'
         assert proposal['questions'][0]['header'] == 'Name'
+
+    def test_create_takes_the_top_level_name(self, service):
+        proposal = service.propose('agent', 'create', {'instructions': 'x'}, entity_name='GitHub PR Reviewer')
+        assert proposal['status'] == 'ready'
+        assert 'GitHub PR Reviewer' in proposal['summary']
 
     def test_create_applies_without_confirmation(self, service, calls):
         proposal = service.propose('agent', 'create', {'name': 'Helper', 'instructions': 'Help.'})
@@ -253,3 +273,91 @@ class TestResumeReproposes:
         service.apply(first['changeset_id'])
         second = service.propose('agent', 'create', {'name': 'Once', 'instructions': 'x'})
         assert second['changeset_id'] != first['changeset_id']
+
+
+def test_operation_arguments_shown_to_the_chat_mask_secret_values(builder, calls):
+    tools = [{'value': 'put_secrets_secret', 'method': 'PUT', 'path': '/api/v2/secrets/secret/{mode}/{project_id}/{secret}',
+              'description': 'Update a secret.',
+              'args_schema': {'type': 'object', 'properties': {'project_id': {'type': 'integer'},
+                                                               'secret': {'type': 'string'},
+                                                               'value': {'type': 'string'}},
+                              'required': ['project_id', 'secret', 'value']}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'secret': 's', 'value': 'v-123'}, entity_id='put_secrets_secret')
+    assert proposal['status'] == 'needs_confirmation'
+    assert proposal['arguments'] == {'secret': 's', 'value': '****', 'project_id': PID}
+    service.confirm(proposal['changeset_id'], user_id=5)
+    service.apply(proposal['changeset_id'])
+    assert calls.writes[-1] == ('op:put_secrets_secret', {'secret': 's', 'value': 'v-123', 'project_id': PID})
+
+
+def test_a_secrets_operation_shows_only_the_secret_name(builder, calls):
+    """E2E: the model put the new value into the `secret` path argument; it is masked all the same."""
+    tools = [{'value': 'put_secrets_secret', 'method': 'PUT', 'path': '/api/v2/secrets/secret/{mode}/{project_id}/{secret}',
+              'args_schema': {'type': 'object', 'properties': {'project_id': {'type': 'integer'},
+                                                               'secret': {'type': 'string'},
+                                                               'name': {'type': 'string'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'name': 'tmp', 'secret': 'e2e-value-789'},
+                               entity_id='put_secrets_secret')
+    assert proposal['arguments'] == {'name': 'tmp', 'secret': '****', 'project_id': PID}
+
+
+def test_toolkits_are_not_an_agent_field(service):
+    proposal = service.propose('agent', 'update', {'tools': [{'id': 3}]}, entity_id=1)
+    assert proposal['status'] == 'invalid' and 'tools' in proposal['message']
+
+
+def test_linking_a_toolkit_returns_the_agent_chip(builder, calls):
+    tools = [{'value': 'patch_elitea_core_tool', 'method': 'PATCH', 'path': '/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}',
+              'args_schema': {'type': 'object', 'properties': {
+                  'project_id': {'type': 'integer'}, 'tool_id': {'type': 'integer'}, 'entity_id': {'type': 'integer'},
+                  'entity_version_id': {'type': 'integer'}, 'entity_type': {'type': 'string'},
+                  'has_relation': {'type': 'boolean'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'tool_id': 9, 'entity_id': 1, 'entity_version_id': 10,
+                                                     'entity_type': 'agent', 'has_relation': True},
+                               entity_id='patch_elitea_core_tool')
+    result = service.apply(proposal['changeset_id'])
+    assert result['chip'] == {'type': 'agent', 'id': 1, 'version_id': 10, 'name': 'Daily Summary'}
+
+
+def test_linking_with_a_version_id_as_the_agent_id_is_refused(builder, calls):
+    """E2E: the model sent the version id (819) as entity_id; the link would have gone to no agent."""
+    tools = [{'value': 'patch_elitea_core_tool', 'method': 'PATCH', 'path': '/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}',
+              'args_schema': {'type': 'object', 'properties': {
+                  'project_id': {'type': 'integer'}, 'tool_id': {'type': 'integer'}, 'entity_id': {'type': 'integer'},
+                  'entity_version_id': {'type': 'integer'}, 'entity_type': {'type': 'string'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'tool_id': 9, 'entity_id': 1, 'entity_version_id': 20,
+                                                     'entity_type': 'agent'}, entity_id='patch_elitea_core_tool')
+    assert proposal['status'] == 'invalid' and 'does not belong' in proposal['message']
+
+
+def test_a_secret_nested_in_an_operation_argument_is_masked(builder, calls):
+    tools = [{'value': 'post_configurations', 'method': 'POST', 'path': '/api/v2/configurations/configurations/{project_id}',
+              'args_schema': {'type': 'object', 'properties': {'project_id': {'type': 'integer'},
+                                                               'type': {'type': 'string'},
+                                                               'data': {'type': 'object'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'type': 'openai', 'data': {
+        'api_key': 'made-up-value', 'headers': [{'auth_token': 'made-up-2'}], 'ref_key': '{{secret.openai}}',
+        'url': 'https://x'}}, entity_id='post_configurations')
+    assert proposal['arguments']['data'] == {'api_key': '****', 'headers': [{'auth_token': '****'}],
+                                             'ref_key': '{{secret.openai}}', 'url': 'https://x'}
+    assert 'made-up' not in str(proposal)
+
+
+def test_a_create_appends_to_list_fields_as_lists(service, calls):
+    proposal = service.propose('agent', 'create', {'name': 'QA', 'tags': {'append': 'qa'},
+                                                   'conversation_starters': {'append': 'Hi'}})
+    if proposal['status'] == 'needs_confirmation':
+        service.confirm(proposal['changeset_id'], user_id=5)
+    service.apply(proposal['changeset_id'])
+    version = calls.writes[0][1]['versions'][0]
+    assert version['tags'] == ['qa'] and version['conversation_starters'] == ['Hi']

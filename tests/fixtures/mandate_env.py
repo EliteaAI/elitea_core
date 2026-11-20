@@ -13,7 +13,8 @@ from pathlib import Path
 from fixtures import admission_env
 from fixtures.helpers import load_module_with_stubs
 
-NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+# yesterday noon: before the real clock (some paths read it) and well inside every 30-day validity
+NOW = (datetime.now(timezone.utc) - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
 OWNER = 5
 
 

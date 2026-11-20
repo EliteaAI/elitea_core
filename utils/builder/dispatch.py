@@ -27,7 +27,7 @@ ROUTES = {
     'get_project_context': ('GET', f'{BASE}/project_context/{{mode}}/{{project_id}}/project-context', 'query'),
     'put_project_context': ('PUT', f'{BASE}/project_context/{{mode}}/{{project_id}}/project-context', 'body'),
     'delete_project_context': ('DELETE', f'{BASE}/project_context/{{mode}}/{{project_id}}/project-context', 'query'),
-    'list_toolkits': ('GET', f'{BASE}/toolkits/{{mode}}/{{project_id}}', 'query'),
+    'list_toolkits': ('GET', f'{BASE}/tools/{{mode}}/{{project_id}}', 'query'),
     'list_models': ('GET', '/api/v2/configurations/models/{project_id}', 'query'),
     'list_configurations': ('GET', '/api/v2/configurations/configurations/{project_id}', 'query'),
 }
@@ -60,6 +60,9 @@ def make_call(project_id: int, catalog):
         result = McpApiToolExecutor.execute(api_tool, args, default_path_params=scoped, scoped_path_params=scoped)
         if 'error' in result:
             return {'error': result['error']}
-        return result.get('result')
+        answer, governance = result.get('result'), result.get('governance_requests')
+        if isinstance(governance, dict) and isinstance(answer, dict):
+            return {**answer, 'governance_requests': governance}
+        return answer
 
     return call
