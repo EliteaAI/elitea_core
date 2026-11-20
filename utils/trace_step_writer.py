@@ -31,7 +31,9 @@ _TOOL_METADATA_KEYS = (
     *_HIERARCHY_KEYS,
     'agent_type', 'checkpoint_ns', 'display_name', 'hitl_deferred',
     'langgraph_node', 'original_name', 'toolkit_name', 'toolkit_type',
+    'via_code_mode',  # #7580: chip mark survives reload
 )
+_BOOL_METADATA_KEYS = frozenset({'hitl_deferred', 'via_code_mode'})
 _TOOL_META_KEYS = ('name', 'display_name', 'model_name', 'loaded_skill')
 
 
@@ -101,9 +103,9 @@ def _allowlisted_metadata(value):
                 continue
         elif key == 'sibling_ordinal' and (not isinstance(raw, int) or raw < 1):
             continue
-        elif key == 'hitl_deferred' and not isinstance(raw, bool):
+        elif key in _BOOL_METADATA_KEYS and not isinstance(raw, bool):
             continue
-        elif key not in {'sibling_ordinal', 'hitl_deferred'}:
+        elif key not in {'sibling_ordinal', *_BOOL_METADATA_KEYS}:
             if not isinstance(raw, str):
                 continue
             raw = _bounded_string(raw)

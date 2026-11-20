@@ -9,6 +9,7 @@ from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
+from .code_mode_utils import strip_code_mode
 from .context_window import (
     BALANCED, budget_for_model_config, get_auto_model_limits, is_platform_admin, manual_context_tokens,
     manual_context_tokens_allowed, strategy_for_predict,
@@ -494,7 +495,7 @@ def generate_predict_payload(
         'application': {
             'instructions': parsed.instructions,
         },
-        'internal_tools': parsed.internal_tools or [],
+        'internal_tools': strip_code_mode(parsed.internal_tools or [], parsed.project_id),
         'project_context': getattr(parsed, 'project_context', None),
         'builder': getattr(parsed, 'builder', None),
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
@@ -678,6 +679,19 @@ def generate_predict_payload(
                 resolve_internal_mcp_tools(tool_list, user_id, parsed.project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
+
+    # #7580: a version saved with code_mode has no effect once the gate is closed; the runtime reads both metas
+    if isinstance(payload.get('meta'), dict) and payload['meta'].get('internal_tools'):
+        payload['meta'] = {**payload['meta'], 'internal_tools': strip_code_mode(
+            payload['meta']['internal_tools'], parsed.project_id,
+        )}
+    application = payload.get('application')
+    version_details = application.get('version_details') if isinstance(application, dict) else None
+    if (isinstance(version_details, dict) and isinstance(version_details.get('meta'), dict)
+            and version_details['meta'].get('internal_tools')):
+        version_details['meta'] = {**version_details['meta'], 'internal_tools': strip_code_mode(
+            version_details['meta'].get('internal_tools'), parsed.project_id,
+        )}
 
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
