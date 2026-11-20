@@ -315,3 +315,20 @@ def test_a_toolkit_tool_no_agent_is_named_like_still_runs(server):
     mcp = server([agent(1, "Helper", [version(10, "base", "mcp")])], toolkits=[toolkit])
     assert mcp.call("Jira_search") == (False, '"toolkit ran"')
     assert mcp.tools_run == [(5, "search")] and mcp.predicted == []
+
+
+def test_a_name_two_toolkits_share_is_refused_not_given_to_the_agent_version_named_alike(server):
+    toolkits = [{"id": tid, "name": name, "type": "t", "description": "", "settings": {"selected_tools": ["x"]},
+                 "meta": {"mcp_options": {"available_by_mcp": True}}} for tid, name in ((5, "Jira"), (6, "Jira"))]
+    mcp = server([agent(1, "Jira", [version(10, "base", "mcp"), version(11, "x", "mcp")])], toolkits=toolkits)
+    assert mcp.tools()["Jira_x"]["description"].startswith("Tool 'x' from toolkit")
+    assert mcp.call("Jira_x")[0] is True
+    assert mcp.predicted == [] and mcp.tools_run == []
+
+
+def test_a_toolkit_scoped_session_runs_no_agent(server):
+    mcp = server([agent(1, "Helper", [version(10, "base", "mcp"), version(11, "v2", "mcp")])],
+                 resource=("toolkit", 5))
+    assert mcp.call("Helper")[0] is True
+    assert mcp.call("Helper_v2")[0] is True
+    assert mcp.predicted == [] and mcp.listed_with == []

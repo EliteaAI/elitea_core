@@ -36,6 +36,9 @@ def _path_segment(name, value) -> str:
     return text
 
 
+AMBIGUOUS_TOOLKIT_TOOL = object()
+
+
 class _RunTokenRefusal(Exception):
     """A tool call the run token's scope does not allow (#7214); its text is the readable refusal."""
 
@@ -399,9 +402,10 @@ class McpService:
         response_content = ""
         try:
             exposed = self.__get_exposed_version_by_tool_name(request.params.name)
-            toolkit = None if self.__is_dispatched_to_agent_first(exposed) \
+            toolkit_claim = None if self.__is_dispatched_to_agent_first(exposed) \
                 else self.__get_toolkit_by_name(request.params.name)
-            if exposed is not None and not toolkit:
+            toolkit = None if toolkit_claim is AMBIGUOUS_TOOLKIT_TOOL else toolkit_claim
+            if exposed is not None and toolkit_claim is None:
                 version_id = exposed.version_id
                 log.debug("Starting agent call (version = %s)", version_id)
                 refused = _refused_by_run_token("run", f"application_version {version_id}", request.params.name)
@@ -682,7 +686,7 @@ class McpService:
         """The agent versions an external client reaches in this session: the ``mcp``-tagged ones, under enforce only
         those with an active identity binding, and in a session scoped to one version that version alone (#1597,
         #7341)"""
-        if not self.session.tags:
+        if not self.session.tags or self.session.resource_type == "toolkit":
             return []
         from .governance import is_governed  # pylint: disable=C0415
         from .mcp_exposed_version import read_exposed_versions  # pylint: disable=C0415
@@ -718,7 +722,8 @@ class McpService:
         from .mcp_exposed_version import is_named_after_agent  # pylint: disable=C0415
         return is_named_after_agent(exposed)
 
-    def __get_toolkit_by_name(self, toolkit_name: str) -> dict | None:
+    def __get_toolkit_by_name(self, toolkit_name: str):
+        """The toolkit exporting ``toolkit_name``, ``AMBIGUOUS_TOOLKIT_TOOL`` when several do, else None."""
         # filter_mcp=None: match against both regular and connected MCP toolkits
         # so tool-call dispatch works for MCP-connected toolkits too
         # (EliteaAI/elitea_issues#6273).
@@ -732,11 +737,10 @@ class McpService:
         # include MCP-connected toolkits (which carry the user's own remote
         # credentials) would make them callable by name even though the owner
         # never opted them into this path.
-        # `_COLLISION` marks a tool name seen on more than one toolkit, so the
-        # lookup below can tell "not found" apart from "ambiguous" and refuse
-        # to dispatch either candidate rather than silently pick whichever
-        # toolkit was iterated first.
-        _COLLISION = object()
+        # AMBIGUOUS_TOOLKIT_TOOL marks a tool name seen on more than one toolkit,
+        # so a call can tell "not found" apart from "ambiguous" and refuse to
+        # dispatch either candidate rather than silently pick whichever toolkit
+        # was iterated first.
         known_tool_names = {}
         for toolkit in toolkits["rows"]:
             if not toolkit.get("meta", {}).get("mcp_options", {}).get("available_by_mcp", False):
@@ -754,12 +758,10 @@ class McpService:
                         "Ambiguous toolkit tool name, refusing to dispatch: %s (toolkit id=%s)",
                         tool_name, toolkit.get("id"),
                     )
-                    known_tool_names[tool_name] = _COLLISION
+                    known_tool_names[tool_name] = AMBIGUOUS_TOOLKIT_TOOL
                     continue
                 known_tool_names[tool_name] = toolkit
-        #
-        result = known_tool_names.get(toolkit_name)
-        return result if result is not _COLLISION else None
+        return known_tool_names.get(toolkit_name)
 
     def __get_api_tool_by_name(self, tool_name: str) -> dict | None:
         """Find an API tool by its MCP tool name."""
