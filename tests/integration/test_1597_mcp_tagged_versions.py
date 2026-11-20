@@ -109,7 +109,7 @@ def agent(agent_id, name, versions, default=None):
 
 class Server:
     def __init__(self, module, monkeypatch, applications, tags=(7,), governed=False, bound=None, toolkits=(),
-                 resource=(None, None)):
+                 resource=(None, None), category=None):
         self.module, self.sent, self.predicted, self.listed_with, self.tools_run = module, [], [], [], []
         self.toolkit_reads = 0
         models = types.ModuleType(f"{PKG}.models")
@@ -170,7 +170,7 @@ class Server:
         monkeypatch.setattr(module, "_refused_by_run_token", lambda *args: None)
         self.service = module.McpService.__new__(module.McpService)
         self.service.session = types.SimpleNamespace(
-            project_id=1, tags=list(tags), resource_type=resource[0], resource_id=resource[1], entity_category=None,
+            project_id=1, tags=list(tags), resource_type=resource[0], resource_id=resource[1], entity_category=category,
             dispatch_message=self.sent.append)
 
     def tools(self):
@@ -332,3 +332,16 @@ def test_a_toolkit_scoped_session_runs_no_agent(server):
     assert mcp.call("Helper")[0] is True
     assert mcp.call("Helper_v2")[0] is True
     assert mcp.predicted == [] and mcp.listed_with == []
+
+
+def test_a_category_session_runs_its_listed_api_tool_not_an_agent_version_named_alike(server, monkeypatch):
+    api_tool = {"value": "Helper_v2", "description": "", "args_schema": {}}
+    executed = []
+    mcp = server([agent(1, "Helper", [version(10, "base", "mcp"), version(11, "v2", "mcp")])],
+                 category="elitea_core/applications")
+    monkeypatch.setattr(mcp.module.openapi_registry, "get_mcp_api_tools", lambda *args, **kwargs: [api_tool])
+    monkeypatch.setattr(mcp.module.McpApiToolExecutor, "execute",
+                        staticmethod(lambda tool, *args: executed.append(tool["value"]) or {"result": "api ran"}))
+    assert mcp.call("Helper_v2") == (False, '"api ran"')
+    assert mcp.call("Helper")[0] is True
+    assert executed == ["Helper_v2"] and mcp.predicted == [] and mcp.listed_with == []

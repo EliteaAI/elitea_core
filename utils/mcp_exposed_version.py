@@ -3,7 +3,8 @@
 A version is exposed when it carries the ``mcp`` tag; under enforce it also needs an active identity binding, so an
 external client only sees what its owner had approved. The agent's default version keeps the agent's name as its tool
 name and every other exposed version is ``<agent>_<version>``. The Elitea MCP server lists and calls by this rule and
-the local MCP client reads it through the ``mcp_exposed_versions`` API, so both expose the same tools.
+the local MCP client reads it through the ``mcp_exposed_versions`` API, so both expose the same agent versions under
+the same names.
 """
 import re
 from dataclasses import dataclass

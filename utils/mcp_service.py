@@ -523,10 +523,7 @@ class McpService:
         return tools
 
     def __get_category_tools(self, openapi_tag: str) -> list[types.Tool]:
-        """Get tools filtered by swagger section tag (e.g. elitea_core/applications).
-        For elitea_core/applications, also includes agents tagged with 'mcp'.
-        For elitea_core/toolkits, also includes toolkit instance tools marked available_by_mcp.
-        """
+        """Get tools filtered by swagger section tag (e.g. elitea_core/applications)."""
         tools = []
         known_tool_names = set()
 
@@ -686,7 +683,7 @@ class McpService:
         """The agent versions an external client reaches in this session: the ``mcp``-tagged ones, under enforce only
         those with an active identity binding, and in a session scoped to one version that version alone (#1597,
         #7341)"""
-        if not self.session.tags or self.session.resource_type == "toolkit":
+        if not self.session.tags or self.session.resource_type == "toolkit" or self.session.entity_category:
             return []
         from .governance import is_governed  # pylint: disable=C0415
         from .mcp_exposed_version import read_exposed_versions  # pylint: disable=C0415
