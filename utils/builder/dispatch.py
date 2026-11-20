@@ -60,6 +60,9 @@ def make_call(project_id: int, catalog):
         result = McpApiToolExecutor.execute(api_tool, args, default_path_params=scoped, scoped_path_params=scoped)
         if 'error' in result:
             return {'error': result['error']}
-        return result.get('result')
+        answer, governance = result.get('result'), result.get('governance_requests')
+        if isinstance(governance, dict) and isinstance(answer, dict):
+            return {**answer, 'governance_requests': governance}
+        return answer
 
     return call

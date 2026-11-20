@@ -82,3 +82,17 @@ def test_a_model_supplied_project_is_refused(dispatch):
 def test_none_arguments_are_dropped(dispatch):
     dispatch.make_call(12, catalog=None)('get_skill', {'skill_id': 4, 'version_id': None})
     assert FakeExecutor.calls == [('GET', '/api/v2/elitea_core/skill/prompt_lib/12/4', {}, {})]
+
+
+def test_a_write_keeps_what_the_run_filed(dispatch, monkeypatch):
+    filed = {'requests': [], 'next': 'Nothing to approve.'}
+    monkeypatch.setattr(FakeExecutor, 'execute', staticmethod(
+        lambda *a, **k: {'result': {'id': 1}, 'governance_requests': filed}))
+    assert dispatch.make_call(12, catalog=None)('update_application', {'application_id': 1, 'name': 'X'}) == {
+        'id': 1, 'governance_requests': filed}
+
+
+def test_a_non_dict_answer_is_returned_as_is(dispatch, monkeypatch):
+    monkeypatch.setattr(FakeExecutor, 'execute', staticmethod(
+        lambda *a, **k: {'result': [1, 2], 'governance_requests': {'next': 'x'}}))
+    assert dispatch.make_call(12, catalog=None)('list_applications', {}) == [1, 2]

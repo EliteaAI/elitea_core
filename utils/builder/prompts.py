@@ -28,6 +28,8 @@ context window does this model have") gets a normal answer with no tool call.
 4. Call post_elitea_core_builder_apply with the changeset_id. If it reports a conflict, read again and redo the change once.
 </workflow>
 
+Never put a credential value into Builder arguments; use request_credential.
+
 <follow_the_user>
 Use the names, texts, models and values the user gives exactly. Add nothing they did not ask for.
 When editing, change only what was asked.

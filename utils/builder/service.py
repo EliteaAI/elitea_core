@@ -95,7 +95,7 @@ class MemoryStore:
 
 class BuilderService:
     def __init__(self, project_id, user_id, call, store, catalog, can_write, seen_playbooks=None,
-                 max_starters=limits.DEFAULT_MAX_STARTERS, now=time.time):
+                 max_starters=limits.DEFAULT_MAX_STARTERS, now=time.time, material=None):
         self.project_id = project_id
         self.user_id = user_id
         self.call = call
@@ -105,6 +105,7 @@ class BuilderService:
         self.seen_playbooks = seen_playbooks if seen_playbooks is not None else set()
         self.max_starters = max_starters
         self.now = now
+        self.material = material
 
     # --- find ---------------------------------------------------------------------------------------------------
 
@@ -315,6 +316,11 @@ class BuilderService:
         mismatch = self._version_mismatch(dispatch_args)
         if mismatch:
             return _invalid(mismatch, [{'field': 'entity_version_id', 'message': mismatch}])
+        if self.material is not None and self.material(self.catalog.tool(op_id), dispatch_args):
+            # (#7228) a credential value never goes through the model: refused before anything is stored
+            return {'status': 'refused', 'code': 'CREDENTIALS_VIA_FORM',
+                    'message': 'Credentials are entered by the user in the credential form, never passed as '
+                               'arguments; nothing was saved.'}
         return self._store({'entity_type': 'operation', 'op': 'call', 'entity_id': op_id, 'before': None,
                             'after': dispatch_args, 'destructive': kind == 'destructive', 'name': op_id})
 
@@ -472,6 +478,8 @@ class BuilderService:
         if backup:
             lines.append(f'- Backup: `{backup}`')
         result = {'status': 'applied', 'summary': '\n'.join(lines), 'result': response}
+        if response.get('governance_requests'):
+            result['governance_requests'] = response['governance_requests']
         if backup:
             result['backup'] = backup
         if row['entity_type'] in ('agent', 'pipeline') and row['op'] != 'delete':
