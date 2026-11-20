@@ -4,6 +4,7 @@ Pure orchestration over an injected ``call(op, args)`` (the existing endpoints, 
 ``store``. Typed handling for agent, pipeline, skill and project context; every other old builder endpoint goes
 through the operation ``catalog``. The model sends only the fields that change; the server builds the full request.
 """
+import re
 import time
 import uuid
 
@@ -33,47 +34,54 @@ PROJECT_CONTEXT_FIELDS = frozenset({'content', 'enabled', 'activation_descriptio
 LOOKUP_OPS = {'toolkit': 'list_toolkits', 'model': 'list_models', 'configuration': 'list_configurations'}
 
 
-_SECRET_ARG_NAMES = frozenset({'value', 'password', 'token', 'api_key', 'secret_value', 'secret_access_key',
-                               'client_secret', 'private_key'})
-
-
-def _masked(args, path=''):
-    """Operation arguments as the chat shows them: secret values never reach the card or the model.
-    A secrets operation shows only the secret's name: any other text argument may hold the value."""
-    if not isinstance(args, dict):
-        return args
-    secrets_op = '/secrets/' in f'/{path or ""}'
-
-    def hidden(key, value):
-        if value in (None, '') or key == 'project_id':
-            return False
-        if secrets_op:
-            # the secret's name (`name`, or the `secret` path segment naming it) stays; any other text is the value
-            if key == 'name' or (key == 'secret' and value in (args.get('name'), None)):
-                return False
-            if key == 'secret' and 'name' not in args and 'value' in args:
-                return False
-            return isinstance(value, str)
-        return _secret_name(key)
-    return {k: '****' if hidden(k, v) else _masked_nested(v) for k, v in args.items()}
+# A key is secret when one of its words is a marker, or two adjacent words form one (``api_key``, ``authToken``);
+# ``primary_key`` / ``project_key`` are not. ``{{secret.…}}`` references name a stored secret, never its value.
+_SECRET_WORDS = frozenset({'password', 'passwd', 'passphrase', 'secret', 'token', 'authorization', 'bearer',
+                           'credential', 'credentials', 'cookie', 'apikey'})
+_SECRET_PAIRS = frozenset({('api', 'key'), ('private', 'key'), ('access', 'key'), ('secret', 'key'),
+                           ('client', 'secret'), ('connection', 'string')})
+_AUTH_SCHEMES = ('bearer ', 'basic ')
+_WORDS = re.compile(r'[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])')
+MASK = '****'
 
 
 def _secret_name(key) -> bool:
-    key = str(key).lower()
-    return key in _SECRET_ARG_NAMES or key.endswith(('_password', '_token', '_secret', '_key'))
+    words = [w.lower() for w in _WORDS.findall(str(key))]
+    return bool(_SECRET_WORDS & set(words)) or any(pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
 
 
-def _masked_nested(value, depth=0):
-    """Secret-named keys inside nested dicts and lists (``data.api_key``, ``settings.password``) are masked too.
-    ``{{secret.…}}`` references stay: they name a stored secret, not its value."""
-    if depth > 6:
+def _is_reference(value) -> bool:
+    return isinstance(value, str) and value.startswith('{{secret.')
+
+
+def masked(value, key=None, depth=0):
+    """``value`` as the chat and the model may see it: every secret-named key, at any depth, and every
+    ``Bearer …`` / ``Basic …`` string are masked; ``{{secret.…}}`` references stay."""
+    if value in (None, '') or _is_reference(value) or depth > 8:
         return value
     if isinstance(value, dict):
-        return {k: '****' if _secret_name(k) and v not in (None, '') and not str(v).startswith('{{secret.')
-                else _masked_nested(v, depth + 1) for k, v in value.items()}
+        return {k: masked(v, k, depth + 1) for k, v in value.items()}
     if isinstance(value, list):
-        return [_masked_nested(item, depth + 1) for item in value]
+        return [masked(item, key, depth + 1) for item in value]
+    if (key is not None and _secret_name(key)) or (isinstance(value, str) and value.lower().startswith(_AUTH_SCHEMES)):
+        return MASK
     return value
+
+
+def _masked(args, path=''):
+    """Operation arguments as the chat shows them. A secrets operation shows only the secret's name (``name``, else
+    the ``secret`` path argument): any other text argument may hold the value."""
+    if not isinstance(args, dict):
+        return args
+    if '/secrets/' not in f'/{path or ""}':
+        return masked(args)
+    shown = 'name' if 'name' in args else 'secret'
+
+    def one(key, value):
+        if key in (shown, 'project_id'):
+            return value
+        return MASK if isinstance(value, str) and value and not _is_reference(value) else masked(value, key)
+    return {k: one(k, v) for k, v in args.items()}
 
 
 def _invalid(message, errors=None):
@@ -496,7 +504,7 @@ class BuilderService:
         backup = (response.get('mcp_backup_version') or {}).get('name')
         if backup:
             lines.append(f'- Backup: `{backup}`')
-        result = {'status': 'applied', 'summary': '\n'.join(lines), 'result': response}
+        result = {'status': 'applied', 'summary': '\n'.join(lines), 'result': masked(response)}
         if response.get('governance_requests'):
             result['governance_requests'] = response['governance_requests']
         if backup:

@@ -532,6 +532,10 @@ def generate_predict_payload(
         },
     }
 
+    # Elitea Builder (#7383): a run with no socket (scheduled, webhook, blocking REST) has no one to answer its cards
+    if payload['builder'] and not sid:
+        payload['builder'] = {**payload['builder'], 'interactive': False}
+
     if chat_skills and not isinstance(parsed, ApplicationChatRequest):
         payload['attached_skills'] = merge_disclosable_skills([], chat_skills)
     if project_skills and not isinstance(parsed, ApplicationChatRequest):
