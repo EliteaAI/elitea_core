@@ -1,4 +1,6 @@
-"""#7580: Code Mode experimental gate - project whitelist, model allowlist and flag stripping.
+"""#7580: Code Mode experimental gate - project whitelist and flag stripping.
+
+Every model may use Code Mode (decision of 2026-11-20): only the enabled flag and the project whitelist strip it.
 
 The helper reads `this.descriptor.config` live, so each test swaps the config in place and
 checks the decision code unchanged.
@@ -29,7 +31,7 @@ def gate(cfg, **section):
 
 def test_off_by_default(config):
     assert cm.is_code_mode_allowed(3) is False
-    assert cm.strip_code_mode(["code_mode", "swarm"], 3, "m") == ["swarm"]
+    assert cm.strip_code_mode(["code_mode", "swarm"], 3) == ["swarm"]
 
 
 def test_enabled_with_empty_whitelist_allows_every_project(config):
@@ -51,35 +53,34 @@ def test_live_config_change_applies_without_reload(config):
     assert cm.is_code_mode_allowed(3)
 
 
-def test_model_allowlist(config):
-    gate(config, enabled=True, allowed_models=["opus", " sonnet "])
-    assert cm.is_code_mode_model_allowed("sonnet")
-    assert not cm.is_code_mode_model_allowed("haiku")
-    assert not cm.is_code_mode_model_allowed(None)
-    assert cm.strip_code_mode(["code_mode"], 3, "haiku") == []
-    assert cm.strip_code_mode(["code_mode"], 3, "opus") == ["code_mode"]
-
-
-def test_empty_model_allowlist_allows_any_model(config):
-    gate(config, enabled=True)
-    assert cm.is_code_mode_model_allowed("anything")
+def test_a_leftover_allowed_models_key_has_no_effect(config):
+    # A config saved before the model gate was dropped must not start stripping by model
+    gate(config, enabled=True, allowed_models=["opus"])
+    assert cm.strip_code_mode(["code_mode"], 3) == ["code_mode"]
+    assert not hasattr(cm, "is_code_mode_model_allowed")
 
 
 def test_strip_keeps_list_identity_when_nothing_to_strip(config):
     tools = ["swarm"]
-    assert cm.strip_code_mode(tools, 3, "m") is tools
-    assert cm.strip_code_mode(None, 3, "m") is None
+    assert cm.strip_code_mode(tools, 3) is tools
+    assert cm.strip_code_mode(None, 3) is None
 
 
-def test_strip_from_subagent_version_uses_its_own_model(config):
-    gate(config, enabled=True, allowed_models=["opus"])
-    weak = {"meta": {"internal_tools": ["code_mode", "pyodide"]}, "llm_settings": {"model_name": "haiku"}}
-    strong = {"meta": {"internal_tools": ["code_mode"]}, "llm_settings": {"model_name": "opus"}}
-    cm.strip_code_mode_from_version(weak, 3)
-    cm.strip_code_mode_from_version(strong, 3)
-    assert weak["meta"]["internal_tools"] == ["pyodide"]
-    assert strong["meta"]["internal_tools"] == ["code_mode"]
+def test_strip_from_subagent_version_follows_the_project_gate_only(config):
+    gate(config, enabled=True, whitelist_project_ids=[3])
+    small = {"meta": {"internal_tools": ["code_mode", "pyodide"]}, "llm_settings": {"model_name": "haiku"}}
+    other_project = {"meta": {"internal_tools": ["code_mode", "pyodide"]}}
+    cm.strip_code_mode_from_version(small, 3)
+    cm.strip_code_mode_from_version(other_project, 25)
+    assert small["meta"]["internal_tools"] == ["code_mode", "pyodide"]
+    assert other_project["meta"]["internal_tools"] == ["pyodide"]
     cm.strip_code_mode_from_version({}, 3)  # no meta: no error
+
+
+def test_limitations_include_the_smaller_models_note():
+    keys = [item["key"] for item in cm.CODE_MODE_LIMITATIONS]
+    assert keys == ["swarm", "sensitive", "indexer", "pipelines", "models"]
+    assert "Smaller models" in cm.CODE_MODE_LIMITATIONS[-1]["text"]
 
 
 def test_admin_schema_fields():
@@ -87,9 +88,10 @@ def test_admin_schema_fields():
     fields = schema.get("properties", schema)
     enabled = fields["is_code_mode_enabled"]
     assert enabled["path"] == "code_mode_experimental.enabled" and enabled["requires_restart"] is False
-    for key in ("code_mode_whitelist_project_ids", "code_mode_allowed_models"):
-        assert fields[key]["visible_when"] == {"field": "is_code_mode_enabled", "value": True}
-        assert fields[key]["requires_restart"] is False
+    projects = fields["code_mode_whitelist_project_ids"]
+    assert projects["visible_when"] == {"field": "is_code_mode_enabled", "value": True}
+    assert projects["requires_restart"] is False
+    assert "code_mode_allowed_models" not in fields
 
 
 def test_predict_payload_and_subagent_paths_strip():

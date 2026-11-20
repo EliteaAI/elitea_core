@@ -11,6 +11,8 @@ CODE_MODE_LIMITATIONS = [
                                  'the agent calls them directly.'},
     {'key': 'indexer', 'text': 'Indexer tools (index_data, search_index, ...) are not available inside programs.'},
     {'key': 'pipelines', 'text': 'Pipelines: Code Mode applies to agents only.'},
+    {'key': 'models', 'text': 'Smaller models may need more attempts on messy or complex tool results. '
+                              'Check the output.'},
 ]
 
 
@@ -30,11 +32,6 @@ def get_code_mode_whitelist() -> set:
     )
 
 
-def get_code_mode_allowed_models() -> list:
-    raw = _gate_config().get('allowed_models', []) or []
-    return [str(x).strip() for x in raw if str(x).strip()]
-
-
 def is_code_mode_allowed(project_id) -> bool:
     if not get_code_mode_enabled():
         return False
@@ -49,16 +46,10 @@ def is_code_mode_allowed(project_id) -> bool:
     return project_id in whitelist
 
 
-def is_code_mode_model_allowed(model_name) -> bool:
-    # Empty list = no model restriction
-    allowed = get_code_mode_allowed_models()
-    return not allowed or (model_name or '') in allowed
-
-
-def strip_code_mode(internal_tools, project_id, model_name):
+def strip_code_mode(internal_tools, project_id):
     if not internal_tools or CODE_MODE_TOOL not in internal_tools:
         return internal_tools
-    if is_code_mode_allowed(project_id) and is_code_mode_model_allowed(model_name):
+    if is_code_mode_allowed(project_id):
         return internal_tools
     return [t for t in internal_tools if t != CODE_MODE_TOOL]
 
@@ -66,7 +57,6 @@ def strip_code_mode(internal_tools, project_id, model_name):
 def strip_code_mode_from_version(version_details: dict, project_id) -> None:
     meta = version_details.get('meta') or {}
     tools = meta.get('internal_tools')
-    model_name = (version_details.get('llm_settings') or {}).get('model_name')
-    stripped = strip_code_mode(tools, project_id, model_name)
+    stripped = strip_code_mode(tools, project_id)
     if stripped is not tools:
         meta['internal_tools'] = stripped

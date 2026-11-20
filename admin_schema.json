@@ -189,17 +189,6 @@
       "enum_source": "projects",
       "visible_when": { "field": "is_code_mode_enabled", "value": true }
     },
-    "code_mode_allowed_models": {
-      "type": "array",
-      "items": { "type": "string" },
-      "title": "Code Mode Models",
-      "description": "Models that may use Code Mode, since weaker models write poor programs. Type the exact model name as it appears in the agent's model settings and press Enter or comma to add it; add one at a time. If empty, every model is allowed.",
-      "path": "code_mode_experimental.allowed_models",
-      "section": "guardrails",
-      "default": [],
-      "requires_restart": false,
-      "visible_when": { "field": "is_code_mode_enabled", "value": true }
-    },
     "is_publish_blocked": {
       "type": "boolean",
       "title": "Block Agent Publishing",

@@ -15,7 +15,6 @@ from ...utils.midturn_injection_utils import (
 )
 from ...utils.code_mode_utils import (
     CODE_MODE_LIMITATIONS,
-    get_code_mode_allowed_models,
     get_code_mode_whitelist,
     is_code_mode_allowed,
 )
@@ -151,7 +150,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "tool_spend": _tool_spend_availability(),
             "is_code_mode_available": _code_mode_available(),
             "code_mode_whitelist_project_ids": list(get_code_mode_whitelist()),
-            "code_mode_allowed_models": get_code_mode_allowed_models(),
             "code_mode_limitations": CODE_MODE_LIMITATIONS,
             "skill_instructions_max_length": get_max_instructions_length(),
             "conversation_starters_max": get_max_conversation_starters(),
