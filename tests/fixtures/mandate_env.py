@@ -61,7 +61,9 @@ def prepare(ns, env):
 def add_mandate(env, ns, project_id=1, *, version=70, application=7, state="draft", owner=OWNER, created_by=3,
                 approved_by=None, binding_ref=None, operations=("run:schedule",), valid_until=None, revision=1,
                 runtime=600, epoch=0, suspended_reason=None):
-    """One mandate row; active and suspended rows get the approval the table demands. Returns its id."""
+    """One mandate row; active and suspended rows get the approval the table demands. Returns its id.
+
+    The default end date follows the clock the test runs on (pinned NOW, or real time for tests that mint tokens)."""
     if state in ("active", "suspended") and approved_by is None:
         approved_by = 1
     mandate_id = uuid.uuid4()
@@ -70,7 +72,7 @@ def add_mandate(env, ns, project_id=1, *, version=70, application=7, state="draf
         agent_binding_ref=binding_ref or uuid.uuid4(), owner_user_id=owner,
         owner_user_ref={"user_id": owner, "issuer": "https://issuer.example", "tid": "tid-1", "oid": f"oid-{owner}"},
         allowed_operations=list(operations), allowed_targets=["*"], max_runtime_s=runtime,
-        valid_until=valid_until or NOW + timedelta(days=30), state=state, suspended_reason=suspended_reason,
+        valid_until=valid_until or ns.adm._now() + timedelta(days=30), state=state, suspended_reason=suspended_reason,
         approval_ref="CHG-1" if approved_by else None, policy_revision="rev-1" if approved_by else None,
         created_by=created_by, approved_by=approved_by, revision=revision, revocation_epoch=epoch,
     )

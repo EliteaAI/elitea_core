@@ -115,6 +115,7 @@ def env(models_path):
         'expand_version_for_runtime': expand_version_for_runtime,
         'attach_subagent_prefetch': attach_subagent_prefetch,
         'inject_stored_logins': lambda payload, project_id, user_id: None,
+        'strip_code_mode': lambda tools, project_id: tools,
         'skill_scratch_for_run': lambda project_id, conversation_uuid, user_id: {},
         'dedupe_internal_mcp_tools': lambda tools: None,
         'resolve_internal_mcp_tools': lambda tools, user_id, project_id: calls.resolve.append(user_id),
