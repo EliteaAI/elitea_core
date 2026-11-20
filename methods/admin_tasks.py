@@ -761,11 +761,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         migrate_elitea_builder_keys.
 
         Param format (optional):
-            "project_id=<all|N>[;dry_run=false]"
+            "project_id=<all|N>[;dry_run=true]"
 
         Examples:
-            "project_id=all"                - dry run across all projects (default; changes nothing)
-            "project_id=all;dry_run=false"  - enable everywhere
+            "project_id=all"                - enable everywhere (default)
+            "project_id=all;dry_run=true"   - dry run: report counts, change nothing
         """
         from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
         from ..utils.builder_keys import run_enable_default_modules  # pylint: disable=C0415
@@ -782,7 +782,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             project_ids,
             lambda pid, dry_run: rpc.social_enable_builder_default_modules(pid, dry_run),
             lambda dry_run: rpc.social_enable_legacy_builder_default_modules(dry_run),
-            dry_run_flag(param),
+            dry_run_flag(param, default=False),
         )
         for pid in result["failed_projects"]:
             log.error("enable_builder_default_modules: project %s failed", pid)
