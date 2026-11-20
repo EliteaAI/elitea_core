@@ -1,13 +1,16 @@
-"""Which version of each agent external MCP clients reach in a project (#7341, C-1009), for the MCP page."""
+"""Which agent versions external MCP clients reach in a project and under which tool name (#1597, #7341, C-1009):
+read by the MCP page and by the local MCP client, so it exposes what the Elitea MCP server does."""
+from dataclasses import asdict
+
 from pylon.core.tools import log
-from sqlalchemy import select
 from tools import api_tools, auth, db, register_openapi
 
+from ...utils.application_utils import list_applications_api
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.governance import is_governed
-from ...utils.mcp_exposed_version import bound_version_ids, exposed_version
+from ...utils.mcp_exposed_version import MCP_TAG, read_exposed_versions
+from ...utils.tags import list_tags
 
-MAX_AGENTS = 200
 NO_ROLES = {mode: {"system": False, "super_admin": False, "admin": False, "editor": False, "viewer": False}
             for mode in ("administration", "default")}
 
@@ -15,39 +18,29 @@ NO_ROLES = {mode: {"system": False, "super_admin": False, "admin": False, "edito
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="MCP Exposed Agent Versions",
-        description=("For each agent of the project (at most 200), the version the Elitea MCP server gives external "
-                     "clients and why: under enforce bound (the version with an active identity binding), published "
-                     "(the latest published one) or stored (the first stored one); under off and audit only stored. {rows: [{application_id, "
-                     "application_name, version_id, version_name, rule}]}"),
+        description=("Every agent version of the project that external MCP clients reach: the versions tagged 'mcp', "
+                     "and under enforce only those with an active identity binding. The default version's tool is "
+                     "named after the agent, any other one <agent>_<version>. {rows: [{application_id, "
+                     "application_name, version_id, version_name, tool_name, description, rule}]}; rule is tagged, or "
+                     "bound under enforce."),
         parameters=[{"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}}],
         mcp_tool=False, available_to_users=False,
     )
     # the agent list's own view right; recommended to nobody here (the agents' routes register it)
     @auth.decorators.check_api({"permissions": ["models.applications.applications.list"], "recommended_roles": NO_ROLES})
     def get(self, project_id: int, **kwargs):
-        from ...models.all import Application, ApplicationVersion  # pylint: disable=C0415
-        governed = is_governed(self.module)
         try:
+            tag_ids = [tag["id"] for tag in list_tags(project_id, {})["rows"] if tag["name"] == MCP_TAG][:1]
+            if not tag_ids:
+                return {"rows": []}, 200
             with db.get_session(project_id) as session:
-                versions = session.execute(
-                    select(ApplicationVersion.id, ApplicationVersion.application_id, ApplicationVersion.name,
-                           ApplicationVersion.status, ApplicationVersion.created_at, Application.name.label("app"))
-                    .join(Application, Application.id == ApplicationVersion.application_id)
-                    .order_by(ApplicationVersion.application_id, ApplicationVersion.id)).all()
-                by_agent = {}
-                for version in versions:
-                    by_agent.setdefault(version.application_id, []).append(version)
-                agents = sorted(by_agent)[:MAX_AGENTS]
-                bound = bound_version_ids(session, project_id, agents) if governed else {}
+                applications = list_applications_api(
+                    project_id=project_id, limit=None, session=session, tags=tag_ids)["applications"]
+                exposed = read_exposed_versions(session, project_id, applications, is_governed(self.module))
         except Exception as exc:  # pylint: disable=W0703
             log.error("mcp exposed versions: failed (%s)", type(exc).__name__)
             return {"error": "the versions could not be read", "code": "DEPENDENCY_UNAVAILABLE"}, 503
-        rows = []
-        for application_id in agents:
-            version, rule = exposed_version(by_agent[application_id], bound.get(application_id, set()), governed)
-            rows.append({"application_id": application_id, "application_name": version.app, "version_id": version.id,
-                         "version_name": version.name, "rule": rule})
-        return {"rows": rows}, 200
+        return {"rows": [asdict(version) for version in exposed]}, 200
 
 
 class API(api_tools.APIBase):

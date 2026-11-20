@@ -1,5 +1,5 @@
 """C-1009 #7269 phase 2: readiness (what an entity still needs to run governed, for one person), the member's batch
-request, what a governed run creates through the internal MCP, and the MCP server's exposed version (#7341).
+request and what a governed run creates through the internal MCP.
 
 Readiness, the request batch and the binding and mandate lifecycles run for real on SQLite (``fixtures/admission_env.py``,
 ``mandate_env.py``); the configuration and credential facts are the harness's fakes, and so is the secrets plugin's
@@ -65,7 +65,6 @@ def ns(tmp_path_factory):
         ns.EntitySchedule.__table__.c.variables.server_default = None
     except Exception:  # pylint: disable=W0703
         ns.EntitySchedule = None
-    ns.mcp_exposed_version = load("mcp_exposed_version")
     ns.governance_readiness = load("governance_readiness")
     ns.governance_requests = load("governance_requests")
     # the two routes, behind a check_api that grants the caller's own permission set (any of the named ones)
@@ -398,30 +397,6 @@ def test_a_credential_a_run_created_is_requested_as_its_users_personal_reference
     assert [item["kind"] for item in result["filed"]] == ["reference"]
     [(session, _, [asked], actor)] = env.secrets.calls
     assert (asked["kind"], asked["configuration_uuid"], actor) == ("reference", cred.uuid, MEMBER)
-
-
-# --- the MCP server's exposed version (#7341) -------------------------------------------------------------------
-
-def _version(version_id, status, day):
-    return types.SimpleNamespace(id=version_id, status=status, created_at=datetime(2026, 11, day))
-
-
-@pytest.mark.parametrize("governed, bound, expected", [
-    (True, {2}, (2, "bound")), (True, {1, 3}, (3, "bound")), (True, {1}, (1, "bound")),
-    (True, set(), (3, "published")),
-    # (D-1) off and audit only: the first stored version, exactly as before (no rule, nothing bound read)
-    (False, {2}, (1, "stored")), (False, set(), (1, "stored")),
-])
-def test_the_exposed_version_rule(ns, governed, bound, expected):
-    versions = [_version(1, "draft", 1), _version(2, "draft", 2), _version(3, "published", 3)]
-    version, rule = ns.mcp_exposed_version.exposed_version(versions, bound, governed)
-    assert (version.id, rule) == expected
-
-
-def test_with_no_published_version_the_first_stored_one_as_before(ns):
-    versions = [_version(5, "draft", 3), _version(4, "draft", 1)]
-    assert ns.mcp_exposed_version.exposed_version(versions, set(), False) == (versions[0], "stored")
-    assert ns.mcp_exposed_version.exposed_version([], set(), True) == (None, None)
 
 
 # --- a schedule: its owner's mandate, the mandate's grants, the owner's consent -----------------------------------
