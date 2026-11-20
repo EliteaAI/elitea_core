@@ -682,10 +682,17 @@ def generate_predict_payload(
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
 
-    # #7580: a version saved with code_mode has no effect once the gate is closed
+    # #7580: a version saved with code_mode has no effect once the gate is closed; the runtime reads both metas
+    request_model = getattr(parsed.llm_settings, 'model_name', None)
     if isinstance(payload.get('meta'), dict) and payload['meta'].get('internal_tools'):
         payload['meta'] = {**payload['meta'], 'internal_tools': strip_code_mode(
-            payload['meta']['internal_tools'], parsed.project_id, getattr(parsed.llm_settings, 'model_name', None),
+            payload['meta']['internal_tools'], parsed.project_id, request_model,
+        )}
+    application = payload.get('application')
+    version_details = application.get('version_details') if isinstance(application, dict) else None
+    if isinstance(version_details, dict) and isinstance(version_details.get('meta'), dict):
+        version_details['meta'] = {**version_details['meta'], 'internal_tools': strip_code_mode(
+            version_details['meta'].get('internal_tools'), parsed.project_id, request_model,
         )}
 
     if isinstance(parsed, ApplicationChatRequest):

@@ -23,6 +23,9 @@ class Agent(Chat):
     pass
 
 
+code_mode_gate = {}
+
+
 @pytest.fixture
 def builder(models_path):
     llm = load_module_with_stubs(models_path/'pd/llm.py', 'auto_payload_llm')
@@ -57,7 +60,7 @@ def builder(models_path):
         'attach_subagent_prefetch': lambda payload, project_id, user_id: None,
         'inject_stored_logins': lambda payload, project_id, user_id: None,
         'skill_scratch_for_run': lambda project_id, conversation_uuid, user_id: {},
-        'strip_code_mode': lambda tools, project_id, model_name: tools,
+        'strip_code_mode': code_mode_gate.get('strip', lambda tools, project_id, model_name: tools),
     }
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
     return namespace['generate_predict_payload'], llm, rpc
@@ -340,3 +343,37 @@ def test_auto_approve_flag_reaches_the_payload(builder, given, expected):
     build, llm, _ = builder
     result = build(parsed(llm, True), 2, skip_expansion=True, auto_approve_sensitive_actions=given)
     assert result.get('auto_approve_sensitive_actions') == expected
+
+
+# #7580: the runtime enables Code Mode from application.version_details.meta.internal_tools (agent path) or
+# the top-level meta (API path), so both must be stripped in the payload the worker receives.
+@pytest.mark.parametrize('allowed_project,allowed_model,expect_kept', [
+    (None, None, False),        # gate closed
+    (7, 'other-model', False),  # project open, request model not on the allowlist
+    (7, 'fixed-model', True),   # project and model allowed
+])
+def test_code_mode_strip_reaches_the_worker_payload(models_path, allowed_project, allowed_model, expect_kept):
+    def strip(tools, project_id, model_name):
+        if not tools or 'code_mode' not in tools:
+            return tools
+        if project_id == allowed_project and model_name == allowed_model:
+            return tools
+        return [t for t in tools if t != 'code_mode']
+
+    code_mode_gate['strip'] = strip
+    try:
+        build, llm, rpc = builder.__wrapped__(models_path)
+        value = parsed(llm, agent=True, auto=False)
+        value.version_details['meta'] = {'internal_tools': ['code_mode', 'pyodide']}
+        value.meta = {'internal_tools': ['code_mode']}
+        value.internal_tools = ['code_mode']
+        result = build(value, 2, skip_expansion=True)
+    finally:
+        code_mode_gate.clear()
+
+    expected = ['code_mode', 'pyodide'] if expect_kept else ['pyodide']
+    assert result['application']['version_details']['meta']['internal_tools'] == expected
+    assert ('code_mode' in result['meta']['internal_tools']) is expect_kept
+    assert ('code_mode' in result['internal_tools']) is expect_kept
+    # the parsed request is not mutated
+    assert value.version_details['meta']['internal_tools'] == ['code_mode', 'pyodide']
