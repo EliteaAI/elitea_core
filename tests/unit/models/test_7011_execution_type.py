@@ -15,6 +15,32 @@ from unit.utils.test_7011_pipeline_execution_owner import world  # noqa: F401 --
 
 PKG = "plugins.elitea_core"
 SHARED_TRIGGERS = ["chat", "api", "mcp", "webhook", "scheduled", "schedule_manual"]
+# Each meta shape and the execution type the list column shows for it; the list filter test runs its SQL over
+# the same table, so the column and the filter cannot drift apart
+META_SHAPES = [
+    ({}, "chat"),
+    ({"execution_type": None}, "chat"),
+    ({"execution_type": ""}, "chat"),
+    ({"execution_type": "other"}, "chat"),
+    ({"execution_type": 5}, "chat"),
+    ({"execution_type": "CHAT"}, "chat"),
+    ({"execution_type": "chat"}, "chat"),
+    ({"execution_type": "chat", "scheduled_run": True}, "chat"),
+    ({"execution_type": "api"}, "api"),
+    ({"execution_type": "mcp"}, "mcp"),
+    ({"execution_type": "mcp", "scheduled_run": True}, "mcp"),
+    ({"execution_type": "webhook"}, "webhook"),
+    ({"execution_type": "manual"}, "manual"),
+    ({"execution_type": "schedule_manual"}, "schedule_manual"),
+    ({"execution_type": "schedule_test"}, "schedule_manual"),
+    ({"execution_type": "scheduled"}, "scheduled"),
+    ({"scheduled_run": True}, "scheduled"),
+    ({"execution_type": "other", "scheduled_run": True}, "scheduled"),
+    ({"scheduled_run": False}, "chat"),
+    ({"scheduled_run": "true"}, "chat"),
+    ({"scheduled_run": 1}, "chat"),
+    ({"scheduled_run": None}, "chat"),
+]
 
 
 @pytest.fixture
@@ -128,3 +154,8 @@ def test_a_conversation_update_drops_the_run_keys_of_client_meta(model):
 
 def test_an_update_without_meta_stays_without_meta(model):
     assert model.ConversationUpdate(name="renamed").meta is None
+
+
+@pytest.mark.parametrize("meta, expected", META_SHAPES)
+def test_each_meta_shape_lists_as_its_execution_type(model, meta, expected):
+    assert _row(model, meta).execution_type == expected

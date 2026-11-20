@@ -1,4 +1,5 @@
 import time
+from typing import get_args
 
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
@@ -15,6 +16,7 @@ from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
+from ..models.pd.schedule_list import ExecutionType
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..utils.running_conversations import running_conversation_ids
@@ -41,6 +43,32 @@ from ..utils.model_defaults import creation_llm_settings, chat_request_default
 # and CLI tools may pass larger values, but anything above this is rejected
 # silently rather than fanning into a heavy GROUP BY.
 LIST_CONVERSATIONS_MAX_LIMIT = 100
+
+
+def _execution_type_condition(execution_type: str):
+    """The rows whose list execution_type is this value: the same rule as ConversationListExtended reads it.
+
+    A stored known type is kept, `schedule_test` included (it reads as schedule_manual); a row without one
+    is scheduled when meta.scheduled_run is JSON true, and a plain chat otherwise. Only the types without a
+    run record (ExecutionType) are accepted: the others are run options.
+    """
+    # Late import: that module loads the DB models
+    from ..utils.pipeline_execution import TriggerType
+    if execution_type not in get_args(ExecutionType):
+        raise ValueError(f'Unknown execution type: {execution_type!r}')
+    stored = Conversation.meta['execution_type'].astext
+    if execution_type != TriggerType.CHAT:
+        return stored == execution_type
+    scheduled_run = Conversation.meta['scheduled_run']
+    return or_(
+        stored == TriggerType.CHAT,
+        and_(
+            or_(stored.is_(None), stored.notin_((*TriggerType.VALUES, 'schedule_test'))),
+            # Null-safe "not JSON true": a missing key, a string "true" or any other value is not a scheduled run
+            or_(func.jsonb_typeof(scheduled_run).is_distinct_from('boolean'),
+                scheduled_run.astext.is_distinct_from('true')),
+        ),
+    )
 
 
 def _schedule_runs(session, conversations) -> dict[int, dict]:
@@ -455,6 +483,7 @@ class RPC:
         run_status: str | None = None,
         run_trigger: str | None = None,
         run_version_id: int | None = None,
+        execution_type: str | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -469,6 +498,8 @@ class RPC:
             schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
             run_status, run_trigger, run_version_id: Optional run options (`run_trigger` is a stored trigger: cron, manual, test);
                 they combine with `schedule_id` and each other on the same run row
+            execution_type: Optional list execution type of the conversation (chat, api, mcp): the runs that
+                have no run record
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -562,6 +593,9 @@ class RPC:
                 base_query = base_query.filter(
                     Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions)),
                 )
+
+            if execution_type is not None:
+                base_query = base_query.filter(_execution_type_condition(execution_type))
 
             base_query = base_query.order_by(sorting(sorting_by))
 

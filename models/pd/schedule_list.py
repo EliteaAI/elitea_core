@@ -11,6 +11,8 @@ DbId = Annotated[int, Field(ge=1, le=MAX_DB_ID)]
 EntityType = Literal['agent', 'pipeline', 'toolkit_index']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
 RunTrigger = Literal['cron', 'manual', 'test', 'webhook']
+# The run kinds that have no run record: the conversation's own execution type tells them apart
+ExecutionType = Literal['chat', 'api', 'mcp']
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled', 'last_delivery_at']
 SortOrder = Literal['asc', 'desc']
 
@@ -21,6 +23,12 @@ class RunFilters(BaseModel):
     status: RunStatus | None = None
     trigger: RunTrigger | None = None
     version_id: DbId | None = None
+
+
+class ConversationListFilters(RunFilters):
+    """The filters of the conversation list: the run filters and the execution type of a run without a record."""
+
+    execution_type: ExecutionType | None = None
 
 
 class ScheduleListFilters(BaseModel):
