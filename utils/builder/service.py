@@ -16,6 +16,7 @@ TYPED = ('agent', 'pipeline', 'skill', 'project_context')
 LOOKUP = ('toolkit', 'model', 'configuration')
 ENTITY_TYPES = TYPED + LOOKUP + ('operation',)
 CHANGESET_TTL_S = 30 * 60
+LIST_FIELDS = frozenset({'tags', 'conversation_starters', 'variables'})
 # Agent / pipeline: `name` and `description` belong to the application (PUT application); everything else to the
 # version (PUT version, instructions through the safe patch). The version's own name is read-only (`version_name`).
 APPLICATION_LEVEL_FIELDS = frozenset({'name', 'description'})
@@ -53,8 +54,26 @@ def _masked(args, path=''):
             if key == 'secret' and 'name' not in args and 'value' in args:
                 return False
             return isinstance(value, str)
-        return key.lower() in _SECRET_ARG_NAMES or key.lower().endswith(('_password', '_token', '_secret'))
-    return {k: '****' if hidden(k, v) else v for k, v in args.items()}
+        return _secret_name(key)
+    return {k: '****' if hidden(k, v) else _masked_nested(v) for k, v in args.items()}
+
+
+def _secret_name(key) -> bool:
+    key = str(key).lower()
+    return key in _SECRET_ARG_NAMES or key.endswith(('_password', '_token', '_secret', '_key'))
+
+
+def _masked_nested(value, depth=0):
+    """Secret-named keys inside nested dicts and lists (``data.api_key``, ``settings.password``) are masked too.
+    ``{{secret.…}}`` references stay: they name a stored secret, not its value."""
+    if depth > 6:
+        return value
+    if isinstance(value, dict):
+        return {k: '****' if _secret_name(k) and v not in (None, '') and not str(v).startswith('{{secret.')
+                else _masked_nested(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_masked_nested(item, depth + 1) for item in value]
+    return value
 
 
 def _invalid(message, errors=None):
@@ -286,7 +305,7 @@ class BuilderService:
 
     def _propose_create(self, entity_type, fields):
         try:
-            fields = cs.apply_changes({}, fields)
+            fields = cs.apply_changes({f: [] for f in LIST_FIELDS if f in (fields or {})}, fields)
         except cs.ChangeError as exc:
             return _invalid(str(exc), [{'field': str(exc).split(':')[0], 'message': str(exc)}])
         if entity_type in ('agent', 'pipeline'):

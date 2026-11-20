@@ -336,3 +336,28 @@ def test_linking_with_a_version_id_as_the_agent_id_is_refused(builder, calls):
     proposal = service.propose('operation', 'call', {'tool_id': 9, 'entity_id': 1, 'entity_version_id': 20,
                                                      'entity_type': 'agent'}, entity_id='patch_elitea_core_tool')
     assert proposal['status'] == 'invalid' and 'does not belong' in proposal['message']
+
+
+def test_a_secret_nested_in_an_operation_argument_is_masked(builder, calls):
+    tools = [{'value': 'post_configurations', 'method': 'POST', 'path': '/api/v2/configurations/configurations/{project_id}',
+              'args_schema': {'type': 'object', 'properties': {'project_id': {'type': 'integer'},
+                                                               'type': {'type': 'string'},
+                                                               'data': {'type': 'object'}}}}]
+    service = builder.service.BuilderService(project_id=PID, user_id=5, call=calls, store=builder.service.MemoryStore(),
+                                             catalog=builder.catalog.Catalog(tools), can_write=True)
+    proposal = service.propose('operation', 'call', {'type': 'openai', 'data': {
+        'api_key': 'made-up-value', 'headers': [{'auth_token': 'made-up-2'}], 'ref_key': '{{secret.openai}}',
+        'url': 'https://x'}}, entity_id='post_configurations')
+    assert proposal['arguments']['data'] == {'api_key': '****', 'headers': [{'auth_token': '****'}],
+                                             'ref_key': '{{secret.openai}}', 'url': 'https://x'}
+    assert 'made-up' not in str(proposal)
+
+
+def test_a_create_appends_to_list_fields_as_lists(service, calls):
+    proposal = service.propose('agent', 'create', {'name': 'QA', 'tags': {'append': 'qa'},
+                                                   'conversation_starters': {'append': 'Hi'}})
+    if proposal['status'] == 'needs_confirmation':
+        service.confirm(proposal['changeset_id'], user_id=5)
+    service.apply(proposal['changeset_id'])
+    version = calls.writes[0][1]['versions'][0]
+    assert version['tags'] == ['qa'] and version['conversation_starters'] == ['Hi']
