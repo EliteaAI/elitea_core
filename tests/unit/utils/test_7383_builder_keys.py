@@ -123,3 +123,37 @@ class TestRunBuilderKeysMigration:
             lambda pid, dry_run: seen.append(dry_run) or 0, dry_run=True,
         )
         assert seen == [True, True]
+
+
+class TestEnableDefaultModules:
+    """R-2.0.9 admin task: Elitea Builder and Ask User on as default modules for every user."""
+
+    def test_sums_projects_lists_failures_and_updates_legacy_once(self, builder_keys):
+        legacy_calls = []
+
+        def enable_project(pid, dry_run):
+            if pid == 2:
+                raise RuntimeError('schema missing')
+            return pid
+
+        result = builder_keys.run_enable_default_modules(
+            [1, 2, 3], enable_project, lambda dry_run: legacy_calls.append(dry_run) or 5, dry_run=False,
+        )
+        assert result == {'updated_settings': 4, 'updated_legacy_users': 5, 'failed_projects': [2],
+                          'legacy_failed': False, 'dry_run': False}
+        assert legacy_calls == [False]
+
+    def test_a_failing_legacy_update_is_reported(self, builder_keys):
+        def fail(dry_run):
+            raise RuntimeError('db')
+
+        result = builder_keys.run_enable_default_modules([1], lambda pid, dry_run: 1, fail, dry_run=True)
+        assert result['legacy_failed'] is True and result['updated_settings'] == 1 and result['dry_run'] is True
+
+    def test_passes_dry_run_through(self, builder_keys):
+        seen = []
+        builder_keys.run_enable_default_modules(
+            [1], lambda pid, dry_run: seen.append(dry_run) or 0, lambda dry_run: seen.append(dry_run) or 0,
+            dry_run=True,
+        )
+        assert seen == [True, True]
