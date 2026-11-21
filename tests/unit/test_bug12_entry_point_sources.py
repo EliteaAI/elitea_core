@@ -113,6 +113,8 @@ def do_predict(monkeypatch, world):  # noqa: F811 -- the fixture imported above
         "utils.budget_door": {"schema_may_use_llm": lambda *_: True},
         "utils.utils": {"verify_signature": None},
         "utils.exceptions": {"VerifySignatureError": Exception, "PoolSaturationError": Exception},
+        "utils.api_run_history": {"should_record_api_run": lambda *a, **k: False,
+                                  "open_api_run_conversation": None},
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace()},
         "utils.input_guardrail": {"inspect_and_unsecret": lambda payload, *a, **k: payload},
         "utils.vectorstore": {"get_pgvector_connection_string": lambda _pid: "connstr"},
@@ -136,7 +138,7 @@ def do_predict(monkeypatch, world):  # noqa: F811 -- the fixture imported above
     spec.loader.exec_module(loaded)
 
     started = []
-    owner = types.SimpleNamespace(task_node=types.SimpleNamespace(
+    owner = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={}), task_node=types.SimpleNamespace(
         start_task=lambda *a, **k: started.append(k["kwargs"]) or "task-1"))
 
     def run(**kwargs):
