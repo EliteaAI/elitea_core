@@ -111,12 +111,9 @@ def _select_version(skill_data: dict, version_name: Optional[str]) -> dict:
 def ensure_base_version(raw_versions):
     """Guarantee a 'base' version exists and comes first (issues #5469, #7636).
 
-    A sole version is renamed to 'base', the way skill forks (#5706), skill
-    MD imports (#5414) and agent imports already do: an agent reference to
-    its old name falls back to 'base' when attached, so a clone would only
-    add a duplicate. Several versions keep their names, so agent versions
-    that reference different ones still resolve, and a 'base' clone of the
-    first is prepended.
+    Without one, the first version is renamed to 'base', the way skill forks (#5706), skill MD imports (#5414) and
+    agent imports already do: an agent reference to its old name falls back to 'base' when attached, so a clone would
+    only add a duplicate of it.
 
     Position matters as much as presence: import_skill creates the skill from
     the first entry and appends the rest, and Skill.versions carries no
@@ -133,10 +130,7 @@ def ensure_base_version(raw_versions):
         return [versions[base_index], *versions[:base_index], *versions[base_index + 1:]]
     # Spread is safe: import_skill whitelists payload keys, so no stray
     # id/created_at/skill_id leaks and absent author_id -> importing user.
-    base = {**(versions[0] or {}), 'name': DEFAULT_VERSION_NAME}
-    if len(versions) == 1:
-        return [base]
-    return [base, *versions]
+    return [{**(versions[0] or {}), 'name': DEFAULT_VERSION_NAME}, *versions[1:]]
 
 
 def _normalize_tags(version: dict) -> List[str]:

@@ -142,14 +142,14 @@ class TestEnsureBaseVersion:
         assert result == [{**source, 'name': 'base'}]
         assert source['name'] == 'v1.2'
 
-    def test_a_base_clone_is_prepended_to_several_named_versions(self, export_import):
+    def test_the_first_of_several_named_versions_is_renamed_to_base_not_cloned(self, export_import):
+        """Issue #7636: agent versions linking v1.1 and v1.2 left 'base' and 'v1.1' as identical twins."""
         result = export_import.ensure_base_version([
             {'name': 'v1.1', 'instructions': 'old'},
             {'name': 'v1.2', 'instructions': 'new'},
         ])
 
-        assert _names(result) == ['base', 'v1.1', 'v1.2']
-        assert result[0]['instructions'] == 'old'
+        assert result == [{'name': 'base', 'instructions': 'old'}, {'name': 'v1.2', 'instructions': 'new'}]
 
     def test_an_empty_list_is_unchanged(self, export_import):
         assert export_import.ensure_base_version([]) == []
