@@ -99,6 +99,7 @@ def legacy_schedules(api):
 
 
 BODY = {"cron": DAILY, "timezone": "Etc/UTC", "enabled": True}
+NOT_FOUND = {"ok": False, "error": "The requested item could not be found"}, 404
 
 
 def test_patching_an_unscheduled_index_creates_its_schedule_row(api):
@@ -152,7 +153,39 @@ def test_patching_with_a_bad_body_answers_400_with_the_field(api, payload, field
 
 def test_patching_an_unknown_toolkit_answers_404(api):
     body, status, _ = patch(api, BODY, toolkit_id=99)
-    assert (status, body["code"]) == (404, "not_found")
+    assert (status, body) == (404, {"code": "not_found", "error": "The requested item could not be found"})
+
+
+def test_el7607_deleting_on_an_unknown_toolkit_answers_the_generic_404(api):
+    assert api.index_schedule.PromptLibAPI().delete(7, 99, "docs") == NOT_FOUND
+
+
+def test_el7607_deleting_an_index_the_settings_do_not_hold_answers_the_generic_404(api):
+    assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == NOT_FOUND
+
+
+def test_el7607_a_hidden_toolkit_answers_like_a_missing_one(api):
+    missing_delete = api.index_schedule.PromptLibAPI().delete(7, 99, "docs")
+    missing_patch = patch(api, BODY, toolkit_id=99)
+    api.folder_refusal = ({"ok": False, "error": "Not found"}, 404)
+    assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == missing_delete
+    assert patch(api, BODY) == missing_patch
+    assert api.folder_calls[-2:] == [(["toolkit", "mcp"], 3, True)] * 2
+    assert schedule_rows(api) == []
+
+
+@pytest.mark.parametrize("payload", [{"cron": "bad"}, {}])
+def test_el7607_a_hidden_toolkit_answers_like_a_missing_one_whatever_the_body(api, payload):
+    missing = patch(api, payload, toolkit_id=99)
+    api.folder_refusal = ({"ok": False, "error": "Not found"}, 404)
+    assert patch(api, payload) == missing
+    assert missing[1] == 404
+
+
+def test_el7607_a_read_only_folder_keeps_its_403_on_both_routes(api):
+    api.folder_refusal = ({"ok": False, "error": "You have read-only access to this folder"}, 403)
+    assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == api.folder_refusal
+    assert patch(api, BODY) == (*api.folder_refusal, DEPRECATED)
 
 
 def test_deleting_a_settings_schedule_removes_the_key_of_the_caller(api):
@@ -173,8 +206,7 @@ def test_deleting_the_team_key_needs_the_user_id_argument(api):
 
 def test_deleting_an_index_without_a_settings_schedule_answers_404(api):
     set_legacy_schedules(api, {"-1": {"cron": DAILY}})
-    body, status = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
-    assert status == 404 and "42" in body["error"]
+    assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == NOT_FOUND
 
 
 def test_deleting_leaves_the_schedule_rows_alone(api):
@@ -188,16 +220,14 @@ def test_deleting_leaves_the_schedule_rows_alone(api):
 def test_deleting_another_users_key_without_the_schedule_admin_right_changes_nothing(api, target):
     set_legacy_schedules(api, {"42": {"cron": DAILY}, target: {"cron": DAILY}})
     api.request.args = {"user_id": target}
-    body, status = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
-    assert (status, body["error"]) == (404, f"No schedule found for user '{target}'")
+    assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == NOT_FOUND
     assert set(legacy_schedules(api)) == {"42", target}
 
 
 def test_deleting_a_missing_key_answers_like_a_key_of_another_user(api):
     set_legacy_schedules(api, {"42": {"cron": DAILY}})
     api.request.args = {"user_id": "43"}
-    missing = api.index_schedule.PromptLibAPI().delete(7, 3, "docs")
-    assert missing == ({"ok": False, "error": "No schedule found for user '43'"}, 404)
+    assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == NOT_FOUND
 
 
 def test_the_schedule_admin_deletes_the_key_of_another_user(api):

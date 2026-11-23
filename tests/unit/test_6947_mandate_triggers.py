@@ -581,6 +581,18 @@ def test_a_bad_signature_mints_nothing_and_runs_nothing(ns, env, agent, webhook)
     assert len(module._mandate_tickets) == 0   # pylint: disable=W0212
 
 
+def test_el7607_a_webhook_of_an_unknown_version_answers_the_generic_404(webhook, monkeypatch):
+    session = mock.MagicMock()
+    session.query.return_value.options.return_value.get.return_value = None
+    monkeypatch.setattr(webhook, "db", types.SimpleNamespace(get_session=lambda project_id: mock.MagicMock(
+        __enter__=lambda self: session, __exit__=lambda *a: False)))
+    monkeypatch.setattr(sys.modules["sqlalchemy.orm"], "joinedload", lambda attribute: attribute)
+    monkeypatch.setattr(webhook.ApplicationVersion, "application", None, raising=False)
+    validate = webhook.WebHookAPI._validate_webhook_signature   # pylint: disable=W0212
+    assert validate(webhook.handler, 1, 999, "github", b"{}") == (
+        False, ({"error": "The requested item could not be found"}, 404))
+
+
 @pytest.mark.parametrize("name, change, code", [
     ("no_mandate", None, "MANDATE_REQUIRED"),
     ("suspended", {"state": "suspended", "suspended_reason": "MANUAL"}, "MANDATE_INACTIVE"),

@@ -69,8 +69,9 @@ from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
 from ..utils.sio_guards import ensure_sio_user_in_project
+from ..utils.error_text import NOT_FOUND_TEXT
 from ..utils.schedule_access import INDEX_WRITE_TOOLS, ScheduleScope
-from ..utils.schedule_service import NOT_FOUND_TEXT, ScheduleError, check_index_rights
+from ..utils.schedule_service import ScheduleError, check_index_rights
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
 from ..utils.internal_tools import (
     require_internal_mcp_pat,

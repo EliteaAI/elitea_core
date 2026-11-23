@@ -16,6 +16,7 @@ from ..models.entity_schedule import REFUSAL_STREAK, EntitySchedule
 from ..models.enums.all import AgentTypes, NotificationEventTypes
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
 from ..models.pd.index import _cron_gaps
+from .error_text import NOT_FOUND_TEXT
 from .folder_access import entity_access_error
 from .schedule_access import INDEX_EDIT_PERMISSION, ScheduleScope, schedule_scope
 from .schedule_notifications import notify_schedule_event
@@ -37,7 +38,6 @@ TOOLKIT_INDEX_UNIQUE = 'uq_entity_schedules_toolkit_index'
 INDEX_SCHEDULED = 'This index already has a schedule'
 INDEX_UNAVAILABLE = 'The index could not be checked; try again'
 INDEX_READ_ONLY = 'You have read-only access to this index'
-NOT_FOUND_TEXT = 'The requested item could not be found'
 # A Toolkit Index run starts from the saved index settings: no version, input or approval of its own
 INDEX_REFUSED_FIELDS = ('application_id', 'version_id', 'run_mode', 'prompt', 'risk_ack')
 

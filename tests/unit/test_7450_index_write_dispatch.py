@@ -69,8 +69,9 @@ class Env:
         _compile(namespace, "utils/schedule_access.py",
                  {"INDEX_EDIT_PERMISSION", "INDEX_DELETE_PERMISSION", "INDEX_WRITE_TOOLS", "ScheduleScope"})
         namespace.update(entity_access_error=self._folder)
+        _compile(namespace, "utils/error_text.py", {"NOT_FOUND_TEXT"})
         _compile(namespace, "utils/schedule_service.py",
-                 {"INDEX_READ_ONLY", "NOT_FOUND_TEXT", "refusal", "ScheduleError", "ScheduleNotFound",
+                 {"INDEX_READ_ONLY", "refusal", "ScheduleError", "ScheduleNotFound",
                   "check_index_rights"})
         namespace.update(self._io())
         _compile(namespace, "rpc/application.py", {"_toolkit_run_refused", "_stored_index_toolkit",

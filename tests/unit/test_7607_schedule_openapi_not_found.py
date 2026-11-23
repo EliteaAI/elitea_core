@@ -20,8 +20,8 @@ def _load(relative_path, names, namespace):
 
 @pytest.fixture(scope='module')
 def spec():
-    namespace = _load('utils/schedule_service.py',
-                      {'NOT_FOUND_TEXT', 'refusal', 'ScheduleError', 'ScheduleNotFound'}, {})
+    namespace = _load('utils/error_text.py', {'NOT_FOUND_TEXT'}, {})
+    _load('utils/schedule_service.py', {'refusal', 'ScheduleError', 'ScheduleNotFound'}, namespace)
     return _load('utils/schedule_openapi.py',
                  {'ERRORS', 'DEFAULT_CODES', 'REFUSAL_NAME', 'REFUSAL_REF', '_responses'}, namespace)
 

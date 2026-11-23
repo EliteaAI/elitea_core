@@ -521,7 +521,7 @@ def test_a_saved_run_is_not_reachable_through_the_test_run_scope(harness):
 
 def test_a_schedule_or_run_id_above_the_database_range_is_404(harness):
     huge = 2**31
-    assert harness.call('get', None, huge) == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
+    assert harness.call('get', None, huge) == sys.modules[f'{PACKAGE}.utils.schedule_service'].ScheduleNotFound().response
     harness.body, harness.query = None, {'application_id': 1}
     harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/{huge}'
     assert harness.routes.PromptLibAPI().get(project_id=PROJECT_ID, run_id=huge)[1] == 404

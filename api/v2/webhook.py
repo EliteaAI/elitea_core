@@ -36,6 +36,7 @@ from ...utils.exceptions import (  # pylint: disable=E0402
     AdmissionDenied, InputGuardrailBlockedError, PoolSaturationError, VerifySignatureError,
 )
 from ...utils.mandate_admission import prepare_trigger_run, refusal_http_status
+from ...utils.error_text import NOT_FOUND_TEXT
 from ...utils.pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG,
     normalize_secret_value,
@@ -84,7 +85,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             ).get(version_id)
 
             if not version:
-                return False, ({"error": f"Version {version_id} not found"}, 404)
+                return False, ({"error": NOT_FOUND_TEXT}, 404)
 
             # Get secret from version-specific trigger config. Which header and which
             # secret are authoritative depends on the configured GitLab auth method,

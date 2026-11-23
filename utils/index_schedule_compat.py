@@ -11,9 +11,11 @@ from ..models.all import EliteATool
 from ..models.entity_schedule import EntitySchedule
 from ..models.pd.entity_schedule import NAME_MAX, ScheduleCreate, ScheduleUpdate
 from ..models.pd.index import UpdateIndexingSchedule
+from .folder_access import TOOLKIT_ENTITY_TYPES, entity_access_error
 from .schedule_access import SCHEDULE_PERMISSIONS, schedule_scope
 from .schedule_service import (
     INDEX_READ_ONLY,
+    NOT_FOUND_TEXT,
     TOOLKIT_INDEX,
     ScheduleError,
     create_schedule,
@@ -24,6 +26,13 @@ from .schedule_service import (
 from .schedule_timing import ScheduleLimitError
 
 LIMIT_REACHED = 'schedule_limit_reached'  # the code of the Schedules routes
+TOOLKIT_NOT_FOUND = refusal('not_found', NOT_FOUND_TEXT, 404)
+
+
+def toolkit_write_refusal(project_id: int, toolkit_id: int, not_found: tuple[dict, int]) -> tuple[dict, int] | None:
+    """The folder refusal of a write on the toolkit, or None; a hidden toolkit answers `not_found`, the answer of a missing one."""
+    error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True)
+    return not_found if error and error[1] == 404 else error
 
 
 def _invalid(error: ValidationError) -> tuple[dict, int]:
@@ -45,15 +54,15 @@ def save_index_schedule(project_id: int, toolkit_id: int, index_name: str, paylo
     An index that the toolkit settings still schedule answers 409: delete that entry first, or let the
     migration move it.
     """
-    try:
-        update = UpdateIndexingSchedule.model_validate(payload)
-    except ValidationError as error:
-        return _invalid(error)
     scope = schedule_scope(project_id)
     with db.get_session(project_id) as session:
         toolkit = session.get(EliteATool, toolkit_id)
         if toolkit is None:
-            return refusal('not_found', 'Toolkit not found', 404)
+            return TOOLKIT_NOT_FOUND
+        try:
+            update = UpdateIndexingSchedule.model_validate(payload)
+        except ValidationError as error:
+            return _invalid(error)
         row_id = session.scalar(select(EntitySchedule.id).where(
             EntitySchedule.toolkit_id == toolkit_id, EntitySchedule.index_name == index_name).limit(1))
         needed = 'create' if row_id is None else 'update'  # the Schedules routes check these rights; the shim sits behind another one

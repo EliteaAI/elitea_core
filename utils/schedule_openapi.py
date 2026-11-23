@@ -19,7 +19,7 @@ from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
-from .schedule_service import NOT_FOUND_TEXT
+from .error_text import NOT_FOUND_TEXT
 from .schedule_settings import ScheduleProjectSettings
 
 BASE_URL = f"/api/v2/elitea_core/schedules/{SCHEDULES_PROJECT_PATH}"
@@ -256,8 +256,8 @@ def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict
     for error, value in errors.items():
         description, error_example = value if isinstance(value, tuple) else (value, None)
         description = description or ERRORS[error]
-        text = NOT_FOUND_TEXT if error == 404 else description
-        refusal = {"code": DEFAULT_CODES[error], "error": text, **(error_example or {})}
+        error_text = NOT_FOUND_TEXT if error == 404 else description
+        refusal = {"code": DEFAULT_CODES[error], "error": error_text, **(error_example or {})}
         body = {"schema": REFUSAL_REF, "example": refusal} if 400 <= error < 500 else {"example": refusal}
         answers[str(error)] = {"description": description, "content": {"application/json": body}}
     return answers

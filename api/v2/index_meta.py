@@ -24,7 +24,7 @@ from ...utils.application_tools import (
     _is_undefined_table_error,
 )
 from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
-from ...utils.index_schedule_compat import save_index_schedule
+from ...utils.index_schedule_compat import TOOLKIT_NOT_FOUND, save_index_schedule, toolkit_write_refusal
 from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
@@ -262,8 +262,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def patch(self, project_id: int, toolkit_id: int, index_meta_id: str):
+        refused = toolkit_write_refusal(project_id, toolkit_id, TOOLKIT_NOT_FOUND)
+        if refused:
+            return *refused, DEPRECATION_HEADERS
         # Index schedules are rows of the Schedules module; the old route writes that row, for one more release
         body, status = save_index_schedule(project_id, toolkit_id, index_meta_id, request.get_json(silent=True) or {})
         return body, status, DEPRECATION_HEADERS
