@@ -35,6 +35,11 @@ class Calls:
             return dict(self.versions[(args['application_id'], args['version_id'])])
         if op == 'get_project_context':
             return dict(self.project_context)
+        if op == 'list_toolkits':
+            self.toolkit_args = args
+            rows = [{'id': 5, 'name': 'Github', 'mcp': False}, {'id': 6, 'name': 'Github MCP', 'mcp': True}]
+            mcp = args.get('mcp') == 'true'
+            return {'rows': [r for r in rows if r['mcp'] is mcp]}
         if op == 'list_models':
             self.model_args = args
             if args.get('section') == 'embedding':
@@ -83,6 +88,20 @@ class TestFind:
 
     def test_unknown_type(self, service):
         assert service.find('folder', 'x')['status'] == 'invalid'
+
+    def test_finds_mcps_with_the_mcp_filter(self, service, calls):
+        found = service.find('mcp', 'github')
+        assert found['candidates'] == [{'id': 6, 'name': 'Github MCP'}]
+        assert calls.toolkit_args == {'query': 'github', 'mcp': 'true'}
+
+    def test_toolkit_search_keeps_mcps_out(self, service, calls):
+        found = service.find('toolkit', 'github')
+        assert found['candidates'] == [{'id': 5, 'name': 'Github'}]
+        assert 'mcp' not in calls.toolkit_args
+
+    def test_mcp_is_a_lookup_type_only(self, service):
+        assert service.read('mcp', 6)['status'] == 'invalid'
+        assert service.propose('mcp', 'update', {}, entity_id=6)['status'] == 'invalid'
 
 
 class TestRead:

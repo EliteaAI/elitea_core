@@ -56,7 +56,8 @@ PLAYBOOKS = {
 - Required: name. Ask for the purpose if it isn't stated. Keep the project default model unless the user names one.
 - Instructions: role, task, rules, output format, in second person, covering only what the user asked.
 - Attach only the toolkits, agents, pipelines and skills the user named; post_elitea_core_builder_find each one first.
-  If one doesn't exist, ask; don't create a substitute. Toolkits are not an agent field: link one with the operation
+  Find an MCP server with type "mcp" (type "toolkit" excludes MCPs).
+  If one doesn't exist, ask; don't create a substitute. Toolkits and MCPs are not agent fields: link one with the operation
   patch_elitea_core_tool (tool_id, entity_id, entity_version_id, entity_type "agent", has_relation true).
 - Instruction edits: {"instructions": {"old_text": ..., "new_text": ...}} with old_text copied exactly from
   post_elitea_core_builder_read, or {"append": ...}. Use {"replace": ...} only for a full rewrite the user asked for.

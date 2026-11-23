@@ -14,7 +14,7 @@ from .catalog import UnknownOperation
 from .prompts import playbook
 
 TYPED = ('agent', 'pipeline', 'skill', 'project_context')
-LOOKUP = ('toolkit', 'model', 'configuration')
+LOOKUP = ('toolkit', 'mcp', 'model', 'configuration')
 ENTITY_TYPES = TYPED + LOOKUP + ('operation',)
 CHANGESET_TTL_S = 30 * 60
 LIST_FIELDS = frozenset({'tags', 'conversation_starters', 'variables'})
@@ -31,7 +31,7 @@ SKILL_LEVEL_FIELDS = frozenset({'name', 'description'})
 SKILL_VERSION_FIELDS = frozenset({'instructions', 'tags', 'meta', 'run_settings'})
 SKILL_FIELDS = SKILL_LEVEL_FIELDS | SKILL_VERSION_FIELDS
 PROJECT_CONTEXT_FIELDS = frozenset({'content', 'enabled', 'activation_description'})
-LOOKUP_OPS = {'toolkit': 'list_toolkits', 'model': 'list_models', 'configuration': 'list_configurations'}
+LOOKUP_OPS = {'toolkit': 'list_toolkits', 'mcp': 'list_toolkits', 'model': 'list_models', 'configuration': 'list_configurations'}
 
 
 # A key is secret when one of its words is a marker, or two adjacent words form one (``api_key``, ``authToken``);
@@ -146,6 +146,8 @@ class BuilderService:
                                                      'ambiguous': False})
         if entity_type in LOOKUP:
             args = {'query': query}
+            if entity_type == 'mcp':
+                args['mcp'] = 'true'
             if entity_type == 'model':
                 args = {'section': 'embedding' if 'embedding' in (query or '').lower() else 'llm',
                         'include_shared': 'true'}

@@ -3,7 +3,7 @@ from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-EntityType = Literal['agent', 'pipeline', 'skill', 'project_context', 'toolkit', 'model', 'configuration',
+EntityType = Literal['agent', 'pipeline', 'skill', 'project_context', 'toolkit', 'mcp', 'model', 'configuration',
                      'operation']
 
 

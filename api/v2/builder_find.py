@@ -4,5 +4,5 @@ from ...utils.builder.api_base import make_api
 
 API = make_api(
     "find", BuilderFindModel,
-    "Elitea Builder: find agents, pipelines, skills, toolkits, models, configurations, or an operation for any other project setting (type operation), in the current project.",
+    "Elitea Builder: find agents, pipelines, skills, toolkits, MCPs, models, configurations, or an operation for any other project setting (type operation), in the current project.",
 )
