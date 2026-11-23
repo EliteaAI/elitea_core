@@ -88,6 +88,7 @@ def env(monkeypatch):
 
     folder_access = types.ModuleType(f'{PACKAGE}.utils.folder_access')
     folder_access.entity_access_error = lambda *args, **kwargs: None
+    folder_access.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     notifications = types.ModuleType(f'{PACKAGE}.utils.schedule_notifications')
     notifications.notify_schedule_event = lambda *args, **kwargs: True
     sys.modules[folder_access.__name__] = folder_access

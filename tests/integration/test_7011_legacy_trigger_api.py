@@ -57,6 +57,12 @@ class Harness:
         self.version = FakeVersion(dict(LEGACY_SCHEDULE))
         self.body = None
         self.commits = 0
+        self.hidden = False
+        self.refusal_calls = []
+
+    def version_refusal(self, project_id, version_id, not_found, write=False):
+        self.refusal_calls.append((project_id, version_id, not_found, write))
+        return not_found if self.hidden else None
 
     @contextlib.contextmanager
     def get_session(self, project_id=None):
@@ -111,9 +117,10 @@ def harness():
 
     sys.modules[f'{PACKAGE}.models.all'] = types.SimpleNamespace(
         ApplicationVersion=types.SimpleNamespace(id=None, application=None))
-    sys.modules[f'{PACKAGE}.utils.folder_access'] = types.SimpleNamespace(
-        require_folder_access=_passthrough, APPLICATION_ENTITY_TYPES=())
+    sys.modules[f'{PACKAGE}.utils.folder_access'] = types.SimpleNamespace(version_refusal=harness.version_refusal)
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'error_text.py', f'{PACKAGE}.utils.error_text')
     sys.modules[f'{PACKAGE}.utils.constants'] = types.SimpleNamespace(PROMPT_LIB_MODE='prompt_lib')
+    sys.modules[f'{PACKAGE}.utils.trigger_governance'] = types.SimpleNamespace(governance_notice_for=lambda *a, **k: None)
     sys.modules[f'{PACKAGE}.utils.pipeline_trigger'] = types.SimpleNamespace(
         GITLAB_AUTH_SIGNING_TOKEN='signing_token',
         get_trigger_from_pipeline_settings=lambda settings: settings.get('trigger') or {},
@@ -174,3 +181,25 @@ def test_7011_r1_4_get_returns_a_stored_legacy_schedule(harness):
     response, status = _call(harness, 'get')
     assert status == 200
     assert (response['type'], response['cron'], response['timezone']) == ('schedule', '0 9 * * *', 'UTC')
+
+
+NOT_FOUND = {'ok': False, 'error': 'The requested item could not be found'}, 404
+
+
+@pytest.mark.parametrize('verb, body, write', [
+    ('get', None, False),
+    ('put', {'type': 'schedule', 'cron': 'not a cron', 'timezone': 'UTC'}, True),
+    ('put', {'type': 'webhook'}, True),
+    ('post', None, False),
+])
+def test_el7607_a_missing_or_hidden_version_is_refused_first_with_the_generic_404(harness, verb, body, write):
+    harness.hidden = True
+    assert _call(harness, verb, body) == NOT_FOUND
+    assert harness.refusal_calls == [(PROJECT_ID, VERSION_ID, NOT_FOUND, write)]
+    assert harness.commits == 0
+
+
+@pytest.mark.parametrize('verb, body', [('get', None), ('put', {'type': 'chat_message'}), ('post', None)])
+def test_el7607_a_version_gone_after_the_check_is_the_generic_404(harness, verb, body):
+    harness.version = None
+    assert _call(harness, verb, body) == NOT_FOUND

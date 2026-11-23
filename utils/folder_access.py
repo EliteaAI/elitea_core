@@ -151,6 +151,16 @@ def application_id_from_version(project_id: int, version_id: int) -> Optional[in
         ).scalar()
 
 
+def version_refusal(project_id: int, version_id: int, not_found: tuple, write: bool = False) -> Optional[tuple]:
+    """None when the caller may use the version; a missing version and one in a hidden folder both answer
+    `not_found`, so a caller cannot tell them apart, and a read-only folder keeps its 403."""
+    application_id = application_id_from_version(project_id, version_id)
+    if application_id is None:
+        return not_found
+    error = entity_access_error(project_id, APPLICATION_ENTITY_TYPES, application_id, write=write)
+    return not_found if error and error[1] == 404 else error
+
+
 def require_folder_access(
         entity_types: Union[str, List[str]],
         id_param: str,

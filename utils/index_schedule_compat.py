@@ -26,12 +26,15 @@ from .schedule_service import (
 from .schedule_timing import ScheduleLimitError
 
 LIMIT_REACHED = 'schedule_limit_reached'  # the code of the Schedules routes
-TOOLKIT_NOT_FOUND = refusal('not_found', NOT_FOUND_TEXT, 404)
 
 
-def toolkit_write_refusal(project_id: int, toolkit_id: int, not_found: tuple[dict, int]) -> tuple[dict, int] | None:
-    """The folder refusal of a write on the toolkit, or None; a hidden toolkit answers `not_found`, the answer of a missing one."""
-    error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=True)
+def toolkit_refusal(project_id: int, toolkit_id: int, not_found: tuple, write: bool = True) -> tuple | None:
+    """None when the caller may use the toolkit; a missing toolkit and one in a hidden folder both answer
+    `not_found`, and a read-only folder keeps its 403."""
+    with db.get_session(project_id) as session:
+        if session.get(EliteATool, toolkit_id) is None:
+            return not_found
+    error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_id, write=write)
     return not_found if error and error[1] == 404 else error
 
 
@@ -58,7 +61,7 @@ def save_index_schedule(project_id: int, toolkit_id: int, index_name: str, paylo
     with db.get_session(project_id) as session:
         toolkit = session.get(EliteATool, toolkit_id)
         if toolkit is None:
-            return TOOLKIT_NOT_FOUND
+            return refusal('not_found', NOT_FOUND_TEXT, 404)
         try:
             update = UpdateIndexingSchedule.model_validate(payload)
         except ValidationError as error:

@@ -126,6 +126,7 @@ def _rights(prerun, monkeypatch, rpc, folder=None, entity=("agent", 55), **kwarg
             raise folder
         return folder
     folders.entity_access_error = entity_access_error
+    folders.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     monkeypatch.setitem(sys.modules, access.__name__, access)
     monkeypatch.setitem(sys.modules, folders.__name__, folders)
     return prerun.check_owner_rights(34, 12, *entity, **kwargs)

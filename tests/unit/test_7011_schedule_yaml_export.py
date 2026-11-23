@@ -49,6 +49,7 @@ def env(monkeypatch):
                 self.response = {'code': code, 'error': text, **extra}, status
 
         service.ScheduleError = ScheduleError
+        service.ScheduleNotFound = type('ScheduleNotFound', (ScheduleError,), {})
         sys.modules[service.__name__] = service
         env.ScheduleError = ScheduleError
         env.EntitySchedule = sqlite_db.create_schedule_table(load_plugin_module, Base, engine)

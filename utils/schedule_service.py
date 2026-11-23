@@ -17,7 +17,7 @@ from ..models.enums.all import AgentTypes, NotificationEventTypes
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleTiming, ScheduleUpdate
 from ..models.pd.index import _cron_gaps
 from .error_text import NOT_FOUND_TEXT
-from .folder_access import entity_access_error
+from .folder_access import APPLICATION_ENTITY_TYPES, entity_access_error
 from .schedule_access import INDEX_EDIT_PERMISSION, ScheduleScope, schedule_scope
 from .schedule_notifications import notify_schedule_event
 from .schedule_timing import check_enabled_cap, compute_next_run, end_of_day, min_interval_minutes_for
@@ -142,17 +142,16 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
     if application_id is None or version_id is None:
         raise _field_error('application_id' if application_id is None else 'version_id', 'Field required')
     if session.get(Application, application_id) is None:
-        raise _field_error('application_id', 'The agent or pipeline is not in this project')
+        raise ScheduleNotFound()
+    access_error = entity_access_error(project_id, APPLICATION_ENTITY_TYPES, application_id, write=True)
+    if access_error:
+        body, status = access_error
+        raise ScheduleNotFound() if status == 404 else ScheduleError('read_only', body['error'], status)
     version = session.get(ApplicationVersion, version_id)
     if version is None or version.application_id != application_id:
         raise _field_error('version_id', 'The version does not belong to this agent or pipeline')
     if entity_type != ('pipeline' if version.agent_type == AgentTypes.pipeline else 'agent'):
         raise _field_error('entity_type', f'The version is not a {entity_type}')
-    # The type is verified above, so the one folder type is exact
-    access_error = entity_access_error(project_id, entity_type, application_id, write=True)
-    if access_error:
-        body, status = access_error
-        raise ScheduleNotFound() if status == 404 else ScheduleError('read_only', body['error'], status)
 
 
 def read_index_configuration(session, project_id: int, toolkit, index_name: str, user_id: int) -> dict | None:
@@ -229,7 +228,7 @@ def check_toolkit_index(session, project_id: int, toolkit_id: int | None, index_
         raise _field_error('toolkit_id' if toolkit_id is None else 'index_name', 'Field required')
     toolkit = session.get(EliteATool, toolkit_id)
     if toolkit is None:
-        raise _field_error('toolkit_id', 'The toolkit is not in this project')
+        raise ScheduleNotFound()
     scope = schedule_scope(project_id)
     check_index_rights(project_id, toolkit_id, scope)
     try:

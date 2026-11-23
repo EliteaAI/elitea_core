@@ -46,7 +46,14 @@ from ...utils.pipeline_trigger import (
     is_gitlab_signing_mode,
 )
 from ...rpc.pipeline_webhook import execute_pipeline_webhook
-from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
+from ...utils.folder_access import version_refusal
+
+
+def _rejected(version_id: int, reason: str) -> tuple[dict, int]:
+    """The answer to a delivery that is not proven genuine: like an unknown version, so a sender without the
+    secret learns nothing about which versions exist; the reason goes to the log only."""
+    log.info("Webhook delivery for version %s rejected: %s", version_id, reason)
+    return {"error": NOT_FOUND_TEXT}, 404
 
 
 class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -98,17 +105,17 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             signature_header = get_webhook_signature_header(webhook_type, auth_method)
             webhook_signature = request.headers.get(signature_header)
             if webhook_signature is None:
-                return False, ({"error": f"Missing request header {signature_header}"}, 400)
+                return False, _rejected(version_id, f"missing request header {signature_header}")
 
             secret_ref_key = "webhook_signing_secret" if signing_mode else "webhook_secret"
             webhook_secret_ref = trigger.get(secret_ref_key)
 
             if not webhook_secret_ref:
-                return False, ({"error": "Webhook secret not configured"}, 400)
+                return False, _rejected(version_id, "webhook secret not configured")
 
             secret = VaultClient(project_id).unsecret(webhook_secret_ref)
             if not secret:
-                return False, ({"error": "Webhook secret not configured"}, 400)
+                return False, _rejected(version_id, "webhook secret not configured")
 
             # Signing tokens are stored verbatim; legacy secrets may carry a header prefix
             secret_value = secret if signing_mode else normalize_secret_value(secret)
@@ -123,7 +130,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             )
 
             if not is_valid:
-                return False, ({"error": error_msg}, 400)
+                return False, _rejected(version_id, error_msg)
 
             return True, (version, version.application)
 
@@ -150,9 +157,13 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         available_to_users=True,
     )
     @api_tools.endpoint_metrics
-    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def post(self, project_id: int, version_id: int, webhook_type: str):  # pylint: disable=R0911
         """ POST """
+        if webhook_type not in WEBHOOK_TYPE_CONFIG:
+            return {"error": "Bad signature type"}, 400
+        refused = version_refusal(project_id, version_id, ({"error": NOT_FOUND_TEXT}, 404))
+        if refused:
+            return refused
         raw_data = request.data
         payload_str = raw_data.decode("utf-8")
 

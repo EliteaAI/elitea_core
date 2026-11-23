@@ -79,8 +79,11 @@ def test_7011_r8_1_resume_past_the_project_cap_is_409_with_code_and_error(harnes
     assert_refusal(harness.call('post', None, harness.seed(enabled=False), suffix='/resume'), 409, code='schedule_limit_reached')
 
 
+def test_el7607_an_agent_outside_the_project_is_the_generic_404(harness):
+    assert harness.call('post', agent_body(application_id=99)) == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
+
+
 @pytest.mark.parametrize('verb, body, field', [
-    ('post', agent_body(application_id=99), 'application_id'),
     ('post', agent_body(version_id=11), 'version_id'),
     ('post', agent_body(entity_type='pipeline'), 'entity_type'),
     ('post', agent_body(prompt='Say {% if x %}a{% endif %}'), 'prompt'),

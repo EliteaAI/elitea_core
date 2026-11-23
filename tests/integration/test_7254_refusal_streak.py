@@ -123,6 +123,7 @@ def _service(monkeypatch):
                                                                DEFAULT_MODE="default"), raising=False)
     folder = types.ModuleType(f"{PKG}.utils.folder_access")
     folder.entity_access_error = lambda *_a, **_k: None
+    folder.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     monkeypatch.setitem(sys.modules, folder.__name__, folder)
     trace = types.SimpleNamespace(get_current_span=lambda: types.SimpleNamespace(set_attribute=lambda *_a: None))
     monkeypatch.setitem(sys.modules, "opentelemetry", types.SimpleNamespace(trace=trace))   # the audit span of the service

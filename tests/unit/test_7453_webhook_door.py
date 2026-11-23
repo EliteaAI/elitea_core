@@ -216,9 +216,9 @@ def _rejections(env):
     }
 
 
-def test_7453_every_rejection_is_the_same_empty_404_and_writes_nothing(door):
+def test_7453_every_rejection_is_the_same_generic_404_and_writes_nothing(door):
     answers = {name: _post(door, row_uuid, headers) for name, (row_uuid, headers) in _rejections(door).items()}
-    assert {(status, data, tuple(extra)) for status, data, extra in answers.values()} == {(404, b'', ())}, answers
+    assert all(answer == (404, {'code': 'not_found', 'error': 'The requested item could not be found'}, {}) for answer in answers.values()), answers
     assert _runs(door) == [] and door.redis.calls == [] and door.started == []
     with door.session_factory() as session:
         assert all(row.last_delivery_at is None for row in session.query(door.EntitySchedule))

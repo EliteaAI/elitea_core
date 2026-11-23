@@ -182,6 +182,15 @@ def test_el7607_a_hidden_toolkit_answers_like_a_missing_one_whatever_the_body(ap
     assert missing[1] == 404
 
 
+@pytest.mark.parametrize("verb, args, write", [("get", (), False), ("delete", ("meta-1",), True)])
+def test_el7607_index_meta_answers_a_hidden_toolkit_like_a_missing_one(api, verb, args, write):
+    route = getattr(api.index_meta.PromptLibAPI(), verb)
+    missing = route(7, 99, *args)
+    api.folder_refusal = ({"ok": False, "error": "Not found"}, 404)
+    assert route(7, 3, *args) == missing == NOT_FOUND
+    assert api.folder_calls[-1] == (["toolkit", "mcp"], 3, write)
+
+
 def test_el7607_a_read_only_folder_keeps_its_403_on_both_routes(api):
     api.folder_refusal = ({"ok": False, "error": "You have read-only access to this folder"}, 403)
     assert api.index_schedule.PromptLibAPI().delete(7, 3, "docs") == api.folder_refusal
