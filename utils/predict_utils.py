@@ -314,6 +314,11 @@ def store_context_budget(project_id: int, conversation_id, budget: Optional[dict
         log.warning(f"Could not store context budget for conversation {conversation_id}: {e}")
 
 
+def _discovered_token_endpoints(server_url: str) -> set:
+    from .mcp_saved_login import discovered_token_endpoints  # pylint: disable=C0415
+    return discovered_token_endpoints(server_url)
+
+
 def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int) -> None:
     """Stored OAuth logins (Microsoft toolkits, MCP logins) for runs that carry no browser token, e.g. schedules."""
     try:
@@ -324,6 +329,7 @@ def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int)
                 project_id=project_id, user_id=expansion_user_id,
                 configuration_uuid=uuid_, expected_type=type_),
             save_fn=make_rotation_saver(rpc),
+            discover_fn=_discovered_token_endpoints,
         )
     except Exception as e:  # pylint: disable=W0703
         log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)

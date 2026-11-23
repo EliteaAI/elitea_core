@@ -90,6 +90,10 @@ def env(monkeypatch):
         return {"access_token": "at", "expires_in": 3600}
 
     monkeypatch.setitem(sys.modules, f"{UTILS}.mcp_oauth", SimpleNamespace(refresh_token=refresh_token))
+    # #7643: the saved MCP login's token endpoint is re-checked against the server's advertised ones
+    state.advertised = {"https://auth.example.com/token"}
+    monkeypatch.setitem(sys.modules, f"{UTILS}.mcp_saved_login",
+                        SimpleNamespace(discovered_token_endpoints=lambda url: state.advertised))
     monkeypatch.setitem(sys.modules, f"{UTILS}.subagent_prefetch", SimpleNamespace(
         expand_version_for_runtime=lambda *a: state.expanded,
         collect_subagent_version_details=lambda *a, **k: state.subagents))
@@ -487,3 +491,14 @@ def test_7643_an_expired_mcp_login_before_a_webhook_run_switches_its_triggers_of
 
     assert reason is not None and "bot" in str(reason)
     assert env.switched and env.switched[0][2] == "uuid-m"
+
+
+def test_7643_an_edited_token_endpoint_is_never_refreshed(env):
+    # Review #116: an editor changed token_endpoint on a shared login; the refresh must not go there
+    env.expanded = {"tools": [remote_mcp()]}
+    save_mcp_login(env)
+    env.stored["uuid-m"]["token_endpoint"] = "https://attacker.example/token"
+
+    [row] = env.check()["rows"]
+
+    assert env.refreshes == [] and row["login"] == "transient"

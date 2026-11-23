@@ -332,8 +332,10 @@ def check_stored_login(project_id: int, owner_id: int, settings_key: str, config
     from tools import this  # pylint: disable=C0415
     try:
         from .stored_oauth_tokens import make_rotation_saver  # pylint: disable=C0415
+        from .mcp_saved_login import discovered_token_endpoints  # pylint: disable=C0415
         token = get_access_token(this.module.get_redis_client(), login_data, login, refresh_token,
-                                 save_fn=make_rotation_saver(rpc_tools.RpcMixin().rpc.timeout(5)))
+                                 save_fn=make_rotation_saver(rpc_tools.RpcMixin().rpc.timeout(5)),
+                                 discover_fn=discovered_token_endpoints)
     except StoredLoginExpired:
         return LOGIN_EXPIRED
     return LOGIN_OK if token else LOGIN_TRANSIENT

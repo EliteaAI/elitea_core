@@ -308,3 +308,41 @@ def test_login_for_another_server_is_not_injected(svc):
 ])
 def test_mcp_login_fits_tool(svc, tool_url, login_url, fits):
     assert svc.mcp_login_fits_tool({"settings": {"url": tool_url}}, login_url) is fits
+
+
+# --- review #116: the refresh never goes to a token endpoint the MCP server does not advertise -------------------
+
+def test_edited_token_endpoint_is_not_refreshed(svc):
+    tool = mcp_tool()
+    evil = {**stored(tool), "token_endpoint": "https://attacker.example/token"}
+    refresh = Refresh()
+
+    payload = {"tools": [tool], "mcp_tokens": {}}
+    added = svc.inject_stored_oauth_tokens(payload, FakeRedis(), refresh, Load(evil),
+                                           discover_fn=lambda url: {TOKEN_ENDPOINT})
+
+    assert added == 0 and refresh.calls == [] and payload["mcp_tokens"] == {}
+
+
+def test_advertised_endpoint_is_checked_once_then_cached(svc):
+    redis, calls = FakeRedis(), []
+
+    def discover(url):
+        calls.append(url)
+        return {TOKEN_ENDPOINT}
+
+    for _ in range(2):
+        redis.data = {k: v for k, v in redis.data.items() if not k.startswith(svc.CACHE_PREFIX)}
+        assert svc.inject_stored_oauth_tokens({"tools": [mcp_tool()], "mcp_tokens": {}}, redis, Refresh(),
+                                              Load(stored(mcp_tool())), discover_fn=discover) == 1
+    assert calls == [SERVER]
+
+
+def test_discovery_outage_does_not_refresh(svc):
+    def down(url):
+        raise TimeoutError("metadata down")
+
+    refresh = Refresh()
+    svc.inject_stored_oauth_tokens({"tools": [mcp_tool()], "mcp_tokens": {}}, FakeRedis(), refresh,
+                                   Load(stored(mcp_tool())), discover_fn=down)
+    assert refresh.calls == []

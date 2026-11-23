@@ -109,8 +109,26 @@ def _login_fingerprint(config: dict, login: dict) -> str:
     return hashlib.sha256(material.encode()).hexdigest()[:32]
 
 
+ENDPOINT_OK_PREFIX = "oauth:stored:ep:"
+ENDPOINT_OK_SECONDS = 3600
+
+
+def _mcp_endpoint_trusted(redis, login: dict, server_url: str, discover: Callable) -> bool:
+    """The saved token endpoint is still the one the MCP server advertises; checked hourly per server+endpoint."""
+    key = ENDPOINT_OK_PREFIX + hashlib.sha256(f"{server_url}|{login['token_endpoint']}".encode()).hexdigest()[:32]
+    if redis.get(key):
+        return True
+    try:
+        trusted = login["token_endpoint"] in discover(server_url)
+    except Exception:  # pylint: disable=W0703
+        return False
+    if trusted:
+        redis.setex(key, ENDPOINT_OK_SECONDS, "1")
+    return trusted
+
+
 def get_access_token(redis, config: dict, login: dict, refresh_fn: Callable, sleep: Callable = time.sleep,
-                     save_fn: Optional[Callable] = None) -> Optional[str]:
+                     save_fn: Optional[Callable] = None, discover_fn: Optional[Callable] = None) -> Optional[str]:
     """Cached access token for the stored login, refreshing it at most once per lifetime; None on a transient error."""
     suffix = f"{config['configuration_uuid']}:{_login_fingerprint(config, login)}"
     cache_key, lock_key = f"{CACHE_PREFIX}{suffix}", f"{LOCK_PREFIX}{suffix}"
@@ -129,6 +147,11 @@ def get_access_token(redis, config: dict, login: dict, refresh_fn: Callable, sle
         cached = redis.get(cache_key)
         if cached:
             return cached
+        if login.get("mcp") and discover_fn and not _mcp_endpoint_trusted(redis, login, config.get("url"), discover_fn):
+            # The secret and refresh token never go to an endpoint the server does not advertise (edited credential)
+            log.warning("Saved MCP login %s: token endpoint not advertised by its server; not refreshed",
+                        config.get("configuration_uuid"))
+            return None
         extra = {"resource": login["resource"]} if login.get("resource") else {}
         data = refresh_fn(
             token_endpoint=login["token_endpoint"],
@@ -213,7 +236,7 @@ def strip_mcp_login_secrets(tools: list) -> None:
 
 
 def inject_stored_oauth_tokens(payload: dict, redis, refresh_fn: Callable, load_fn: Callable,
-                               save_fn: Optional[Callable] = None) -> int:
+                               save_fn: Optional[Callable] = None, discover_fn: Optional[Callable] = None) -> int:
     """Add access tokens for stored logins to payload['mcp_tokens']; browser tokens always win."""
     # Payload tool dicts can be client-supplied: only their uuid is used, the login comes from load_fn (DB)
     tokens = payload.setdefault("mcp_tokens", {})
@@ -241,7 +264,7 @@ def inject_stored_oauth_tokens(payload: dict, redis, refresh_fn: Callable, load_
             if token_key in tokens:
                 continue
         try:
-            token = get_access_token(redis, config, login, refresh_fn, save_fn=save_fn)
+            token = get_access_token(redis, config, login, refresh_fn, save_fn=save_fn, discover_fn=discover_fn)
         except StoredLoginExpired:
             log.warning("Stored OAuth login of credential %s expired", configuration_uuid)
             continue
