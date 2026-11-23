@@ -17,7 +17,7 @@ class InvalidPath(Exception):
     """hvac's "nothing at this path"; CI has no hvac."""
 
 
-def _lookup(monkeypatch, secrets, hidden):
+def _lookup(monkeypatch, secrets, hidden, **options):
     reads = []
 
     class Vault:
@@ -38,13 +38,13 @@ def _lookup(monkeypatch, secrets, hidden):
 
     monkeypatch.setitem(sys.modules, "tools", types.SimpleNamespace(VaultClient=Vault))
     monkeypatch.setitem(sys.modules, "pylon.core.tools",
-                        types.SimpleNamespace(log=types.SimpleNamespace(debug=lambda *a, **k: None)))
+                        types.SimpleNamespace(log=types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)))
     monkeypatch.setitem(sys.modules, "hvac", types.ModuleType("hvac"))
     monkeypatch.setitem(sys.modules, "hvac.exceptions", types.SimpleNamespace(InvalidPath=InvalidPath))
     spec = importlib.util.spec_from_file_location("vectorstore_7660", VECTORSTORE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.get_pgvector_connection_string(2), reads
+    return module.get_pgvector_connection_string(2, **options), reads
 
 
 @pytest.mark.unit
@@ -78,3 +78,14 @@ def test_any_other_hidden_read_failure_raises_so_dispatch_omits_the_key(monkeypa
 def test_an_unreadable_project_vault_still_raises(monkeypatch):
     with pytest.raises(RuntimeError):
         _lookup(monkeypatch, RuntimeError("vault down"), {})
+
+
+@pytest.mark.unit
+def test_a_checkpoint_delete_falls_back_to_the_default_store(monkeypatch):
+    assert _lookup(monkeypatch, {}, ConnectionError("vault timeout"), default_on_hidden_failure=True)[0] is None
+
+
+@pytest.mark.unit
+def test_a_checkpoint_delete_still_raises_when_the_project_vault_is_unreadable(monkeypatch):
+    with pytest.raises(RuntimeError):
+        _lookup(monkeypatch, RuntimeError("vault down"), {}, default_on_hidden_failure=True)

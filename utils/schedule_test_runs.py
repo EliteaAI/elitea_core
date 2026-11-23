@@ -182,7 +182,7 @@ def remove_trimmed_chats(project_id: int, chats: list[TrimmedChat]) -> None:
 
             from .vectorstore import get_pgvector_connection_string
             this.module.event_node.emit('indexer_delete_checkpoint', {
-                'thread_ids': chat.thread_ids, 'pgvector_connstr': get_pgvector_connection_string(project_id),
+                'thread_ids': chat.thread_ids, 'pgvector_connstr': get_pgvector_connection_string(project_id, default_on_hidden_failure=True),
             })
             MinioClient.from_project_id(project_id).remove_bucket(f'conversation_{chat.uuid}')
         except Exception:  # noqa: BLE001 -- the rows are gone; the age cleanup removes what is left
