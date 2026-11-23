@@ -287,7 +287,7 @@ def test_a_test_run_of_a_toolkit_outside_the_project_is_400_on_toolkit_id(harnes
 
 def test_a_test_run_of_an_index_the_caller_cannot_write_is_refused_and_stores_nothing(harness, index):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(index.test_run(), 404, 'No access')
+    assert_refusal(index.test_run(), 404, 'The requested item could not be found')
     assert index.run_ids() == []
 
 
@@ -403,7 +403,7 @@ def test_the_detail_is_404_for_another_owner_another_index_or_a_run_of_an_agent(
         (500, {'toolkit_id': TOOLKIT_ID, 'index_name': INDEX}),  # a run of a saved schedule
         (999, {'toolkit_id': TOOLKIT_ID, 'index_name': INDEX}),
     ):
-        assert index.detail(run_id, **query) == ({'code': 'run_not_found', 'error': 'Run not found'}, 404), (run_id, query)
+        assert index.detail(run_id, **query) == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404), (run_id, query)
 
 
 @pytest.mark.parametrize('query, field', [
@@ -529,4 +529,4 @@ def test_the_decision_route_cannot_reach_the_test_run_of_an_index(harness, index
     harness.body, harness.query = {'action': 'approve'}, {}
     harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/{run_id}/decision'
     body, status = harness.routes.PromptLibAPI().post(project_id=PROJECT_ID, run_id=run_id)
-    assert status == 404 and body['code'] == 'run_not_found'
+    assert status == 404 and body['code'] == 'not_found'

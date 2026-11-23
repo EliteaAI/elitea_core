@@ -68,9 +68,10 @@ class Env:
                      "Optional": Optional, "dataclass": dataclasses.dataclass}
         _compile(namespace, "utils/schedule_access.py",
                  {"INDEX_EDIT_PERMISSION", "INDEX_DELETE_PERMISSION", "INDEX_WRITE_TOOLS", "ScheduleScope"})
-        namespace.update(entity_access_error=self._folder, NO_ACCESS_ERROR="Not found")
+        namespace.update(entity_access_error=self._folder)
         _compile(namespace, "utils/schedule_service.py",
-                 {"INDEX_READ_ONLY", "refusal", "ScheduleError", "check_index_rights"})
+                 {"INDEX_READ_ONLY", "NOT_FOUND_TEXT", "refusal", "ScheduleError", "ScheduleNotFound",
+                  "check_index_rights"})
         namespace.update(self._io())
         _compile(namespace, "rpc/application.py", {"_toolkit_run_refused", "_stored_index_toolkit",
                                                    "_index_write_refusal"})
@@ -212,7 +213,7 @@ def test_an_editor_on_a_read_only_folder_is_refused_and_a_hidden_toolkit_is_not_
     env.folder_refusal = ({"ok": False, "error": "You have read-only access to this folder"}, 403)
     assert refusal_of(env) == {"code": "INDEX_READ_ONLY", "error": "You have read-only access to this folder"}
     env.folder_refusal = ({"ok": False, "error": "Not found"}, 404)
-    assert refusal_of(env) == {"code": "INDEX_NOT_FOUND", "error": "Not found"}
+    assert refusal_of(env) == {"code": "INDEX_NOT_FOUND", "error": "The requested item could not be found"}
     assert env.dispatched == []
 
 
@@ -224,7 +225,7 @@ def test_the_run_uses_the_stored_toolkit_not_the_settings_the_payload_carries(en
 
 @pytest.mark.parametrize("toolkit_config", [{"toolkit_id": None}, {"toolkit_id": 99}, {"project_id": 1}])
 def test_an_index_write_on_no_stored_toolkit_of_this_project_is_not_found_without_reading_rights(env, toolkit_config):
-    assert refusal_of(env, **toolkit_config) == {"code": "INDEX_NOT_FOUND", "error": "Not found"}
+    assert refusal_of(env, **toolkit_config) == {"code": "INDEX_NOT_FOUND", "error": "The requested item could not be found"}
     assert env.permission_reads == [] and env.dispatched == []
 
 

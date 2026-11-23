@@ -425,21 +425,21 @@ class TestCheckAsRunActor:
         run_id = _seed_run(harness, other_id, {'trigger': 'manual', 'requested_by': ADMIN_ID})
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': run_id},
                                     suffix='/check')
-        assert (status, body['code']) == (404, 'run_not_found')
+        assert (status, body['code']) == (404, 'not_found')
         assert harness.scans == []
 
     def test_check_refuses_an_unknown_run_id(self, harness):
         schedule_id = harness.seed()
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': 9999},
                                     suffix='/check')
-        assert (status, body['code']) == (404, 'run_not_found')
+        assert (status, body['code']) == (404, 'not_found')
         assert harness.scans == []
 
     def test_check_refuses_a_run_id_beyond_the_database_range_as_unknown(self, harness):
         schedule_id = harness.seed()
         body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id, 'run_id': 2**31},
                                     suffix='/check')
-        assert (status, body['code']) == (404, 'run_not_found')
+        assert (status, body['code']) == (404, 'not_found')
         assert harness.scans == []
 
     @pytest.mark.parametrize('run_id', [1, 0])

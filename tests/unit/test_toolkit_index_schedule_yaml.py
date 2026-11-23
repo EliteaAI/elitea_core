@@ -284,7 +284,7 @@ def test_import_fails_the_item_when_the_store_cannot_be_read(env):
 def test_import_fails_an_item_the_admin_may_not_write_with_the_service_refusal(env):
     env.folder_error = ({'error': 'Toolkit not found'}, 404)
     report = env.import_items(index_item(), schema_version=2)
-    assert report['failed'] == [{'name': 'Docs refresh', 'reason': 'Toolkit not found'}]
+    assert report['failed'] == [{'name': 'Docs refresh', 'reason': 'The requested item could not be found'}]
     assert env.index_rows() == []
     assert env.reads == []  # the rights come before any read of the store
 

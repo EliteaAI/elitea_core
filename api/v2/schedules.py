@@ -50,7 +50,7 @@ ROUTES = {
 }
 # The body of `schedule_service.refusal`; the handler tests load this module without the service
 NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
-ID_OUT_OF_RANGE = {"code": "not_found", "error": "Schedule not found"}, 404
+ID_OUT_OF_RANGE = {"code": "not_found", "error": "The requested item could not be found"}, 404
 
 
 def _tail(schedule_id: int | None, run_id: int | None) -> str:

@@ -68,9 +68,9 @@ def test_7011_r8_1_a_method_the_url_does_not_serve_is_405_with_code_and_error(ha
     assert_refusal(harness.call('get', None, harness.seed(), suffix='/pause'), 405, code='method_not_allowed')
 
 
-def test_7011_r8_1_a_folder_denial_is_returned_with_code_and_its_text(harness):
+def test_7011_r8_1_a_folder_denial_404_answers_the_generic_not_found(harness):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(harness.call('post', agent_body()), 404, 'No access')
+    assert_refusal(harness.call('post', agent_body()), 404, 'The requested item could not be found')
 
 
 def test_7011_r8_1_resume_past_the_project_cap_is_409_with_code_and_error(harness):

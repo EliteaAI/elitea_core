@@ -28,7 +28,7 @@ ADMIN_ID = 99
 PERMISSION_PREFIX = 'models.applications.schedules.'
 EDITOR = {PERMISSION_PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 ADMIN = EDITOR | {PERMISSION_PREFIX + 'admin'}
-NOT_FOUND = {'code': 'not_found', 'error': 'Schedule not found'}
+NOT_FOUND = {'code': 'not_found', 'error': 'The requested item could not be found'}
 
 
 class FakeSpan:
@@ -317,7 +317,7 @@ def test_7011_r1_3_version_of_another_entity_is_400_on_version_id(harness):
 
 def test_7011_r1_4_folder_rights_denial_is_returned_and_nothing_is_saved(harness):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(harness.call('post', agent_body()), 404, 'No access')
+    assert_refusal(harness.call('post', agent_body()), 404, 'The requested item could not be found')
     assert harness.row(1) is None
 
 

@@ -180,7 +180,7 @@ def test_a_toolkit_outside_the_project_is_400_on_toolkit_id(harness, env):
 
 def test_a_folder_the_caller_cannot_write_is_refused_before_the_index_is_read(harness, env):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(env.check(), 404, 'No access')
+    assert_refusal(env.check(), 404, 'The requested item could not be found')
     assert env.expanded == []
 
 

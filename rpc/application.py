@@ -69,9 +69,8 @@ from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
 from ..utils.sio_guards import ensure_sio_user_in_project
-from ..utils.folder_access import NO_ACCESS_ERROR
 from ..utils.schedule_access import INDEX_WRITE_TOOLS, ScheduleScope
-from ..utils.schedule_service import ScheduleError, check_index_rights
+from ..utils.schedule_service import NOT_FOUND_TEXT, ScheduleError, check_index_rights
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
 from ..utils.internal_tools import (
     require_internal_mcp_pat,
@@ -352,7 +351,7 @@ def _index_write_refusal(project_id: int, sid, user_id, toolkit: Optional[dict],
                          permission: str) -> Optional[AdmissionDenied]:
     """Why the caller may not make this index write, or None: the index editor's rule, on the toolkit that runs."""
     if toolkit is None:
-        return AdmissionDenied("INDEX_NOT_FOUND", NO_ACCESS_ERROR)
+        return AdmissionDenied("INDEX_NOT_FOUND", NOT_FOUND_TEXT)
     auth_data = {'auth_data': auth.sio_users[sid]} if sid else {}
     permissions = frozenset(auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id, **auth_data))
     try:

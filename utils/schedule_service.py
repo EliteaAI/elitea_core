@@ -37,6 +37,7 @@ TOOLKIT_INDEX_UNIQUE = 'uq_entity_schedules_toolkit_index'
 INDEX_SCHEDULED = 'This index already has a schedule'
 INDEX_UNAVAILABLE = 'The index could not be checked; try again'
 INDEX_READ_ONLY = 'You have read-only access to this index'
+NOT_FOUND_TEXT = 'The requested item could not be found'
 # A Toolkit Index run starts from the saved index settings: no version, input or approval of its own
 INDEX_REFUSED_FIELDS = ('application_id', 'version_id', 'run_mode', 'prompt', 'risk_ack')
 
@@ -56,7 +57,7 @@ class ScheduleError(Exception):
 
 class ScheduleNotFound(ScheduleError):
     def __init__(self):
-        super().__init__('not_found', 'Schedule not found', 404)
+        super().__init__('not_found', NOT_FOUND_TEXT, 404)
 
 
 def _field_error(field: str, message: str) -> ScheduleError:
@@ -151,7 +152,7 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
     access_error = entity_access_error(project_id, entity_type, application_id, write=True)
     if access_error:
         body, status = access_error
-        raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
+        raise ScheduleNotFound() if status == 404 else ScheduleError('read_only', body['error'], status)
 
 
 def read_index_configuration(session, project_id: int, toolkit, index_name: str, user_id: int) -> dict | None:
@@ -212,7 +213,7 @@ def check_index_rights(project_id: int, toolkit_id: int | None, scope: ScheduleS
                                            user_id=scope.user_id)
         if access_error:
             body, status = access_error
-            raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
+            raise ScheduleNotFound() if status == 404 else ScheduleError('read_only', body['error'], status)
     if permission not in scope.permissions:  # an admin too: the run re-checks it for the owner
         raise ScheduleError('read_only', INDEX_READ_ONLY, 403)
 
