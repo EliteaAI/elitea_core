@@ -107,6 +107,30 @@ class ProjectAPI(api_tools.APIModeHandler):
         client_id = data.client_id
         client_secret = data.client_secret
         scope = data.scope
+        saved_login = None
+        if data.save_login:
+            from ...utils.mcp_saved_login import (  # pylint: disable=C0415
+                SavedLoginRefused, check_login_target, load_login_credential,
+            )
+            if (data.grant_type or 'authorization_code') != 'authorization_code':
+                return {"error": "invalid_request", "error_description": "save_login needs an authorization code"}, 400
+            try:
+                saved_login = load_login_credential(project_id, data.configuration_uuid, auth.current_user().get('id'))
+                # Checked before any secret is loaded or sent: the browser chooses token_endpoint
+                login_url = (saved_login.get('data') or {}).get('url')
+                check_login_target(login_url, data.token_endpoint, data.resource or login_url)
+            except SavedLoginRefused as e:
+                return {"error": e.code, "error_description": str(e)}, e.status
+            # A non-DCR client configured on the credential is used as is; the browser cannot swap it
+            login_data = saved_login.get('data') or {}
+            # A client registered by DCR for an earlier login is not a configured one; only typed-in clients pin
+            if not data.used_dcr and login_data.get('client_id') and not login_data.get('used_dcr'):
+                client_id, client_secret = login_data['client_id'], login_data.get('client_secret')
+            scope = scope or login_data.get('scopes')
+            # The client comes only from the credential (or DCR): no toolkit or vault-reference secrets here
+            data.toolkit_id, data.oauth_app_id = None, None
+            if client_secret and client_secret != login_data.get('client_secret') and not data.used_dcr:
+                client_secret = None
 
 
         # Helper function to detect masked secrets (e.g., "*****", "****6afP")
@@ -293,6 +317,13 @@ class ProjectAPI(api_tools.APIModeHandler):
                      f"expires_in={token_data.get('expires_in')}, "
                      f"token_type={token_data.get('token_type')}, "
                      f"scope={token_data.get('scope')}")
+            if saved_login is not None:
+                from ...utils.mcp_saved_login import SavedLoginRefused, save_exchanged_login  # pylint: disable=C0415
+                try:
+                    return save_exchanged_login(project_id, saved_login, token_data, data,
+                                                client_id=client_id, client_secret=client_secret, scope=scope), 200
+                except SavedLoginRefused as e:
+                    return {"error": e.code, "error_description": str(e)}, e.status
             return token_data, 200
 
         except ValueError as e:
@@ -301,6 +332,36 @@ class ProjectAPI(api_tools.APIModeHandler):
         except Exception as e:
             log.error(f"MCP OAuth proxy: unexpected error - {e}")
             return {"error": "internal_error", "error_description": str(e)}, 500
+
+
+    @register_openapi(
+        name="Log out MCP saved login",
+        description="Remove the saved MCP login of an mcp_login credential and its cached access tokens.",
+        parameters=[
+            {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "configuration_uuid", "in": "query", "schema": {"type": "string"}},
+        ],
+    )
+    @auth.decorators.check_api({
+        "permissions": ["models.applications.mcp_auth.post"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": True},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
+        }})
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, **kwargs):
+        from ...utils.mcp_saved_login import (  # pylint: disable=C0415
+            MCP_LOGIN_TYPE, SavedLoginRefused, forget_cached_tokens, load_login_credential,
+        )
+        configuration_uuid = request.args.get('configuration_uuid')
+        try:
+            load_login_credential(project_id, configuration_uuid, auth.current_user().get('id'))
+        except SavedLoginRefused as e:
+            return {"error": e.code, "error_description": str(e)}, e.status
+        self.module.context.rpc_manager.timeout(10).configurations_clear_stored_login(
+            project_id=project_id, configuration_uuid=configuration_uuid, expected_type=MCP_LOGIN_TYPE)
+        forget_cached_tokens(configuration_uuid)
+        return {"ok": True}, 200
 
 
 class API(api_tools.APIBase):

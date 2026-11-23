@@ -14,7 +14,7 @@ from ..models.all import ApplicationVersion
 from ..models.pd.mcp_oauth import VAULT_SECRET_PATTERN
 from .application_tools import ConfigurationExpandError, expand_toolkit_settings
 from .pipeline_utils import validate_yaml_from_str
-from .stored_oauth_tokens import LOGIN_RESOLVERS
+from .stored_oauth_tokens import LOGIN_RESOLVERS, MCP_LOGIN_KEY, mcp_login_fits_tool
 
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
@@ -30,7 +30,8 @@ TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint
                'ms_graph': 'MS Graph'}
 INCOMPLETE_CODE = 'scan_incomplete'
 # Same wording as the Connections check (schedule_prerun BROWSER_ONLY_TEXT / DELEGATED_TEXT)
-WEBHOOK_SIGN_IN = 'Webhooks cannot wait for a sign-in; use a toolkit with a saved login.'
+WEBHOOK_SIGN_IN = ('Webhooks cannot wait for a sign-in; use a toolkit with a saved login '
+                   '(for MCP: a Team or Private MCP login instead of "Browser only").')
 DELEGATED_TEXT = "acts with the signed-in person's Microsoft account; unattended runs cannot use it"
 
 
@@ -72,7 +73,12 @@ def _uses_personal_token(tool, expanded: dict) -> bool:
     # A saved login lets the run sign in without a browser (inject_stored_logins), so only a delegated
     # credential without one needs the owner. The referenced credential is authoritative.
     if tool.type == 'mcp' or (tool.meta or {}).get('mcp') or tool.type.startswith('mcp_'):
-        return True
+        # A saved MCP login (#7643) runs as its bot account, so no person needs to be signed in
+        login = expanded.get(MCP_LOGIN_KEY) or {}
+        usable = (MCP_LOGIN_KEY in (tool.settings or {}) and login.get('saved_login') is True
+                  and bool(LOGIN_RESOLVERS[MCP_LOGIN_KEY](login))
+                  and mcp_login_fits_tool({'settings': expanded}, login.get('url')))
+        return not usable
     settings_key = f'{tool.type}_configuration'
     if tool.type != 'openapi' and settings_key not in LOGIN_RESOLVERS:
         return False

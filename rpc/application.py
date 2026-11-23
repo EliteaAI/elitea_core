@@ -64,7 +64,7 @@ from ..utils.skill_utils import (
 from ..models.skill import Skill, SkillVersion
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
     get_public_base_url, get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
-    load_context_settings_from_conversation, user_input_preview
+    load_context_settings_from_conversation, user_input_preview, inject_stored_logins
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
@@ -2302,6 +2302,16 @@ class RPC:
             resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id, admitted_run=False)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
+        # A saved MCP login (#7643) answers the test like a browser token; its secrets never go to the runtime
+        login_payload = {'tools': [data['toolkit_config']], 'mcp_tokens': dict(data.get('mcp_tokens') or {})}
+        # A (re-)login check must reach the sign-in, so the current saved login does not answer it
+        if not data.pop('skip_stored_logins', False):
+            inject_stored_logins(login_payload, project_id, user_id)
+        else:
+            from ..utils.stored_oauth_tokens import strip_mcp_login_secrets  # pylint: disable=C0415
+            strip_mcp_login_secrets(login_payload['tools'])
+        data['mcp_tokens'] = login_payload['mcp_tokens']
 
         # Get project-specific auth_token from secrets
         try:

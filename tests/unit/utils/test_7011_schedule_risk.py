@@ -235,6 +235,28 @@ class TestEL7011R2PersonalToken:
         scan.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp', 'refresh_token': 'r'}}
         assert scan.run() == []
 
+    def test_7643_mcp_with_saved_login_does_not_block(self, scan):
+        scan.version = _version(tools=[_tool('mcp', 'Remote', settings={'mcp_login_configuration': {'elitea_title': 'bot'}})])
+        # Expansion replaces the refresh token with a saved_login flag (#7643: the token never leaves Main)
+        scan.expanded['mcp'] = {'url': 'https://mcp', 'mcp_login_configuration': {
+            'url': 'https://mcp', 'token_endpoint': 'https://auth/token', 'saved_login': True}}
+        assert scan.run() == []
+
+    def test_7643_mcp_login_reference_without_token_still_blocks(self, scan):
+        scan.version = _version(tools=[_tool('mcp', 'Remote', settings={'mcp_login_configuration': {'elitea_title': 'bot'}})])
+        scan.expanded['mcp'] = {'url': 'https://mcp', 'mcp_login_configuration': {
+            'url': 'https://mcp', 'token_endpoint': 'https://auth/token', 'saved_login': False}}
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('login', [
+        {'url': 'https://mcp', 'saved_login': True},  # no token endpoint: the login cannot be refreshed
+        {'url': 'https://other', 'token_endpoint': 'https://auth/token', 'saved_login': True},  # other server
+    ])
+    def test_7643_unusable_mcp_login_still_blocks(self, scan, login):
+        scan.version = _version(tools=[_tool('mcp', 'Remote', settings={'mcp_login_configuration': {'elitea_title': 'bot'}})])
+        scan.expanded['mcp'] = {'url': 'https://mcp', 'mcp_login_configuration': login}
+        assert _codes(scan.run()) == ['personal_signin_required']
+
     def test_7309_openapi_refresh_token_still_blocks(self, scan):
         # Only the Microsoft stored-login path injects tokens; OpenAPI still needs a live sign-in
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'openapi_configuration': {'elitea_title': 'c'}})])
