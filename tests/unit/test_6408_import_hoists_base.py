@@ -132,13 +132,24 @@ class TestEnsureBaseVersion:
 
         assert _names(result) == ['base', 'yoda', 'vader', 'leia']
 
-    def test_a_base_clone_is_still_prepended_when_none_exists(self, export_import):
+    def test_a_sole_named_version_is_renamed_to_base_not_cloned(self, export_import):
+        """Issue #7636: a forked agent's skill arrived as both 'base' and 'v1.2'."""
+        source = {'name': 'v1.2', 'id': 42, 'instructions': 'hmm', 'meta': {'parent_entity_id': 5},
+                  'files': [{'path': 'a.txt'}]}
+
+        result = export_import.ensure_base_version([source])
+
+        assert result == [{**source, 'name': 'base'}]
+        assert source['name'] == 'v1.2'
+
+    def test_a_base_clone_is_prepended_to_several_named_versions(self, export_import):
         result = export_import.ensure_base_version([
-            {'name': 'yoda', 'instructions': 'hmm'},
+            {'name': 'v1.1', 'instructions': 'old'},
+            {'name': 'v1.2', 'instructions': 'new'},
         ])
 
-        assert _names(result) == ['base', 'yoda']
-        assert result[0]['instructions'] == 'hmm'
+        assert _names(result) == ['base', 'v1.1', 'v1.2']
+        assert result[0]['instructions'] == 'old'
 
     def test_an_empty_list_is_unchanged(self, export_import):
         assert export_import.ensure_base_version([]) == []
