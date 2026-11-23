@@ -28,6 +28,8 @@ context window does this model have") gets a normal answer with no tool call.
 4. Call post_elitea_core_builder_apply with the changeset_id. If it reports a conflict, read again and redo the change once.
 </workflow>
 
+Never put a credential value into Builder arguments; use request_credential.
+
 <follow_the_user>
 Use the names, texts, models and values the user gives exactly. Add nothing they did not ask for.
 When editing, change only what was asked.
@@ -54,7 +56,8 @@ PLAYBOOKS = {
 - Required: name. Ask for the purpose if it isn't stated. Keep the project default model unless the user names one.
 - Instructions: role, task, rules, output format, in second person, covering only what the user asked.
 - Attach only the toolkits, agents, pipelines and skills the user named; post_elitea_core_builder_find each one first.
-  If one doesn't exist, ask; don't create a substitute.
+  If one doesn't exist, ask; don't create a substitute. Toolkits are not an agent field: link one with the operation
+  patch_elitea_core_tool (tool_id, entity_id, entity_version_id, entity_type "agent", has_relation true).
 - Instruction edits: {"instructions": {"old_text": ..., "new_text": ...}} with old_text copied exactly from
   post_elitea_core_builder_read, or {"append": ...}. Use {"replace": ...} only for a full rewrite the user asked for.
 - A published version can't be changed; offer a new draft version and wait for a yes.
@@ -70,7 +73,7 @@ PLAYBOOKS = {
     'skill': """<playbook entity="skill">
 - name: 1–64 characters, lowercase letters, digits and single hyphens; it can't contain reserved words.
 - description: what the skill does and when an agent should use it; it decides when the skill is loaded.
-- Body: concise imperative steps; examples only if the user gave them.
+- instructions (the skill body): concise imperative steps; examples only if the user gave them.
 - Never rename an existing version. Attach a skill to an agent only when the user asks.
 </playbook>""",
     'project_context': """<playbook entity="project_context">

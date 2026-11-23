@@ -4,6 +4,7 @@ Pure orchestration over an injected ``call(op, args)`` (the existing endpoints, 
 ``store``. Typed handling for agent, pipeline, skill and project context; every other old builder endpoint goes
 through the operation ``catalog``. The model sends only the fields that change; the server builds the full request.
 """
+import re
 import time
 import uuid
 
@@ -16,11 +17,12 @@ TYPED = ('agent', 'pipeline', 'skill', 'project_context')
 LOOKUP = ('toolkit', 'model', 'configuration')
 ENTITY_TYPES = TYPED + LOOKUP + ('operation',)
 CHANGESET_TTL_S = 30 * 60
+LIST_FIELDS = frozenset({'tags', 'conversation_starters', 'variables'})
 # Agent / pipeline: `name` and `description` belong to the application (PUT application); everything else to the
 # version (PUT version, instructions through the safe patch). The version's own name is read-only (`version_name`).
 APPLICATION_LEVEL_FIELDS = frozenset({'name', 'description'})
 VERSION_FIELDS = frozenset({
-    'instructions', 'llm_settings', 'tools', 'variables', 'conversation_starters', 'welcome_message',
+    'instructions', 'llm_settings', 'variables', 'conversation_starters', 'welcome_message',
     'pipeline_settings', 'tags', 'meta', 'agent_type', 'notes',
 })
 APPLICATION_FIELDS = APPLICATION_LEVEL_FIELDS | VERSION_FIELDS
@@ -30,6 +32,56 @@ SKILL_VERSION_FIELDS = frozenset({'instructions', 'tags', 'meta', 'run_settings'
 SKILL_FIELDS = SKILL_LEVEL_FIELDS | SKILL_VERSION_FIELDS
 PROJECT_CONTEXT_FIELDS = frozenset({'content', 'enabled', 'activation_description'})
 LOOKUP_OPS = {'toolkit': 'list_toolkits', 'model': 'list_models', 'configuration': 'list_configurations'}
+
+
+# A key is secret when one of its words is a marker, or two adjacent words form one (``api_key``, ``authToken``);
+# ``primary_key`` / ``project_key`` are not. ``{{secret.…}}`` references name a stored secret, never its value.
+_SECRET_WORDS = frozenset({'password', 'passwd', 'passphrase', 'secret', 'token', 'authorization', 'bearer',
+                           'credential', 'credentials', 'cookie', 'apikey'})
+_SECRET_PAIRS = frozenset({('api', 'key'), ('private', 'key'), ('access', 'key'), ('secret', 'key'),
+                           ('client', 'secret'), ('connection', 'string')})
+_AUTH_SCHEMES = ('bearer ', 'basic ')
+_WORDS = re.compile(r'[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])')
+MASK = '****'
+
+
+def _secret_name(key) -> bool:
+    words = [w.lower() for w in _WORDS.findall(str(key))]
+    return bool(_SECRET_WORDS & set(words)) or any(pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
+
+
+def _is_reference(value) -> bool:
+    return isinstance(value, str) and value.startswith('{{secret.')
+
+
+def masked(value, key=None, depth=0):
+    """``value`` as the chat and the model may see it: every secret-named key, at any depth, and every
+    ``Bearer …`` / ``Basic …`` string are masked; ``{{secret.…}}`` references stay."""
+    if value in (None, '') or _is_reference(value) or depth > 8:
+        return value
+    if isinstance(value, dict):
+        return {k: masked(v, k, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [masked(item, key, depth + 1) for item in value]
+    if (key is not None and _secret_name(key)) or (isinstance(value, str) and value.lower().startswith(_AUTH_SCHEMES)):
+        return MASK
+    return value
+
+
+def _masked(args, path=''):
+    """Operation arguments as the chat shows them. A secrets operation shows only the secret's name (``name``, else
+    the ``secret`` path argument): any other text argument may hold the value."""
+    if not isinstance(args, dict):
+        return args
+    if '/secrets/' not in f'/{path or ""}':
+        return masked(args)
+    shown = 'name' if 'name' in args else 'secret'
+
+    def one(key, value):
+        if key in (shown, 'project_id'):
+            return value
+        return MASK if isinstance(value, str) and value and not _is_reference(value) else masked(value, key)
+    return {k: one(k, v) for k, v in args.items()}
 
 
 def _invalid(message, errors=None):
@@ -70,7 +122,7 @@ class MemoryStore:
 
 class BuilderService:
     def __init__(self, project_id, user_id, call, store, catalog, can_write, seen_playbooks=None,
-                 max_starters=limits.DEFAULT_MAX_STARTERS, now=time.time):
+                 max_starters=limits.DEFAULT_MAX_STARTERS, now=time.time, material=None):
         self.project_id = project_id
         self.user_id = user_id
         self.call = call
@@ -80,6 +132,7 @@ class BuilderService:
         self.seen_playbooks = seen_playbooks if seen_playbooks is not None else set()
         self.max_starters = max_starters
         self.now = now
+        self.material = material
 
     # --- find ---------------------------------------------------------------------------------------------------
 
@@ -92,12 +145,21 @@ class BuilderService:
             return self._with_playbook(entity_type, {'status': 'ok', 'candidates': [{'id': 'project'}],
                                                      'ambiguous': False})
         if entity_type in LOOKUP:
-            rows = self.call(LOOKUP_OPS[entity_type], {'query': query})
-            rows = rows.get('rows', rows) if isinstance(rows, dict) else rows
+            args = {'query': query}
+            if entity_type == 'model':
+                args = {'section': 'embedding' if 'embedding' in (query or '').lower() else 'llm',
+                        'include_shared': 'true'}
+            rows = self.call(LOOKUP_OPS[entity_type], args)
+            if isinstance(rows, dict):
+                if rows.get('error'):
+                    return {'status': 'error', 'message': str(rows['error'])}
+                rows = rows.get('rows', rows.get('items', []))
             wanted = (query or '').lower()
             candidates = [
                 {'id': r.get('id'), 'name': r.get('name') or r.get('label') or r.get('display_name')}
-                for r in rows or [] if wanted in str(r.get('name') or r.get('label') or '').lower()
+                for r in rows or [] if isinstance(r, dict)
+                and (not wanted or wanted in ' '.join(str(r.get(k) or '') for k in ('name', 'label', 'display_name')).lower()
+                     or (entity_type == 'model' and wanted in ('embedding', 'embeddings')))
             ][:limit]
             return {'status': 'ok', 'candidates': candidates, 'ambiguous': False}
         op = 'list_skills' if entity_type == 'skill' else 'list_applications'
@@ -204,6 +266,10 @@ class BuilderService:
         if op not in ('create', 'update', 'delete'):
             return _invalid("op must be create, update or delete")
         if op == 'create':
+            if entity_name and not changes.get('name'):
+                changes = {**changes, 'name': entity_name}
+            if entity_type == 'skill' and 'body' in changes and not changes.get('instructions'):
+                changes = {**{k: v for k, v in changes.items() if k != 'body'}, 'instructions': changes['body']}
             return self._propose_create(entity_type, changes)
 
         entity_id, version_id, stop = self._resolve_target(entity_type, entity_id, version_id, entity_name)
@@ -246,6 +312,12 @@ class BuilderService:
                             'name': display_name or after.get('name') or state.get('name')})
 
     def _propose_create(self, entity_type, fields):
+        try:
+            fields = cs.apply_changes({f: [] for f in LIST_FIELDS if f in (fields or {})}, fields)
+        except cs.ChangeError as exc:
+            return _invalid(str(exc), [{'field': str(exc).split(':')[0], 'message': str(exc)}])
+        if entity_type in ('agent', 'pipeline'):
+            fields.setdefault('llm_settings', {})
         required = {'agent': ('name',), 'pipeline': ('name', 'instructions'), 'skill': ('name', 'description',
                                                                                           'instructions'),
                     'project_context': ('content',)}[entity_type]
@@ -268,6 +340,14 @@ class BuilderService:
             return _invalid(f"unknown operation '{op_id}'; use post_elitea_core_builder_find with type 'operation'")
         if errors:
             return _invalid('The arguments do not match the operation schema; nothing was called.', errors)
+        mismatch = self._version_mismatch(dispatch_args)
+        if mismatch:
+            return _invalid(mismatch, [{'field': 'entity_version_id', 'message': mismatch}])
+        if self.material is not None and self.material(self.catalog.tool(op_id), dispatch_args):
+            # (#7228) a credential value never goes through the model: refused before anything is stored
+            return {'status': 'refused', 'code': 'CREDENTIALS_VIA_FORM',
+                    'message': 'Credentials are entered by the user in the credential form, never passed as '
+                               'arguments; nothing was saved.'}
         return self._store({'entity_type': 'operation', 'op': 'call', 'entity_id': op_id, 'before': None,
                             'after': dispatch_args, 'destructive': kind == 'destructive', 'name': op_id})
 
@@ -293,8 +373,14 @@ class BuilderService:
             'summary': self._describe(row),
         }
         if row['op'] == 'call':
-            proposal['arguments'] = row['after']
+            proposal['arguments'] = _masked(row['after'], self._op_path(row['entity_id']))
         return proposal
+
+    def _op_path(self, op_id):
+        try:
+            return self.catalog.tool(op_id).get('path') or ''
+        except UnknownOperation:
+            return ''
 
     # --- confirm / apply ----------------------------------------------------------------------------------------
 
@@ -386,6 +472,10 @@ class BuilderService:
         merged = {}
         for response in responses:
             merged.update(response or {})
+        if app_fields and isinstance(responses[0], dict) and responses[0].get('name'):
+            merged['name'] = responses[0]['name']
+        elif len(responses) > 1 or not app_fields:
+            merged.pop('name', None)
         return merged
 
     @staticmethod
@@ -414,7 +504,9 @@ class BuilderService:
         backup = (response.get('mcp_backup_version') or {}).get('name')
         if backup:
             lines.append(f'- Backup: `{backup}`')
-        result = {'status': 'applied', 'summary': '\n'.join(lines), 'result': response}
+        result = {'status': 'applied', 'summary': '\n'.join(lines), 'result': masked(response)}
+        if response.get('governance_requests'):
+            result['governance_requests'] = response['governance_requests']
         if backup:
             result['backup'] = backup
         if row['entity_type'] in ('agent', 'pipeline') and row['op'] != 'delete':
@@ -424,4 +516,36 @@ class BuilderService:
             entity_id = row['entity_id'] if row['op'] != 'create' else response.get('id')
             result['chip'] = {'type': row['entity_type'], 'id': entity_id,
                               'version_id': created_version or row.get('version_id'), 'name': name}
+        elif row['op'] == 'call':
+            chip = self._linked_entity_chip(row['after'] or {})
+            if chip:
+                result['chip'] = chip
         return result
+
+    def _version_mismatch(self, args):
+        """A link names the agent (entity_id) and one of its versions (entity_version_id); both must match."""
+        entity_id, version_id = args.get('entity_id'), args.get('entity_version_id')
+        if args.get('entity_type') not in ('agent', 'pipeline', 'application') or not entity_id or not version_id:
+            return None
+        app = self.call('get_application', {'application_id': entity_id})
+        versions = (app or {}).get('versions') if isinstance(app, dict) and not app.get('error') else None
+        if versions is None:
+            return f'Agent {entity_id} not found; entity_id is the agent id from builder_find, not a version id.'
+        if version_id not in {v.get('id') for v in versions}:
+            return (f'Version {version_id} does not belong to agent {entity_id}; read the agent and use its '
+                    f'version_id as entity_version_id.')
+        return None
+
+    def _linked_entity_chip(self, args):
+        """An operation that changed an agent or pipeline version (e.g. linking a toolkit) refreshes its editor."""
+        entity_type = args.get('entity_type')
+        entity_id, version_id = args.get('entity_id'), args.get('entity_version_id')
+        if entity_type not in ('agent', 'pipeline', 'application') or not entity_id:
+            return None
+        app = self.call('get_application', {'application_id': entity_id}) or {}
+        if not isinstance(app, dict) or app.get('error'):
+            return None
+        agent_type = (app.get('version_details') or {}).get('agent_type')
+        return {'type': 'pipeline' if agent_type == 'pipeline' else 'agent', 'id': entity_id,
+                'version_id': version_id or (app.get('version_details') or {}).get('id'),
+                'name': app.get('name') or ''}

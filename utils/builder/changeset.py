@@ -37,6 +37,13 @@ def _apply_text_patch(field: str, current, patch: dict) -> str:
 
 
 def _merge(field: str, current, change):
+    if _is_text_patch(change) and isinstance(current, list):
+        if set(change) == {'append'}:
+            added = change['append'] if isinstance(change['append'], list) else [change['append']]
+            return [*current, *added]
+        if set(change) == {'replace'}:
+            return copy.deepcopy(change['replace'])
+        raise ChangeError(f"{field}: a list change is the full list, or {{append}} / {{replace}}")
     if _is_text_patch(change) and (current is None or isinstance(current, str)):
         return _apply_text_patch(field, current, change)
     if isinstance(change, dict) and isinstance(current, dict):

@@ -70,3 +70,20 @@ def run_builder_keys_migration(project_ids, migrate_project, migrate_settings, d
         result["updated_conversations"] += conversations
         result["updated_settings"] += settings
     return result
+
+
+def run_enable_default_modules(project_ids, enable_project, enable_legacy, dry_run: bool) -> dict:
+    """R-2.0.9: the Elitea Builder and Ask User defaults on per project (`enable_project`), then once in the legacy
+    personalization (`enable_legacy`). One failing project is listed and the run goes on."""
+    result = {"updated_settings": 0, "updated_legacy_users": 0, "failed_projects": [], "legacy_failed": False,
+              "dry_run": dry_run}
+    for pid in project_ids:
+        try:
+            result["updated_settings"] += enable_project(pid, dry_run)
+        except Exception:  # pylint: disable=W0703
+            result["failed_projects"].append(pid)
+    try:
+        result["updated_legacy_users"] = enable_legacy(dry_run)
+    except Exception:  # pylint: disable=W0703
+        result["legacy_failed"] = True
+    return result

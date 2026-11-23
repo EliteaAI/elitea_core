@@ -752,6 +752,46 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return result
 
     @web.method()
+    def enable_builder_default_modules(self, *args, **kwargs):
+        """Admin task: Elitea Builder and Ask User on as default modules for every user (R-2.0.9, #7383). Idempotent.
+
+        Turns on the Chats and Agents defaults of both modules in every stored per-project module settings row,
+        including rows where the user had turned them off, and in the legacy personalization where it holds them.
+        Existing agents and chats are not changed: the defaults apply to new ones. Run after
+        migrate_elitea_builder_keys.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=true]"
+
+        Examples:
+            "project_id=all"                - enable everywhere (default)
+            "project_id=all;dry_run=true"   - dry run: report counts, change nothing
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.builder_keys import run_enable_default_modules  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("enable_builder_default_modules: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        rpc = self.context.rpc_manager.timeout(30)
+        result = run_enable_default_modules(
+            project_ids,
+            lambda pid, dry_run: rpc.social_enable_builder_default_modules(pid, dry_run),
+            lambda dry_run: rpc.social_enable_legacy_builder_default_modules(dry_run),
+            dry_run_flag(param, default=False),
+        )
+        for pid in result["failed_projects"]:
+            log.error("enable_builder_default_modules: project %s failed", pid)
+        if result["legacy_failed"]:
+            log.error("enable_builder_default_modules: the legacy personalization was not updated")
+        log.info("enable_builder_default_modules: %s", result)
+        return result
+
+    @web.method()
     def close_stuck_chat_runs(self, *args, **kwargs):
         """Admin task: end chat answers stuck "streaming" that nothing will end any more (R-2.0.9, EL-7385).
 

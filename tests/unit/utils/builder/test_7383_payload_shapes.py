@@ -52,9 +52,9 @@ class StrictEndpoints:
             assert 'name' not in args, 'a rename must not rename the version'
             if self.fail_update_version:
                 return {'error': 'conversation_starters cannot exceed 4'}
-            return {'ok': True}
+            return {'ok': True, 'name': 'base'}
         if op == 'patch_instructions':
-            return {'mcp_backup_version': {'id': 99, 'name': 'mcp-backup-10-x'}}
+            return {'name': 'base', 'mcp_backup_version': {'id': 99, 'name': 'mcp-backup-10-x'}}
         return {'ok': True}
 
 
@@ -97,6 +97,12 @@ class TestCreate:
         assert result['status'] == 'applied'
         assert api.writes[0][1]['versions'][0] == {'name': 'base', 'instructions': 'Do it.'}
 
+    def test_skill_create_takes_the_body_as_its_instructions(self, service, api):
+        result = apply(service, service.propose('skill', 'create', {'description': 'd', 'body': 'Do it.'},
+                                                entity_name='triage'))
+        assert result['status'] == 'applied'
+        assert api.writes[0][1]['versions'][0] == {'name': 'base', 'instructions': 'Do it.'}
+
 
 class TestSkill:
 
@@ -129,6 +135,26 @@ class TestAgentRename:
         result = apply(service, service.propose('agent', 'update', {'name': 'Weekly Summary'}, entity_id=1))
         assert api.writes == [('update_application', {'application_id': 1, 'name': 'Weekly Summary'})]
         assert 'Weekly Summary' in result['summary']
+
+    def test_rename_with_settings_reports_the_agent_name_not_the_version(self, service, api):
+        result = apply(service, service.propose('agent', 'update', {'name': 'Weekly Summary',
+                                                                    'conversation_starters': ['Hi']}, entity_id=1))
+        assert result['summary'].startswith('**Updated agent "Weekly Summary"**')
+        assert result['chip']['name'] == 'Weekly Summary'
+
+    def test_settings_update_reports_the_agent_name(self, service, api):
+        result = apply(service, service.propose('agent', 'update', {'conversation_starters': ['Hi']}, entity_id=1))
+        assert '"base"' not in result['summary']
+
+    def test_starters_accept_an_append(self, service, api):
+        apply(service, service.propose('agent', 'update', {'conversation_starters': {'append': 'Hi'}}, entity_id=1))
+        assert api.writes[-1][1]['conversation_starters'][-1] == 'Hi'
+
+    def test_create_resolves_text_patches_and_takes_the_default_model(self, service, api):
+        apply(service, service.propose('agent', 'create', {'instructions': {'append': 'Greet users.'}},
+                                       entity_name='Greeter'))
+        version = api.writes[0][1]['versions'][0]
+        assert version['instructions'] == 'Greet users.' and version['llm_settings'] == {}
 
     def test_state_separates_agent_and_version_names(self, service):
         state = service.read('agent', 1)['state']

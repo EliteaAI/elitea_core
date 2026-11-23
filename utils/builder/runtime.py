@@ -34,12 +34,44 @@ def _max_starters():
         return 4
 
 
+def _material_checks(project_id):
+    """(#7228) Under a run token: ``(listed, material)`` from the internal OBO credential-material rules, so the Builder
+    lists and proposes what the plain MCP listing and call would. Without a run token: ``(None, None)``. Under a run
+    token without those rules every operation proposal is refused: the check fails closed."""
+    from ..mcp_service import _run_token_claims  # pylint: disable=C0415
+    from .. import internal_obo  # pylint: disable=C0415
+    claims = _run_token_claims()
+    if claims is None:
+        return None, None
+    if not hasattr(internal_obo, "material_of_call"):
+        log.warning("[builder] no credential-material rules under a run token; operation proposals are refused")
+        return None, lambda tool, args: True
+
+    def listed(tool):
+        return internal_obo.listed_for_run(tool.get("method"), tool.get("path"))
+
+    def material(tool, args):
+        path = tool.get("path") or ""
+        path_params = {k: v for k, v in args.items() if "{" + k + "}" in path}
+        path_params.setdefault("project_id", project_id)
+        body = {k: v for k, v in args.items() if k not in path_params}
+        try:
+            return bool(internal_obo.material_of_call(tool.get("method"), path, path_params, body, claims.get("uid")))
+        except Exception:  # pylint: disable=W0703
+            log.warning("[builder] the credential-material check failed; refused")
+            return True
+
+    return listed, material
+
+
 def build_service(project_id, user_id, seen_playbooks=None) -> BuilderService:
-    catalog = Catalog(openapi_registry.get_mcp_api_tools(filter_tags=list(BUILDER_TAGS)))
+    listed, material = _material_checks(project_id)
+    catalog = Catalog(openapi_registry.get_mcp_api_tools(filter_tags=list(BUILDER_TAGS), public_only=True),
+                      listed=listed)
     return BuilderService(
         project_id=project_id, user_id=user_id, call=make_call(project_id, catalog), store=DbStore(project_id),
         catalog=catalog, can_write=_can_write(project_id), seen_playbooks=seen_playbooks,
-        max_starters=_max_starters(),
+        max_starters=_max_starters(), material=material,
     )
 
 

@@ -873,7 +873,7 @@ def task(ns, env, param, actor=3):
 
 
 CREATE = "project_id=1;action=create;version_id=70;owner_user_id=5;operations=run:schedule;max_runtime_s=600;" \
-         "valid_until=" + (mandate_env.NOW + timedelta(days=30)).isoformat()
+         f"valid_until={(mandate_env.NOW + timedelta(days=30)).isoformat()}"
 
 
 def test_the_task_creates_a_mandate_naming_an_identity_the_deployment_allows(ns, env):
