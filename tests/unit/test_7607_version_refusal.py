@@ -6,7 +6,7 @@ from typing import Optional
 import pytest
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
-NOT_FOUND = {'error': 'The requested item could not be found'}, 404
+NOT_FOUND = {'code': 'not_found', 'error': 'The requested item could not be found'}, 404
 READ_ONLY = {'ok': False, 'error': 'You have read-only access to this folder'}, 403
 
 

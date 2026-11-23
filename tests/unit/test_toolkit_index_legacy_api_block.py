@@ -99,7 +99,7 @@ def legacy_schedules(api):
 
 
 BODY = {"cron": DAILY, "timezone": "Etc/UTC", "enabled": True}
-NOT_FOUND = {"ok": False, "error": "The requested item could not be found"}, 404
+NOT_FOUND = {"ok": False, "code": "not_found", "error": "The requested item could not be found"}, 404
 
 
 def test_patching_an_unscheduled_index_creates_its_schedule_row(api):

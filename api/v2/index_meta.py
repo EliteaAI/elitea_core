@@ -95,7 +95,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, toolkit_id: int, **kwargs):
-        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "error": NOT_FOUND_TEXT}, 404), write=False)
+        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404), write=False)
         if refused:
             return refused
         toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
@@ -204,7 +204,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, toolkit_id: int, index_meta_id: str):
-        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "error": NOT_FOUND_TEXT}, 404))
+        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404))
         if refused:
             return refused
         toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
@@ -245,7 +245,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 session.commit()
                 log.debug(f"Deleted all index_meta with collection '{index_name}' from toolkit {toolkit_id}")
         except NoResultFound:
-            return {"ok": False, "error": NOT_FOUND_TEXT}, 404
+            return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
         except OperationalError as e:
             log.warning(f"Lock timeout while deleting index_meta {index_meta_id}: {e}")
             return {"ok": False, "error": str(IndexMetaLockTimeoutError(index_name or index_meta_id))}, 409

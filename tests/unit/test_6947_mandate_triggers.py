@@ -580,7 +580,7 @@ def test_a_bad_signature_mints_nothing_and_runs_nothing(ns, env, agent, webhook)
     assert len(module._mandate_tickets) == 0   # pylint: disable=W0212
 
 
-GENERIC_404 = {"error": "The requested item could not be found"}, 404
+GENERIC_404 = {"code": "not_found", "error": "The requested item could not be found"}, 404
 
 
 def _validate_with(webhook, monkeypatch, version, headers, secret="secret", signature_ok=False):

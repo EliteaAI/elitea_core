@@ -11,11 +11,11 @@ from ..models.all import EliteATool
 from ..models.entity_schedule import EntitySchedule
 from ..models.pd.entity_schedule import NAME_MAX, ScheduleCreate, ScheduleUpdate
 from ..models.pd.index import UpdateIndexingSchedule
+from .error_text import NOT_FOUND_TEXT
 from .folder_access import TOOLKIT_ENTITY_TYPES, entity_access_error
 from .schedule_access import SCHEDULE_PERMISSIONS, schedule_scope
 from .schedule_service import (
     INDEX_READ_ONLY,
-    NOT_FOUND_TEXT,
     TOOLKIT_INDEX,
     ScheduleError,
     create_schedule,

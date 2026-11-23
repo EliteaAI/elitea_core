@@ -183,14 +183,14 @@ def test_7011_r1_4_get_returns_a_stored_legacy_schedule(harness):
     assert (response['type'], response['cron'], response['timezone']) == ('schedule', '0 9 * * *', 'UTC')
 
 
-NOT_FOUND = {'ok': False, 'error': 'The requested item could not be found'}, 404
+NOT_FOUND = {'ok': False, 'code': 'not_found', 'error': 'The requested item could not be found'}, 404
 
 
 @pytest.mark.parametrize('verb, body, write', [
     ('get', None, False),
     ('put', {'type': 'schedule', 'cron': 'not a cron', 'timezone': 'UTC'}, True),
     ('put', {'type': 'webhook'}, True),
-    ('post', None, False),
+    ('post', None, True),
 ])
 def test_el7607_a_missing_or_hidden_version_is_refused_first_with_the_generic_404(harness, verb, body, write):
     harness.hidden = True
@@ -203,3 +203,12 @@ def test_el7607_a_missing_or_hidden_version_is_refused_first_with_the_generic_40
 def test_el7607_a_version_gone_after_the_check_is_the_generic_404(harness, verb, body):
     harness.version = None
     assert _call(harness, verb, body) == NOT_FOUND
+
+
+@pytest.mark.parametrize('verb, body', [('put', {'type': 'chat_message'}), ('post', None)])
+def test_a_read_only_folder_cannot_change_the_trigger_or_its_secret(harness, verb, body):
+    read_only = {'ok': False, 'error': 'You have read-only access to this folder'}, 403
+    harness.version_refusal = lambda project_id, version_id, not_found, write=False: read_only if write else None
+    harness.module.version_refusal = harness.version_refusal
+    assert _call(harness, verb, body) == read_only
+    assert harness.commits == 0

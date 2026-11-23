@@ -53,7 +53,7 @@ def _rejected(version_id: int, reason: str) -> tuple[dict, int]:
     """The answer to a delivery that is not proven genuine: like an unknown version, so a sender without the
     secret learns nothing about which versions exist; the reason goes to the log only."""
     log.info("Webhook delivery for version %s rejected: %s", version_id, reason)
-    return {"error": NOT_FOUND_TEXT}, 404
+    return {"code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
 
 class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -78,10 +78,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         Returns:
             Tuple of (is_valid, error_response or None)
         """
-        # Get webhook config for this type
-        webhook_config = WEBHOOK_TYPE_CONFIG.get(webhook_type)
-        if not webhook_config:
-            return False, ({"error": "Bad signature type"}, 400)
+        webhook_config = WEBHOOK_TYPE_CONFIG[webhook_type]
 
         # Get secret and validate
         with db.get_session(project_id) as session:
@@ -92,7 +89,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             ).get(version_id)
 
             if not version:
-                return False, ({"error": NOT_FOUND_TEXT}, 404)
+                return False, ({"code": "not_found", "error": NOT_FOUND_TEXT}, 404)
 
             # Get secret from version-specific trigger config. Which header and which
             # secret are authoritative depends on the configured GitLab auth method,
@@ -161,7 +158,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         """ POST """
         if webhook_type not in WEBHOOK_TYPE_CONFIG:
             return {"error": "Bad signature type"}, 400
-        refused = version_refusal(project_id, version_id, ({"error": NOT_FOUND_TEXT}, 404))
+        refused = version_refusal(project_id, version_id, ({"code": "not_found", "error": NOT_FOUND_TEXT}, 404))
         if refused:
             return refused
         raw_data = request.data

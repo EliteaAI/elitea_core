@@ -62,7 +62,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         Note: Webhook secrets are masked for viewers (users without edit permission).
         """
-        refused = version_refusal(project_id, version_id, ({"ok": False, "error": NOT_FOUND_TEXT}, 404))
+        refused = version_refusal(project_id, version_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404))
         if refused:
             return refused
         try:
@@ -82,7 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
 
                 if not version:
-                    return {"ok": False, "error": NOT_FOUND_TEXT}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 # Get trigger from pipeline_settings with fallback
                 pipeline_settings = version.pipeline_settings or {}
@@ -144,7 +144,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         For 'schedule' type: rejected with 400, schedules live in the Schedules API.
         For 'webhook' type: webhook_type is required, secret is auto-generated.
         """
-        refused = version_refusal(project_id, version_id, ({"ok": False, "error": NOT_FOUND_TEXT}, 404), write=True)
+        refused = version_refusal(project_id, version_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404), write=True)
         if refused:
             return refused
         payload = dict(request.json)
@@ -190,7 +190,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
 
                 if not version:
-                    return {"ok": False, "error": NOT_FOUND_TEXT}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 # Only a version that still stores a legacy webhook may edit it; new ones are webhook rows (#7402)
                 stored_type = get_trigger_from_pipeline_settings(version.pipeline_settings or {}).get("type")
@@ -325,7 +325,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         This is useful when the secret has been compromised.
         Only works when trigger type is 'webhook'.
         """
-        refused = version_refusal(project_id, version_id, ({"ok": False, "error": NOT_FOUND_TEXT}, 404))
+        refused = version_refusal(project_id, version_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404),
+                                  write=True)
         if refused:
             return refused
         try:
@@ -337,7 +338,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
 
                 if not version:
-                    return {"ok": False, "error": NOT_FOUND_TEXT}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 # Check if current trigger is webhook
                 pipeline_settings = version.pipeline_settings or {}
