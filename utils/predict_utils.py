@@ -20,7 +20,7 @@ from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates, strip_skill_bodies
 from .skill_scratch import skill_scratch_for_run
 from .skill_utils import SkillInvocationLimitError, consume_message_skills, merge_invoked_skills, resolve_runtime_skills
-from .stored_oauth_tokens import inject_stored_oauth_tokens
+from .stored_oauth_tokens import inject_stored_oauth_tokens, make_rotation_saver
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
@@ -315,7 +315,7 @@ def store_context_budget(project_id: int, conversation_id, budget: Optional[dict
 
 
 def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int) -> None:
-    """Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules."""
+    """Stored OAuth logins (Microsoft toolkits, MCP logins) for runs that carry no browser token, e.g. schedules."""
     try:
         rpc = rpc_tools.RpcMixin().rpc.timeout(5)
         inject_stored_oauth_tokens(
@@ -323,6 +323,7 @@ def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int)
             lambda uuid_, type_: rpc.configurations_get_stored_login(
                 project_id=project_id, user_id=expansion_user_id,
                 configuration_uuid=uuid_, expected_type=type_),
+            save_fn=make_rotation_saver(rpc),
         )
     except Exception as e:  # pylint: disable=W0703
         log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)

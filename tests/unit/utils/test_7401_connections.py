@@ -410,3 +410,80 @@ def test_7401_a_link_without_a_version_starts_no_recheck(env, monkeypatch):
     env.prerun.recheck_version_triggers_later(34, None)
 
     assert started == []
+
+
+# --- #7643: a saved MCP login lets a remote MCP toolkit run unattended ------------------------------------------------
+
+def remote_mcp(uuid="uuid-m", with_login=True):
+    settings = {"url": "https://mcp.example.com/mcp"}
+    if with_login:
+        settings["mcp_login_configuration"] = {"configuration_uuid": uuid, "elitea_title": "bot",
+                                               "url": "https://mcp.example.com/mcp"}
+    return {"type": "mcp", "name": "Remote", "settings": settings}
+
+
+def save_mcp_login(env, uuid="uuid-m"):
+    env.stored[uuid] = {"configuration_uuid": uuid, "refresh_token": f"rt-{uuid}", "client_id": "dcr",
+                        "url": "https://mcp.example.com/mcp", "token_endpoint": "https://auth.example.com/token"}
+
+
+def test_7643_mcp_with_a_saved_login_is_ok_after_a_real_refresh(env):
+    env.expanded = {"tools": [remote_mcp()]}
+    save_mcp_login(env)
+
+    result = env.check()
+
+    assert statuses(result) == [("Remote", "ok")]
+    assert env.refreshes == ["rt-uuid-m"]
+    assert result["credential_refs"] == ["uuid-m"]
+
+
+def test_7643_mcp_without_a_saved_login_stays_browser_only(env):
+    env.expanded = {"tools": [remote_mcp(with_login=False)]}
+
+    [row] = env.check()["rows"]
+
+    assert row["status"] == "unsupported" and row["reason"] == env.prerun.BROWSER_ONLY_TEXT
+
+
+def test_7643_mcp_login_reference_without_a_saved_login_needs_a_sign_in(env):
+    env.expanded = {"tools": [remote_mcp()]}
+
+    [row] = env.check()["rows"]
+
+    assert (row["status"], row["login"]) == ("sign_in_required", "gone")
+
+
+def test_7643_an_expired_mcp_login_is_lost(env):
+    env.expanded = {"tools": [remote_mcp()]}
+    save_mcp_login(env)
+    env.refresh_error = Refused("invalid_grant")
+
+    result = env.check()
+
+    assert result["rows"][0]["login"] == "expired"
+    assert [row["credential_uuid"] for row in env.prerun.lost_logins(result)] == ["uuid-m"]
+
+
+def test_7643_a_login_for_another_server_is_unsupported_without_a_refresh(env):
+    tool = remote_mcp()
+    tool["settings"]["url"] = "https://other.example.com/mcp"
+    env.expanded = {"tools": [tool]}
+    save_mcp_login(env)
+
+    [row] = env.check()["rows"]
+
+    assert row["status"] == "unsupported" and "different MCP server" in row["reason"]
+    assert env.refreshes == []
+
+
+def test_7643_an_expired_mcp_login_before_a_webhook_run_switches_its_triggers_off(env):
+    # Found live: the pre-run check rebuilt the toolkit without its URL, so the URL-match check made the
+    # row "unsupported" and an expired MCP login never switched anything off
+    save_mcp_login(env)
+    env.refresh_error = Refused("invalid_grant")
+
+    reason = env.prerun.check_saved_logins(34, schedule(), {"tools": [remote_mcp()]})
+
+    assert reason is not None and "bot" in str(reason)
+    assert env.switched and env.switched[0][2] == "uuid-m"

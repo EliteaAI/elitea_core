@@ -197,7 +197,9 @@ def check_saved_logins(project_id: int, schedule, expanded: dict) -> str | None:
             if key not in UNATTENDED_LOGIN_TYPES or uuid_ in seen:
                 continue
             seen.add(uuid_)
-            row = _connection_row(project_id, schedule.created_by, {**tool, 'settings': {key: credential}}, True)
+            # Only this credential is checked; the toolkit URL stays, so an MCP login can be matched to its server
+            settings = {key: credential, 'url': (tool.get('settings') or {}).get('url')}
+            row = _connection_row(project_id, schedule.created_by, {**tool, 'settings': settings}, True)
             # A login never saved is not "lost": a schedule may wait for it (#7304); a webhook was refused at save
             if row.get('login') == LOGIN_EXPIRED or (row.get('login') == LOGIN_GONE and _was_tracked(schedule, uuid_)):
                 return switch_off_for_login(project_id, schedule.created_by, row, schedule.id)
@@ -299,7 +301,9 @@ LOGIN_EXPIRED_TEXT = 'the saved login stopped working: sign in again'
 LOGIN_TRANSIENT_TEXT = 'the saved login could not be checked now; try again'
 LOGIN_UNSUPPORTED_TEXT = 'this credential cannot keep a saved login'
 # Shared with the risk scan, so one condition has one wording
-BROWSER_ONLY_TEXT = 'Webhooks cannot wait for a sign-in; use a toolkit with a saved login.'
+BROWSER_ONLY_TEXT = ('Webhooks cannot wait for a sign-in; use a toolkit with a saved login '
+                     '(for MCP: a Team or Private MCP login instead of "Browser only").')
+MCP_LOGIN_MISMATCH_TEXT = 'has a saved login for a different MCP server URL; pick the login made for this server'
 DELEGATED_TEXT = "acts with the signed-in person's Microsoft account; unattended runs cannot use it"
 LOGIN_TEXTS = {LOGIN_EXPIRED: LOGIN_EXPIRED_TEXT, LOGIN_GONE: NO_SAVED_LOGIN, LOGIN_TRANSIENT: LOGIN_TRANSIENT_TEXT,
                LOGIN_UNSUPPORTED: LOGIN_UNSUPPORTED_TEXT}
@@ -327,7 +331,9 @@ def check_stored_login(project_id: int, owner_id: int, settings_key: str, config
         return LOGIN_OK
     from tools import this  # pylint: disable=C0415
     try:
-        token = get_access_token(this.module.get_redis_client(), login_data, login, refresh_token)
+        from .stored_oauth_tokens import make_rotation_saver  # pylint: disable=C0415
+        token = get_access_token(this.module.get_redis_client(), login_data, login, refresh_token,
+                                 save_fn=make_rotation_saver(rpc_tools.RpcMixin().rpc.timeout(5)))
     except StoredLoginExpired:
         return LOGIN_EXPIRED
     return LOGIN_OK if token else LOGIN_TRANSIENT
@@ -354,7 +360,7 @@ def _credentials(tool: dict) -> list:
 
 def _connection_row(project_id: int, owner_id: int, tool: dict, refresh: bool) -> dict:
     from .credential_decision import DELEGATED_AUTH_MODE  # pylint: disable=C0415
-    from .stored_oauth_tokens import UNATTENDED_LOGIN_TYPES  # pylint: disable=C0415
+    from .stored_oauth_tokens import UNATTENDED_LOGIN_TYPES, mcp_login_fits_tool  # pylint: disable=C0415
     name = tool.get('name') or tool.get('toolkit_name') or tool.get('type')
     row = {'toolkit': name, 'toolkit_type': tool.get('type'), 'status': CONNECTION_OK, 'reason': None}
     credentials = _credentials(tool)
@@ -363,14 +369,18 @@ def _connection_row(project_id: int, owner_id: int, tool: dict, refresh: bool) -
                    private=credential.get('private') is True, credential_title=credential.get('elitea_title'))
         if credential.get('auth_mode') == DELEGATED_AUTH_MODE:
             return {**row, 'status': CONNECTION_UNSUPPORTED, 'reason': f'Toolkit "{name}" {DELEGATED_TEXT}'}
-        login_field = 'tenant_id' if key == 'dataverse_configuration' else 'oauth_discovery_endpoint'
+        login_field = {'dataverse_configuration': 'tenant_id', 'mcp_login_configuration': 'url'}.get(
+            key, 'oauth_discovery_endpoint')
+        if key == 'mcp_login_configuration' and not mcp_login_fits_tool(tool, credential.get('url')):
+            return {**row, 'status': CONNECTION_UNSUPPORTED, 'reason': f'Toolkit "{name}" {MCP_LOGIN_MISMATCH_TEXT}'}
         if key in UNATTENDED_LOGIN_TYPES and credential.get(login_field):
             state = check_stored_login(project_id, owner_id, key, credential['configuration_uuid'], refresh)
             if state != LOGIN_OK:
                 status = CONNECTION_UNSUPPORTED if state == LOGIN_UNSUPPORTED else CONNECTION_SIGN_IN
                 return {**row, 'status': status, 'reason': LOGIN_TEXTS[state], 'login': state}
             row['login'] = LOGIN_OK
-    if _browser_only(tool):
+    # An MCP toolkit with an OK saved login signs in without a browser
+    if row.get('login') != LOGIN_OK and _browser_only(tool):
         return {**row, 'status': CONNECTION_UNSUPPORTED, 'reason': BROWSER_ONLY_TEXT}
     return row
 
