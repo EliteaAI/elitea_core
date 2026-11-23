@@ -4,10 +4,9 @@ import json
 
 from mcp import types
 from pylon.core.tools import log
-from sqlalchemy.orm import joinedload
 from tools import db, auth, this, openapi_registry, sanitize_property_name
 
-from ..models.all import Application, ApplicationVersion
+from ..models.all import ApplicationVersion
 from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
@@ -35,6 +34,9 @@ def _path_segment(name, value) -> str:
                 or any(ord(ch) < 32 or ord(ch) == 127 for ch in segment)):
             raise ValueError(f"path parameter {name} must be a plain path segment")
     return text
+
+
+AMBIGUOUS_TOOLKIT_TOOL = object()
 
 
 class _RunTokenRefusal(Exception):
@@ -399,7 +401,12 @@ class McpService:
     def __handle_call_tool_request(self, request: types.CallToolRequest):
         response_content = ""
         try:
-            if version_id := self.__get_ver_id_by_agent_name(request.params.name):
+            exposed = self.__get_exposed_version_by_tool_name(request.params.name)
+            toolkit_claim = None if self.__is_dispatched_to_agent_first(exposed) \
+                else self.__get_toolkit_by_name(request.params.name)
+            toolkit = None if toolkit_claim is AMBIGUOUS_TOOLKIT_TOOL else toolkit_claim
+            if exposed is not None and toolkit_claim is None:
+                version_id = exposed.version_id
                 log.debug("Starting agent call (version = %s)", version_id)
                 refused = _refused_by_run_token("run", f"application_version {version_id}", request.params.name)
                 if refused:
@@ -422,7 +429,7 @@ class McpService:
                         response_content = chat_history[-1]["content"]
                     else:
                         response_content = ""
-            elif toolkit := self.__get_toolkit_by_name(request.params.name):
+            elif toolkit:
                 tk_name = _build_agent_identifier(toolkit.get('name', ''))
                 tool_name = re.sub(rf"^{re.escape(tk_name)}_+", "", request.params.name)
                 tool_params = request.params.arguments
@@ -511,15 +518,12 @@ class McpService:
         if self.session.resource_type == "toolkit":
             tools = self.__get_toolkit_tools(self.session.resource_id)
         elif self.session.resource_type == "application":
-            tools = self.__get_application_tools(self.session.resource_id)
+            tools = self.__get_application_tools()
 
         return tools
 
     def __get_category_tools(self, openapi_tag: str) -> list[types.Tool]:
-        """Get tools filtered by swagger section tag (e.g. elitea_core/applications).
-        For elitea_core/applications, also includes agents tagged with 'mcp'.
-        For elitea_core/toolkits, also includes toolkit instance tools marked available_by_mcp.
-        """
+        """Get tools filtered by swagger section tag (e.g. elitea_core/applications)."""
         tools = []
         known_tool_names = set()
 
@@ -577,41 +581,11 @@ class McpService:
 
         return tools
 
-    def __get_application_tools(self, version_id: int) -> list[types.Tool]:
-        """Get tools for a specific application version"""
-        tools = []
-
-        # Get the application by version_id
-        with db.with_project_schema_session(self.session.project_id) as session:
-            version = session.query(ApplicationVersion).options(
-                joinedload(ApplicationVersion.application)
-            ).filter(ApplicationVersion.id == version_id).first()
-
-            if not version:
-                log.warning(f"Application version {version_id} not found")
-                return tools
-
-            app = version.application
-            tool_name = _build_agent_identifier(app.name)
-
-            tools.append(
-                types.Tool(
-                    name=tool_name,
-                    description=getattr(app, "description", ""),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "task": {
-                                "type": "string",
-                                "description": "Task or message for agent"
-                            }
-                        },
-                        "required": ["task"]
-                    }
-                )
-            )
-
-        return tools
+    def __get_application_tools(self) -> list[types.Tool]:
+        """The one version this session is scoped to, under its agent's name, when it is exposed (#1597)"""
+        return [
+            _build_agent_tool(exposed.tool_name, exposed.description) for exposed in self.__exposed_agent_versions()
+        ]
 
     def __get_all_tools(self) -> list[types.Tool]:
         """Get all tools (legacy behavior)"""
@@ -666,43 +640,17 @@ class McpService:
         #
         # Expand agents(applications) to export as mcp server tools
         #
-        if self.session.tags:
-            with db.get_session(self.session.project_id) as session:
-                some_result = list_applications_api(
-                    project_id=self.session.project_id,
-                    limit=None,
-                    session=session,
-                    tags=self.session.tags,
+        for exposed in self.__exposed_agent_versions():
+            if exposed.tool_name in known_tool_names:
+                log.warning(
+                    "Skipping agent with colliding name: %s -> %s",
+                    exposed.application_name, exposed.tool_name,
                 )
+                continue
             #
-            for app in some_result["applications"]:
-                tool_name = _build_agent_identifier(app.name)
-                #
-                if tool_name in known_tool_names:
-                    log.warning(
-                        "Skipping agent with colliding name: %s -> %s",
-                        app.name, tool_name,
-                    )
-                    continue
-                #
-                known_tool_names.add(tool_name)
-                #
-                tools.append(
-                    types.Tool(
-                        name=tool_name,
-                        description=getattr(app, "description", ""),
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "task": {
-                                    "type": "string",
-                                    "description": "Task or message for agent"
-                                }
-                            },
-                            "required": ["task"]
-                        }
-                    )
-                )
+            known_tool_names.add(exposed.tool_name)
+            #
+            tools.append(_build_agent_tool(exposed.tool_name, exposed.description))
 
         api_tools = openapi_registry.get_mcp_api_tools()
         for api_tool in api_tools:
@@ -731,34 +679,48 @@ class McpService:
         set_level_empty_result_json = _jrpc_server_response(request.id, types.EmptyResult()).model_dump_json()
         self.session.dispatch_message(set_level_empty_result_json)
 
-    def __get_ver_id_by_agent_name(self, agent_name: str) -> int | None:
+    def __exposed_agent_versions(self) -> list:
+        """The agent versions an external client reaches in this session: the ``mcp``-tagged ones, under enforce only
+        those with an active identity binding, and in a session scoped to one version that version alone (#1597,
+        #7341)"""
+        if not self.session.tags or self.session.resource_type == "toolkit" or self.session.entity_category:
+            return []
+        from .governance import is_governed  # pylint: disable=C0415
+        from .mcp_exposed_version import read_exposed_versions  # pylint: disable=C0415
+        scoped_version_id = self.session.resource_id if self.session.resource_type == "application" else None
         with db.get_session(self.session.project_id) as session:
-            some_result = list_applications_api(
+            listing = {"limit": None}
+            if scoped_version_id is not None:
+                application_id = session.query(ApplicationVersion.application_id).filter(
+                    ApplicationVersion.id == scoped_version_id
+                ).scalar()
+                if application_id is None:
+                    return []
+                listing = {"limit": 1, "ids": [application_id]}
+            applications = list_applications_api(
                 project_id=self.session.project_id,
-                limit=None,
                 session=session,
                 tags=self.session.tags,
+                **listing,
+            )["applications"]
+            return read_exposed_versions(
+                session, self.session.project_id, applications, is_governed(this.module), scoped_version_id
             )
 
-        for app in some_result.get("applications", []):
-            if _build_agent_identifier(app.name) == agent_name:
-                with db.with_project_schema_session(self.session.project_id) as session_2:
-                    application = session_2.query(Application).options(
-                        joinedload(Application.versions).joinedload(ApplicationVersion.tags)
-                    ).get(app.id)
-                    # (#7341) under enforce by rule: the bound version, else the latest published, else the first;
-                    # under off and audit only the first, as before
-                    from .governance import is_governed  # pylint: disable=C0415
-                    from .mcp_exposed_version import bound_version_ids, exposed_version  # pylint: disable=C0415
-                    governed = is_governed(this.module)
-                    bound = bound_version_ids(session_2, self.session.project_id, [app.id]).get(app.id, set()) \
-                        if governed else set()
-                    version, _rule = exposed_version(list(application.versions), bound, governed)
-                    return version.id if version is not None else None
+    def __get_exposed_version_by_tool_name(self, tool_name: str):
+        return next((exposed for exposed in self.__exposed_agent_versions() if exposed.tool_name == tool_name), None)
 
-        return None
+    def __is_dispatched_to_agent_first(self, exposed) -> bool:
+        """A tool named after its agent goes to the agent without reading the toolkits, as it always has (a session
+        scoped to one version serves only such a tool). Only an ``<agent>_<version>`` name (#1597) yields to a toolkit
+        tool the list shows under that name."""
+        if exposed is None:
+            return False
+        from .mcp_exposed_version import is_named_after_agent  # pylint: disable=C0415
+        return is_named_after_agent(exposed)
 
-    def __get_toolkit_by_name(self, toolkit_name: str) -> dict | None:
+    def __get_toolkit_by_name(self, toolkit_name: str):
+        """The toolkit exporting ``toolkit_name``, ``AMBIGUOUS_TOOLKIT_TOOL`` when several do, else None."""
         # filter_mcp=None: match against both regular and connected MCP toolkits
         # so tool-call dispatch works for MCP-connected toolkits too
         # (EliteaAI/elitea_issues#6273).
@@ -772,11 +734,10 @@ class McpService:
         # include MCP-connected toolkits (which carry the user's own remote
         # credentials) would make them callable by name even though the owner
         # never opted them into this path.
-        # `_COLLISION` marks a tool name seen on more than one toolkit, so the
-        # lookup below can tell "not found" apart from "ambiguous" and refuse
-        # to dispatch either candidate rather than silently pick whichever
-        # toolkit was iterated first.
-        _COLLISION = object()
+        # AMBIGUOUS_TOOLKIT_TOOL marks a tool name seen on more than one toolkit,
+        # so a call can tell "not found" apart from "ambiguous" and refuse to
+        # dispatch either candidate rather than silently pick whichever toolkit
+        # was iterated first.
         known_tool_names = {}
         for toolkit in toolkits["rows"]:
             if not toolkit.get("meta", {}).get("mcp_options", {}).get("available_by_mcp", False):
@@ -794,12 +755,10 @@ class McpService:
                         "Ambiguous toolkit tool name, refusing to dispatch: %s (toolkit id=%s)",
                         tool_name, toolkit.get("id"),
                     )
-                    known_tool_names[tool_name] = _COLLISION
+                    known_tool_names[tool_name] = AMBIGUOUS_TOOLKIT_TOOL
                     continue
                 known_tool_names[tool_name] = toolkit
-        #
-        result = known_tool_names.get(toolkit_name)
-        return result if result is not _COLLISION else None
+        return known_tool_names.get(toolkit_name)
 
     def __get_api_tool_by_name(self, tool_name: str) -> dict | None:
         """Find an API tool by its MCP tool name."""
@@ -858,6 +817,23 @@ def _jrpc_server_response(id: str, inner_server_result) -> types.JSONRPCResponse
 
 def _response_unsupported(session: SseSession, request):
     session.dispatch_error_response(request.id, types.METHOD_NOT_FOUND, f"'{request.method}' request is currently not supported.")
+
+
+def _build_agent_tool(name: str, description: str) -> types.Tool:
+    return types.Tool(
+        name=name,
+        description=description,
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Task or message for agent"
+                }
+            },
+            "required": ["task"]
+        }
+    )
 
 
 def _build_agent_identifier(name):

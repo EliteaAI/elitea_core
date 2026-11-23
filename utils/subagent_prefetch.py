@@ -49,6 +49,9 @@ def expand_version_for_runtime(project_id: int, application_id: int, version_id:
     if 'error' in version_details:
         return version_details
 
+    from .code_mode_utils import strip_code_mode_from_version
+    strip_code_mode_from_version(version_details, project_id)
+
     # #5267: MCP tools are runtime-only; scoped to the end user's own project and token
     try:
         from .internal_tools import inject_mcp_toolkits

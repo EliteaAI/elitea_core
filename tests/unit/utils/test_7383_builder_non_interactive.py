@@ -48,7 +48,8 @@ def build(models_path):
         'inject_stored_logins': lambda *a, **k: None,
         'skill_scratch_for_run': lambda project_id, conversation_uuid, user_id: {},
         'resolve_internal_mcp_tools': lambda *a: None,
-        'log': NS(warning=lambda *a, **k: None, debug=lambda *a, **k: None, info=lambda *a, **k: None),
+        'strip_code_mode': lambda tools, project_id: tools,
+        'log':NS(warning=lambda *a, **k: None, debug=lambda *a, **k: None, info=lambda *a, **k: None),
     }
     namespace = load_cut([function], namespace, 'utils/predict_utils.py')  # the real function cut out of utils/predict_utils.py
     return lambda builder, **kwargs: namespace['generate_predict_payload'](

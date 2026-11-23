@@ -7,7 +7,7 @@ admits the dispatch as the real one does), and the real ``predict_sio`` is lifte
 """
 import sys
 import types
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pytest
@@ -17,7 +17,7 @@ from unit.test_6947_mandate_triggers import (  # noqa: F401  pylint: disable=W06
     source_of, tick, wire,
 )
 from fixtures.helpers import load_module_with_stubs  # noqa: E402  pylint: disable=C0413
-from fixtures.mandate_env import NOW, OWNER  # noqa: E402  pylint: disable=C0413
+from fixtures.mandate_env import OWNER  # noqa: E402  pylint: disable=C0413
 
 PROJECT_ID, SCHEDULE_ID, RUN_ID = 1, 41, 900
 TRIGGER_REF = f"schedule:entity:{SCHEDULE_ID}"
@@ -289,7 +289,7 @@ def test_audit_only_a_mandate_enforce_would_refuse_by_its_state_leaves_its_would
 
 
 @pytest.mark.parametrize("values, code", [
-    ({"valid_until": NOW - timedelta(seconds=1)}, "MANDATE_EXPIRED"),   # past its end date, still marked active
+    ({"valid_until": datetime.now(timezone.utc) - timedelta(seconds=1)}, "MANDATE_EXPIRED"),  # past end date, still active
     ({"allowed_operations": ["run:webhook"]}, "DENIED_OPERATION"),       # not allowed for schedules
 ])
 def test_audit_only_a_mandate_enforce_would_refuse_by_date_or_operation_leaves_its_row(ns, env, agent, run, values,

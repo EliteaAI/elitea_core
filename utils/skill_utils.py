@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, List, Optional, Tuple, Literal
 
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from sqlalchemy import func, or_, asc, desc, text
 from sqlalchemy.orm import selectinload
@@ -1420,11 +1420,85 @@ def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skil
     )
 
 
+def _query_forked_versions(session, project_id: int, source: tuple, parent_version_ids: list) -> list:
+    """(skill_id, version_id, parent_version_id) of this project's versions forked from these source versions."""
+    src_project, src_entity = source
+    parent_version_id = SkillVersion.meta['parent_version_id'].astext
+    return (
+        session.query(SkillVersion.skill_id, SkillVersion.id, parent_version_id)
+        .join(Skill, Skill.id == SkillVersion.skill_id)
+        .filter(
+            Skill.owner_id == project_id,
+            SkillVersion.meta['parent_project_id'].astext == str(src_project),
+            SkillVersion.meta['parent_entity_id'].astext == str(src_entity),
+            parent_version_id.in_(set(parent_version_ids)),
+        )
+        .order_by(SkillVersion.skill_id, SkillVersion.id)
+        .all()
+    )
+
+
+def _find_fork_holding_every_version(
+    rows: list, versions: list, parent_version_ids: list,
+) -> Optional[SkillImportResultModel]:
+    """The first fork holding a copy of every source version, keyed by the imported versions' names.
+
+    Only those names: the agent's reference to a name the fork lacks then falls back to the 'base' copy of the same
+    source version, never to a version of the fork's own that the fork happens to share a name with.
+    """
+    held = {}
+    for skill_id, version_id, parent_version_id in rows:
+        held.setdefault(skill_id, {}).setdefault(parent_version_id, version_id)
+    for skill_id, by_parent in held.items():
+        if all(parent in by_parent for parent in parent_version_ids):
+            return SkillImportResultModel(
+                id=skill_id,
+                versions={
+                    v.get('name', 'base'): by_parent[parent] for v, parent in zip(versions, parent_version_ids)
+                },
+                reused=True,
+            )
+    return None
+
+
+def _find_reusable_fork(session, project_id: int, source: tuple, versions: list) -> Optional[SkillImportResultModel]:
+    """An existing fork of the same source to attach instead of a new copy (#7636).
+
+    A fork lacking one of the source versions is not reused: the attach would fall back to another version's
+    instructions and files without telling anyone. Versions carrying no source version id predate that stamp, so
+    their fork is matched on lineage alone, as before.
+    """
+    parent_version_ids = [(v.get('meta') or {}).get('parent_version_id') for v in versions]
+    if None in parent_version_ids:
+        existing = _find_forked_skill(session, project_id, source)
+        if existing is None:
+            return None
+        return SkillImportResultModel(
+            id=existing.id, versions={v.name: v.id for v in existing.versions}, reused=True,
+        )
+    parent_version_ids = [str(parent) for parent in parent_version_ids]
+    rows = _query_forked_versions(session, project_id, source, parent_version_ids)
+    return _find_fork_holding_every_version(rows, versions, parent_version_ids)
+
+
+def _field_error_message(field: str, error: dict) -> str:
+    """The skill editor's wording for one pydantic error of a skill field."""
+    if error['type'] == 'string_too_long':
+        return f"{field.capitalize()} must be at most {error['ctx']['max_length']} characters"
+    if error['type'] == 'value_error':
+        return error['msg'].removeprefix('Value error, ')
+    return f"{field.capitalize()}: {error['msg']}"
+
+
 def validate_new_skill_fields(name, description) -> None:
     """Raise the error creating a skill would raise for this name or description, before anything is stored."""
     for field, value in (('name', name), ('description', description)):
         info = SkillCreateModel.model_fields[field]
-        TypeAdapter(Annotated[info.annotation, *info.metadata], config=ConfigDict(title=field)).validate_python(value)
+        adapter = TypeAdapter(Annotated[info.annotation, *info.metadata], config=ConfigDict(title=field))
+        try:
+            adapter.validate_python(value)
+        except ValidationError as exc:
+            raise ValueError(_field_error_message(field, exc.errors()[0])) from exc
 
 
 def import_skill(
@@ -1450,13 +1524,9 @@ def import_skill(
     source = None if force_new else _source_lineage(versions)
     if source:
         with _skill_session(session, project_id) as s:
-            existing = _find_forked_skill(s, project_id, source)
-            if existing:
-                return SkillImportResultModel(
-                    id=existing.id,
-                    versions={v.name: v.id for v in existing.versions},
-                    reused=True,
-                )
+            reused = _find_reusable_fork(s, project_id, source, versions)
+            if reused:
+                return reused
 
     payloads = [
         {

@@ -733,7 +733,7 @@ def skill_models(monkeypatch):
 
 @pytest.mark.parametrize('name', ['my--skill', '-skill', 'skill-', 'Skill'])
 def test_the_skill_name_validator_rejects_names_the_spec_forbids(skill_models, name):
-    with pytest.raises(ValueError, match='no consecutive hyphens'):
+    with pytest.raises(ValueError, match='cannot start or end with a hyphen or contain consecutive hyphens$'):
         skill_models.validate_skill_name(name)
 
 

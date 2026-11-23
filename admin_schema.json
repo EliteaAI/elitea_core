@@ -168,6 +168,27 @@
       "enum_source": "projects",
       "visible_when": { "field": "is_midturn_injection_blocked", "value": true }
     },
+    "is_code_mode_enabled": {
+      "type": "boolean",
+      "title": "Enable Code Mode (beta)",
+      "description": "When enabled, agent authors see the Code Mode (beta) switch: the agent writes one program against its tools instead of calling them one by one.",
+      "path": "code_mode_experimental.enabled",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "code_mode_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Code Mode Projects",
+      "description": "Projects where Code Mode is available. If empty, it is available in every project.",
+      "path": "code_mode_experimental.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_code_mode_enabled", "value": true }
+    },
     "is_publish_blocked": {
       "type": "boolean",
       "title": "Block Agent Publishing",
