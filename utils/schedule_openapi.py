@@ -320,7 +320,7 @@ OPERATIONS = {
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleCreate,
         "responses": _responses(201, "Created: the schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: SAVE_BAD_INPUT, 403: None, 404: "The agent, pipeline or version is not found or not visible",
+            400: SAVE_BAD_INPUT, 403: None, 404: "The agent or pipeline is not found or not visible",
             409: SAVE_CONFLICTS}),
     },
     ("post", "check"): {
