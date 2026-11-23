@@ -6,7 +6,7 @@ import re
 import sys
 import types
 import uuid
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -96,7 +96,8 @@ def test_operations_are_a_deduplicated_list_in_the_order_given(ns, env):
 
 
 def test_the_validity_is_normalised_to_utc(ns, env):
-    values, _ = parsed(ns, CREATE.replace(UNTIL, "2026-11-20T14:00:00+02:00"))
+    in_plus_two = (NOW + timedelta(days=31)).astimezone(timezone(timedelta(hours=2))).isoformat()
+    values, _ = parsed(ns, CREATE.replace(UNTIL, in_plus_two))
     assert values["valid_until"] == NOW + timedelta(days=31)
     assert values["valid_until"].utcoffset() == timedelta(0) and values["valid_until"].hour == 12
 
