@@ -13,7 +13,7 @@ from pathlib import Path
 from fixtures import admission_env
 from fixtures.helpers import load_module_with_stubs
 
-NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
 OWNER = 5
 
 
