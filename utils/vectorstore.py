@@ -9,8 +9,7 @@ def get_pgvector_connection_string(project_id: int) -> str | None:
     """
     vc = VaultClient(project_id)
     project_secrets: dict = vc.get_secrets()
-
     if 'pgvector_project_connstr' in project_secrets:
         return project_secrets['pgvector_project_connstr']
 
-    return None
+    return vc.get_project_hidden_secrets().get('pgvector_project_connstr')
