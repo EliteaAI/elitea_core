@@ -158,15 +158,15 @@ DESCRIPTIONS = {
     "preflight": {
         "ready": "Ready: everything audit-only and enforce depend on is in place.",
         "column_missing": "Settings storage needs an update. Run the task create_governance_settings_tables under "
-                          "System → Tasks.",
+                          "Administration → System Tasks.",
         "not_ready": "Not ready: governance can stay off, but cannot be turned on until the failed checks below are "
                      "fixed.",
         "ready_with_warnings": "Ready, with warnings: governance can be turned on; the items below limit some "
                                "features.",
         "unavailable": "Governance is on but a required service is unavailable. Governed runs are being refused. Fix "
                        "the failed check or switch to Off.",
-        "table_missing": "Settings storage is not set up. Run the task create_governance_settings_tables under System "
-                         "→ Tasks.",
+        "table_missing": "Settings storage is not set up. Run the task create_governance_settings_tables under "
+                         "Administration → System Tasks.",
     },
     "checks": {
         "identity_verifier": "The user identity verifier is not configured.",
@@ -175,8 +175,8 @@ DESCRIPTIONS = {
         "audit_backlog": "The security audit backlog is over its limit; new governed runs would be refused.",
         "credential_facts": "Credential services are not loaded.",
         "master_key": "The secrets master key is not set.",
-        "settings_table": "Settings storage is not set up. Run the task create_governance_settings_tables under System "
-                          "→ Tasks.",
+        "settings_table": "Settings storage is not set up. Run the task create_governance_settings_tables under "
+                          "Administration → System Tasks.",
         "audit_schema": "The security audit trail cannot record what audit only would have refused yet; audit only "
                         "cannot be turned on until the audit service is updated (enforce is not affected).",
         "preflight": "The preflight could not run.",
