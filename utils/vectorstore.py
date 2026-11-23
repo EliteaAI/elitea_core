@@ -1,3 +1,5 @@
+from hvac.exceptions import InvalidPath
+from pylon.core.tools import log
 from tools import VaultClient
 
 
@@ -12,4 +14,11 @@ def get_pgvector_connection_string(project_id: int) -> str | None:
     if 'pgvector_project_connstr' in project_secrets:
         return project_secrets['pgvector_project_connstr']
 
-    return vc.get_project_hidden_secrets().get('pgvector_project_connstr')
+    # A project whose hidden path was never written holds no hidden connstr; any other failure must raise, so
+    # dispatch leaves the key out instead of sending a None the worker would trust
+    try:
+        hidden_secrets: dict = vc.get_project_hidden_secrets()
+    except InvalidPath:
+        log.debug('No hidden secrets path for project_id=%s', project_id)
+        return None
+    return hidden_secrets.get('pgvector_project_connstr')

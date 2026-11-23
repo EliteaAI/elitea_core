@@ -13,6 +13,10 @@ VECTORSTORE = pathlib.Path(__file__).resolve().parents[2] / "utils" / "vectorsto
 CONNSTR = "postgresql://project"
 
 
+class InvalidPath(Exception):
+    """hvac's "nothing at this path"; CI has no hvac."""
+
+
 def _lookup(monkeypatch, secrets, hidden):
     reads = []
 
@@ -22,13 +26,21 @@ def _lookup(monkeypatch, secrets, hidden):
 
         def get_secrets(self):
             reads.append("secrets")
+            if isinstance(secrets, Exception):
+                raise secrets
             return secrets
 
         def get_project_hidden_secrets(self):
             reads.append("hidden")
+            if isinstance(hidden, Exception):
+                raise hidden
             return hidden
 
     monkeypatch.setitem(sys.modules, "tools", types.SimpleNamespace(VaultClient=Vault))
+    monkeypatch.setitem(sys.modules, "pylon.core.tools",
+                        types.SimpleNamespace(log=types.SimpleNamespace(debug=lambda *a, **k: None)))
+    monkeypatch.setitem(sys.modules, "hvac", types.ModuleType("hvac"))
+    monkeypatch.setitem(sys.modules, "hvac.exceptions", types.SimpleNamespace(InvalidPath=InvalidPath))
     spec = importlib.util.spec_from_file_location("vectorstore_7660", VECTORSTORE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -48,3 +60,21 @@ def test_a_regular_connstr_never_reads_the_hidden_store(monkeypatch):
 @pytest.mark.unit
 def test_no_connstr_anywhere_is_none(monkeypatch):
     assert _lookup(monkeypatch, {}, {})[0] is None
+
+
+@pytest.mark.unit
+def test_a_never_written_hidden_path_is_no_connstr(monkeypatch):
+    assert _lookup(monkeypatch, {}, InvalidPath("kv-for-hidden-2"))[0] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", [ConnectionError("vault timeout"), PermissionError("forbidden"), KeyError("x")])
+def test_any_other_hidden_read_failure_raises_so_dispatch_omits_the_key(monkeypatch, failure):
+    with pytest.raises(type(failure)):
+        _lookup(monkeypatch, {}, failure)
+
+
+@pytest.mark.unit
+def test_an_unreadable_project_vault_still_raises(monkeypatch):
+    with pytest.raises(RuntimeError):
+        _lookup(monkeypatch, RuntimeError("vault down"), {})
