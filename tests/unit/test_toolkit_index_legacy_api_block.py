@@ -191,12 +191,12 @@ def test_el7607_index_meta_answers_a_hidden_toolkit_like_a_missing_one(api, verb
     assert api.folder_calls[-1] == (["toolkit", "mcp"], 3, write)
 
 
-def test_el7607_index_meta_delete_answers_a_toolkit_gone_during_the_cleanup_with_the_generic_404(api, monkeypatch):
+def test_el7607_index_meta_delete_that_removed_the_index_succeeds_when_the_toolkit_goes_during_the_cleanup(api, monkeypatch):
     gone = {"ok": False, "error": "Toolkit 3 not found (project_id=7, index_name='docs')"}, 404
     monkeypatch.setattr(api.index_meta, "load_toolkit_for_index", lambda *args: ("3", "conn", None))
     monkeypatch.setattr(api.index_meta, "get_session_for_schema", MagicMock())
     monkeypatch.setattr(api.index_meta, "clean_up_schedule_in_toolkit", lambda *args: gone)
-    assert api.index_meta.PromptLibAPI().delete(7, 3, "meta-1") == NOT_FOUND
+    assert api.index_meta.PromptLibAPI().delete(7, 3, "meta-1") == ({"ok": True}, 200)
 
 
 def test_el7607_a_read_only_folder_keeps_its_403_on_both_routes(api):
