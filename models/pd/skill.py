@@ -28,10 +28,16 @@ RESERVED_NAME_WORDS = ('claude', 'anthropic')
 
 
 def validate_skill_name(value: str) -> str:
-    if len(value) > 64 or not SKILL_NAME_RE.match(value):
-        raise ValueError('name must be <=64 chars, lowercase letters/digits/hyphens only, no consecutive hyphens')
+    if len(value) > 64:
+        raise ValueError('Name must be at most 64 characters')
+    if not SKILL_NAME_RE.match(value):
+        raise ValueError(
+            'Name must be lowercase letters, digits and hyphens only (no spaces), '
+            'and cannot start or end with a hyphen or contain consecutive hyphens'
+        )
     if any(word in value for word in RESERVED_NAME_WORDS):
-        raise ValueError(f'name cannot contain {" or ".join(RESERVED_NAME_WORDS)}')
+        quoted_words = ' or '.join(f'"{word}"' for word in RESERVED_NAME_WORDS)
+        raise ValueError(f'Name cannot contain {quoted_words}')
     return value
 
 

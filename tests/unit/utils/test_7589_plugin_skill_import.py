@@ -223,7 +223,7 @@ class TestImportPluginSkills:
         long_description = f"---\ndescription: {'x' * 2305}\n---\n\nBody\n"
         packages = env.export.read_plugin_zip(_plugin(**{'commands/long.md': long_description}))
 
-        with pytest.raises(env.utils.SkillFileError, match="'commands/long.md': .*for description"):
+        with pytest.raises(env.utils.SkillFileError, match="^'commands/long.md': Description must be at most 2304 characters$"):
             env.export.import_plugin_skills(PROJECT, packages, author_id=1)
 
         assert env.storage.objects == {}

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, List, Optional, Tuple, Literal
 
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from sqlalchemy import func, or_, asc, desc, text
 from sqlalchemy.orm import selectinload
@@ -1420,11 +1420,24 @@ def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skil
     )
 
 
+def _field_error_message(field: str, error: dict) -> str:
+    """The skill editor's wording for one pydantic error of a skill field."""
+    if error['type'] == 'string_too_long':
+        return f"{field.capitalize()} must be at most {error['ctx']['max_length']} characters"
+    if error['type'] == 'value_error':
+        return error['msg'].removeprefix('Value error, ')
+    return f"{field.capitalize()}: {error['msg']}"
+
+
 def validate_new_skill_fields(name, description) -> None:
     """Raise the error creating a skill would raise for this name or description, before anything is stored."""
     for field, value in (('name', name), ('description', description)):
         info = SkillCreateModel.model_fields[field]
-        TypeAdapter(Annotated[info.annotation, *info.metadata], config=ConfigDict(title=field)).validate_python(value)
+        adapter = TypeAdapter(Annotated[info.annotation, *info.metadata], config=ConfigDict(title=field))
+        try:
+            adapter.validate_python(value)
+        except ValidationError as exc:
+            raise ValueError(_field_error_message(field, exc.errors()[0])) from exc
 
 
 def import_skill(

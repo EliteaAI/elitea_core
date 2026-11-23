@@ -42,6 +42,7 @@ def prepare(ns, env):
     ns.users[OWNER] = {"id": OWNER, "idp_issuer": "https://issuer.example", "idp_tid": "tid-1", "idp_oid": "oid-5"}
     ns.mandate_admin._now = lambda: NOW  # pylint: disable=W0212
     ns.mandate_state._now = lambda: NOW  # pylint: disable=W0212
+    ns.mandate_admission._now = lambda: NOW  # pylint: disable=W0212
     ns.mandate_admin.digest_for_version = lambda session, version_id: env.digests[version_id]
 
     def get_user(user_id):

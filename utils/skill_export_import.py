@@ -731,6 +731,7 @@ def _validate_skill_document(document: dict) -> tuple:
     passthrough = extract_non_elitea_frontmatter(raw_frontmatter)
     frontmatter = {**raw_frontmatter, **decode_elitea_metadata(raw_frontmatter.get('metadata') or {})}
     validate_skill_frontmatter(frontmatter)
+    validate_new_skill_fields(frontmatter['name'], frontmatter['description'] or frontmatter['name'])
     validate_instructions_length(body)
     return frontmatter, body, passthrough
 
@@ -814,8 +815,7 @@ def import_plugin_skills(project_id: int, packages: list, author_id: int) -> lis
     validated, and every file stored, before the transaction starts, so a refused plugin stores nothing."""
     for source, document, _ in packages:
         with _failures_named_after(source):
-            frontmatter = _validate_skill_document(document)[0]
-            validate_new_skill_fields(frontmatter['name'], frontmatter['description'] or frontmatter['name'])
+            _validate_skill_document(document)
     staged = stage_version_files(project_id, [entry for _, _, files in packages for entry in files])
     with _skill_session(None, project_id) as s:
         imported = []
