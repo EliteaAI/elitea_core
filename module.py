@@ -652,6 +652,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "disable_agent_ask_user_default", self.disable_agent_ask_user_default,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "seed_eval_health_check", self.seed_eval_health_check,
                 group="R-2.0.9",
             )

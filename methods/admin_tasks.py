@@ -792,6 +792,45 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return result
 
     @web.method()
+    def disable_agent_ask_user_default(self, *args, **kwargs):
+        """Admin task: the Agents Ask User default off for every user who has it on (R-2.0.9). Idempotent.
+
+        An agent with Ask User can't be scheduled or triggered by a webhook, so new agents no longer get it by
+        default. Turns the Agents default off in every stored per-project module settings row and in the legacy
+        personalization where it is on; the Chats default is kept. Existing agents are not changed.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=true]"
+
+        Examples:
+            "project_id=all"                - disable everywhere (default)
+            "project_id=all;dry_run=true"   - dry run: report counts, change nothing
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.builder_keys import run_enable_default_modules  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("disable_agent_ask_user_default: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        rpc = self.context.rpc_manager.timeout(30)
+        result = run_enable_default_modules(
+            project_ids,
+            lambda pid, dry_run: rpc.social_disable_agent_ask_user_default(pid, dry_run),
+            lambda dry_run: rpc.social_disable_legacy_agent_ask_user_default(dry_run),
+            dry_run_flag(param, default=False),
+        )
+        for pid in result["failed_projects"]:
+            log.error("disable_agent_ask_user_default: project %s failed", pid)
+        if result["legacy_failed"]:
+            log.error("disable_agent_ask_user_default: the legacy personalization was not updated")
+        log.info("disable_agent_ask_user_default: %s", result)
+        return result
+
+    @web.method()
     def close_stuck_chat_runs(self, *args, **kwargs):
         """Admin task: end chat answers stuck "streaming" that nothing will end any more (R-2.0.9, EL-7385).
 
