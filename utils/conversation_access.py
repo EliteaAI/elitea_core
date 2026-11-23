@@ -10,6 +10,7 @@ from .support_utils import get_support_config
 NOT_FOUND = ({'error': 'Conversation not found'}, 404)
 NOT_PARTICIPANT = ({'error': 'Only conversation participants can do this'}, 403)
 NOT_PRIVILEGED = ({'error': 'Only the conversation author or a project admin can do this'}, 403)
+NOT_OWNER = ({'error': 'Only the chat owner can change who has access'}, 403)
 MENTION_REFUSED = "{names} can't be mentioned: they don't have access to this chat."
 
 
@@ -121,6 +122,29 @@ def can_join_room(project_id: int, user_id: int, is_private: bool, is_author: bo
     )
     # Support-project lookup is an RPC, so only pay for it when about to deny
     return denied is None or _is_support_project(project_id)
+
+
+def changes_privacy(conversation, data: dict) -> bool:
+    return data.get('is_private') is not None and bool(data['is_private']) != bool(conversation.is_private)
+
+
+def adds_other_users(participants, user_id: int) -> bool:
+    return any(
+        p.entity_name == ParticipantTypes.user.value and str(p.entity_meta.id) != str(user_id)
+        for p in participants
+    )
+
+
+def removes_other_user(conversation, participant_id: int, user_id: int) -> bool:
+    for p in conversation.participants:
+        if p.id == participant_id:
+            return p.entity_name == ParticipantTypes.user.value and str((p.entity_meta or {}).get('id')) != str(user_id)
+    return False
+
+
+def check_owner(conversation, user_id: int):
+    # Who has access is the owner's call only (#7489)
+    return None if conversation.author_id == user_id else NOT_OWNER
 
 
 def is_privileged_update(conversation, data: dict) -> bool:
