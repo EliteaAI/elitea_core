@@ -17,6 +17,10 @@ class InvalidPath(Exception):
     """hvac's "nothing at this path"; CI has no hvac."""
 
 
+class Forbidden(Exception):
+    """hvac's "this path is outside the project's policy"."""
+
+
 def _lookup(monkeypatch, secrets, hidden, **options):
     reads = []
 
@@ -40,7 +44,7 @@ def _lookup(monkeypatch, secrets, hidden, **options):
     monkeypatch.setitem(sys.modules, "pylon.core.tools",
                         types.SimpleNamespace(log=types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)))
     monkeypatch.setitem(sys.modules, "hvac", types.ModuleType("hvac"))
-    monkeypatch.setitem(sys.modules, "hvac.exceptions", types.SimpleNamespace(InvalidPath=InvalidPath))
+    monkeypatch.setitem(sys.modules, "hvac.exceptions", types.SimpleNamespace(InvalidPath=InvalidPath, Forbidden=Forbidden))
     spec = importlib.util.spec_from_file_location("vectorstore_7660", VECTORSTORE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -63,8 +67,9 @@ def test_no_connstr_anywhere_is_none(monkeypatch):
 
 
 @pytest.mark.unit
-def test_a_never_written_hidden_path_is_no_connstr(monkeypatch):
-    assert _lookup(monkeypatch, {}, InvalidPath("kv-for-hidden-2"))[0] is None
+@pytest.mark.parametrize("absent", [InvalidPath("kv-for-hidden-2"), Forbidden("policy predates kv-for-hidden-2")])
+def test_a_hidden_path_the_project_cannot_reach_is_no_connstr(monkeypatch, absent):
+    assert _lookup(monkeypatch, {}, absent)[0] is None
 
 
 @pytest.mark.unit

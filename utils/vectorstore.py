@@ -1,4 +1,4 @@
-from hvac.exceptions import InvalidPath
+from hvac.exceptions import Forbidden, InvalidPath
 from pylon.core.tools import log
 from tools import VaultClient
 
@@ -15,12 +15,12 @@ def get_pgvector_connection_string(project_id: int, *, default_on_hidden_failure
     if 'pgvector_project_connstr' in project_secrets:
         return project_secrets['pgvector_project_connstr']
 
-    # A project whose hidden path was never written holds no hidden connstr; any other failure must raise, so
-    # dispatch leaves the key out instead of sending a None the worker would trust
+    # A hidden path that was never written, or that the project's policy predates, holds no connstr the project can
+    # reach; any other failure must raise, so dispatch leaves the key out instead of sending a None the worker trusts
     try:
         hidden_secrets: dict = vc.get_project_hidden_secrets()
-    except InvalidPath:
-        log.debug('No hidden secrets path for project_id=%s', project_id)
+    except (InvalidPath, Forbidden):
+        log.debug('No readable hidden secrets path for project_id=%s', project_id)
         return None
     except Exception:  # noqa: BLE001 -- a delete still reaches the default store, as before hidden secrets were read
         if not default_on_hidden_failure:

@@ -6,8 +6,9 @@ import pathlib
 import pytest
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DELETES = ["api/v2/messages.py", "rpc/chat_conversation.py", "utils/schedule_runs.py", "utils/schedule_test_runs.py"]
-DISPATCH = ["methods/predict.py", "rpc/application.py"]
+DELETES = ["api/v2/messages.py", "rpc/chat_conversation.py", "utils/schedule_runs.py", "utils/schedule_test_runs.py",
+           "rpc/agent_state_cleanup.py"]
+DISPATCH = ["methods/predict.py", "rpc/application.py", "methods/pipeline_run.py"]
 
 
 def lookups(path):

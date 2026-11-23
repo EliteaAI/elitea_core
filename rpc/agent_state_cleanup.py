@@ -16,7 +16,7 @@ class RPC:
         project_ids: list[int] = get_all_project_ids()
         for project_id in project_ids:
             try:
-                pgvector_connection_string: str = get_pgvector_connection_string(project_id)
+                pgvector_connection_string: str = get_pgvector_connection_string(project_id, default_on_hidden_failure=True)
             except Exception:  # noqa: BLE001 -- one unreadable vault must not stop the other projects' cleanup
                 log.exception('applications_empty_state: connstr not read: project_id=%s', project_id)
                 continue

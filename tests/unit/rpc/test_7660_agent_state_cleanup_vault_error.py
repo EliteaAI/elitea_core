@@ -9,7 +9,7 @@ from unit._tool_spend_loader import load
 def test_a_vault_error_skips_only_that_project(monkeypatch):
     emitted = []
 
-    def lookup(project_id):
+    def lookup(project_id, **_options):
         if project_id == 1:
             raise RuntimeError("kv-for-hidden-1: forbidden")
         return f"conn-{project_id}"
