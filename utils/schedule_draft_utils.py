@@ -54,7 +54,11 @@ def _vector_index_names(project_id: int, toolkit_ids: list[int]) -> dict[int, li
     from .application_tools import get_session_for_schema  # pylint: disable=C0415
     from .vectorstore import get_pgvector_connection_string  # pylint: disable=C0415
 
-    connection_string = get_pgvector_connection_string(project_id)
+    try:
+        connection_string = get_pgvector_connection_string(project_id)
+    except Exception as error:  # noqa: BLE001 -- an unreadable vault leaves every toolkit to its settings key
+        log.warning('Index names of project %s read from the settings only: %s', project_id, type(error).__name__)
+        return {}
     if not connection_string:
         return {}
     names = {}

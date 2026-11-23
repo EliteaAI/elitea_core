@@ -16,7 +16,7 @@ def cleanup(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
 
     stub("plugins.elitea_core.utils.project_utils", get_all_project_ids=lambda: [1])
-    stub("plugins.elitea_core.utils.vectorstore", get_pgvector_connection_string=lambda _id: "conn")
+    stub("plugins.elitea_core.utils.vectorstore", get_pgvector_connection_string=lambda _id, **_options: "conn")
     stub("plugins.elitea_core.utils.schedule_runs", has_waiting_runs=lambda _id: state["waiting"],
          approval_wait_hours=lambda: state["hours"])
     stub("pylon.core.tools", web=types.SimpleNamespace(rpc=lambda *a, **k: (lambda f: f)),

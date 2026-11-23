@@ -125,7 +125,7 @@ def delete_run_checkpoints(project_id: int, conversation_id: int | None) -> None
                 if isinstance(meta, dict) and meta.get('thread_id')
             )
         this.module.event_node.emit('indexer_delete_checkpoint', {
-            'thread_ids': list(thread_ids), 'pgvector_connstr': get_pgvector_connection_string(project_id),
+            'thread_ids': list(thread_ids), 'pgvector_connstr': get_pgvector_connection_string(project_id, default_on_hidden_failure=True),
         })
     except Exception:  # noqa: BLE001 -- the run already ended; the age cleanup removes the checkpoints later
         log.exception('Schedule run: cannot delete the checkpoints of conversation %s', conversation_id)

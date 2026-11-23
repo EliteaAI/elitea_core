@@ -175,7 +175,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if thread_ids:
                 try:
                     from ...utils.vectorstore import get_pgvector_connection_string
-                    pgvector_connstr = get_pgvector_connection_string(project_id)
+                    pgvector_connstr = get_pgvector_connection_string(project_id, default_on_hidden_failure=True)
                     self.module.event_node.emit('indexer_delete_checkpoint', {
                         'thread_ids': list(thread_ids),
                         'pgvector_connstr': pgvector_connstr,

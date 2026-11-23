@@ -431,3 +431,21 @@ def test_an_agent_draft_keeps_its_old_path_and_never_reads_the_index_roster(env,
     assert (draft.cron, draft.prompt, warnings) == ('*/10 * * * *', 'Summarize', [])  # the index floor is not applied
     env.access.assert_called_once_with(PROJECT, 'agent', 1, user_id=OWNER_ID)
     roster.assert_not_called()
+
+
+def test_an_unreadable_vault_leaves_the_names_to_the_settings_key(env, monkeypatch):
+    """elitea_issues#7660: the connstr lookup also reads the hidden secrets now, and its failure must not fail the picker."""
+    def unreadable(project_id):
+        raise ConnectionError('vault timeout')
+
+    vectorstore = types.ModuleType(f'{PACKAGE}.utils.vectorstore')
+    vectorstore.get_pgvector_connection_string = unreadable
+    indexer = types.ModuleType(f'{PACKAGE}.models.indexer')
+    indexer.EmbeddingStore = None
+    monkeypatch.setitem(sys.modules, vectorstore.__name__, vectorstore)
+    monkeypatch.setitem(sys.modules, indexer.__name__, indexer)
+    monkeypatch.setattr(sys.modules[f'{PACKAGE}.utils.application_tools'], 'get_session_for_schema',
+                        lambda *args: None, raising=False)
+    module = load_plugin_module('utils/schedule_draft_utils.py', 'utils.schedule_draft_utils')
+
+    assert module._vector_index_names(1, [7]) == {}
