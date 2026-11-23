@@ -24,8 +24,9 @@ from ...utils.application_tools import (
     _is_undefined_table_error,
 )
 from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
-from ...utils.index_schedule_compat import save_index_schedule
-from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
+from ...utils.error_text import NOT_FOUND_TEXT
+from ...utils.index_schedule_compat import save_index_schedule, toolkit_refusal
+from ...utils.schedule_service import refusal
 
 
 def _scheduled_index_names(project_id: int, toolkit_id: int) -> set:
@@ -93,8 +94,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
-    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id')
     def get(self, project_id: int, toolkit_id: int, **kwargs):
+        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404), write=False)
+        if refused:
+            return refused
         toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
             project_id, auth.current_user()['id'], toolkit_id)
         if validation_error:
@@ -200,8 +203,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def delete(self, project_id: int, toolkit_id: int, index_meta_id: str):
+        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404))
+        if refused:
+            return refused
         toolkit_name_id, connection_string, validation_error = load_toolkit_for_index(
             project_id, auth.current_user()['id'], toolkit_id)
         if validation_error:
@@ -240,7 +245,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 session.commit()
                 log.debug(f"Deleted all index_meta with collection '{index_name}' from toolkit {toolkit_id}")
         except NoResultFound:
-            return {"ok": False, "error": f"index_meta {index_meta_id} not found"}, 404
+            return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
         except OperationalError as e:
             log.warning(f"Lock timeout while deleting index_meta {index_meta_id}: {e}")
             return {"ok": False, "error": str(IndexMetaLockTimeoutError(index_name or index_meta_id))}, 409
@@ -249,7 +254,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"ok": False, "error": "Error occurred while deleting index_meta"}, 400
 
         clean_result, code = clean_up_schedule_in_toolkit(project_id, toolkit_id, index_name)
-        if not clean_result.get("ok", True):
+        if code == 404:
+            log.warning(f"Toolkit {toolkit_id} was deleted during the delete of index_meta {index_meta_id}; no schedule left to clean up")
+        elif not clean_result.get("ok", True):
             log.error(f"Error occurred while cleaning up schedules for index_meta {index_meta_id}: {clean_result.get('error')}")
             return clean_result, code
 
@@ -262,8 +269,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def patch(self, project_id: int, toolkit_id: int, index_meta_id: str):
+        refused = toolkit_refusal(project_id, toolkit_id, refusal('not_found', NOT_FOUND_TEXT, 404))
+        if refused:
+            return *refused, DEPRECATION_HEADERS
         # Index schedules are rows of the Schedules module; the old route writes that row, for one more release
         body, status = save_index_schedule(project_id, toolkit_id, index_meta_id, request.get_json(silent=True) or {})
         return body, status, DEPRECATION_HEADERS

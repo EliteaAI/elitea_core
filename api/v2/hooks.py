@@ -1,11 +1,12 @@
 """ Public webhook delivery door (#7453) """
 from datetime import UTC, datetime
 
-from flask import Response, request  # pylint: disable=E0401
+from flask import request  # pylint: disable=E0401
 from pylon.core.tools import log  # pylint: disable=E0401,E0611
 from tools import api_tools, db, register_openapi, this  # pylint: disable=E0401
 
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
+from ...utils.error_text import NOT_FOUND_TEXT
 from ...utils.schedule_claim import fail_run
 from ...utils.schedule_dispatch import START_FAILED, start_schedule_run
 from ...utils.schedule_prerun import (
@@ -60,7 +61,7 @@ class HooksAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         # Unknown, wrong type and bad signature look the same: nothing tells which part was wrong
         if row is None or not door.verify_delivery(row, headers, body, door.row_secrets(project_id, row, now)):
             door.log_rejected(row.webhook_type if row is not None else None)
-            return Response(status=404)
+            return {'code': 'not_found', 'error': NOT_FOUND_TEXT}, 404
         delivery = door.delivery_id(headers)
         log.info('Webhook %s delivery %s (type %s)', row.id, delivery, row.webhook_type)
         if not row.enabled:

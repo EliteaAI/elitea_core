@@ -16,7 +16,7 @@ from yaml import AliasEvent, YAMLError, parse
 from ..models.all import Application, ApplicationVersion, EliteATool
 from ..models.entity_schedule import EntitySchedule
 from .pipeline_utils import from_str_to_yaml, validate_yaml_from_str
-from .schedule_service import ScheduleError
+from .schedule_service import ScheduleError, ScheduleNotFound
 from .schedule_timing import end_of_day
 
 FILE_KIND = 'elitea_schedules'
@@ -172,12 +172,18 @@ def _entity_index(session, names: set) -> dict:
     return index
 
 
+def _not_in_project(item) -> str:
+    """The skip reason of an item whose entity is missing, or hidden from the caller: the two read alike."""
+    kind = 'Toolkit' if item.entity_type == TOOLKIT_INDEX else item.entity_type.capitalize()
+    return f"{kind} '{item.entity_name}' not found in this project"
+
+
 def _resolve(index: dict, item) -> tuple[int, int]:
     """Return (application_id, version_id) of the one entity and version the item names, or raise _Skipped."""
     kind = item.entity_type.capitalize()
     versions = index.get((item.entity_type, item.entity_name), [])
     if not versions:
-        raise _Skipped(f"{kind} '{item.entity_name}' not found in this project")
+        raise _Skipped(_not_in_project(item))
     if len({application_id for application_id, *_ in versions}) > 1:
         raise _Skipped(f"{kind} '{item.entity_name}' found more than once")
     if item.version_name is None:
@@ -203,7 +209,7 @@ def _resolve_toolkit(toolkits: dict, item):
     """Return the one toolkit the Toolkit Index item names, or raise _Skipped."""
     found = toolkits.get(item.entity_name, [])
     if not found:
-        raise _Skipped(f"Toolkit '{item.entity_name}' not found in this project")
+        raise _Skipped(_not_in_project(item))
     if len(found) > 1:
         raise _Skipped(f"Toolkit '{item.entity_name}' found more than once")
     return found[0]
@@ -428,6 +434,9 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
                 report[group].append(entry)
             except _Skipped as e:
                 report['skipped'].append({**entry, 'reason': str(e)})
+            except ScheduleNotFound:
+                session.rollback()
+                report['skipped'].append({**entry, 'reason': _not_in_project(item)})
             except ValidationError as e:
                 report['failed'].append({**entry, 'reason': _reason(e)})
             except ScheduleError as e:

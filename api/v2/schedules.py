@@ -12,6 +12,7 @@ from tools import api_tools
 
 from ...models.pd.schedule_list import MAX_DB_ID
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.error_text import NOT_FOUND_TEXT
 from ...utils.schedule_draft_handler import ScheduleDraftHandler
 from ...utils.schedule_item_handlers import ScheduleItemHandlers
 from ...utils.schedule_project_handlers import ScheduleProjectHandlers
@@ -50,7 +51,7 @@ ROUTES = {
 }
 # The body of `schedule_service.refusal`; the handler tests load this module without the service
 NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
-ID_OUT_OF_RANGE = {"code": "not_found", "error": "Schedule not found"}, 404
+ID_OUT_OF_RANGE = {"code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
 
 def _tail(schedule_id: int | None, run_id: int | None) -> str:

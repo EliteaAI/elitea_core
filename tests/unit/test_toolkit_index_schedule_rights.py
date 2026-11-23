@@ -92,6 +92,7 @@ def prerun(monkeypatch):
             raise folder.answer
         return folder.answer
     folder.entity_access_error = entity_access_error
+    folder.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     monkeypatch.setitem(sys.modules, FOLDER, folder)
     module.folder = folder
 

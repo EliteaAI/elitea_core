@@ -87,6 +87,7 @@ def env(monkeypatch):
 
     folder_access.entity_access_error = entity_access_error
     folder_access.TOOLKIT_ENTITY_TYPES = ['toolkit', 'mcp']
+    folder_access.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     notifications = types.ModuleType(f'{PACKAGE}.utils.schedule_notifications')
     notifications.notify_schedule_event = lambda *args, **kwargs: True
     sys.modules[folder_access.__name__] = folder_access
@@ -191,7 +192,7 @@ def test_the_index_read_expands_the_settings_for_the_caller_after_it_ends_the_re
 def test_check_entity_refuses_an_unknown_toolkit(env):
     with pytest.raises(env.service.ScheduleError) as excinfo:
         env.check(toolkit_id=99)
-    assert error_of(excinfo) == ('invalid_input', 400, 'toolkit_id')
+    assert excinfo.value.response == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
     assert env.lookups == []
 
 
@@ -202,6 +203,15 @@ def test_check_entity_maps_a_folder_refusal_before_it_reads_the_index(env, statu
         env.check()
     assert error_of(excinfo)[:2] == (code, status)
     assert env.lookups == []
+
+
+@pytest.mark.parametrize('entity', [('agent', 1, 10, {}), ('toolkit_index', None, None, {'toolkit_id': 3, 'index_name': 'docs'})])
+def test_el7607_a_hidden_entity_answers_the_generic_not_found(env, entity):
+    entity_type, application_id, version_id, toolkit = entity
+    env.folder_refusal = ({'ok': False, 'error': 'Agent not found'}, 404)
+    with pytest.raises(env.service.ScheduleError) as excinfo, env.session_factory() as session:
+        env.service.check_entity(session, PROJECT_ID, entity_type, application_id, version_id, **toolkit)
+    assert excinfo.value.response == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
 
 
 def test_check_entity_refuses_an_index_the_store_does_not_have(env):

@@ -6,8 +6,10 @@ from tools import api_tools, auth, config as c, db
 
 from ...models.elitea_tools import EliteATool
 from ...utils.constants import DEPRECATION_HEADERS, PROMPT_LIB_MODE
-from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 from ...utils.schedule_access import schedule_scope
+from ...utils.error_text import NOT_FOUND_TEXT
+from ...utils.index_schedule_compat import toolkit_refusal
+
 
 _ADMIN_ROLES = {
     c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -21,8 +23,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         "recommended_roles": _ADMIN_ROLES,
     })
     @api_tools.endpoint_metrics
-    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def delete(self, project_id: int, toolkit_id: int, index_name: str):
+        refused = toolkit_refusal(project_id, toolkit_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404))
+        if refused:
+            return refused
         current_user_id = str(auth.current_user().get("id"))
 
         # Another user's key, or the shared key "-1", is removed only by a holder of the schedule admin right.
@@ -34,19 +38,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     EliteATool.id == toolkit_id
                 ).first()
                 if not toolkit:
-                    return {"ok": False, "error": "Toolkit not found"}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 meta = toolkit.meta or {}
                 indexes_meta = meta.get("indexes_meta", {})
                 index_entry = indexes_meta.get(index_name)
 
                 if not index_entry:
-                    return {"ok": False, "error": f"No schedule found for index '{index_name}'"}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 schedules = index_entry.get("schedules", {})
                 if target_user_id not in schedules or (
                         target_user_id != current_user_id and not schedule_scope(project_id).is_admin):
-                    return {"ok": False, "error": f"No schedule found for user '{target_user_id}'"}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 del schedules[target_user_id]
                 index_entry["schedules"] = schedules

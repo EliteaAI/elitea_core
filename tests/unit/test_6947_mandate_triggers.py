@@ -531,8 +531,7 @@ def webhook(ns, env, monkeypatch):
     monkeypatch.setattr(ns.tools, "register_openapi", lambda **kwargs: (lambda func: func), raising=False)
     for name, attrs in {
         f"{PKG}.utils.constants": {"PROMPT_LIB_MODE": "prompt_lib"},
-        f"{PKG}.utils.folder_access": {"require_folder_access": lambda *a, **k: (lambda func: func),
-                                       "APPLICATION_ENTITY_TYPES": ()},
+        f"{PKG}.utils.folder_access": {"version_refusal": lambda *a, **k: None},
         f"{PKG}.utils.pipeline_trigger": {
             "WEBHOOK_TYPE_CONFIG": {"github": {"signature_header": "X-Hub-Signature-256", "signing_id_header": "x"}},
             "normalize_secret_value": lambda s: s, "validate_webhook_secret": None,
@@ -579,6 +578,63 @@ def test_a_bad_signature_mints_nothing_and_runs_nothing(ns, env, agent, webhook)
     result, status = post(webhook)
     assert status == 400 and ns.state.predicts == [] and ns.state.conversations == []
     assert len(module._mandate_tickets) == 0   # pylint: disable=W0212
+
+
+GENERIC_404 = {"code": "not_found", "error": "The requested item could not be found"}, 404
+
+
+def _validate_with(webhook, monkeypatch, version, headers, secret="secret", signature_ok=False):
+    """The real signature check over a fake session holding `version` (None: no such version)."""
+    session = mock.MagicMock()
+    session.query.return_value.options.return_value.get.return_value = version
+    monkeypatch.setattr(webhook, "db", types.SimpleNamespace(get_session=lambda project_id: mock.MagicMock(
+        __enter__=lambda self: session, __exit__=lambda *a: False)))
+    monkeypatch.setattr(sys.modules["sqlalchemy.orm"], "joinedload", lambda attribute: attribute)
+    monkeypatch.setattr(webhook.ApplicationVersion, "application", None, raising=False)
+    monkeypatch.setattr(webhook, "VaultClient", lambda project_id: types.SimpleNamespace(unsecret=lambda ref: secret))
+    monkeypatch.setattr(webhook, "validate_webhook_secret", lambda **kwargs: (signature_ok, "X-Hub-Signature-256 mismatch"))
+    monkeypatch.setattr(webhook, "request", types.SimpleNamespace(data=b"{}", headers=headers))
+    validate = webhook.WebHookAPI._validate_webhook_signature   # pylint: disable=W0212
+    return validate(webhook.handler, 1, 999, "github", b"{}")
+
+
+SIGNED = {"X-Hub-Signature-256": "sha256=abc"}
+
+
+@pytest.mark.parametrize("trigger, headers, secret", [
+    ({"type": "webhook", "webhook_secret": "ref"}, {}, "secret"),
+    ({"type": "chat_message"}, SIGNED, "secret"),
+    ({"type": "webhook", "webhook_secret": "ref"}, SIGNED, ""),
+    ({"type": "webhook", "webhook_secret": "ref"}, SIGNED, "secret"),
+], ids=["no_signature_header", "no_webhook_trigger", "secret_gone_from_vault", "bad_signature"])
+def test_el7607_an_unproven_delivery_answers_like_an_unknown_version(webhook, monkeypatch, trigger, headers, secret):
+    unknown = _validate_with(webhook, monkeypatch, None, SIGNED)
+    version = FakeVersion()
+    version.pipeline_settings = {"trigger": trigger}
+    assert _validate_with(webhook, monkeypatch, version, headers, secret) == unknown == (False, GENERIC_404)
+
+
+def test_el7607_a_genuine_delivery_still_passes_the_check(webhook, monkeypatch):
+    version = FakeVersion()
+    version.pipeline_settings = {"trigger": {"type": "webhook", "webhook_secret": "ref"}}
+    version.application = "the pipeline"
+    assert _validate_with(webhook, monkeypatch, version, SIGNED, signature_ok=True) == (True, (version, "the pipeline"))
+
+
+@pytest.mark.parametrize("refusal", [None, GENERIC_404], ids=["visible", "missing_or_hidden"])
+def test_el7607_an_unknown_webhook_type_is_400_whatever_the_version(webhook, monkeypatch, refusal):
+    monkeypatch.setattr(webhook, "version_refusal", lambda *args, **kwargs: refusal)
+    answer = webhook.handler.post(project_id=1, version_id=70, webhook_type="nosuch")
+    assert answer == ({"error": "Bad signature type"}, 400)
+    assert webhook.state.signature_checks == 0
+
+
+def test_el7607_a_hidden_or_missing_version_is_refused_before_the_signature_is_read(webhook, monkeypatch):
+    calls = []
+    monkeypatch.setattr(webhook, "version_refusal",
+                        lambda project_id, version_id, not_found, write=False: calls.append(not_found) or not_found)
+    assert post(webhook) == GENERIC_404
+    assert calls == [GENERIC_404] and webhook.state.signature_checks == 0
 
 
 @pytest.mark.parametrize("name, change, code", [

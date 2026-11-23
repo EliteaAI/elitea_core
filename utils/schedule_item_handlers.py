@@ -82,7 +82,7 @@ RUN_FIELDS = (
     "id", "trigger", "status", "reason", "conversation_id", "requested_by", "started_at", "finished_at",
     "version_id",
 )
-RUN_NOT_FOUND = refusal("run_not_found", "Run not found", 404)
+RUN_NOT_FOUND = ScheduleNotFound().response
 TEST_RUN_UNAVAILABLE = refusal(
     "test_run_unavailable", "Test runs are not available yet: the administrator must run the task migrate_schedule_test_runs",
     503,
@@ -1238,7 +1238,7 @@ class ScheduleItemHandlers:
         is the one of the stored form.
         Who may call: a project member with `schedules.run`; another owner's run, a run of a saved schedule and a
         run of another agent, pipeline or index are 404.
-        Errors: 400 invalid target, or no target or two targets; 403; 404 `run_not_found`; 503 `test_run_unavailable`.
+        Errors: 400 invalid target, or no target or two targets; 403; 404; 503 `test_run_unavailable`.
         """
         try:
             query = TestRunTarget.model_validate(dict(request.args))

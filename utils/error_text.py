@@ -5,6 +5,7 @@ ERROR_LINE_MAX_LENGTH = 300
 FAILED_REASON = 'The run failed'
 # Shown when the error text is written for engineers; the text itself goes to the server log only
 GENERIC_FAILED_REASON = f'{FAILED_REASON}. Open the run log or ask an administrator for details.'
+NOT_FOUND_TEXT = 'The requested item could not be found'
 # A query string of an http(s) URL: it may hold a token, so only its place is kept
 _URL_QUERY = re.compile(r'(https?://[^\s?#]+)\?[^\s#]*')
 # A Windows path (C:\work\x.py) or a POSIX absolute path (/data/x.py, /x.py), up to the first space. The

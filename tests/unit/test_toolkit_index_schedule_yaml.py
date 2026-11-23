@@ -86,6 +86,7 @@ def export_env(monkeypatch):
                 self.response = {'code': code, 'error': text, **extra}, status
 
         service.ScheduleError = env.ScheduleError = ScheduleError
+        service.ScheduleNotFound = type('ScheduleNotFound', (ScheduleError,), {})
         sys.modules[service.__name__] = service
         env.EntitySchedule = sqlite_db.create_schedule_table(load_plugin_module, Base, engine)
         load_plugin_module('utils/constants.py', 'utils.constants')
@@ -281,10 +282,11 @@ def test_import_fails_the_item_when_the_store_cannot_be_read(env):
     assert env.index_rows() == []
 
 
-def test_import_fails_an_item_the_admin_may_not_write_with_the_service_refusal(env):
-    env.folder_error = ({'error': 'Toolkit not found'}, 404)
+def test_el7607_import_skips_a_hidden_toolkit_like_a_missing_one(env):
+    env.folder_error = ({'error': 'Not found'}, 404)
     report = env.import_items(index_item(), schema_version=2)
-    assert report['failed'] == [{'name': 'Docs refresh', 'reason': 'Toolkit not found'}]
+    assert report['failed'] == []
+    assert report['skipped'] == [{'name': 'Docs refresh', 'reason': f"Toolkit '{TOOLKIT_NAME}' not found in this project"}]
     assert env.index_rows() == []
     assert env.reads == []  # the rights come before any read of the store
 

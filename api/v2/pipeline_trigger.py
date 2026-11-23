@@ -31,7 +31,8 @@ from ...utils.pipeline_trigger import (
     validate_webhook_secret_strength,
     validate_gitlab_signing_token_format,
 )
-from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
+from ...utils.error_text import NOT_FOUND_TEXT
+from ...utils.folder_access import version_refusal
 from ...utils.trigger_governance import governance_notice_for
 
 
@@ -52,7 +53,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     })
     @api_tools.endpoint_metrics
-    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def get(self, project_id: int, version_id: int, **kwargs):
         """
         Get the current trigger configuration for a pipeline version.
@@ -62,6 +62,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         Note: Webhook secrets are masked for viewers (users without edit permission).
         """
+        refused = version_refusal(project_id, version_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404))
+        if refused:
+            return refused
         try:
             # Check if user has edit permission (viewers don't)
             # If they don't have edit permission, mask the secret
@@ -79,7 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
 
                 if not version:
-                    return {"ok": False, "error": f"Version {version_id} not found"}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 # Get trigger from pipeline_settings with fallback
                 pipeline_settings = version.pipeline_settings or {}
@@ -133,7 +136,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     })
     @api_tools.endpoint_metrics
-    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', write=True, via_version=True)
     def put(self, project_id: int, version_id: int, **kwargs):
         """
         Update the trigger configuration for a pipeline version.
@@ -142,6 +144,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         For 'schedule' type: rejected with 400, schedules live in the Schedules API.
         For 'webhook' type: webhook_type is required, secret is auto-generated.
         """
+        refused = version_refusal(project_id, version_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404), write=True)
+        if refused:
+            return refused
         payload = dict(request.json)
 
         # Before the body check: every schedule write gets the same answer, even one with a bad cron (R1.1)
@@ -185,7 +190,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
 
                 if not version:
-                    return {"ok": False, "error": f"Version {version_id} not found"}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 # Only a version that still stores a legacy webhook may edit it; new ones are webhook rows (#7402)
                 stored_type = get_trigger_from_pipeline_settings(version.pipeline_settings or {}).get("type")
@@ -313,7 +318,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     })
     @api_tools.endpoint_metrics
-    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def post(self, project_id: int, version_id: int, **kwargs):
         """
         Regenerate the webhook secret for a pipeline version.
@@ -321,6 +325,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         This is useful when the secret has been compromised.
         Only works when trigger type is 'webhook'.
         """
+        refused = version_refusal(project_id, version_id, ({"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404),
+                                  write=True)
+        if refused:
+            return refused
         try:
             with db.get_session(project_id) as session:
                 version = session.query(ApplicationVersion).options(
@@ -330,7 +338,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
 
                 if not version:
-                    return {"ok": False, "error": f"Version {version_id} not found"}, 404
+                    return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
 
                 # Check if current trigger is webhook
                 pipeline_settings = version.pipeline_settings or {}

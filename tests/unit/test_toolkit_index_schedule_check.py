@@ -172,15 +172,13 @@ def test_an_index_that_is_not_in_the_toolkit_is_400_on_index_name(harness, env):
     assert env.expanded == []
 
 
-def test_a_toolkit_outside_the_project_is_400_on_toolkit_id(harness, env):
-    body, status = env.check(toolkit_id=99)
-    assert status == 400
-    assert body['field'] == 'toolkit_id'
+def test_el7607_a_toolkit_outside_the_project_is_the_generic_404(harness, env):
+    assert env.check(toolkit_id=99) == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
 
 
 def test_a_folder_the_caller_cannot_write_is_refused_before_the_index_is_read(harness, env):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(env.check(), 404, 'No access')
+    assert_refusal(env.check(), 404, 'The requested item could not be found')
     assert env.expanded == []
 
 

@@ -19,6 +19,7 @@ from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
+from .error_text import NOT_FOUND_TEXT
 from .schedule_settings import ScheduleProjectSettings
 
 BASE_URL = f"/api/v2/elitea_core/schedules/{SCHEDULES_PROJECT_PATH}"
@@ -245,7 +246,8 @@ CONNECTIONS_EXAMPLE = {"rows": [
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
     """The success answer with its JSON example, then the main error answers; an error text None takes the default.
 
-    Every 4xx answer points to the shared `ScheduleRefusal` schema and keeps its own example.
+    Every 4xx answer points to the shared `ScheduleRefusal` schema and keeps its own example; a 404 example
+    shows the one not-found text the server answers, its description says when it happens.
     """
     success = {"description": text}
     if example is not None:
@@ -254,7 +256,8 @@ def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict
     for error, value in errors.items():
         description, error_example = value if isinstance(value, tuple) else (value, None)
         description = description or ERRORS[error]
-        refusal = {"code": DEFAULT_CODES[error], "error": description, **(error_example or {})}
+        error_text = NOT_FOUND_TEXT if error == 404 else description
+        refusal = {"code": DEFAULT_CODES[error], "error": error_text, **(error_example or {})}
         body = {"schema": REFUSAL_REF, "example": refusal} if 400 <= error < 500 else {"example": refusal}
         answers[str(error)] = {"description": description, "content": {"application/json": body}}
     return answers
@@ -317,7 +320,7 @@ OPERATIONS = {
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleCreate,
         "responses": _responses(201, "Created: the schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: SAVE_BAD_INPUT, 403: None, 404: "The agent, pipeline or version is not found or not visible",
+            400: SAVE_BAD_INPUT, 403: None, 404: "The agent or pipeline is not found or not visible",
             409: SAVE_CONFLICTS}),
     },
     ("post", "check"): {
@@ -504,7 +507,7 @@ OPERATIONS = {
             "`approval_rule` is the one of the stored form; `can_approve_all` is as for a run of a saved schedule.",
             "a project member with `schedules.run`; another owner's run, a run of a saved schedule and a run of "
             "another agent or pipeline are 404",
-            "400 a missing `application_id`; 403 no permission; 404 `run_not_found`; "
+            "400 a missing `application_id`; 403 no permission; 404 not found; "
             "503 `test_run_unavailable`"),
         "parameters": [*PROJECT_PARAMS, APPLICATION_QUERY,
                        {"name": "run_id", "in": "path", "required": True,

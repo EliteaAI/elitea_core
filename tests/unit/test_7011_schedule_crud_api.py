@@ -28,7 +28,7 @@ ADMIN_ID = 99
 PERMISSION_PREFIX = 'models.applications.schedules.'
 EDITOR = {PERMISSION_PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 ADMIN = EDITOR | {PERMISSION_PREFIX + 'admin'}
-NOT_FOUND = {'code': 'not_found', 'error': 'Schedule not found'}
+NOT_FOUND = {'code': 'not_found', 'error': 'The requested item could not be found'}
 
 
 class FakeSpan:
@@ -211,6 +211,7 @@ def harness(isolated_sys_modules, monkeypatch):
 
     folder_access = types.ModuleType(f'{PACKAGE}.utils.folder_access')
     folder_access.entity_access_error = lambda *args, **kwargs: harness.access_error
+    folder_access.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     notifications = types.ModuleType(f'{PACKAGE}.utils.schedule_notifications')
     notifications.notify_schedule_event = lambda *args, **kwargs: harness.notify(*args, **kwargs)
     sys.modules[folder_access.__name__] = folder_access
@@ -307,8 +308,12 @@ def assert_400_names(response, field):
 
 # --- R1.3, R1.4, R1.5, R1.6: entity, folder rights, permission, type
 
-def test_7011_r1_3_entity_outside_the_project_is_400_on_application_id(harness):
-    assert_400_names(harness.call('post', agent_body(application_id=99, version_id=10)), 'application_id')
+@pytest.mark.parametrize('body', [agent_body(), agent_body(version_id=11), agent_body(entity_type='pipeline')])
+def test_el7607_a_hidden_agent_answers_like_a_missing_one_whatever_the_version_and_type(harness, body):
+    missing = harness.call('post', {**body, 'application_id': 99})
+    harness.access_error = ({'ok': False, 'error': 'Not found'}, 404)
+    assert harness.call('post', body) == missing == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
+    assert harness.row(1) is None
 
 
 def test_7011_r1_3_version_of_another_entity_is_400_on_version_id(harness):
@@ -317,7 +322,7 @@ def test_7011_r1_3_version_of_another_entity_is_400_on_version_id(harness):
 
 def test_7011_r1_4_folder_rights_denial_is_returned_and_nothing_is_saved(harness):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(harness.call('post', agent_body()), 404, 'No access')
+    assert_refusal(harness.call('post', agent_body()), 404, 'The requested item could not be found')
     assert harness.row(1) is None
 
 

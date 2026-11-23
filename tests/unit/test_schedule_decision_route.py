@@ -290,7 +290,7 @@ def test_a_missing_run_is_404(harness, decisions):
 
     body, status = decide(harness, schedule_id, 999)
 
-    assert (status, body['code']) == (404, 'run_not_found')
+    assert (status, body['code']) == (404, 'not_found')
 
 
 def test_a_run_of_another_schedule_is_404(harness, decisions):
@@ -299,7 +299,7 @@ def test_a_run_of_another_schedule_is_404(harness, decisions):
 
     body, status = decide(harness, schedule_id, run_id)
 
-    assert (status, body['code']) == (404, 'run_not_found')
+    assert (status, body['code']) == (404, 'not_found')
     assert decisions.checks == []
 
 
