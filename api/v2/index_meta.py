@@ -256,6 +256,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         clean_result, code = clean_up_schedule_in_toolkit(project_id, toolkit_id, index_name)
         if not clean_result.get("ok", True):
             log.error(f"Error occurred while cleaning up schedules for index_meta {index_meta_id}: {clean_result.get('error')}")
+            if code == 404:
+                return {"ok": False, "code": "not_found", "error": NOT_FOUND_TEXT}, 404
             return clean_result, code
 
         return {"ok": True}, 200
