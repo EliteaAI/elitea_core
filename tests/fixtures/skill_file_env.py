@@ -29,20 +29,37 @@ class Predicate:
         return Predicate(lambda row: not self.test(row))
 
 
+class JoinedRow:
+    """A row of a joined query: each column reads the row of the model it belongs to."""
+
+    def __init__(self, rows_by_model):
+        self.rows_by_model = rows_by_model
+
+
 class Column:
     def __init__(self, name):
         self.name = name
         self.owner = None
 
+    def read(self, row):
+        if isinstance(row, JoinedRow):
+            row = row.rows_by_model[self.owner]
+        return getattr(row, self.name)
+
+    def __getitem__(self, key):
+        return JsonText(self, key)
+
     def __eq__(self, other):
-        return Predicate(lambda row: getattr(row, self.name) == other)
+        if isinstance(other, Column):
+            return Predicate(lambda row: self.read(row) == other.read(row))
+        return Predicate(lambda row: self.read(row) == other)
 
     def __ne__(self, other):
-        return Predicate(lambda row: getattr(row, self.name) != other)
+        return Predicate(lambda row: self.read(row) != other)
 
     def in_(self, values):
         wanted = list(values)
-        return Predicate(lambda row: getattr(row, self.name) in wanted)
+        return Predicate(lambda row: self.read(row) in wanted)
 
     def asc(self):
         return self
@@ -54,6 +71,22 @@ class Column:
 
     def __hash__(self):
         return id(self)
+
+
+class JsonText(Column):
+    """``column['key'].astext``: the key's value as Postgres renders it as text, None when absent."""
+
+    def __init__(self, column, key):
+        super().__init__(key)
+        self.column, self.owner = column, column.owner
+
+    @property
+    def astext(self):
+        return self
+
+    def read(self, row):
+        value = (self.column.read(row) or {}).get(self.name)
+        return None if value is None else str(value)
 
 
 class Lower:
@@ -79,15 +112,19 @@ class Row(tuple):
 
 
 class FakeQuery:
-    def __init__(self, session, model, target, predicates=(), order=(), distinct=False, for_update=False):
+    def __init__(self, session, model, target, predicates=(), order=(), distinct=False, for_update=False,
+                 joins=()):
         self.session, self.model, self.target = session, model, target
         self.predicates, self.order, self.is_distinct = predicates, order, distinct
-        self.for_update = for_update
+        self.for_update, self.joins = for_update, joins
 
     def _copy(self, **changes):
         values = {'predicates': self.predicates, 'order': self.order, 'distinct': self.is_distinct,
-                  'for_update': self.for_update, **changes}
+                  'for_update': self.for_update, 'joins': self.joins, **changes}
         return FakeQuery(self.session, self.model, self.target, **values)
+
+    def join(self, model, on):
+        return self._copy(joins=self.joins + ((model, on),))
 
     def with_for_update(self):
         return self._copy(for_update=True)
@@ -104,17 +141,29 @@ class FakeQuery:
     def options(self, *args):
         return self
 
+    def _join_rows(self):
+        rows = self.session.rows[self.model]
+        for model, on in self.joins:
+            rows = [
+                JoinedRow({**getattr(row, 'rows_by_model', {self.model: row}), model: joined})
+                for row in rows for joined in self.session.rows[model]
+            ]
+            rows = [row for row in rows if on.test(row)]
+        return rows
+
     def _rows(self):
-        rows = [row for row in self.session.rows[self.model] if all(p.test(row) for p in self.predicates)]
+        rows = [row for row in self._join_rows() if all(p.test(row) for p in self.predicates)]
         if self.for_update:
             self.session.locked_rows.extend(rows)
         for column in reversed(self.order):
-            rows.sort(key=lambda row, name=column.name: getattr(row, name), reverse=getattr(column, 'descending', False))
+            rows.sort(key=column.read, reverse=getattr(column, 'descending', False))
         return rows
 
     def _results(self):
         if isinstance(self.target, type):
-            return self._rows()
+            return [getattr(row, 'rows_by_model', {self.model: row})[self.model] for row in self._rows()]
+        if isinstance(self.target, tuple):
+            return [tuple(column.read(row) for column in self.target) for row in self._rows()]
         results = [Row(self.target.name, getattr(row, self.target.name)) for row in self._rows()]
         if self.is_distinct:
             results = list(dict.fromkeys(results))
@@ -150,7 +199,7 @@ def _model(name, columns):
 
 
 FakeSkill = _model('Skill', ['id', 'owner_id', 'shared_owner_id', 'shared_id'])
-FakeSkillVersion = _model('SkillVersion', ['id', 'skill_id', 'name', 'status', 'created_at', 'tags'])
+FakeSkillVersion = _model('SkillVersion', ['id', 'skill_id', 'name', 'status', 'created_at', 'tags', 'meta'])
 FakeSkillVersionFile = _model('SkillVersionFile', ['id', 'skill_version_id', 'path', 'sha256', 'size'])
 FakeEntitySkillMapping = _model(
     'EntitySkillMapping', ['skill_version_id', 'skill_id', 'entity_version_id', 'entity_type'],
@@ -181,9 +230,9 @@ class FakeSession:
         for holders in self.locks.values():
             holders.discard(self)
 
-    def query(self, target):
+    def query(self, target, *more_targets):
         model = target if isinstance(target, type) else target.owner
-        return FakeQuery(self, model, target)
+        return FakeQuery(self, model, (target, *more_targets) if more_targets else target)
 
     def add(self, row):
         row.session = self
