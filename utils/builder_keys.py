@@ -73,8 +73,8 @@ def run_builder_keys_migration(project_ids, migrate_project, migrate_settings, d
 
 
 def run_enable_default_modules(project_ids, enable_project, enable_legacy, dry_run: bool) -> dict:
-    """R-2.0.9: the Elitea Builder defaults on and Ask User off per project (`enable_project`), then once in the legacy
-    personalization (`enable_legacy`). One failing project is listed and the run goes on."""
+    """R-2.0.9: the Elitea Builder defaults on, Ask User on for Chats and off for Agents, per project
+    (`enable_project`), then once in the legacy personalization (`enable_legacy`). One failing project is listed and the run goes on."""
     result = {"updated_settings": 0, "updated_legacy_users": 0, "failed_projects": [], "legacy_failed": False,
               "dry_run": dry_run}
     for pid in project_ids:
