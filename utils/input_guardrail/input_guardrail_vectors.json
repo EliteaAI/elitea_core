@@ -349,6 +349,67 @@
         "NI number ",
         "QQ 12 34 56 C"
       ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "call +1 415 ",
+        "555 0132 2026-11-24"
+      ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "Call +1 415 555 ",
+        "0132 - 9 to 5"
+      ]
+    },
+    {
+      "rule_id": "gitlab_token",
+      "category": "credentials",
+      "parts": [
+        "token glpat-",
+        "FakeTestVector0000000",
+        ".01.",
+        "fakesuffix9"
+      ]
+    },
+    {
+      "rule_id": "gitlab_token",
+      "category": "credentials",
+      "parts": [
+        "token glpat-",
+        "FakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVector"
+      ]
+    },
+    {
+      "rule_id": "iban",
+      "category": "personal_data",
+      "parts": [
+        "iban RU02",
+        "0445256004070281",
+        "0412345678901"
+      ]
+    },
+    {
+      "rule_id": "url_credentials",
+      "category": "credentials",
+      "parts": [
+        "https://user:",
+        "Fak3@T3st",
+        "@host.example.com/x"
+      ]
+    },
+    {
+      "rule_id": "us_ssn",
+      "category": "personal_data",
+      "parts": [
+        "Social Security number: ",
+        "078-05-",
+        "1120"
+      ]
     }
   ],
   "negative": [
@@ -525,6 +586,91 @@
     {
       "parts": [
         "sha 00a1b2c3d4e5f60718293a4b5c6d7e8f"
+      ]
+    },
+    {
+      "parts": [
+        "Ref 00",
+        "12345678"
+      ]
+    },
+    {
+      "parts": [
+        "00",
+        "12345678905"
+      ]
+    },
+    {
+      "parts": [
+        "Order 00",
+        "123456789"
+      ]
+    },
+    {
+      "parts": [
+        "password: ",
+        "forgotten"
+      ]
+    },
+    {
+      "parts": [
+        "Enter your password: ",
+        "Confirmation"
+      ]
+    },
+    {
+      "parts": [
+        "Password:\n",
+        "Confirmation"
+      ]
+    },
+    {
+      "parts": [
+        "if password: ",
+        "validate_pw"
+      ]
+    },
+    {
+      "parts": [
+        "password=",
+        "user_input"
+      ]
+    },
+    {
+      "parts": [
+        "password: ",
+        "SecretStr"
+      ]
+    },
+    {
+      "parts": [
+        "\"password\": ",
+        "\"string\""
+      ]
+    },
+    {
+      "parts": [
+        "pwd: ",
+        "C:\\Users\\x\\proj"
+      ]
+    },
+    {
+      "parts": [
+        "http://localhost:",
+        "8080@x"
+      ]
+    },
+    {
+      "parts": [
+        "ssh://git:",
+        "22@host"
+      ]
+    },
+    {
+      "parts": [
+        "Ticket ",
+        "078-05-",
+        "1120"
       ]
     }
   ],
@@ -756,6 +902,35 @@
       "id": "azure_ad_tilde_run",
       "parts": [
         "8Q~"
+      ],
+      "repeat": 60000
+    },
+    {
+      "id": "url_userinfo_at_run",
+      "parts": [
+        "ab://a:b@"
+      ],
+      "repeat": 25000
+    },
+    {
+      "id": "ssn_keyword_run",
+      "parts": [
+        "ssn 123-"
+      ],
+      "repeat": 25000
+    },
+    {
+      "id": "gitlab_dot_run",
+      "parts": [
+        "glpat-",
+        ".............................."
+      ],
+      "repeat": 10000
+    },
+    {
+      "id": "phone_trailing_groups",
+      "parts": [
+        "+1 2"
       ],
       "repeat": 60000
     }
