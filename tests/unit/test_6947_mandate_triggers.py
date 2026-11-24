@@ -741,6 +741,8 @@ def do_predict(ns, env, monkeypatch):
     monkeypatch.setitem(sys.modules, f"{PKG}.utils.input_guardrail", stub(
         f"{PKG}.utils.input_guardrail", inspect_and_unsecret=lambda payload, vault, *a: vault.unsecret(payload)))
     monkeypatch.setitem(sys.modules, f"{PKG}.utils.sio_utils", stub(f"{PKG}.utils.sio_utils", SioEvents=mock.MagicMock()))
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.api_run_history", stub(
+        f"{PKG}.utils.api_run_history", should_record_api_run=lambda *a, **k: False, open_api_run_conversation=None))
     monkeypatch.setattr(sys.modules[f"{PKG}.models.all"].ApplicationVersion, "application", mock.MagicMock(), raising=False)
     monkeypatch.setattr(ns.tools, "serialize", lambda value: value, raising=False)
     monkeypatch.setattr(ns.tools, "VaultClient", lambda *a, **k: mock.MagicMock(), raising=False)
@@ -755,6 +757,7 @@ def run_do_predict(ns, env, do_predict, governed=True, signature="sig", version=
     module = arm(ns, env, governed=governed)
     module.task_node = mock.MagicMock()
     module.task_node.start_task.return_value = "task-1"
+    module.descriptor = types.SimpleNamespace(config={})
     version = version or types.SimpleNamespace(
         id=70, application_id=7, llm_settings={"model_name": "m"}, agent_type="agent", instructions="x",
         application=types.SimpleNamespace(name="agent", webhook_secret="secret"))

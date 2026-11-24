@@ -66,7 +66,7 @@ def create_trigger_run_conversation(
         project_id: Project ID
         version: ApplicationVersion instance
         user_id: User ID for execution context (trigger creator)
-        trigger_type: Type of trigger ("scheduled" or "webhook")
+        trigger_type: Type of trigger ("scheduled", "webhook", "api" or "mcp")
         trigger_message: Initial message content showing trigger info
         conversation_name: Name for the conversation (e.g., "Scheduled run: Pipeline Name")
         extra_meta: Additional metadata to include in conversation.meta
