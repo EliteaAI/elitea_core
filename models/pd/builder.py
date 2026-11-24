@@ -12,13 +12,15 @@ class _Strict(BaseModel):
 
 
 class BuilderFindModel(_Strict):
-    type: EntityType
+    type: EntityType = Field(description="toolkit also finds MCP servers (marked mcp: true); there is no separate mcp "
+                                         "type. toolkit, model and configuration are lookups: use the id, don't read.")
     query: str = Field('', description="Name or words to search for. For type operation: what you want to do.")
     limit: int = Field(10, ge=1, le=25)
 
 
 class BuilderReadModel(_Strict):
-    type: EntityType
+    type: EntityType = Field(description="agent, pipeline, skill, project_context or operation. Toolkits, MCPs, models "
+                                         "and configurations can't be read.")
     id: Optional[Union[int, str]] = Field(None, description="Id from builder_find (op_id for type operation).")
     version_id: Optional[int] = None
 

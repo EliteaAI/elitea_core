@@ -84,6 +84,10 @@ def _masked(args, path=''):
     return {k: one(k, v) for k, v in args.items()}
 
 
+def _is_mcp(row) -> bool:
+    return row.get('type') == 'mcp' or bool((row.get('meta') or {}).get('mcp'))
+
+
 def _invalid(message, errors=None):
     return {'status': 'invalid', 'message': message, 'errors': errors or []}
 
@@ -149,15 +153,21 @@ class BuilderService:
             if entity_type == 'model':
                 args = {'section': 'embedding' if 'embedding' in (query or '').lower() else 'llm',
                         'include_shared': 'true'}
-            rows = self.call(LOOKUP_OPS[entity_type], args)
-            if isinstance(rows, dict):
-                if rows.get('error'):
-                    return {'status': 'error', 'message': str(rows['error'])}
-                rows = rows.get('rows', rows.get('items', []))
+            # The toolkit listing hides MCP toolkits unless asked (mcp=true), so a toolkit lookup asks both ways.
+            calls = [args, {**args, 'mcp': 'true'}] if entity_type == 'toolkit' else [args]
+            rows = []
+            for call_args in calls:
+                answer = self.call(LOOKUP_OPS[entity_type], call_args)
+                if isinstance(answer, dict):
+                    if answer.get('error'):
+                        return {'status': 'error', 'message': str(answer['error'])}
+                    answer = answer.get('rows', answer.get('items', []))
+                rows += answer or []
             wanted = (query or '').lower()
             candidates = [
-                {'id': r.get('id'), 'name': r.get('name') or r.get('label') or r.get('display_name')}
-                for r in rows or [] if isinstance(r, dict)
+                {'id': r.get('id'), 'name': r.get('name') or r.get('label') or r.get('display_name'),
+                 **({'mcp': True} if entity_type == 'toolkit' and _is_mcp(r) else {})}
+                for r in rows if isinstance(r, dict)
                 and (not wanted or wanted in ' '.join(str(r.get(k) or '') for k in ('name', 'label', 'display_name')).lower()
                      or (entity_type == 'model' and wanted in ('embedding', 'embeddings')))
             ][:limit]
@@ -221,6 +231,9 @@ class BuilderService:
                 })
             except UnknownOperation:
                 return _invalid(f"unknown operation '{entity_id}'; use post_elitea_core_builder_find with type 'operation'")
+        if entity_type in LOOKUP:
+            return _invalid(f"{entity_type} can't be read; the id from post_elitea_core_builder_find is all you need "
+                            f"(for a toolkit or MCP it is the tool_id to link)")
         if entity_type not in TYPED:
             return _invalid(f"read supports: {', '.join(TYPED + ('operation',))}")
         _, state = self._state(entity_type, entity_id, version_id)
