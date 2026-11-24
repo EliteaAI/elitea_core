@@ -169,6 +169,247 @@
         "iban ",
         "GB82 WEST 1234 5698 7654 32"
       ]
+    },
+    {
+      "rule_id": "gitlab_token",
+      "category": "credentials",
+      "parts": [
+        "token ",
+        "gl",
+        "pat-",
+        "FakeTestVector000000"
+      ]
+    },
+    {
+      "rule_id": "azure_devops_pat",
+      "category": "credentials",
+      "parts": [
+        "ADO PAT: ",
+        "FakeTestVectorFakeTestVectorFakeTestVectorFakeTestVe",
+        "JQQ",
+        "J99",
+        "FakeTestVector000AZ",
+        "DO00000"
+      ]
+    },
+    {
+      "rule_id": "atlassian_token",
+      "category": "credentials",
+      "parts": [
+        "jira ",
+        "ATATT3x",
+        "FfGF0",
+        "FakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVector=FAKE0"
+      ]
+    },
+    {
+      "rule_id": "stripe_key",
+      "category": "credentials",
+      "parts": [
+        "sk_",
+        "live_",
+        "FakeTestVector0000000000"
+      ]
+    },
+    {
+      "rule_id": "sendgrid_key",
+      "category": "credentials",
+      "parts": [
+        "SG",
+        ".FakeTestVector00000000",
+        ".FakeTestVectorFakeTestVectorFakeTestVector0"
+      ]
+    },
+    {
+      "rule_id": "huggingface_token",
+      "category": "credentials",
+      "parts": [
+        "hf",
+        "_FakeTestVectorFakeTestVector000000"
+      ]
+    },
+    {
+      "rule_id": "npm_token",
+      "category": "credentials",
+      "parts": [
+        "npm",
+        "_FakeTestVectorFakeTestVector00000000"
+      ]
+    },
+    {
+      "rule_id": "azure_ad_client_secret",
+      "category": "credentials",
+      "parts": [
+        "client_secret: ",
+        "Fak",
+        "8Q",
+        "~FakeTestVectorFakeTestVector000"
+      ]
+    },
+    {
+      "rule_id": "url_credentials",
+      "category": "credentials",
+      "parts": [
+        "git clone https://user:",
+        "FakeTestVector0000",
+        "@dev.example.com/org/_git/repo"
+      ]
+    },
+    {
+      "rule_id": "url_credentials",
+      "category": "credentials",
+      "parts": [
+        "postgres://admin:",
+        "Fak3T3st!x",
+        "@db.example.internal:5432/app"
+      ]
+    },
+    {
+      "rule_id": "password_assignment",
+      "category": "credentials",
+      "parts": [
+        "GITHUB_",
+        "TOKEN=",
+        "FakeTestVector0000qwerty"
+      ]
+    },
+    {
+      "rule_id": "password_assignment",
+      "category": "credentials",
+      "parts": [
+        "DB_PASS",
+        "WORD: ",
+        "Passw",
+        "0rd"
+      ]
+    },
+    {
+      "rule_id": "password_assignment",
+      "category": "credentials",
+      "parts": [
+        "ado_",
+        "pat=",
+        "fakevectorfakevectorfakevectorfakevector234567abcdef"
+      ]
+    },
+    {
+      "rule_id": "password_phrase",
+      "category": "credentials",
+      "parts": [
+        "my pass",
+        "word is ",
+        "Fak3T3st",
+        "Vect0r"
+      ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "call +1 415 ",
+        "555 0132"
+      ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "call 00374 ",
+        "91 23 45 67"
+      ]
+    },
+    {
+      "rule_id": "phone_nanp",
+      "category": "personal_data",
+      "parts": [
+        "call (415) ",
+        "555-0132"
+      ]
+    },
+    {
+      "rule_id": "iban",
+      "category": "personal_data",
+      "parts": [
+        "iban gb82west",
+        "12345698765432"
+      ]
+    },
+    {
+      "rule_id": "us_ssn",
+      "category": "personal_data",
+      "parts": [
+        "my SSN is ",
+        "078-05-1120"
+      ]
+    },
+    {
+      "rule_id": "uk_nino",
+      "category": "personal_data",
+      "parts": [
+        "NI number ",
+        "QQ 12 34 56 C"
+      ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "call +1 415 ",
+        "555 0132 2026-11-24"
+      ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "Call +1 415 555 ",
+        "0132 - 9 to 5"
+      ]
+    },
+    {
+      "rule_id": "gitlab_token",
+      "category": "credentials",
+      "parts": [
+        "token glpat-",
+        "FakeTestVector0000000",
+        ".01.",
+        "fakesuffix9"
+      ]
+    },
+    {
+      "rule_id": "gitlab_token",
+      "category": "credentials",
+      "parts": [
+        "token glpat-",
+        "FakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVectorFakeTestVector"
+      ]
+    },
+    {
+      "rule_id": "iban",
+      "category": "personal_data",
+      "parts": [
+        "iban RU02",
+        "0445256004070281",
+        "0412345678901"
+      ]
+    },
+    {
+      "rule_id": "url_credentials",
+      "category": "credentials",
+      "parts": [
+        "https://user:",
+        "Fak3@T3st",
+        "@host.example.com/x"
+      ]
+    },
+    {
+      "rule_id": "us_ssn",
+      "category": "personal_data",
+      "parts": [
+        "Social Security number: ",
+        "078-05-",
+        "1120"
+      ]
     }
   ],
   "negative": [
@@ -275,6 +516,161 @@
     {
       "parts": [
         "[REDACTED:credentials] was removed"
+      ]
+    },
+    {
+      "parts": [
+        "GITHUB_TOKEN=${GITHUB_TOKEN}"
+      ]
+    },
+    {
+      "parts": [
+        "SECRET_KEY=changeme"
+      ]
+    },
+    {
+      "parts": [
+        "API_KEY=os.environ[\"X\"]"
+      ]
+    },
+    {
+      "parts": [
+        "token=${ADO_TOKEN}"
+      ]
+    },
+    {
+      "parts": [
+        "The password is required for login."
+      ]
+    },
+    {
+      "parts": [
+        "Your password is incorrect, try again."
+      ]
+    },
+    {
+      "parts": [
+        "pwd=/usr/local/bin"
+      ]
+    },
+    {
+      "parts": [
+        "Use glpat- prefixed tokens for GitLab."
+      ]
+    },
+    {
+      "parts": [
+        "hf_ and npm_ prefixes mark tokens."
+      ]
+    },
+    {
+      "parts": [
+        "export DATABASE_URL=postgres://localhost:5432/db"
+      ]
+    },
+    {
+      "parts": [
+        "Ticket 123-45-678 and range 100-200"
+      ]
+    },
+    {
+      "parts": [
+        "date 2026-11-24 10:15"
+      ]
+    },
+    {
+      "parts": [
+        "tel 00 00 and port 0080:80"
+      ]
+    },
+    {
+      "parts": [
+        "sha 00a1b2c3d4e5f60718293a4b5c6d7e8f"
+      ]
+    },
+    {
+      "parts": [
+        "Ref 00",
+        "12345678"
+      ]
+    },
+    {
+      "parts": [
+        "00",
+        "12345678905"
+      ]
+    },
+    {
+      "parts": [
+        "Order 00",
+        "123456789"
+      ]
+    },
+    {
+      "parts": [
+        "password: ",
+        "forgotten"
+      ]
+    },
+    {
+      "parts": [
+        "Enter your password: ",
+        "Confirmation"
+      ]
+    },
+    {
+      "parts": [
+        "Password:\n",
+        "Confirmation"
+      ]
+    },
+    {
+      "parts": [
+        "if password: ",
+        "validate_pw"
+      ]
+    },
+    {
+      "parts": [
+        "password=",
+        "user_input"
+      ]
+    },
+    {
+      "parts": [
+        "password: ",
+        "SecretStr"
+      ]
+    },
+    {
+      "parts": [
+        "\"password\": ",
+        "\"string\""
+      ]
+    },
+    {
+      "parts": [
+        "pwd: ",
+        "C:\\Users\\x\\proj"
+      ]
+    },
+    {
+      "parts": [
+        "http://localhost:",
+        "8080@x"
+      ]
+    },
+    {
+      "parts": [
+        "ssh://git:",
+        "22@host"
+      ]
+    },
+    {
+      "parts": [
+        "Ticket ",
+        "078-05-",
+        "1120"
       ]
     }
   ],
@@ -438,6 +834,105 @@
         "Key="
       ],
       "repeat": 18000
+    },
+    {
+      "id": "phone_spaced_run",
+      "parts": [
+        "+1 "
+      ],
+      "repeat": 60000
+    },
+    {
+      "id": "phone_double_zero_run",
+      "parts": [
+        "00"
+      ],
+      "repeat": 100000
+    },
+    {
+      "id": "phone_nanp_run",
+      "parts": [
+        "(415) "
+      ],
+      "repeat": 30000
+    },
+    {
+      "id": "password_phrase_run",
+      "parts": [
+        "password is "
+      ],
+      "repeat": 15000
+    },
+    {
+      "id": "url_userinfo_run",
+      "parts": [
+        "ab://a:"
+      ],
+      "repeat": 25000
+    },
+    {
+      "id": "prefixed_key_run",
+      "parts": [
+        "x_token="
+      ],
+      "repeat": 20000
+    },
+    {
+      "id": "nino_run",
+      "parts": [
+        "QQ 1"
+      ],
+      "repeat": 50000
+    },
+    {
+      "id": "iban_lowercase_run",
+      "parts": [
+        "gb82"
+      ],
+      "repeat": 50000
+    },
+    {
+      "id": "ssn_dash_run",
+      "parts": [
+        "123-"
+      ],
+      "repeat": 50000
+    },
+    {
+      "id": "azure_ad_tilde_run",
+      "parts": [
+        "8Q~"
+      ],
+      "repeat": 60000
+    },
+    {
+      "id": "url_userinfo_at_run",
+      "parts": [
+        "ab://a:b@"
+      ],
+      "repeat": 25000
+    },
+    {
+      "id": "ssn_keyword_run",
+      "parts": [
+        "ssn 123-"
+      ],
+      "repeat": 25000
+    },
+    {
+      "id": "gitlab_dot_run",
+      "parts": [
+        "glpat-",
+        ".............................."
+      ],
+      "repeat": 10000
+    },
+    {
+      "id": "phone_trailing_groups",
+      "parts": [
+        "+1 2"
+      ],
+      "repeat": 60000
     }
   ]
 }
