@@ -36,7 +36,8 @@ def _load(monkeypatch, dotted, relative):
 
 @pytest.fixture
 def opener(monkeypatch):
-    state = types.SimpleNamespace(created=[], deleted=[], events=[], fail_create=False, exceptions=[])
+    state = types.SimpleNamespace(created=[], deleted=[], stopped=[], added=[], commits=0, fail_create=False,
+                                  exceptions=[], response=types.SimpleNamespace(is_streaming=True, message_items=[]))
 
     def create_trigger_run_conversation(**kwargs):
         if state.fail_create:
@@ -45,32 +46,45 @@ def opener(monkeypatch):
         return "conv-1", 11, "msg-1"
 
     class Session:
-        def query(self, _model):
-            return types.SimpleNamespace(filter=lambda *_: types.SimpleNamespace(first=lambda: "conversation-row"))
+        def query(self, model):
+            row = state.response if model is message_group else "conversation-row"
+            return types.SimpleNamespace(filter=lambda *_: types.SimpleNamespace(first=lambda: row))
 
         def delete(self, row):
             state.deleted.append(row)
 
+        def add(self, row):
+            state.added.append(row)
+
         def commit(self):
-            pass
+            state.commits += 1
+
+    message_group = types.SimpleNamespace(uuid="uuid-column")
+    text_item = type("TextMessageItem", (types.SimpleNamespace,), {
+        "__mapper_args__": {"polymorphic_identity": "text_message"}})
 
     @contextmanager
     def get_session(_project_id):
         yield Session()
 
     log = types.SimpleNamespace(exception=lambda *a, **k: state.exceptions.append(a))
-    event_manager = types.SimpleNamespace(fire_event=lambda name, payload: state.events.append((name, payload)))
     for name in (PKG, f"{PKG}.models", f"{PKG}.utils"):
         _install(monkeypatch, name)
     _install(monkeypatch, "pylon.core.tools", log=log)
     _install(monkeypatch, "tools", db=types.SimpleNamespace(get_session=get_session),
-             this=types.SimpleNamespace(module=types.SimpleNamespace(
-                 context=types.SimpleNamespace(event_manager=event_manager))))
+             this=types.SimpleNamespace(module=types.SimpleNamespace(mark_chat_run_stopped=state.stopped.append)))
     _install(monkeypatch, f"{PKG}.utils.input_guardrail", redacted_input=lambda value: f"redacted({value})")
     _install(monkeypatch, f"{PKG}.utils.pipeline_execution", TriggerType=TRIGGERS,
-             create_trigger_run_conversation=create_trigger_run_conversation)
-    _install(monkeypatch, f"{PKG}.utils.predict_utils", user_input_preview=lambda value, limit=None: value)
+             create_trigger_run_conversation=create_trigger_run_conversation,
+             run_label=lambda source: "Agent run" if source == "agent" else "Pipeline run")
+    _install(monkeypatch, f"{PKG}.utils.predict_utils",
+             user_input_preview=lambda value, limit=None: state.__dict__.setdefault("limits", []).append(limit) or value)
+    _install(monkeypatch, f"{PKG}.utils.sio_utils", SioEvents=types.SimpleNamespace(
+        chat_predict=types.SimpleNamespace(value="chat_predict")))
     _install(monkeypatch, f"{PKG}.models.conversation", Conversation=types.SimpleNamespace(uuid="uuid-column"))
+    _install(monkeypatch, f"{PKG}.models.message_group", ConversationMessageGroup=message_group)
+    _install(monkeypatch, f"{PKG}.models.message_items")
+    _install(monkeypatch, f"{PKG}.models.message_items.text", TextMessageItem=text_item)
     module = _load(monkeypatch, f"{PKG}.utils.api_run_history", "utils/api_run_history.py")
     return types.SimpleNamespace(module=module, state=state)
 
@@ -119,6 +133,13 @@ def test_the_stored_input_is_the_redacted_one(opener):
     assert opener.state.created[0]["trigger_message"] == "redacted(token abc)"
 
 
+def test_the_stored_input_is_capped(opener):
+    opener.module.open_api_run_conversation(
+        project_id=2, version=_version(), user_id=3, user_input="x", trigger_source="api", entity_name="Echo")
+
+    assert opener.state.limits == [opener.module.STORED_INPUT_LIMIT] and opener.module.STORED_INPUT_LIMIT > 0
+
+
 def test_an_unnamed_entity_falls_back_to_its_application_id(opener):
     opener.module.open_api_run_conversation(
         project_id=2, version=_version(), user_id=3, user_input=None, trigger_source="api", entity_name=None)
@@ -140,14 +161,27 @@ def test_discard_deletes_the_conversation(opener):
     assert opener.state.deleted == ["conversation-row"]
 
 
-def test_fail_ends_the_answer_with_an_error(opener):
-    opener.module.ApiRunConversation(2, "conv-1", "msg-1", "agent").fail("Agent run timed out")
+def test_task_meta_binds_the_worker_events_to_the_row(opener):
+    assert opener.module.ApiRunConversation(2, "conv-1", "msg-1", "agent").task_meta() == {
+        "stream_id": "conv-1", "message_id": "msg-1", "sio_event": "chat_predict", "chat_project_id": 2}
 
-    [(name, payload)] = opener.state.events
-    assert name == "chat_message_stream_end"
-    assert payload["message_id"] == "msg-1" and payload["content"] == "Agent run timed out"
-    assert payload["response_metadata"] == {
-        "project_id": 2, "chat_project_id": 2, "is_error": True, "error": "Agent run timed out"}
+
+@pytest.mark.parametrize("source, text", [("agent", "Agent run timed out"), ("pipeline", "Pipeline run timed out")])
+def test_a_time_out_marks_the_run_stopped_and_ends_the_answer(opener, source, text):
+    opener.module.ApiRunConversation(2, "conv-1", "msg-1", source).time_out()
+
+    assert opener.state.stopped == ["msg-1"]   # a late end from the stopped worker is ignored
+    assert opener.state.response.is_streaming is False
+    [item] = opener.state.added
+    assert (item.content, item.item_type, item.order_index) == (text, "text_message", 0)
+    assert opener.state.commits == 1
+
+
+def test_a_time_out_keeps_a_partial_answer(opener):
+    opener.state.response.message_items = ["partial"]
+    opener.module.ApiRunConversation(2, "conv-1", "msg-1", "agent").time_out()
+
+    assert opener.state.added == [] and opener.state.response.is_streaming is False
 
 
 # --- the binding in do_predict ------------------------------------------------------------------
@@ -155,13 +189,17 @@ def test_fail_ends_the_answer_with_an_error(opener):
 class _Row:
     def __init__(self):
         self.project_id, self.conversation_uuid, self.response_message_id, self.source = 2, "conv-1", "msg-1", "agent"
-        self.discarded, self.failed = False, []
+        self.discarded, self.timed_out = False, False
 
     def discard(self):
         self.discarded = True
 
-    def fail(self, error):
-        self.failed.append(error)
+    def task_meta(self):
+        return {"stream_id": self.conversation_uuid, "message_id": self.response_message_id,
+                "sio_event": "chat_predict", "chat_project_id": self.project_id}
+
+    def time_out(self):
+        self.timed_out = True
 
 
 class _Saturated(Exception):
@@ -181,7 +219,8 @@ class _Session:
 def predict(monkeypatch):
     """The real do_predict with an opener the test steers; `world.run(**kwargs)` calls it."""
     world = types.SimpleNamespace(row=_Row(), record=True, opened=[], decided=[], starts=[], events=[],
-                                  task_id="task-1", start_error=None, joined="answer", stopped=[])
+                                  task_id="task-1", start_error=None, joined="answer", stopped=[],
+                                  inspect_error=None)
     version = types.SimpleNamespace(
         application=types.SimpleNamespace(name="Echo", webhook_secret=None), application_id=85, id=127,
         llm_settings={"model": "m"}, agent_type="openai", instructions="")
@@ -207,6 +246,11 @@ def predict(monkeypatch):
     def payload_of(parsed, **_kwargs):
         return {"user_input": "hi", "stream_id": parsed.stream_id, "message_id": parsed.message_id}
 
+    def inspect_and_unsecret(payload, *_args, **_kwargs):
+        if world.inspect_error:
+            raise world.inspect_error
+        return payload
+
     log = types.SimpleNamespace(warning=lambda *a, **k: None)
     _install(monkeypatch, "opentelemetry", trace=types.SimpleNamespace(get_current_span=lambda: None))
     _install(monkeypatch, "pylon.core.tools", log=log, web=types.SimpleNamespace(method=lambda *a, **k: (lambda f: f)))
@@ -225,9 +269,7 @@ def predict(monkeypatch):
         "utils.api_run_history": {"should_record_api_run": should_record_api_run,
                                   "open_api_run_conversation": open_api_run_conversation},
         "utils.pipeline_execution": {"TriggerType": TRIGGERS},
-        "utils.sio_utils": {"SioEvents": types.SimpleNamespace(
-            chat_predict=types.SimpleNamespace(value="chat_predict"))},
-        "utils.input_guardrail": {"inspect_and_unsecret": lambda payload, *a, **k: payload},
+        "utils.input_guardrail": {"inspect_and_unsecret": inspect_and_unsecret},
         "utils.vectorstore": {"get_pgvector_connection_string": lambda _pid: "connstr"},
         "models.pd.admission": {"admission_request_from": lambda *a, **k: None},
         "utils.credential_slots": {"has_free_form_secret": lambda *a, **k: False,
@@ -306,7 +348,7 @@ def test_a_row_that_could_not_be_opened_still_runs_unbound(predict):
     assert predict.starts[0]["args"] == [None, None] and predict.events == []
 
 
-@pytest.mark.parametrize("config, enabled", [({}, True), ({"record_api_runs": False}, False)])
+@pytest.mark.parametrize("config, enabled", [({}, False), ({"record_api_runs": True}, True)])
 def test_the_switch_and_the_inputs_reach_the_decision(predict, config, enabled):
     predict.config.update(config)
     predict.run(payload_in={"user_input": "hi"}, webhook_signature=None)
@@ -332,16 +374,24 @@ def test_a_start_that_raises_leaves_no_row(predict):
     assert predict.row.discarded
 
 
+def test_a_guardrail_refusal_leaves_no_row(predict):
+    predict.inspect_error = PermissionError("blocked")
+    with pytest.raises(PermissionError):
+        predict.run()
+
+    assert predict.row.discarded and predict.starts == []
+
+
 def test_a_sync_timeout_closes_the_row_with_an_error(predict):
     predict.joined = ...
     result = predict.run(predict_wait=True)
 
     assert result == {"error": "Timeout"}
-    assert predict.stopped == ["task-1"] and predict.row.failed == ["Agent run timed out"]
+    assert predict.stopped == ["task-1"] and predict.row.timed_out
 
 
 def test_a_sync_run_returns_the_worker_result_unchanged(predict):
     predict.joined = {"chat_history": [{"content": "Blue and red."}]}
 
     assert predict.run(predict_wait=True) == {"chat_history": [{"content": "Blue and red."}]}
-    assert predict.row.failed == [] and not predict.row.discarded
+    assert not predict.row.timed_out and not predict.row.discarded

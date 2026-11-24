@@ -20,7 +20,6 @@ from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.api_run_history import open_api_run_conversation, should_record_api_run
 from ..utils.pipeline_execution import TriggerType
 from ..utils.input_guardrail import inspect_and_unsecret
-from ..utils.sio_utils import SioEvents
 from ..utils.vectorstore import get_pgvector_connection_string
 
 class Method:
@@ -130,7 +129,7 @@ class Method:
         # persists the answer into it (chat_predict), the same way a scheduled run does
         run_row = None
         if should_record_api_run(trigger_source, webhook_signature, payload_in,
-                                 enabled=self.descriptor.config.get('record_api_runs', True)):
+                                 enabled=self.descriptor.config.get('record_api_runs', False)):
             run_row = open_api_run_conversation(
                 project_id=project_id, version=application_version, user_id=user_id,
                 user_input=payload_in.get('user_input'), trigger_source=trigger_source,
@@ -140,45 +139,41 @@ class Method:
             parsed.stream_id = parsed.conversation_id = run_row.conversation_uuid
             parsed.message_id = run_row.response_message_id
 
-        payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
-        # Same as predict_sio: inspect, resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
-        free_form_secret = has_free_form_secret(self, payload)   # governed: noticed before it is resolved (#6946)
-        payload = inspect_and_unsecret(payload, VaultClient(parsed.project_id), parsed.project_id, user_id)
-        payload['trigger_source'] = trigger_source  # usage analytics groups runs by it (BUG-12)
-        mark_free_form_secret(payload, free_form_secret)
+        # Anything that refuses the run after the row is open (guardrail, admission, a saturated pool) drops it
         try:
-            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
-        except Exception as e:  # pylint: disable=W0703
-            log.warning(
-                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
-                parsed.project_id, e
-            )
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
+            # Same as predict_sio: inspect, resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
+            free_form_secret = has_free_form_secret(self, payload)   # governed: noticed before it is resolved (#6946)
+            payload = inspect_and_unsecret(payload, VaultClient(parsed.project_id), parsed.project_id, user_id)
+            payload['trigger_source'] = trigger_source  # usage analytics groups runs by it (BUG-12)
+            mark_free_form_secret(payload, free_form_secret)
+            try:
+                payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+            except Exception as e:  # pylint: disable=W0703
+                log.warning(
+                    "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                    parsed.project_id, e
+                )
 
-        user_context = {
-            'user_id': user_id,
-            'project_id': parsed.project_id,
-        }
+            user_context = {
+                'user_id': user_id,
+                'project_id': parsed.project_id,
+            }
 
-        # Governed runs are admitted from the authenticated HTTP caller and the version row loaded above, never
-        # from the user_id argument or the payload; a webhook has no person behind it. None when governance is off
-        if mandate_principal is not None:
-            admission = mandate_admission_request(
-                project_id=parsed.project_id, binding_project_id=project_id, version_row=application_version,
-                principal=mandate_principal, entry_point="webhook", trigger_ref=f"webhook:version:{version_id}",
-            )
-        else:
-            admission = admission_request_from(
-                self, sid=None, project_id=parsed.project_id, binding_project_id=project_id,
-                version_row=application_version, run_kind="system" if webhook_signature is not None else "interactive",
-                entry_point="predict_api",
-            )
-        row_meta = {} if run_row is None else {
-            'stream_id': run_row.conversation_uuid,
-            'message_id': run_row.response_message_id,
-            'sio_event': SioEvents.chat_predict.value,
-            'chat_project_id': project_id,
-        }
-        try:
+            # Governed runs are admitted from the authenticated HTTP caller and the version row loaded above, never
+            # from the user_id argument or the payload; a webhook has no person behind it. None when governance is off
+            if mandate_principal is not None:
+                admission = mandate_admission_request(
+                    project_id=parsed.project_id, binding_project_id=project_id, version_row=application_version,
+                    principal=mandate_principal, entry_point="webhook", trigger_ref=f"webhook:version:{version_id}",
+                )
+            else:
+                admission = admission_request_from(
+                    self, sid=None, project_id=parsed.project_id, binding_project_id=project_id,
+                    version_row=application_version, run_kind="system" if webhook_signature is not None else "interactive",
+                    entry_point="predict_api",
+                )
+            row_meta = {} if run_row is None else run_row.task_meta()
             task_id = self.task_node.start_task(
                 "indexer_agent",
                 args=[None, None] if run_row is None else [run_row.conversation_uuid, run_row.response_message_id],
@@ -230,7 +225,7 @@ class Method:
             if result is ...:
                 self.task_node.stop_task(task_id)
                 if run_row is not None:
-                    run_row.fail(f"{run_row.source.capitalize()} run timed out")
+                    run_row.time_out()
                 return {"error": "Timeout"}
 
         return result

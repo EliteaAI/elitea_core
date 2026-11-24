@@ -20,6 +20,10 @@ max_published_versions_per_agent: 3
 # Stop the worker when a blocking predict exceeds await_task_timeout
 cancel_on_timeout: true
 
+# Record agent and pipeline runs started over REST predict or MCP in Run History (#7610).
+# Off by default: each run is a private chat, and chats are kept until someone deletes them
+record_api_runs: false
+
 chat_history:
   # Replay recent turns' tool calls as compact tool_call/tool_result stubs so models don't fake tool success (#7460)
   tool_call_stubs:
