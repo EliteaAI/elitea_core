@@ -1326,7 +1326,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         Platform dimensions are scored by AI or Human exactly like project-tier ones, so the
         engine set belongs to the registry and is projected into every p_N.eval_dimension row.
         Only environments whose registry table was created by a pre-release build lack the
-        column; fresh ones get it from create_tables. Without it every registry read fails
+        column; fresh ones get it from create_tables (project_id=all;dry_run=false). Without it every registry read fails
         with UndefinedColumn.
 
         Shared-schema table, so there is no per-project loop. Idempotent
