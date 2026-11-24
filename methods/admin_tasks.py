@@ -753,10 +753,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def enable_builder_default_modules(self, *args, **kwargs):
-        """Admin task: Elitea Builder and Ask User on as default modules for every user (R-2.0.9, #7383). Idempotent.
+        """Admin task: Elitea Builder on and Ask User off as default modules for every user (R-2.0.9, #7383). Idempotent.
 
-        Turns on the Chats and Agents defaults of both modules in every stored per-project module settings row,
-        including rows where the user had turned them off, and in the legacy personalization where it holds them.
+        Turns the Elitea Builder Chats and Agents defaults on and the Ask User ones off (an agent with Ask User can't be
+        scheduled or triggered by a webhook) in every stored per-project module settings row, whatever the user had
+        set, and in the legacy personalization where it holds them.
         Existing agents and chats are not changed: the defaults apply to new ones. Run after
         migrate_elitea_builder_keys.
 
