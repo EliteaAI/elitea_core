@@ -354,7 +354,7 @@
     "input_guardrail_personal_data_action": {
       "type": "string",
       "title": "Personal Data",
-      "description": "Action for e-mail addresses, phone numbers, payment cards and IBANs.",
+      "description": "Action for e-mail addresses, phone numbers, payment cards, IBANs, US Social Security numbers and UK National Insurance numbers.",
       "path": "input_guardrail.categories.personal_data",
       "section": "guardrails",
       "default": "off",
