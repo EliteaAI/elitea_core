@@ -52,6 +52,8 @@ _module(
     Environment=object,
     DebugUndefined=object,
 )
+_module('jinja2.sandbox', SandboxedEnvironment=object)
+_module('jinja2.exceptions', SecurityError=Exception)
 
 chat = importlib.import_module('models.pd.chat')
 ApplicationChatRequest = chat.ApplicationChatRequest

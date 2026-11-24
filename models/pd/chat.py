@@ -1,7 +1,9 @@
 import uuid
 from typing import Optional, List, Dict, Any, Literal
 
-from jinja2 import Environment, DebugUndefined
+from jinja2 import DebugUndefined
+from jinja2.exceptions import SecurityError
+from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 # from .tool import ToolUpdateModel
 from .tool import ToolChatModel
@@ -12,10 +14,13 @@ from .version import ApplicationVariableModel, LLMSettingsModel
 
 
 def _resolve_variables(text, vars) -> str:
-    environment = Environment(undefined=DebugUndefined)
-    template = environment.from_string(text)
+    # Sandboxed (#7681); an unsafe template is returned unrendered.
+    environment = SandboxedEnvironment(undefined=DebugUndefined)
     converted_vars = {d.name: d.value for d in vars}
-    return template.render(**converted_vars)
+    try:
+        return environment.from_string(text).render(**converted_vars)
+    except SecurityError:
+        return text
 
 
 # Merged from promptlib_shared.models.pd.chat
