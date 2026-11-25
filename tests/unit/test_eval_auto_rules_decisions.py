@@ -374,3 +374,19 @@ def test_probe_keys_keep_the_seeded_key_for_unchanged_text(rules):
 def test_health_check_inputs_append_starters_and_cap(rules):
     assert rules.health_check_inputs(['a', 'b'], ['b', ' ', 'c', 'd', 'e'], 3, 10) == ['a', 'b', 'c', 'd']
     assert rules.health_check_inputs(['a', 'b'], None, 3, 1) == ['a']
+
+
+@pytest.mark.parametrize('reason', ['HITL_REQUIRED', 'OAUTH_REQUIRED', 'AGENT_BROKEN'])
+def test_a_reason_read_from_history_is_retried(rules, reason):
+    # Old errors stay in the look-back window after a fix, so the chats are read again next tick.
+    now = datetime(2026, 11, 11)
+    attempt = {**_not_evaluated(5, reason, now - timedelta(days=1)), 'mode': rules.MODE_HISTORY}
+    assert rules.needs_evaluation(5, None, now, 90, last_attempt=attempt) == (True, 'retry')
+    live = {**attempt, 'mode': rules.MODE_LIVE}
+    assert rules.needs_evaluation(5, None, now, 90, last_attempt=live) == (False, 'blocked')
+
+
+def test_a_history_suite_that_cannot_score_turns_still_waits(rules):
+    now = datetime(2026, 11, 11)
+    attempt = {**_not_evaluated(5, 'NO_DATASET', now - timedelta(days=1)), 'mode': rules.MODE_HISTORY}
+    assert rules.needs_evaluation(5, None, now, 90, last_attempt=attempt) == (False, 'blocked')

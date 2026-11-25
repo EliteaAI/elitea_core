@@ -265,6 +265,25 @@ def test_the_consent_listing_is_registered_and_returns_no_chat_content():
     assert "has_history_consent(int(project['id']))" in listing
     assert "rules.project_in_scope(project, settings)" in listing
     assert "load_turns" not in listing
+    # The per-project reads run a few at a time, not one after another inside the caller's timeout.
+    assert "ThreadPoolExecutor(max_workers=CONSENT_READS_PARALLEL)" in listing
+
+
+def test_the_live_slot_is_counted_under_a_lock_in_the_items_session():
+    # Several hybrid fallbacks in one drain, or two drains, must not each see the same free slot.
+    slot = _service_function("_live_slot_free")
+    assert "object_session(item)" in slot and "_lock_live_slots(session)" in slot
+    assert "_lock_live_slots(session)" in _service_function("_claim")
+
+
+def test_a_history_run_that_cannot_be_built_gets_a_specific_reason():
+    launch = _service_function("_launch_history")
+    assert "rules.NO_TRAFFIC" in launch
+    assert "except EvalRunConfigError" in launch and "rules.NO_DATASET" in launch
+
+
+def test_the_back_off_knows_which_mode_ended_not_evaluated():
+    assert "EvalAutoItem.mode" in _service_function("_last_attempt")
 
 
 def test_history_mode_ignores_a_fallback_flag_left_by_hybrid():
@@ -278,3 +297,9 @@ def test_enhancement_leaves_out_the_cases_the_viewer_may_not_read():
     source = (PLUGIN_ROOT / "api" / "v2" / "enhance_from_eval.py").read_text()
     filtered = source.index("without_hidden_cases(run, hidden)")
     assert source.index("fetch_run_for_enhancement") < filtered < source.index("select_gaps(")
+
+
+def test_human_scores_are_redacted_for_hidden_cases():
+    # A reviewer's note on a case from a private chat can quote it (#7483 D15).
+    for name in ("eval_human_scores.py", "eval_results.py"):
+        assert "redact_human_score" in (PLUGIN_ROOT / "api" / "v2" / name).read_text()

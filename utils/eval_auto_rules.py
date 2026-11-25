@@ -282,12 +282,15 @@ def needs_evaluation(version_id: Optional[int], last: Optional[dict], now: datet
     An unchanged agent with a recent result keeps it ("carried forward") and costs nothing.
     ``last_attempt`` is its latest finished item of any status (adds ``status``, ``reason_code``).
     When that is a newer Not Evaluated, a deterministic reason waits for a new version or for the
-    staleness age (``blocked``); any other reason is tried again (``retry``).
+    staleness age (``blocked``); any other reason is tried again (``retry``). So is a reason a
+    history item read from the chats (``mode`` history, all but ``NO_DATASET``): new chats can clear
+    it without a new version, and checking costs reads only, no judge call.
     """
     if _not_evaluated_since(last_attempt, last):
         if last_attempt.get('application_version_id') != version_id:
             return True, 'changed'
-        if last_attempt.get('reason_code') not in DETERMINISTIC_REASONS:
+        reason = last_attempt.get('reason_code')
+        if reason not in DETERMINISTIC_REASONS or (last_attempt.get('mode') == MODE_HISTORY and reason != NO_DATASET):
             return True, 'retry'
         if now - last_attempt['finished_at'] < timedelta(days=reevaluate_after_days):
             return False, 'blocked'

@@ -10,11 +10,13 @@ Every decision that needs no database is in :mod:`eval_auto_rules`; this module 
 inputs those rules take and writes their outcome.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from sqlalchemy import func, or_, text
+from sqlalchemy.orm import object_session
 
 from tools import context, db  # pylint: disable=E0401
 
@@ -40,7 +42,9 @@ from .evaluation_library_utils import EvalLibraryError, EvalNameConflictError
 from .eval_auto_history import plan_history
 from .eval_auto_history_loader import load_turns
 from .eval_history_consent import has_history_consent
-from .evaluation_run_utils import create_batch_run, create_history_run, delete_run, launch_run, mark_run_unstarted
+from .evaluation_run_utils import (
+    EvalRunConfigError, create_batch_run, create_history_run, delete_run, launch_run, mark_run_unstarted,
+)
 from .evaluation_suite_utils import EvalBindingDuplicateError, add_binding, create_suite
 from .evaluation_trajectory_checks import builtin_key, registry_seed
 from .maintenance_gate import is_maintenance_active
@@ -65,8 +69,11 @@ STALE_CLAIM = timedelta(minutes=15)
 # ``created``, which the run reaper does not look at; past this it is closed as unstarted.
 UNSTARTED_RUN = timedelta(minutes=30)
 RUN_PERMISSION = 'models.applications.evaluation.run.create'
+CONSENT_READS_PARALLEL = 8
 # Serialises opening a job: a "Run now" racing the scheduled tick, or two pods, must not queue twice.
 _JOB_LOCK = text("SELECT pg_advisory_xact_lock(hashtext('eval-auto-job'))")
+# Serialises counting and taking live slots across drains (two pods, "Run now" during the tick).
+_LIVE_SLOT_LOCK = text("SELECT pg_advisory_xact_lock(hashtext('eval-auto-live-slot'))")
 _FINAL_RUN_STATUSES = (EvalRunStatus.finished, EvalRunStatus.errored, EvalRunStatus.cancelled)
 
 # The probes every agent without a dataset of its own is run on, plus its conversation starters.
@@ -354,11 +361,11 @@ def _last_scored(session, project_id: int) -> dict:
 
 
 def _last_attempt(session, project_id: int) -> dict:
-    """``application_id -> {application_version_id, finished_at, status, reason_code}`` of each
-    agent's latest finished item, Not Evaluated included: what the back-off is decided on."""
+    """``application_id -> {application_version_id, finished_at, status, reason_code, mode}`` of
+    each agent's latest finished item, Not Evaluated included: what the back-off is decided on."""
     rows = session.query(
         EvalAutoItem.application_id, EvalAutoItem.application_version_id, EvalAutoItem.finished_at,
-        EvalAutoItem.status, EvalAutoItem.reason_code,
+        EvalAutoItem.status, EvalAutoItem.reason_code, EvalAutoItem.mode,
     ).filter(
         EvalAutoItem.project_id == project_id,
         EvalAutoItem.state == EvalAutoItemState.done,
@@ -366,7 +373,7 @@ def _last_attempt(session, project_id: int) -> dict:
         EvalAutoItem.application_id, EvalAutoItem.finished_at.desc()).all()
     return {row.application_id: {'application_version_id': row.application_version_id,
                                  'finished_at': row.finished_at, 'status': row.status,
-                                 'reason_code': row.reason_code} for row in rows}
+                                 'reason_code': row.reason_code, 'mode': row.mode} for row in rows}
 
 
 def _default_versions(session) -> List[tuple]:
@@ -436,11 +443,14 @@ def list_history_consents() -> dict:
     Names and ids only: the Super Admin sees who opted in, never the chats themselves.
     """
     settings = get_config()
-    projects = []
-    for project in context.rpc_manager.timeout(120).project_list(filter_={'create_success': True}):
-        if has_history_consent(int(project['id'])):
-            projects.append({'project_id': int(project['id']), 'name': project.get('name'),
-                             'in_scope': rules.project_in_scope(project, settings)})
+    listed = context.rpc_manager.timeout(120).project_list(filter_={'create_success': True})
+    # One read per project (each keeps its record in its own schema), a few at a time, so a large
+    # install answers well inside the caller's RPC timeout.
+    with ThreadPoolExecutor(max_workers=CONSENT_READS_PARALLEL) as pool:
+        consents = list(pool.map(lambda project: has_history_consent(int(project['id'])), listed))
+    projects = [{'project_id': int(project['id']), 'name': project.get('name'),
+                 'in_scope': rules.project_in_scope(project, settings)}
+                for project, consent in zip(listed, consents) if consent]
     return {'total': len(projects), 'projects': sorted(projects, key=lambda row: row['project_id'])}
 
 
@@ -718,10 +728,18 @@ def _launch_history(item: EvalAutoItem, settings: dict, eval_task_node) -> Optio
             _finish(item, rules.NOT_EVALUATED, *plan['reason'])
             return 'done'
         tier, _dataset_id, suite_id = _resolve_suite(session, item, settings, application, version, history=True)
-        run = create_history_run(
-            item.project_id, suite_id, plan['sample'], application_version_id=version.id,
-            owner_id=item.owner_id, session=session,
-            meta={'auto_item_id': item.id, 'auto_job_id': item.job_id, 'history': plan['meta']})
+        if not plan['sample']:
+            _finish(item, rules.NOT_EVALUATED, rules.NO_TRAFFIC, 'No chat turn could be sampled')
+            return 'done'
+        try:
+            run = create_history_run(
+                item.project_id, suite_id, plan['sample'], application_version_id=version.id,
+                owner_id=item.owner_id, session=session,
+                meta={'auto_item_id': item.id, 'auto_job_id': item.job_id, 'history': plan['meta']})
+        except EvalRunConfigError as exc:
+            # The suite has only usage checks, which a chat turn has no data for.
+            _finish(item, rules.NOT_EVALUATED, rules.NO_DATASET, f'The suite cannot score chat turns: {exc}')
+            return 'done'
         session.commit()
         run_id, snapshot_judge = run.id, (run.snapshot or {}).get('suite', {}).get('judge_model')
 
@@ -762,11 +780,20 @@ def _launch_live(item: EvalAutoItem, settings: dict, eval_task_node) -> str:
     return _submit(item, settings, eval_task_node, run_id, version.id, snapshot_judge)
 
 
+def _lock_live_slots(session) -> None:
+    """Held until the commit; SQLite tests have no advisory locks."""
+    if session.get_bind().dialect.name == 'postgresql':
+        session.execute(_LIVE_SLOT_LOCK)
+
+
 def _live_slot_free(item: EvalAutoItem, settings: dict) -> bool:
-    with db.with_project_schema_session(None) as session:
-        running = session.query(func.count(EvalAutoItem.id)).filter(
-            EvalAutoItem.state == EvalAutoItemState.running, EvalAutoItem.mode != rules.MODE_HISTORY,
-            EvalAutoItem.id != item.id).scalar() or 0
+    """Counted in the item's own session, under the live-slot lock, so the slot stays taken until
+    :func:`_process_claimed` commits the item as a running live one."""
+    session = object_session(item)
+    _lock_live_slots(session)
+    running = session.query(func.count(EvalAutoItem.id)).filter(
+        EvalAutoItem.state == EvalAutoItemState.running, EvalAutoItem.mode != rules.MODE_HISTORY,
+        EvalAutoItem.id != item.id).scalar() or 0
     return running < settings['max_concurrent_runs']
 
 
@@ -828,6 +855,7 @@ def _claim(settings: dict, manual_only: bool = False) -> List[int]:
     job (outside the window).
     """
     with db.with_project_schema_session(None) as session:
+        _lock_live_slots(session)
         running = dict(session.query(EvalAutoItem.mode == rules.MODE_HISTORY, func.count(EvalAutoItem.id)).filter(
             EvalAutoItem.state == EvalAutoItemState.running).group_by(EvalAutoItem.mode == rules.MODE_HISTORY).all())
         live_free = settings['max_concurrent_runs'] - running.get(False, 0)

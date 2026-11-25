@@ -9,11 +9,35 @@ admin check is the one wrapper that calls out.
 from typing import Callable, Iterable, Optional, Set
 
 PRIVATE_PLACEHOLDER = 'Private conversation — content hidden'
+# Allow-lists: what a hidden case keeps. Anything else is text the chat may have put there, so a
+# key added later is hidden by default. A kept string is a placeholder; other values are dropped.
+_CASE_KEPT = ('id', 'order_index')
 _CASE_TEXT = ('input', 'output')
-_VERDICT_TEXT = ('rationale', 'stdout', 'stderr', 'error', 'note')
-_EVIDENCE_TEXT = ('input', 'output', 'expected_output')
-# Structured evidence that carries tool inputs and outputs: dropped rather than rewritten.
-_EVIDENCE_DROPPED = ('trajectory', 'expected_trajectory', 'structure')
+_VERDICT_KEPT = ('passed', 'status', 'native_score', 'normalized_score', 'not_inspected', 'execution_time',
+                 'reason_code', 'ok', 'verdict')
+_EXECUTION_KEPT = ('id', 'run_id', 'dataset_case_id', 'case_index', 'status', 'trajectory_state',
+                   'trajectory_state_reason', 'created_at')
+
+
+def _is_count(value) -> bool:
+    return value is None or isinstance(value, (bool, int, float))
+
+
+def _same_user(left, right) -> bool:
+    # The author id comes from JSON participant meta and may be a string; the viewer id is an int.
+    return left is not None and right is not None and str(left) == str(right)
+
+
+def _masked(values: dict, kept: Iterable[str] = ()) -> dict:
+    """``values`` with the ``kept`` scalars as they are, other strings replaced, the rest dropped."""
+    kept = set(kept)
+    out = {}
+    for key, value in (values or {}).items():
+        if key in kept and (_is_count(value) or isinstance(value, str)):
+            out[key] = value
+        elif isinstance(value, str):
+            out[key] = PRIVATE_PLACEHOLDER if value else value
+    return out
 
 
 def private_case_ids(snapshot: Optional[dict], viewer_id: Optional[int]) -> Set[int]:
@@ -24,7 +48,7 @@ def private_case_ids(snapshot: Optional[dict], viewer_id: Optional[int]) -> Set[
     hidden = set()
     for case in snapshot.get('cases') or []:
         source = case.get('source') or {}
-        if source.get('is_private') and (viewer_id is None or source.get('author_id') != viewer_id):
+        if source.get('is_private') and not _same_user(source.get('author_id'), viewer_id):
             hidden.add(case.get('id'))
     return hidden
 
@@ -45,8 +69,11 @@ def redact_snapshot(snapshot: dict, hidden: Iterable[int]) -> dict:
     cases = []
     for case in snapshot.get('cases') or []:
         if case.get('id') in hidden:
-            case = {**case, **{key: PRIVATE_PLACEHOLDER for key in _CASE_TEXT if case.get(key)},
-                    'redacted': True}
+            # ``source`` names the chat and its author, so only the private flag is left of it.
+            case = {**{key: case.get(key) for key in _CASE_KEPT if key in case},
+                    **{key: PRIVATE_PLACEHOLDER if case.get(key) else case.get(key) for key in _CASE_TEXT},
+                    'expected_output': None, 'structure': None,
+                    'source': {'is_private': True}, 'redacted': True}
         cases.append(case)
     return {**snapshot, 'cases': cases}
 
@@ -55,18 +82,25 @@ def redact_result(result: dict, hidden: Iterable[int]) -> dict:
     """One result row: its scores kept, the judge's text and the evidence it saw replaced."""
     if result.get('dataset_case_id') not in set(hidden):
         return result
-    verdict = {key: (PRIVATE_PLACEHOLDER if key in _VERDICT_TEXT and value else value)
-               for key, value in (result.get('verdict') or {}).items()}
-    evidence = {key: (PRIVATE_PLACEHOLDER if key in _EVIDENCE_TEXT and value else value)
-                for key, value in (result.get('evidence') or {}).items() if key not in _EVIDENCE_DROPPED}
-    return {**result, 'verdict': verdict, 'evidence': evidence, 'redacted': True}
+    return {**result, 'verdict': _masked(result.get('verdict'), _VERDICT_KEPT),
+            'evidence': _masked(result.get('evidence')), 'redacted': True}
 
 
 def redact_execution(row: dict, hidden: Iterable[int]) -> dict:
-    """One case execution: its counters kept, the trajectory (tool inputs and outputs) dropped."""
+    """One case execution: its state and numeric counters kept; the trajectory and the metrics that
+    name tools, models or nodes dropped."""
     if row.get('dataset_case_id') not in set(hidden):
         return row
-    return {**row, 'trajectory': None, 'redacted': True}
+    metrics = {key: value for key, value in (row.get('metrics') or {}).items() if _is_count(value)}
+    return {**{key: row.get(key) for key in _EXECUTION_KEPT if key in row},
+            'trajectory': None, 'metrics': metrics, 'redacted': True}
+
+
+def redact_human_score(row: dict, hidden: Iterable[int]) -> dict:
+    """One human annotation: the score kept, the reviewer's note replaced."""
+    if row.get('dataset_case_id') not in set(hidden):
+        return row
+    return {**row, 'note': PRIVATE_PLACEHOLDER if row.get('note') else row.get('note'), 'redacted': True}
 
 
 def viewer_hidden_case_ids(project_id: int, snapshot: Optional[dict], viewer_id: Optional[int]) -> Set[int]:

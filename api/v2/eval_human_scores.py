@@ -20,6 +20,8 @@ from ...utils.evaluation_human_score_utils import (
     write_human_score,
 )
 from ...utils.evaluation_library_utils import EvalLibraryError
+from ...utils.evaluation_run_utils import get_run
+from ...utils.eval_history_redaction import redact_human_score, viewer_hidden_case_ids
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -56,12 +58,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     latest_only=latest_only,
                     session=session,
                 )
+                snapshot = get_run(project_id, run_id, session=session).snapshot
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status
-            return [
-                EvalHumanScoreDetailModel.model_validate(r).model_dump(mode='json')
-                for r in rows
-            ], 200
+            body = [EvalHumanScoreDetailModel.model_validate(r).model_dump(mode='json') for r in rows]
+        # A note on a case from a private chat can quote it (#7483 D15).
+        hidden = viewer_hidden_case_ids(project_id, snapshot, auth.current_user().get("id"))
+        if hidden:
+            body = [redact_human_score(row, hidden) for row in body]
+        return body, 200
 
     @register_openapi(
         name="Append a human score to a run",
