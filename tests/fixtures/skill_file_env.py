@@ -327,6 +327,14 @@ class Storage:
         return sorted(key for bucket, key in self.objects if bucket == f'p--{project_id}.{BUCKET}')
 
 
+class StorageClientError(Exception):
+    """The shape of botocore's ClientError: the S3 error code under ``response['Error']['Code']``."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.response = {'Error': {'Code': code}}
+
+
 class FakeMinioClient:
     storage = None
 
@@ -384,7 +392,12 @@ class FakeMinioClient:
     def download_file(self, bucket, file_name, project_id=None):
         if self.storage.broken_reads:
             raise RuntimeError('storage unavailable')
-        return self.storage.objects[(self.format_bucket_name(bucket), file_name)]
+        name = self.format_bucket_name(bucket)
+        if name not in self.storage.buckets:
+            raise StorageClientError('NoSuchBucket')
+        if (name, file_name) not in self.storage.objects:
+            raise StorageClientError('NoSuchKey')
+        return self.storage.objects[(name, file_name)]
 
     def remove_file(self, bucket, file_name):
         if self.storage.broken_deletes:

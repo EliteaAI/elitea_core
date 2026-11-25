@@ -20,7 +20,8 @@ from pylon.core.tools import log
 from .export_import_utils import slugify
 from .skill_export_import import build_embedded_skill_frontmatter
 from .skill_files import (
-    SkillFileContentUnavailableError, SkillVersionExportUnavailableError, list_version_manifest,
+    SkillFileContentMissingError, SkillFileContentUnavailableError, SkillVersionExportMissingError,
+    SkillVersionExportUnavailableError, list_version_manifest,
     read_version_contents,
 )
 from .toolkit_meta import drop_index_schedules
@@ -549,6 +550,8 @@ def _version_files_for_export(session, project_id: int, skill, version, with_fil
         return list_version_manifest(session, version.id)
     try:
         contents = read_version_contents(project_id, version.id, session=session)
+    except SkillFileContentMissingError as exc:
+        raise SkillVersionExportMissingError(skill.name, version.name, exc.path) from exc
     except SkillFileContentUnavailableError as exc:
         raise SkillVersionExportUnavailableError(skill.name, version.name, exc.path) from exc
     return [

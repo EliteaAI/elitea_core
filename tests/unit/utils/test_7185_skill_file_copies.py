@@ -499,6 +499,17 @@ class TestAgentExport:
             _export(agent_export, forked=False)
         assert info.value.http_status == 503
 
+    def test_a_file_storage_does_not_hold_fails_the_export_as_missing_not_to_retry(self, env, agent_export):
+        _seed(env)
+        del env.storage.objects[(f'p--{SOURCE}.skill-files', _sha(b'\x89PNG\x00'))]
+
+        with pytest.raises(env.files.SkillVersionExportMissingError,
+                           match="Skill 'forms' version 'base' could not be exported: the stored content of "
+                                 "'assets/logo.png' is missing") as info:
+            _export(agent_export, forked=False)
+        assert info.value.http_status == 410
+        assert 'try again' not in str(info.value)
+
     def test_bytes_that_do_not_match_their_hash_fail_the_export_too(self, env, agent_export):
         _seed(env)
         env.storage.objects[(f'p--{SOURCE}.skill-files', _sha(b'# Guide'))] = b'# Tampered'
@@ -727,7 +738,8 @@ class TestExportEndpoint:
         response = export_api.PromptLibAPI().get(project_id=SOURCE, application_ids='5')
 
         assert response == ({'error': "Skill 'forms' version 'base' could not be exported: the stored content of "
-                                      "'assets/logo.png' could not be read; try again later"}, 503)
+                                      "'assets/logo.png' could not be read; try again later"}, 503,
+                            {'Cache-Control': 'no-store'})
 
     def test_an_unreadable_skill_file_fails_the_markdown_export_with_the_same_503(self, env, export_api, monkeypatch):
         def unreadable(**kwargs):
@@ -739,7 +751,23 @@ class TestExportEndpoint:
         response = export_api.PromptLibAPI().get(project_id=SOURCE, application_ids='5')
 
         assert response == ({'error': "Skill 'forms' version 'base' could not be exported: the stored content of "
-                                      "'assets/logo.png' could not be read; try again later"}, 503)
+                                      "'assets/logo.png' could not be read; try again later"}, 503,
+                            {'Cache-Control': 'no-store'})
+
+    @pytest.mark.parametrize('export_format, exporter', [('json', 'export_application'), ('md', 'export_application_md')])
+    def test_a_missing_skill_file_is_a_410_never_cached_so_a_file_uploaded_later_is_exported(
+            self, env, export_api, monkeypatch, export_format, exporter):
+        def missing(**kwargs):
+            raise env.files.SkillVersionExportMissingError('forms', 'base', 'assets/logo.png')
+
+        monkeypatch.setattr(export_api, exporter, missing)
+        export_api.request.args = MultiDict({'format': export_format})
+
+        error, status, headers = export_api.PromptLibAPI().get(project_id=SOURCE, application_ids='5')
+
+        assert error['error'].startswith("Skill 'forms' version 'base' could not be exported: the stored content of "
+                                         "'assets/logo.png' is missing")
+        assert (status, headers) == (410, {'Cache-Control': 'no-store'})
 
 
 class TestRuntimeManifests:
