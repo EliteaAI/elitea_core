@@ -54,7 +54,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 version_id=version_id,
             )
         except SkillError as exc:
-            return {"error": str(exc)}, exc.http_status
+            return {"error": str(exc)}, exc.http_status, {'Cache-Control': 'no-store'}
         except Exception as e:
             log.error(f"Skill MD export failed: {e}\n{format_exc()}")
             return {"error": "Internal server error"}, 500

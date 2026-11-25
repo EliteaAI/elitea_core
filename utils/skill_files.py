@@ -64,13 +64,19 @@ class SkillFileContentMissingError(SkillFileContentUnavailableError):
 
 
 class SkillVersionExportUnavailableError(SkillFileError):
-    http_status = 503
+    http_status = SkillFileContentUnavailableError.http_status
+    reason = SkillFileContentUnavailableError.reason
 
     def __init__(self, skill_name: str, version_name: str, path: str):
         super().__init__(
             f"Skill '{skill_name}' version '{version_name}' could not be exported: the stored content of '{path}' "
-            "could not be read; try again later"
+            f"{self.reason}"
         )
+
+
+class SkillVersionExportMissingError(SkillVersionExportUnavailableError):
+    http_status = SkillFileContentMissingError.http_status
+    reason = SkillFileContentMissingError.reason
 
 
 class SkillFileSourceUnavailableError(SkillFileError):
@@ -242,6 +248,7 @@ def read_content(session, project_id: int, version_file, client=None) -> bytes:
     meanwhile, or storage serves bytes that are not the ones the row names."""
     requested = version_file.sha256
     try:
+        client = client or project_client(project_id)
         data = get_content(project_id, requested, client)
     except Exception as exc:
         if is_content_missing(project_id, exc, client) and _still_names(session, version_file.id, requested):

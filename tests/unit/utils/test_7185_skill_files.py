@@ -459,11 +459,13 @@ class TestRead:
         _version(session)
         _write(env, session, 'forms.md', b'# Forms\n')
         del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms\n'))]
+        env.storage.clients.clear()
 
         with pytest.raises(env.files.SkillFileContentMissingError, match="'forms.md' is missing") as info:
             env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
         assert info.value.http_status == 410
         assert 'try again' not in str(info.value)
+        assert env.storage.clients == [PROJECT]
 
     def test_a_project_without_a_skill_files_bucket_reads_its_rows_as_missing(self, env, session):
         _version(session)

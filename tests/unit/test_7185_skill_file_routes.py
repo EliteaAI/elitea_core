@@ -446,8 +446,8 @@ class SentResponse:
 
 @pytest.fixture
 def package_routes(harness):
-    calls = types.SimpleNamespace(imported=[], unzipped=[], zip_error=None, export={}, plugin=None,
-                                  plugin_imports=[])
+    calls = types.SimpleNamespace(imported=[], unzipped=[], zip_error=None, export={}, export_error=None,
+                                  plugin=None, plugin_imports=[])
 
     def read_plugin_zip(data):
         if calls.zip_error:
@@ -468,6 +468,11 @@ def package_routes(harness):
         calls.imported.append(kwargs)
         return {'id': 3}
 
+    def export_skill_md(**kwargs):
+        if calls.export_error:
+            raise calls.export_error
+        return calls.export
+
     def validate_skill_import_filename(filename):
         if not filename.lower().endswith(('.md', '.zip', '.skill')):
             raise ValueError('Skill import only accepts .md, .zip or .skill files.')
@@ -478,7 +483,7 @@ def package_routes(harness):
         read_plugin_zip=read_plugin_zip, import_plugin_skills=import_plugin_skills,
         is_skill_package=lambda filename: filename.lower().endswith(('.zip', '.skill')),
         validate_skill_import_filename=validate_skill_import_filename,
-        export_skill_md=lambda **kwargs: calls.export,
+        export_skill_md=export_skill_md,
     )
     sys.modules[module.__name__] = module
     sys.modules['tools'].auth.current_user = lambda: {'id': 1}
@@ -544,3 +549,10 @@ class TestSkillPackageRoutes:
 
         assert (response.content, response.mimetype) == (b'PK', 'application/zip')
         assert response.headers['Content-Disposition'] == 'attachment; filename=forms.zip'
+
+    def test_a_refused_export_is_never_cached_so_a_file_uploaded_later_is_exported(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.export'}
+        package_routes.export_error = Refusal("The stored content of 'forms.md' is missing")
+
+        assert package_routes.exporter.get(project_id=7, skill_id=3) == (
+            {'error': "The stored content of 'forms.md' is missing"}, 404, {'Cache-Control': 'no-store'})
