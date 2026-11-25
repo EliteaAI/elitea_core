@@ -119,7 +119,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 project_id=project_id, skill_id=skill_id, version_id=version_id, path=path,
             )
         except SkillError as exc:
-            return {"error": str(exc)}, exc.http_status
+            return {"error": str(exc)}, exc.http_status, {'Cache-Control': 'no-store'}
         response = send_file(
             BytesIO(content),
             mimetype=entry['content_type'],

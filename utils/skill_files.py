@@ -17,7 +17,8 @@ from tools import auth, config as c, db, serialize
 
 from .folder_access import resolve_entity_access
 from .skill_file_store import (
-    delete_contents, get_content, holds_content, list_contents, project_client, put_content, put_contents,
+    delete_contents, get_content, holds_content, is_content_missing, list_contents, project_client, put_content,
+    put_contents,
 )
 from .skill_utils import (
     SkillFileError,
@@ -46,10 +47,20 @@ SWEEP_MIN_AGE = timedelta(hours=1)
 
 class SkillFileContentUnavailableError(SkillFileError):
     http_status = 503
+    reason = "could not be read; try again later"
 
     def __init__(self, path: str):
-        super().__init__(f"The stored content of '{path}' could not be read; try again later")
+        super().__init__(f"The stored content of '{path}' {self.reason}")
         self.path = path
+
+
+class SkillFileContentMissingError(SkillFileContentUnavailableError):
+    http_status = 410
+    reason = (
+        "is missing, for example because the project was restored from a backup without skill attachments; "
+        "upload the file again (to a new version if this one is published) or restore a backup that includes skill "
+        "attachments"
+    )
 
 
 class SkillVersionExportUnavailableError(SkillFileError):
@@ -225,18 +236,35 @@ def list_version_files(project_id: int, skill_id: int, version_id: int, session=
         return [_manifest_entry(version_file) for version_file in version.files]
 
 
-def read_content(project_id: int, version_file, client=None) -> bytes:
-    """The bytes of one manifest row of the project, or a 503 naming the path when storage cannot serve them
-    or serves bytes that are not the ones the row names."""
+def read_content(session, project_id: int, version_file, client=None) -> bytes:
+    """The bytes of one manifest row of the project; a 410 naming the path when storage does not hold them and the
+    row still names them, which no retry mends, or a 503 when storage cannot serve them, the row was replaced
+    meanwhile, or storage serves bytes that are not the ones the row names."""
+    requested = version_file.sha256
     try:
-        data = get_content(project_id, version_file.sha256, client)
+        data = get_content(project_id, requested, client)
     except Exception as exc:
+        if is_content_missing(project_id, exc, client) and _still_names(session, version_file.id, requested):
+            log.error('skill files: content %s of project %s is missing', version_file.sha256, project_id)
+            raise SkillFileContentMissingError(version_file.path) from exc
         log.exception('skill files: content %s of project %s unreadable', version_file.sha256, project_id)
         raise SkillFileContentUnavailableError(version_file.path) from exc
     if hashlib.sha256(data).hexdigest() != version_file.sha256:
         log.error('skill files: content %s of project %s does not match its hash', version_file.sha256, project_id)
         raise SkillFileContentUnavailableError(version_file.path)
     return data
+
+
+def _still_names(session, version_file_id: int, sha256: str) -> bool:
+    """Whether the row still names ``sha256``: a replace commits the new hash and then deletes the old object, so a
+    read that raced it finds the object gone although the file has content. A row that cannot be read just now
+    does not count, so the read stays retryable."""
+    try:
+        current = session.query(SkillVersionFile.sha256).filter(SkillVersionFile.id == version_file_id).first()
+    except Exception:  # pylint: disable=W0703
+        log.exception('skill files: row %s could not be read again', version_file_id)
+        return False
+    return current is not None and current.sha256 == sha256
 
 
 def read_version_file(project_id: int, skill_id: int, version_id: int, path: str, session=None) -> tuple:
@@ -246,7 +274,7 @@ def read_version_file(project_id: int, skill_id: int, version_id: int, path: str
         version_file = find_version_file(s, version.id, normalize_skill_file_path(path))
         if not version_file:
             raise SkillFileNotFoundError(version_id, path)
-        return _manifest_entry(version_file), read_content(project_id, version_file)
+        return _manifest_entry(version_file), read_content(s, project_id, version_file)
 
 
 def write_version_file(project_id: int, skill_id: int, version_id: int, path: str, data: bytes, session=None) -> dict:
@@ -425,7 +453,7 @@ def read_version_contents(project_id: int, version_id: int, session=None) -> lis
             return []
         client = project_client(project_id)
         return [
-            (describe_manifest([version_file])[0], read_content(project_id, version_file, client))
+            (describe_manifest([version_file])[0], read_content(s, project_id, version_file, client))
             for version_file in version_files
         ]
 

@@ -272,9 +272,16 @@ class TestRead:
         harness.user_permissions = {READ, WRITE}
         harness.raises = Refusal("File 'x' not found in skill version 10")
 
-        for method in ('get', 'put', 'patch', 'delete'):
+        for method in ('put', 'patch', 'delete'):
             harness.json = BODIES.get(method)
             assert _call(harness, method) == ({'error': "File 'x' not found in skill version 10"}, 404)
+
+    def test_a_read_refusal_is_never_cached_so_a_file_uploaded_later_is_fetched_again(self, harness):
+        harness.user_permissions = {READ}
+        harness.raises = Refusal("The stored content of 'forms.md' is missing")
+
+        assert _call(harness, 'get') == (
+            {'error': "The stored content of 'forms.md' is missing"}, 404, {'Cache-Control': 'no-store'})
 
 
 class TestWrite:
