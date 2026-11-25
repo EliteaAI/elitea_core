@@ -49,6 +49,8 @@ class ConversationListExtended(ConversationList):
     execution_type: str = 'chat'  # no stored value: a plain chat (owner decision 2026-10-21, US-50 R3.1)
     schedule_run: ScheduleRunRef | None = None  # the run record of a run row (CR-22, US-16 R2.4)
     has_running_task: bool = False  # a message group still streaming: the list spinner (EL-7385)
+    run_status: Optional[str] = None  # the status of the run row (AC-24), derived for every row
+    tool_names: list[str] = Field(default_factory=list)  # tool calls of the run, in call order (AC-44)
 
     @model_validator(mode='after')
     def compute_execution_type(self):

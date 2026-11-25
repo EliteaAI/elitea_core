@@ -199,7 +199,9 @@ def tool_call_to_row(msg_group_id: int, run_id: str, entry: dict) -> MessageTrac
         parent_agent_call_id=hierarchy.get('parent_agent_call_id') or _parent_call_id(entry),
         started_at=_parse_ts(entry.get('timestamp_start')),
         finished_at=_parse_ts(entry.get('timestamp_finish')),
-        is_error=bool(entry.get('error')),
+        # A failed tool result is an error step even when the entry carries no `error` text: a toolkit test that
+        # fails (for example an MCP that cannot instantiate) finishes with finish_reason 'error' (AC-24)
+        is_error=bool(entry.get('error')) or entry.get('finish_reason') == 'error',
         has_visible_content=True,
         tool_name=_bounded_string(entry.get('tool_name') or (
             entry.get('tool_meta', {}).get('name') if isinstance(entry.get('tool_meta'), dict) else None
