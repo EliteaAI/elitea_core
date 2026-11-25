@@ -174,7 +174,9 @@ def test_the_back_off_reads_not_evaluated_attempts():
 
 
 def test_a_refused_start_closes_the_run_it_created():
-    launch = _service_function("_launch")
+    # Both modes submit their run through ``_submit``.
+    assert "_submit(" in _service_function("_launch_live") and "_submit(" in _service_function("_launch_history")
+    launch = _service_function("_submit")
     assert "mark_run_unstarted(item.project_id, run_id" in launch
 
 
@@ -221,3 +223,58 @@ def test_the_resync_rewrites_only_generated_copies_and_skips_unchanged_ones():
     assert "_rewrite_generated(session, dataset, probes)" in resync
     # No probes means a missing or inactive registry: refuse rather than empty every copy.
     assert resync.index("if not probes:") < resync.index("_active_project_ids()")
+
+
+def test_history_mode_skips_the_risk_scan_but_not_the_owner_and_budget_checks():
+    launch = _service_function("_launch")
+    assert "check_owner_access" in launch and "closed_budget_scope" in launch
+    assert "scan_schedule" not in launch and "scan_schedule" not in _service_function("_launch_history")
+    assert "scan_schedule" in _service_function("_launch_live")
+
+
+def test_history_needs_consent_and_hybrid_falls_back_to_live():
+    history = _service_function("_launch_history")
+    assert history.index("has_history_consent") < history.index("load_turns")
+    assert "History evaluation not enabled for this project" in history
+    assert "rules.NO_TRAFFIC" in history and "return None" in history
+    assert "f'{item.job_id}:{item.application_id}'" in history
+    assert "item.mode = rules.MODE_HISTORY" in history
+
+
+def test_history_runs_take_their_own_slots():
+    claim = _service_function("_claim")
+    assert "max_concurrent_history_runs" in claim and "max_concurrent_runs" in claim
+    assert "skip_locked=True" in _service_function("_claim_rows")
+    assert _service_constant("LIVE_FALLBACK_KEY") == "live_fallback"
+    # Waiting for a live slot does not use up an attempt.
+    assert "'requeue'" in _service_function("_process_claimed")
+
+
+def test_history_modes_use_their_own_cadence():
+    assert "history_reevaluate_after_days" in _service_function("_candidates")
+
+
+def test_the_dashboard_counts_by_mode():
+    assert "EvalAutoItem.mode == mode" in _service_function("list_latest")
+    assert "mode=mode" in (PLUGIN_ROOT / "rpc" / "eval_auto.py").read_text()
+
+
+def test_the_consent_listing_is_registered_and_returns_no_chat_content():
+    assert "elitea_core_eval_auto_history_consents" in _rpc_names(PLUGIN_ROOT / "rpc" / "eval_auto.py")
+    listing = _service_function("list_history_consents")
+    assert "has_history_consent(int(project['id']))" in listing
+    assert "rules.project_in_scope(project, settings)" in listing
+    assert "load_turns" not in listing
+
+
+def test_history_mode_ignores_a_fallback_flag_left_by_hybrid():
+    launch = _service_function("_launch")
+    assert "settings['mode'] == rules.MODE_HYBRID and" in launch
+    assert "LIVE_FALLBACK_KEY" in launch
+    assert "history=True" in _service_function("_launch_history")
+
+
+def test_enhancement_leaves_out_the_cases_the_viewer_may_not_read():
+    source = (PLUGIN_ROOT / "api" / "v2" / "enhance_from_eval.py").read_text()
+    filtered = source.index("without_hidden_cases(run, hidden)")
+    assert source.index("fetch_run_for_enhancement") < filtered < source.index("select_gaps(")

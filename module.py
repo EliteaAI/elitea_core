@@ -28,6 +28,7 @@ from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
 from .utils.schedule_access import register_schedule_permissions
 from .utils.schedule_settings import register_schedule_settings_type
+from .utils.eval_history_consent import register_eval_history_settings_type
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
     CAPABILITIES_REQUEST_EVENT,
@@ -1035,6 +1036,7 @@ class Module(module.ModuleModel):
         # Register schedule permissions for schedules permission family (EL-7011)
         register_schedule_permissions()
         register_schedule_settings_type()
+        register_eval_history_settings_type()
         # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
         # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
         # (the operator tasks are the only writers).

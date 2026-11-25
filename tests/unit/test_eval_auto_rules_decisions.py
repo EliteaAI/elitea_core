@@ -222,6 +222,39 @@ def test_two_unflagged_suites_fall_through(rules):
     assert rules.resolve_dataset_tier('agent_only', suites, None, 11)['tier'] is None
 
 
+def test_history_mode_takes_bindings_and_never_a_dataset(rules):
+    suites = [{'id': 2, 'dataset_id': 8, 'auto_evaluation': True}]
+    assert rules.resolve_history_tier('agent_first', suites) == {
+        'tier': 'agent_suite', 'suite_id': 2, 'dataset_id': None}
+    assert rules.resolve_history_tier('agent_first', [], None, 11) == {
+        'tier': 'project', 'suite_id': None, 'dataset_id': None}
+
+
+def test_history_mode_never_ends_in_no_dataset(rules):
+    # Suites without a dataset still give bindings; the flagged one first.
+    no_dataset = [{'id': 4, 'dataset_id': None}, {'id': 6, 'dataset_id': None, 'auto_evaluation': True}]
+    assert rules.resolve_dataset_tier('agent_only', no_dataset)['tier'] is None
+    assert rules.resolve_history_tier('agent_only', no_dataset) == {
+        'tier': 'agent_suite', 'suite_id': 6, 'dataset_id': None}
+    two = [{'id': 1, 'dataset_id': 7}, {'id': 2, 'dataset_id': 8}]
+    assert rules.resolve_history_tier('agent_only', two)['suite_id'] == 1
+    # No suite of its own: the generated one.
+    assert rules.resolve_history_tier('agent_only', []) == {
+        'tier': 'platform', 'suite_id': None, 'dataset_id': None}
+
+
+def test_history_mode_prefers_the_agents_own_suite_under_agent_first(rules):
+    flagged_no_dataset = [{'id': 3, 'dataset_id': None, 'auto_evaluation': True}]
+    assert rules.resolve_dataset_tier('agent_first', flagged_no_dataset, None, 11)['tier'] == 'project'
+    assert rules.resolve_history_tier('agent_first', flagged_no_dataset, None, 11) == {
+        'tier': 'agent_suite', 'suite_id': 3, 'dataset_id': None}
+    two = [{'id': 1, 'dataset_id': 7}, {'id': 2, 'dataset_id': 8}]
+    assert rules.resolve_history_tier('agent_first', two) == {
+        'tier': 'agent_only_suite', 'suite_id': 1, 'dataset_id': None}
+    assert rules.resolve_history_tier('platform_only', two) == {
+        'tier': 'platform', 'suite_id': None, 'dataset_id': None}
+
+
 # --- pre-flight -------------------------------------------------------------
 
 def test_preflight_order(rules):

@@ -17,6 +17,7 @@ from ...models.pd.evaluation import EvalRunDetailModel
 from ...utils.evaluation_run_utils import get_run, delete_run
 from ...utils.evaluation_library_utils import EvalLibraryError
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.eval_history_redaction import redact_snapshot, viewer_hidden_case_ids
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -52,7 +53,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # case set only to discard it is the expensive half of the work, and this endpoint is
             # the one the client falls back to polling.
             exclude = set() if "snapshot" in include else {"snapshot"}
-            return detail.model_dump(mode='json', exclude=exclude), 200
+            payload = detail.model_dump(mode='json', exclude=exclude)
+            if "snapshot" in payload:
+                hidden = viewer_hidden_case_ids(project_id, payload["snapshot"], auth.current_user().get("id"))
+                payload["snapshot"] = redact_snapshot(payload["snapshot"], hidden)
+            return payload, 200
 
     @register_openapi(
         name="Delete an eval run",

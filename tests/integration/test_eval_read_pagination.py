@@ -166,8 +166,15 @@ def _install_package(calls):
     tools.config = types.SimpleNamespace(ADMINISTRATION_MODE='administration',
                                          DEFAULT_MODE='default')
     tools.auth = types.SimpleNamespace(
-        decorators=types.SimpleNamespace(check_api=lambda *a, **k: (lambda f: f)))
+        decorators=types.SimpleNamespace(check_api=lambda *a, **k: (lambda f: f)),
+        current_user=lambda: {'id': 1})
     tools.register_openapi = lambda *a, **k: (lambda f: f)
+
+    # Pure: the run's snapshot is not a history one, so nothing is hidden and no admin check runs.
+    redaction_spec = importlib.util.spec_from_file_location(
+        f'{PKG}.utils.eval_history_redaction', PLUGIN_ROOT / 'utils' / 'eval_history_redaction.py')
+    redaction = importlib.util.module_from_spec(redaction_spec)
+    redaction_spec.loader.exec_module(redaction)
 
     for name, mod in {
         PKG: pkg,
@@ -183,6 +190,7 @@ def _install_package(calls):
         f'{PKG}.utils.evaluation_suite_utils': suite_utils,
         f'{PKG}.utils.evaluation_library_utils': library_utils,
         f'{PKG}.utils.constants': constants,
+        f'{PKG}.utils.eval_history_redaction': redaction,
         'flask': flask,
         'tools': tools,
     }.items():
