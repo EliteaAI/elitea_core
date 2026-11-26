@@ -91,19 +91,6 @@ def enforce_conversation_starters_limit(starters: Optional[list], previous_start
     check_conversation_starters_length(starters, previous_starters)
 
 
-def fit_fork_starters(applications: list) -> None:
-    """Cut fork starters to the length limit in place, so a published agent saved over it before the
-    limit stays forkable: the forker can't edit the source, and its owner can't edit a published version."""
-    for application in applications or []:
-        for version in application.get('versions') or []:
-            starters = version.get('conversation_starters')
-            if isinstance(starters, list):
-                version['conversation_starters'] = [
-                    item.strip()[:MAX_CONVERSATION_STARTER_LENGTH] if isinstance(item, str) else item
-                    for item in starters
-                ]
-
-
 def import_starters_errors(agent_name: str, versions: list) -> list:
     """Per-version messages for an import or fork above the absolute cap or the starter length,
     so the user sees which version failed.

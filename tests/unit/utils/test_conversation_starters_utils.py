@@ -119,20 +119,6 @@ class TestRule:
         }]
 
 
-class TestForkStarters:
-    def test_cuts_each_starter_to_the_limit(self, mod):
-        applications = [{'versions': [
-            {'conversation_starters': ['  ' + 'a' * 900 + ' ', 'ok', None]},
-            {'conversation_starters': None},
-            {},
-        ]}, {'entity': 'pipelines', 'versions': [{'conversation_starters': ['b' * 769]}]}]
-        mod.fit_fork_starters(applications)
-        assert applications[0]['versions'][0]['conversation_starters'] == ['a' * 768, 'ok', None]
-        assert applications[0]['versions'][1]['conversation_starters'] is None
-        assert applications[1]['versions'][0]['conversation_starters'] == ['b' * 768]
-        assert mod.import_starters_errors('A', applications[1]['versions']) == []
-
-
 class TestImportErrors:
     def test_names_the_agent_and_version(self, mod):
         versions = [
