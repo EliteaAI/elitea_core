@@ -613,6 +613,13 @@ Run admin task migrate_eval_dataset_columns with param: project_id=all
 # and is idempotent. It is off until Runtime config eval_auto_run_enabled is turned on.
 Run admin task seed_eval_health_check
 
+# EliteaAI/elitea_issues#7682 (PR elitea_core#766): the Run History status filter reads each conversation's last
+# message group. This index on chat_message_group (conversation_id, id) builds with CREATE INDEX CONCURRENTLY, so
+# writes are not locked. Run the dry run first (changes nothing); then the real run. Idempotent: a project that has
+# the index is left alone.
+Run admin task index_message_groups_by_conversation with param: project_id=all
+Run admin task index_message_groups_by_conversation with param: project_id=all;dry_run=false
+
 # History evaluation consent index (#7483): the shared table eval_history_consent_index comes from create_all at boot.
 # Saving a project's consent keeps it in step; consents saved before it existed are indexed by the admin task.
 # Idempotent: safe to run multiple times.

@@ -119,6 +119,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             run_trigger=run_filters.trigger,
             run_version_id=run_filters.version_id,
             execution_type=run_filters.execution_type,
+            run_outcome=run_filters.run_outcome,
+            tool_name=run_filters.tool_name,
         )
 
         return result, 200

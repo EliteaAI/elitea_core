@@ -112,6 +112,8 @@ def pd_models():
         'plugins.elitea_core.utils.authors': {'get_authors_data': lambda **k: []},
         'plugins.elitea_core.utils.toolkits_utils': {'get_mcp_schemas': lambda *a, **k: {}},
         'plugins.elitea_core.utils.pipeline_utils': {'validate_yaml_from_str': noop},
+        'plugins.elitea_core.utils.trigger_write_rule': {'strip_trigger_secrets': noop},
+        'plugins.elitea_core.utils.conversation_starters_utils': {'ABSOLUTE_MAX_CONVERSATION_STARTERS': 10},
         'plugins.elitea_core.utils.application_tools': {
             'expand_toolkit_settings': lambda type_, settings, project_id, user_id: settings,
             'ValidatorNotSupportedError': type('ValidatorNotSupportedError', (Exception,), {}),
@@ -135,11 +137,12 @@ def pd_models():
     install('plugins.elitea_core.models.pd.collection_base', _module(
         'plugins.elitea_core.models.pd.collection_base',
         TagBaseModel=_Named, AuthorBaseModel=_Permissive,
-        PromptTagUpdateModel=_Permissive,
+        PromptTagUpdateModel=_Permissive, VersionAuthorMixin=_Permissive,
     ))
     install('plugins.elitea_core.models.pd.llm', _module(
         'plugins.elitea_core.models.pd.llm',
         LLMSettingsModel=_Permissive, LLMSettingsWriteModel=_Permissive,
+        validate_model_selection_surface=noop,
     ))
     install('plugins.elitea_core.models.pd.tag', _module(
         'plugins.elitea_core.models.pd.tag', TagDetailModel=_Permissive,
@@ -226,3 +229,50 @@ def test_clone_tools_field_is_not_the_validating_model(pd_models):
     assert pd_models.ApplicationVersionCloneModel.model_fields['tools'].annotation \
         is not pd_models.ApplicationVersionCreateModel.model_fields['tools'].annotation
     assert not issubclass(ToolCopyModel, ToolCreateModel)
+
+
+# --- #7663: the version PUT must not expand credentials as the signed-in user -------------------
+# A non-owner editing an agent from a shared chat sent the version with the owner's private
+# credential. ToolUpdateModel expanded it as the editor, so Save failed with a 400 that also named
+# the credential. The PUT never writes `tools`, so the full-update model does not validate them.
+
+def _update_payload(settings):
+    return {
+        'id': 11,
+        'application_id': 5,
+        'name': 'base',
+        'author_id': 3,
+        'project_id': 2,
+        'user_id': 4,
+        'instructions': 'new instructions',
+        'tools': [{
+            'id': 46,
+            'type': 'github',
+            'name': 'Github',
+            'settings': dict(settings),
+            'meta': {},
+        }],
+    }
+
+
+def test_full_update_model_accepts_a_toolkit_the_editor_cannot_resolve(pd_models):
+    version = pd_models.ApplicationVersionFullUpdateModel.model_validate(
+        _update_payload(STALE_SETTINGS),
+    )
+
+    assert version.instructions == 'new instructions'
+
+
+def test_full_update_model_never_calls_the_toolkit_validator(pd_models):
+    pd_models.validator_spy.calls.clear()
+
+    pd_models.ApplicationVersionFullUpdateModel.model_validate(_update_payload(STALE_SETTINGS))
+
+    assert pd_models.validator_spy.calls == []
+
+
+def test_full_update_model_tools_field_is_not_the_validating_model(pd_models):
+    from plugins.elitea_core.models.pd.tool import ToolCreateModel, ToolUpdateModel
+
+    tool_model = pd_models.ApplicationVersionFullUpdateModel.model_fields['tools'].annotation.__args__[0].__args__[0]
+    assert not issubclass(tool_model, (ToolCreateModel, ToolUpdateModel))
