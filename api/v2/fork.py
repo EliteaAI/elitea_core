@@ -3,10 +3,27 @@ from flask import request
 
 from tools import api_tools, auth, config as c
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_starters_utils import import_starters_errors
+from ...utils.export_import_utils import ENTITY_IMPORT_MAPPER, _wrap_import_error
 
 from pylon.core.tools import log
 from ...utils.folder_access import fork_payload_access_error
 from ...utils.permissions import ProjectPermissionChecker
+
+
+def _starters_rejection(applications: list):
+    """Reject the whole fork, since import_wizard saves each application alone and would leave a partial fork."""
+    errors = [
+        _wrap_import_error(index, message, import_uuid=application.get('import_uuid'))
+        for index, application in enumerate(applications)
+        for message in import_starters_errors(application.get('name', ''), application.get('versions'))
+    ]
+    if not errors:
+        return None
+    result = {key: [] for key in ENTITY_IMPORT_MAPPER}
+    rejected = {key: [] for key in ENTITY_IMPORT_MAPPER}
+    rejected['agents'] = errors
+    return {'result': result, 'errors': rejected}, 400
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -34,6 +51,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         error = fork_payload_access_error(entities)
         if error is not None:
             return error
+        rejection = _starters_rejection(applications)
+        if rejection is not None:
+            return rejection
 
         # Set fork parent metadata on each version (this makes is_forked = true)
         for entity in entities:
