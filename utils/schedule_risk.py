@@ -39,14 +39,31 @@ def _warning(code, message, **extra):
     return {'code': code, 'message': message, **extra}
 
 
+def _read_interrupt_node_ids(interrupts) -> list:
+    """The node ids of an `interrupt_before` / `interrupt_after` value; a text value counts as one entry."""
+    if isinstance(interrupts, str):
+        return [interrupts] if interrupts else []
+    if not isinstance(interrupts, (list, dict, set)):
+        return []
+    return [step for step in interrupts if isinstance(step, str)]
+
+
+def _flag_pipeline_human_steps(schema: dict) -> list:
+    """The human nodes, then the nodes the run pauses at (`interrupt_before` / `interrupt_after`), each once."""
+    nodes = [node for node in schema.get('nodes') or [] if isinstance(node, dict) and isinstance(node.get('id'), str)]
+    step_labels = {node.get('id'): node.get('name') or node.get('id') for node in nodes}
+    human_nodes = [node.get('id') for node in nodes if node.get('type') in HUMAN_NODE_TYPES]
+    interrupt_nodes = [step for key in ('interrupt_before', 'interrupt_after')
+                       for step in _read_interrupt_node_ids(schema.get(key))]
+    return [
+        _warning('human_input_step', f'Node "{step}" waits for a person', step=step, step_label=step_labels.get(step, step))
+        for step in dict.fromkeys(human_nodes + interrupt_nodes)
+    ]
+
+
 def _human_steps(version) -> list:
     if version.agent_type == 'pipeline':
-        nodes = validate_yaml_from_str(version.instructions).get('nodes') or []
-        return [
-            _warning('human_input_step', f'Node "{node.get("id")}" waits for a person',
-                     step=node.get('id'), step_label=node.get('name') or node.get('id'))
-            for node in nodes if isinstance(node, dict) and node.get('type') in HUMAN_NODE_TYPES
-        ]
+        return _flag_pipeline_human_steps(validate_yaml_from_str(version.instructions))
     if 'ask_user' in ((version.meta or {}).get('internal_tools') or []):
         return [_warning('human_input_step', 'The agent can ask the user a question')]
     return []
