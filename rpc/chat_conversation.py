@@ -20,6 +20,12 @@ from ..models.pd.schedule_list import ExecutionType
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..utils.running_conversations import running_conversation_ids
+from ..utils.run_outcome import (
+    outcome_condition,
+    run_outcomes,
+    tool_name_condition,
+    tool_names_by_conversation,
+)
 from ..utils.schedule_test_runs import UNDEFINED_COLUMN, error_code
 from ..utils.conversation_utils import (
     get_conversation_details,
@@ -43,6 +49,19 @@ from ..utils.model_defaults import creation_llm_settings, chat_request_default
 # and CLI tools may pass larger values, but anything above this is rejected
 # silently rather than fanning into a heavy GROUP BY.
 LIST_CONVERSATIONS_MAX_LIMIT = 100
+
+
+def _as_values(value) -> list:
+    """A filter value as a list: a single value is one item, a list is kept (OR within the filter)."""
+    return list(value) if isinstance(value, (list, tuple, set)) else [value]
+
+
+def _any_of(column, value):
+    """The column equals one of the values: a single value keeps today's `=` (AC-48)."""
+    values = _as_values(value)
+    if len(values) == 1:
+        return column == values[0]
+    return column.in_(values)
 
 
 def _execution_type_condition(execution_type: str):
@@ -480,10 +499,12 @@ class RPC:
         entity_name: str = None,
         entity_project_id: int = None,
         schedule_id: int | None = None,
-        run_status: str | None = None,
-        run_trigger: str | None = None,
-        run_version_id: int | None = None,
-        execution_type: str | None = None,
+        run_status: str | list[str] | None = None,
+        run_trigger: str | list[str] | None = None,
+        run_version_id: int | list[int] | None = None,
+        execution_type: str | list[str] | None = None,
+        run_outcome: list[str] | None = None,
+        tool_name: list[str] | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -582,11 +603,11 @@ class RPC:
             if schedule_id is not None:
                 run_conditions.append(EntityScheduleRun.schedule_id == schedule_id)
             if run_status is not None:
-                run_conditions.append(EntityScheduleRun.status == run_status)
+                run_conditions.append(_any_of(EntityScheduleRun.status, run_status))
             if run_trigger is not None:
-                run_conditions.append(EntityScheduleRun.trigger == run_trigger)
+                run_conditions.append(_any_of(EntityScheduleRun.trigger, run_trigger))
             if run_version_id is not None:
-                run_conditions.append(EntityScheduleRun.version_id == run_version_id)
+                run_conditions.append(_any_of(EntityScheduleRun.version_id, run_version_id))
             if run_conditions:
                 # One semi-join on the run row, which owns the link: the chat id column is indexed, and every
                 # option must hold for the same run. User-writable meta is never read for it.
@@ -595,7 +616,14 @@ class RPC:
                 )
 
             if execution_type is not None:
-                base_query = base_query.filter(_execution_type_condition(execution_type))
+                types = _as_values(execution_type)
+                base_query = base_query.filter(or_(*(_execution_type_condition(t) for t in types)))
+
+            if run_outcome:  # AC-24, AC-26: the derived status of each row, OR within the filter
+                base_query = base_query.filter(or_(*(outcome_condition(o) for o in _as_values(run_outcome))))
+
+            if tool_name:  # AC-45: a run matches when any of its tool calls matches (MCP Run History)
+                base_query = base_query.filter(tool_name_condition(_as_values(tool_name)))
 
             base_query = base_query.order_by(sorting(sorting_by))
 
@@ -651,6 +679,14 @@ class RPC:
 
             schedule_runs = _schedule_runs(session, conversations)
             running_ids = running_conversation_ids(session, conv_ids)
+            # AC-24: a status on every row. A record's own status; a plain chat's status from stored data.
+            # Only the Run History of an entity (participant_id) draws these columns, so the sidebar and the skill
+            # chat lists skip the extra reads (review: the shared list paid for them on every load).
+            run_columns = participant_id is not None
+            record_statuses = {conv_id: run['status'] for conv_id, run in schedule_runs.items()}
+            outcomes = run_outcomes(session, conv_ids, record_statuses) if run_columns else {}
+            # AC-44: the tool names of each row, for the MCP Event column (one batched read over the page)
+            tools_of = tool_names_by_conversation(session, conv_ids) if run_columns else {}
             chat_runs = chat_skill_runs(
                 session,
                 [c.id for c in conversations if 'single_participant' not in (c.meta or {})],
@@ -668,11 +704,51 @@ class RPC:
                     "users_count": users_count.get(conv.id, 0),
                     "schedule_run": schedule_runs.get(conv.id),
                     "has_running_task": conv.id in running_ids,
+                    "run_status": outcomes.get(conv.id),
+                    "tool_names": tools_of.get(conv.id, []),
                     **chat_runs.get(conv.id, {}),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 
             return {'total': total, 'rows': rows}
+
+    @web.rpc("chat_run_history_facets_rpc", "run_history_facets_rpc")
+    def run_history_facets_rpc(
+        self,
+        project_id: int,
+        user_id: int,
+        entity_id: int,
+        is_admin: bool = False,
+    ) -> dict:
+        """The filter options of one agent's or pipeline's Run History (AC-9, AC-47a).
+
+        The conversations are limited by the same visibility as the run list: public conversations, and those
+        where the caller is a user participant (any user, for an admin). So a filter never names a run the caller
+        cannot list.
+        """
+        # Late import: the facets read depends on the schedule run tables only
+        from ..utils.run_facets import run_facets
+        with db.get_session(project_id) as session:
+            participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
+            if not is_admin:
+                participant_subquery_filters.append(
+                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
+                )
+            participant_subquery = session.query(Participant.id).filter(
+                *participant_subquery_filters
+            ).subquery()
+            visible = session.query(Conversation.id).distinct().join(
+                ParticipantMapping, Conversation.id == ParticipantMapping.conversation_id,
+            ).join(
+                Participant, Participant.id == ParticipantMapping.participant_id,
+            ).filter(
+                or_(
+                    Conversation.is_private == False,
+                    Participant.id.in_(participant_subquery),
+                )
+            ).subquery()
+            visible_ids = select(visible.c.id)
+            return run_facets(session, entity_id, visible_ids)
 
     @web.rpc("chat_get_conversation_by_uuid_rpc", "get_conversation_by_uuid_rpc")
     def get_conversation_by_uuid_rpc(

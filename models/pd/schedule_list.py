@@ -7,12 +7,17 @@ from pydantic import BaseModel, Field, field_validator
 MAX_DB_ID = 2**31 - 1  # the database integer range
 INDEX_NAME_MAX = 256  # the entity_schedules.index_name column width
 DbId = Annotated[int, Field(ge=1, le=MAX_DB_ID)]
+TOOL_NAME_MAX = 256  # the longest tool name the filter accepts; a longer one is a 400
+ToolName = Annotated[str, Field(min_length=1, max_length=TOOL_NAME_MAX)]
 # The values the list and runs options accept; Swagger reads them with typing.get_args (US-55 D3)
 EntityType = Literal['agent', 'pipeline', 'toolkit_index']
 RunStatus = Literal['running', 'success', 'failed', 'skipped', 'blocked', 'waiting_for_approval']
 RunTrigger = Literal['cron', 'manual', 'test', 'webhook']
 # The run kinds that have no run record: the conversation's own execution type tells them apart
 ExecutionType = Literal['chat', 'api', 'mcp']
+# The status shown on a run row (AC-24): a schedule run's status, or for a plain chat one derived from stored data.
+# Stopped and Partial are index-run states only; they never reach this list.
+RunOutcome = Literal['running', 'waiting_for_approval', 'success', 'failed', 'skipped', 'blocked']
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled', 'last_delivery_at']
 SortOrder = Literal['asc', 'desc']
 
@@ -25,10 +30,46 @@ class RunFilters(BaseModel):
     version_id: DbId | None = None
 
 
-class ConversationListFilters(RunFilters):
-    """The filters of the conversation list: the run filters and the execution type of a run without a record."""
+MAX_FILTER_VALUES = 20  # a comma list of one filter: more than this is a 400 (AC-48)
 
-    execution_type: ExecutionType | None = None
+
+def _split_comma_list(value):
+    """A comma separated query value as a list of its non-empty elements (AC-48: ``a,,b`` reads as a, b).
+
+    A value with no element at all (``''``, ``','``) stays as it is, so it fails the option check: a 400, as before.
+    """
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(',') if item.strip()]
+        return items or value
+    return value
+
+
+class ConversationListFilters(BaseModel):
+    """The conversation list filters. Each takes a comma list (OR within one filter; filters combine with AND).
+
+    A value outside the allowed set is a 400, and so is a list longer than MAX_FILTER_VALUES. An empty list means
+    the filter is not applied.
+    """
+
+    status: RunStatus | list[RunStatus] | None = None
+    trigger: RunTrigger | list[RunTrigger] | None = None
+    version_id: DbId | list[DbId] | None = None
+    execution_type: ExecutionType | list[ExecutionType] | None = None
+    run_outcome: RunOutcome | list[RunOutcome] | None = None  # the derived run_status of a row (AC-24, AC-26)
+    tool_name: ToolName | list[ToolName] | None = None  # MCP runs: a tool called in the run (AC-45)
+
+    @field_validator('status', 'trigger', 'version_id', 'execution_type', 'run_outcome', 'tool_name', mode='before')
+    @classmethod
+    def _comma_list(cls, value):
+        values = _split_comma_list(value)
+        if isinstance(values, list):
+            if len(values) > MAX_FILTER_VALUES:
+                raise ValueError(f'at most {MAX_FILTER_VALUES} values')
+            if not values:
+                return None
+            # One value stays a scalar, so the single-value contract and its results do not change (AC-48)
+            return values[0] if len(values) == 1 else values
+        return values
 
 
 class ScheduleListFilters(BaseModel):
