@@ -4,6 +4,9 @@ One ``eval_history_settings`` record per project in the configurations plugin, s
 ``project_settings``, owned by elitea_core so only the evaluation settings PUT (a project admin)
 changes it. Off until a project admin turns it on: history mode reads private chats, so without the
 record an agent is never scored from them.
+
+Each save also sets the project's row in the shared ``eval_history_consent_index``, which the admin
+listing reads in one query; :func:`reindex_history_consents` rebuilds it from the records.
 """
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from pylon.core.tools import log
@@ -81,4 +84,47 @@ def save_history_consent(project_id: int, consent: bool) -> dict:
     }, owner=OWNER)
     if not created:
         rpc.configurations_update(project_id=project_id, config_id=config["id"], payload={"data": data}, owner=OWNER)
+    # After the record: a failed index write fails the save, and the admin can retry it.
+    index_history_consent(project_id, consent)
     return data
+
+
+def index_history_consent(project_id: int, consent: bool) -> None:
+    from sqlalchemy import func  # pylint: disable=C0415
+    from sqlalchemy.dialects.postgresql import insert  # pylint: disable=C0415
+    from tools import db  # pylint: disable=E0401,C0415
+    from ..models.eval_auto import EvalHistoryConsentIndex  # pylint: disable=C0415
+
+    with db.with_project_schema_session(None) as session:
+        session.execute(insert(EvalHistoryConsentIndex).values(project_id=project_id, consent=consent)
+                        .on_conflict_do_update(index_elements=[EvalHistoryConsentIndex.project_id],
+                                               set_={"consent": consent, "updated_at": func.now()}))
+        session.commit()
+
+
+def consenting_project_ids() -> set:
+    """The projects whose index row says the consent is on."""
+    from tools import db  # pylint: disable=E0401,C0415
+    from ..models.eval_auto import EvalHistoryConsentIndex  # pylint: disable=C0415
+
+    with db.with_project_schema_session(None) as session:
+        return {row.project_id for row in session.query(EvalHistoryConsentIndex.project_id).filter(
+            EvalHistoryConsentIndex.consent.is_(True))}
+
+
+def reindex_history_consents(project_ids) -> dict:
+    """Rebuild the index from each project's record (backfill, or repair after a failed save).
+
+    A project whose record cannot be read keeps its row as it is.
+    """
+    indexed, failed = 0, []
+    for project_id in project_ids:
+        try:
+            settings = _read(project_id)
+        except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- one project must not stop the others
+            log.exception("Could not read the %s of project %s", SETTINGS_TYPE, project_id)
+            failed.append(project_id)
+            continue
+        index_history_consent(project_id, settings is not None and settings.history_evaluation_consent)
+        indexed += 1
+    return {"indexed": indexed, "failed": failed}

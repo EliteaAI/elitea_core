@@ -219,15 +219,15 @@ def _conversations(**overrides):
     return conversations
 
 
-def test_assemble_turns_joins_replies_in_order(history):
+def test_assemble_turns_joins_replies_in_order_without_text(history):
     users = [{'id': 1, 'conversation_id': 1, 'user_id': 10, 'created_at': BASE, 'meta': None, 'is_streaming': False}]
     agents = [{'id': 3, 'reply_to_id': 1, 'meta': {'execution_time_seconds': 2}, 'is_streaming': True},
               {'id': 2, 'reply_to_id': 1, 'meta': {'execution_time_seconds': 1}, 'is_streaming': False},
               {'id': 9, 'reply_to_id': 77, 'meta': {}, 'is_streaming': False}]
-    texts = {1: 'Question', 2: 'First part', 3: 'Second part'}
-    [assembled] = history.assemble_turns(users, agents, texts, _conversations())
-    assert assembled['input'] == 'Question'
-    assert assembled['output'] == 'First part\n\nSecond part'
+    kinds = {1: history.TEXT_PRESENT, 3: history.TEXT_PRESENT}
+    [assembled] = history.assemble_turns(users, agents, kinds, _conversations())
+    assert 'input' not in assembled and 'output' not in assembled
+    assert assembled['input_kind'] == history.TEXT_PRESENT and assembled['has_output'] is True
     assert assembled['group_ids'] == [2, 3]
     assert assembled['is_private'] is True and assembled['version_id'] == 5
     assert assembled['streaming'] is True and assembled['latency_ms'] == 3000
@@ -243,9 +243,49 @@ def test_assemble_turns_drops_evaluation_and_unknown_conversations(history):
 def test_assemble_turns_without_reply(history):
     users = [{'id': 1, 'conversation_id': 1, 'user_id': 10, 'created_at': BASE}]
     [assembled] = history.assemble_turns(users, [], {}, _conversations())
-    assert assembled['output'] is None and assembled['group_ids'] == [] and assembled['latency_ms'] is None
-    assert assembled['input'] == ''
+    assert assembled['has_output'] is False and assembled['group_ids'] == [] and assembled['latency_ms'] is None
+    assert assembled['input_kind'] is None
     assert history.turn_outcome(assembled) != history.OK
+
+
+@pytest.mark.parametrize('input_kind, has_output, expected', [
+    ('text', True, 'ok'),
+    ('text', False, 'error'),
+    ('placeholder', True, 'skip'),
+    (None, True, 'skip'),
+])
+def test_outcome_from_flags_matches_outcome_from_text(history, input_kind, has_output, expected):
+    flagged = {**turn(1), 'input_kind': input_kind, 'has_output': has_output}
+    del flagged['input'], flagged['output']
+    assert history.turn_outcome(flagged) == expected
+
+
+def test_flags_and_text_give_the_same_plan(history, settings):
+    users = [{'id': i, 'conversation_id': 1, 'user_id': 10 + i % 3, 'created_at': BASE + timedelta(minutes=i)}
+             for i in range(1, 9)]
+    agents = [{'id': 100 + i, 'reply_to_id': i, 'meta': {}} for i in range(1, 9)]
+    texts = {i: f'Question {i}' for i in range(1, 9)} | {100 + i: f'Answer {i}' for i in range(1, 8)}
+    texts[3] = '[Scheduled execution triggered]'
+    kinds = {gid: history.TEXT_PLACEHOLDER if text == history.SCHEDULED_PLACEHOLDER else history.TEXT_PRESENT
+             for gid, text in texts.items()}
+    flagged = history.assemble_turns(users, agents, kinds, _conversations())
+    with_text = history.attach_texts([dict(t) for t in flagged], texts)
+    settings = {**settings, 'history_min_turns': 1, 'classify_threshold': 0.9}
+    by_flags = history.plan_history(flagged, settings, 's')
+    by_text = history.plan_history(
+        [{k: v for k, v in t.items() if k not in ('input_kind', 'has_output')} for t in with_text], settings, 's')
+    assert by_flags['reason'] == by_text['reason'] and by_flags['meta'] == by_text['meta']
+    assert [t['id'] for t in by_flags['sample']] == [t['id'] for t in by_text['sample']]
+    assert by_flags['meta']['excluded']['error'] == 1 and 3 not in [t['id'] for t in by_flags['sample']]
+
+
+def test_attach_texts_fills_and_caps(history):
+    turns = [{'id': 1, 'group_ids': [3, 2]}, {'id': 4, 'group_ids': []}]
+    long = 'x' * (history.MAX_TURN_TEXT_CHARS + 5)
+    history.attach_texts(turns, {1: long, 2: 'First part', 3: 'Second part'})
+    assert turns[0]['input'] == 'x' * history.MAX_TURN_TEXT_CHARS + history.TRUNCATED_MARK
+    assert turns[0]['output'] == 'Second part\n\nFirst part'
+    assert turns[1] == {'id': 4, 'group_ids': [], 'input': '', 'output': None}
 
 
 def test_history_settings_defaults_and_bounds(rules):

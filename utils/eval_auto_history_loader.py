@@ -1,23 +1,28 @@
 """Reads an agent's stored chat turns for history mode; every decision on them is in
 :mod:`eval_auto_history`.
 
-One agent's participant, the conversations it is in (pinned to the version the settings ask for),
-the user messages sent to it in the window (newest first, at most ``MAX_SCAN_GROUPS``), its replies
-to them and their text.
+:func:`load_turns`: one agent's participant, the conversations it is in (pinned to the version the
+settings ask for), the user messages sent to it in the window (newest first, at most
+``MAX_SCAN_GROUPS``), its replies to them, and whether each has text, never the text itself.
+:func:`load_texts`: the text of the turns the sample picked, at most ``MAX_TURN_TEXT_CHARS`` a group.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+from sqlalchemy import case, func
 
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
-from ..models.message_items.base import MessageItem
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import Participant, ParticipantMapping
 from . import eval_auto_history as history
 from .eval_auto_rules import HISTORY_VERSION_ANY
-from .evaluation_turn_extraction import group_text
+from .evaluation_turn_extraction import TEXT_ITEM_TYPES, group_text
+
+# What str.strip() removes, for the SQL side of the blank test.
+_WHITESPACE = ' \t\n\r\f\v'
 
 
 def load_turns(session, project_id: int, application_id: int, version_id: Optional[int], settings: dict,
@@ -73,8 +78,34 @@ def load_turns(session, project_id: int, application_id: int, version_id: Option
         ConversationMessageGroup.author_participant_id.in_(participant_ids),
     )]
     group_ids = [g['id'] for g in user_groups] + [g['id'] for g in agent_groups]
+    return history.assemble_turns(user_groups, agent_groups, _text_kinds(session, group_ids), conversations)
+
+
+def _text_kinds(session, group_ids: List[int]) -> Dict[int, str]:
+    """Group id → ``TEXT_PRESENT`` / ``TEXT_PLACEHOLDER`` for the groups with some non-blank text.
+
+    The same test as stripping :func:`group_text`, done in SQL so no text leaves the database.
+    """
+    trimmed = func.btrim(TextMessageItem.content, _WHITESPACE)
+    filled = func.sum(case((trimmed != '', 1), else_=0))
+    placeholder = func.sum(case((trimmed == history.SCHEDULED_PLACEHOLDER, 1), else_=0))
+    rows = session.query(TextMessageItem.message_group_id, filled, placeholder).filter(
+        TextMessageItem.message_group_id.in_(group_ids), TextMessageItem.item_type.in_(TEXT_ITEM_TYPES),
+    ).group_by(TextMessageItem.message_group_id).having(filled > 0)
+    return {row[0]: history.TEXT_PLACEHOLDER if row[1] == 1 and row[2] == 1 else history.TEXT_PRESENT
+            for row in rows}
+
+
+def load_texts(session, turns: List[dict]) -> List[dict]:
+    """``turns`` (the sample) with their ``input`` and ``output`` filled; only their groups are read."""
+    group_ids = [turn['id'] for turn in turns] + [gid for turn in turns for gid in turn['group_ids']]
+    if not group_ids:
+        return turns
     items_by_group = {}
-    for item in session.query(TextMessageItem).filter(MessageItem.message_group_id.in_(group_ids)):
+    for item in session.query(
+        TextMessageItem.message_group_id, TextMessageItem.item_type, TextMessageItem.order_index,
+        func.left(TextMessageItem.content, history.MAX_TURN_TEXT_CHARS + 1).label('content'),
+    ).filter(TextMessageItem.message_group_id.in_(group_ids)):
         items_by_group.setdefault(item.message_group_id, []).append(item)
     texts = {group_id: group_text(items) for group_id, items in items_by_group.items()}
-    return history.assemble_turns(user_groups, agent_groups, texts, conversations)
+    return history.attach_texts(turns, texts)

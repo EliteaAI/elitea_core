@@ -10,7 +10,6 @@ Every decision that needs no database is in :mod:`eval_auto_rules`; this module 
 inputs those rules take and writes their outcome.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -40,8 +39,8 @@ from .evaluation_dataset_utils import (
 )
 from .evaluation_library_utils import EvalLibraryError, EvalNameConflictError
 from .eval_auto_history import plan_history
-from .eval_auto_history_loader import load_turns
-from .eval_history_consent import has_history_consent
+from .eval_auto_history_loader import load_texts, load_turns
+from .eval_history_consent import consenting_project_ids, has_history_consent
 from .evaluation_run_utils import (
     EvalRunConfigError, create_batch_run, create_history_run, delete_run, launch_run, mark_run_unstarted,
 )
@@ -69,7 +68,6 @@ STALE_CLAIM = timedelta(minutes=15)
 # ``created``, which the run reaper does not look at; past this it is closed as unstarted.
 UNSTARTED_RUN = timedelta(minutes=30)
 RUN_PERMISSION = 'models.applications.evaluation.run.create'
-CONSENT_READS_PARALLEL = 8
 # Serialises opening a job: a "Run now" racing the scheduled tick, or two pods, must not queue twice.
 _JOB_LOCK = text("SELECT pg_advisory_xact_lock(hashtext('eval-auto-job'))")
 # Serialises counting and taking live slots across drains (two pods, "Run now" during the tick).
@@ -440,17 +438,17 @@ def _enumerate(settings: dict) -> tuple:
 def list_history_consents() -> dict:
     """The projects whose admins let the evaluation read their chats, and whether each is in scope.
 
-    Names and ids only: the Super Admin sees who opted in, never the chats themselves.
+    Names and ids only: the Super Admin sees who opted in, never the chats themselves. Read from the
+    shared consent index in one query, not from each project's record.
     """
     settings = get_config()
+    consenting = consenting_project_ids()
+    if not consenting:
+        return {'total': 0, 'projects': []}
     listed = context.rpc_manager.timeout(120).project_list(filter_={'create_success': True})
-    # One read per project (each keeps its record in its own schema), a few at a time, so a large
-    # install answers well inside the caller's RPC timeout.
-    with ThreadPoolExecutor(max_workers=CONSENT_READS_PARALLEL) as pool:
-        consents = list(pool.map(lambda project: has_history_consent(int(project['id'])), listed))
     projects = [{'project_id': int(project['id']), 'name': project.get('name'),
                  'in_scope': rules.project_in_scope(project, settings)}
-                for project, consent in zip(listed, consents) if consent]
+                for project in listed if int(project['id']) in consenting]
     return {'total': len(projects), 'projects': sorted(projects, key=lambda row: row['project_id'])}
 
 
@@ -731,9 +729,11 @@ def _launch_history(item: EvalAutoItem, settings: dict, eval_task_node) -> Optio
         if not plan['sample']:
             _finish(item, rules.NOT_EVALUATED, rules.NO_TRAFFIC, 'No chat turn could be sampled')
             return 'done'
+        # Only the sampled turns' text is read, so the read is bounded by history_max_turns.
+        sample = load_texts(session, plan['sample'])
         try:
             run = create_history_run(
-                item.project_id, suite_id, plan['sample'], application_version_id=version.id,
+                item.project_id, suite_id, sample, application_version_id=version.id,
                 owner_id=item.owner_id, session=session,
                 meta={'auto_item_id': item.id, 'auto_job_id': item.job_id, 'history': plan['meta']})
         except EvalRunConfigError as exc:

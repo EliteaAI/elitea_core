@@ -1431,6 +1431,24 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("seed_eval_health_check: failed")
             return {"ok": False, "error": str(exc)}
 
+    @web.method("reindex_eval_history_consents")
+    def reindex_eval_history_consents(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: rebuild the shared index of projects that allow evaluation from chat history.
+
+        The admin listing reads the index; each project's own record is the source of truth. Run once
+        after deploying the index, or to repair it; idempotent.
+        """
+        from tools import rpc_tools  # pylint: disable=E0401,C0415
+        from ..utils.eval_history_consent import reindex_history_consents  # pylint: disable=C0415
+        try:
+            projects = rpc_tools.RpcMixin().rpc.timeout(120).project_list(filter_={"create_success": True}) or []
+            result = {"ok": True, **reindex_history_consents([int(project["id"]) for project in projects])}
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("reindex_eval_history_consents: failed")
+            return {"ok": False, "error": str(exc)}
+        log.info("reindex_eval_history_consents: %s", result)
+        return result
+
     @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
         """Admin task: rename 'alita_title' to 'elitea_title' inside toolkit settings JSON.

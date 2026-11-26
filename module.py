@@ -656,6 +656,10 @@ class Module(module.ModuleModel):
                 "seed_eval_health_check", self.seed_eval_health_check,
                 group="R-2.0.9",
             )
+            this.for_module("admin").module.register_admin_task(
+                "reindex_eval_history_consents", self.reindex_eval_history_consents,
+                group="R-2.0.9",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

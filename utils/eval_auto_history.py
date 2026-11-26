@@ -11,6 +11,11 @@ A turn is one user group and the agent groups that answer it::
      'created_at': datetime, 'input': str, 'output': str | None, 'group_ids': [agent group ids],
      'user_meta': dict, 'agent_metas': [dict], 'streaming': bool, 'latency_ms': int | None}
 
+The loader reads in two steps so a busy agent costs only its sample's text: the turns first come
+with ``input_kind`` (``TEXT_PRESENT`` / ``TEXT_PLACEHOLDER`` / blank) and ``has_output`` instead of
+``input`` and ``output``, enough to classify and sample them, then :func:`attach_texts` fills the
+text of the sampled turns only.
+
 Stdlib only, no plugin imports (same convention as ``eval_auto_rules``); the reason codes are
 literals that a unit test holds equal to the rules module's.
 """
@@ -33,6 +38,13 @@ SCHEDULED_PLACEHOLDER = '[Scheduled execution triggered]'
 EXCLUDED_SOURCES = ('evaluation', 'toolkit')
 #: Newest groups read per agent before sampling; bounds the read on a busy agent.
 MAX_SCAN_GROUPS = 2000
+#: Characters kept of a sampled turn's input and of its output; longer text is cut with ``TRUNCATED_MARK``.
+MAX_TURN_TEXT_CHARS = 20000
+TRUNCATED_MARK = '\n[…truncated]'
+
+#: What the first read knows of a group's text: some non-blank text, or exactly the scheduled placeholder.
+TEXT_PRESENT = 'text'
+TEXT_PLACEHOLDER = 'placeholder'
 
 OK = 'ok'
 SKIP = 'skip'
@@ -108,8 +120,13 @@ def turn_outcome(turn: dict) -> str:
     A resolved approval or sign-in is ``ok``: a person completed the turn, which is what history
     mode can score that a live run cannot.
     """
-    text = (turn.get('input') or '').strip()
-    if turn.get('streaming') or not text or text == SCHEDULED_PLACEHOLDER:
+    if 'input_kind' in turn:
+        input_kind, has_output = turn['input_kind'], turn.get('has_output')
+    else:
+        text = (turn.get('input') or '').strip()
+        input_kind = TEXT_PLACEHOLDER if text == SCHEDULED_PLACEHOLDER else (TEXT_PRESENT if text else None)
+        has_output = bool((turn.get('output') or '').strip())
+    if turn.get('streaming') or input_kind != TEXT_PRESENT:
         return SKIP
     agent_metas = [meta for meta in turn.get('agent_metas') or [] if isinstance(meta, dict)]
     # The guardrail stops the input before the agent sees it; the mark is on either side.
@@ -119,7 +136,7 @@ def turn_outcome(turn: dict) -> str:
         return HITL_OPEN
     if any(pending_oauth(meta) for meta in agent_metas):
         return OAUTH_OPEN
-    if not agent_metas or any(meta.get('is_error') for meta in agent_metas) or not (turn.get('output') or '').strip():
+    if not agent_metas or any(meta.get('is_error') for meta in agent_metas) or not has_output:
         return ERROR
     return OK
 
@@ -228,15 +245,16 @@ def latency_ms(agent_metas: List[dict]) -> Optional[int]:
     return int(round(sum(seconds) * 1000)) if seconds else None
 
 
-def assemble_turns(user_groups: List[dict], agent_groups: List[dict], texts: Dict[int, str],
+def assemble_turns(user_groups: List[dict], agent_groups: List[dict], text_kinds: Dict[int, str],
                    conversations: Dict[int, dict]) -> List[dict]:
-    """Turn dicts from the rows the loader read.
+    """Turn dicts, without their text, from the rows the loader read.
 
     ``user_groups``: ``{id, conversation_id, user_id, created_at, meta, is_streaming}``, one per
     message sent to the agent. ``agent_groups``: ``{id, reply_to_id, meta, is_streaming}``, this
     agent's replies only, so another agent's answer in a shared chat is never its output.
-    ``texts``: group id → text. ``conversations``: id → ``{is_private, version_id, source, meta}``.
-    A conversation an evaluation made is dropped here, before anything is counted.
+    ``text_kinds``: group id → ``TEXT_PRESENT`` or ``TEXT_PLACEHOLDER``, absent for a blank group.
+    ``conversations``: id → ``{is_private, version_id, source, meta}``. A conversation an evaluation
+    made is dropped here, before anything is counted.
     """
     replies: Dict[int, List[dict]] = {}
     for group in sorted(agent_groups, key=lambda g: g['id']):
@@ -248,15 +266,28 @@ def assemble_turns(user_groups: List[dict], agent_groups: List[dict], texts: Dic
             continue
         answers = replies.get(group['id'], [])
         agent_metas = [a.get('meta') if isinstance(a.get('meta'), dict) else {} for a in answers]
-        output = '\n\n'.join(text for text in (texts.get(a['id'], '') for a in answers) if text)
         turns.append({
             'id': group['id'], 'conversation_id': group.get('conversation_id'), 'user_id': group.get('user_id'),
             'is_private': bool(conversation.get('is_private')), 'version_id': conversation.get('version_id'),
-            'created_at': group.get('created_at'), 'input': texts.get(group['id'], ''), 'output': output or None,
+            'created_at': group.get('created_at'), 'input_kind': text_kinds.get(group['id']),
+            'has_output': any(a['id'] in text_kinds for a in answers),
             'group_ids': [a['id'] for a in answers],
             'user_meta': group.get('meta') if isinstance(group.get('meta'), dict) else {},
             'agent_metas': agent_metas,
             'streaming': bool(group.get('is_streaming')) or any(a.get('is_streaming') for a in answers),
             'latency_ms': latency_ms(agent_metas),
         })
+    return turns
+
+
+def cap_text(text: str, limit: int = MAX_TURN_TEXT_CHARS) -> str:
+    return text if len(text) <= limit else text[:limit] + TRUNCATED_MARK
+
+
+def attach_texts(turns: List[dict], texts: Dict[int, str]) -> List[dict]:
+    """Fill ``input`` and ``output`` of the sampled turns from group id → text, each capped."""
+    for turn in turns:
+        output = '\n\n'.join(text for text in (texts.get(group_id, '') for group_id in turn['group_ids']) if text)
+        turn['input'] = cap_text(texts.get(turn['id'], ''))
+        turn['output'] = cap_text(output) if output else None
     return turns

@@ -262,11 +262,31 @@ def test_the_dashboard_counts_by_mode():
 def test_the_consent_listing_is_registered_and_returns_no_chat_content():
     assert "elitea_core_eval_auto_history_consents" in _rpc_names(PLUGIN_ROOT / "rpc" / "eval_auto.py")
     listing = _service_function("list_history_consents")
-    assert "has_history_consent(int(project['id']))" in listing
     assert "rules.project_in_scope(project, settings)" in listing
     assert "load_turns" not in listing
-    # The per-project reads run a few at a time, not one after another inside the caller's timeout.
-    assert "ThreadPoolExecutor(max_workers=CONSENT_READS_PARALLEL)" in listing
+    # One query on the shared index, never a read per project inside the caller's timeout.
+    assert "consenting_project_ids()" in listing and "has_history_consent" not in listing
+
+
+def test_a_saved_consent_updates_the_index_and_the_index_can_be_rebuilt():
+    tree = ast.parse((PLUGIN_ROOT / "utils" / "eval_history_consent.py").read_text())
+    functions = {node.name: ast.get_source_segment((PLUGIN_ROOT / "utils" / "eval_history_consent.py").read_text(), node)
+                 for node in tree.body if isinstance(node, ast.FunctionDef)}
+    save = functions["save_history_consent"]
+    assert save.index("configurations_") < save.index("index_history_consent(project_id, consent)")
+    assert "_read(project_id)" in functions["reindex_history_consents"]
+    assert "EvalHistoryConsentIndex.consent.is_(True)" in functions["consenting_project_ids"]
+    assert "reindex_eval_history_consents" in (PLUGIN_ROOT / "module.py").read_text()
+
+
+def test_history_reads_text_only_for_the_sample():
+    history = _service_function("_launch_history")
+    assert history.index("plan_history(") < history.index("load_texts(session, plan['sample'])")
+    assert "suite_id, sample," in history and "plan['sample'], application_version_id" not in history
+    loader = (PLUGIN_ROOT / "utils" / "eval_auto_history_loader.py").read_text()
+    load_turns = loader[loader.index("def load_turns"):loader.index("def _text_kinds")]
+    assert "TextMessageItem.content" not in load_turns and "session.query(TextMessageItem)" not in loader
+    assert "func.left(TextMessageItem.content, history.MAX_TURN_TEXT_CHARS + 1)" in loader
 
 
 def test_the_live_slot_is_counted_under_a_lock_in_the_items_session():

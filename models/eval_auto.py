@@ -10,6 +10,9 @@ than an N-project fan-out:
 * ``EvalAutoItem`` — one agent within a job: both the queue (``state``) and the result
   (``status``). The run it launched lives in ``p_<id>.eval_run`` and points back through
   ``eval_run.meta.auto_item_id``.
+* ``EvalHistoryConsentIndex`` — which projects allow history mode, so the admin listing is one
+  query instead of a read per project. The project's ``eval_history_settings`` record stays the
+  source of truth that history mode checks before reading chats.
 * ``EvalPlatformDataset`` / ``EvalPlatformDatasetCase`` — the seeded health-check probes,
   copied into a project the first time one of its agents falls through to the platform tier.
 """
@@ -59,6 +62,18 @@ class EvalAutoConfig(db_tools.AbstractBaseMixin, db.Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=True, onupdate=func.now()
+    )
+
+
+class EvalHistoryConsentIndex(db_tools.AbstractBaseMixin, db.Base):
+    __tablename__ = 'eval_history_consent_index'
+    __table_args__ = ({'schema': c.POSTGRES_SCHEMA},)
+
+    # One row per project that ever saved the consent; written with the record by save_history_consent.
+    project_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    consent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 
