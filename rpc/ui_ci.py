@@ -51,9 +51,12 @@ class RPC:  # pylint: disable=R0903
                 extract_cleanup_skip_files=[".gitkeep"],
             )
             log.info("Updated UI using bundle")
+            installed = True
         except:  # pylint: disable=W0702
-            self.update_ui_from_github(release=release)
-        _write_ui_marker(self)
+            installed = self.update_ui_from_github(release=release)
+        # Stale UI must not be marked current, or later boots would never retry
+        if installed:
+            _write_ui_marker(self)
 
     @web.rpc('update_ui_from_github', 'update_ui_from_github')
     def update_ui_from_github(self, release=None):
@@ -112,7 +115,12 @@ class RPC:  # pylint: disable=R0903
                         zip_file.extractall(destination_path)
                     #
                     log.info(f"Zip file downloaded and extracted to {destination_path}")
+                    return True
                 else:
                     log.error(f"Failed to download the zip file. Status code: {response.status_code}")
                 #
                 break
+        else:
+            log.error("UI release not found in %s/%s: %s", self.release_owner, self.release_repo, release)
+        return False
+
