@@ -20,7 +20,6 @@ _STATE_NAME = re.compile(r'^[a-z][a-z0-9_]*$')
 _PLACEHOLDER = re.compile(r'\{([A-Za-z_][A-Za-z0-9_]*)\}')
 # Required registry paths that are references, not text: they may stay empty with a warning
 _REFERENCE_KEYS = frozenset({'tool', 'routes', 'nodes', 'transition', 'output'})
-_VALUE_OBJECT_KEYS = frozenset({'user_message', 'input_mapping.printer'})
 _JINJA_FIELDS = {'router': 'condition', 'state_modifier': 'template'}
 _STUB_RULES = ('R27', 'R35')
 _JINJA = jinja2.Environment()
@@ -28,14 +27,27 @@ _JINJA = jinja2.Environment()
 
 @lru_cache(maxsize=None)
 def required_text(node_type: str) -> Tuple[Tuple[str, ...], ...]:
-    """Registry-required text the model can always write; value objects are checked on their `value`."""
-    groups = []
+    """Registry-required text the model can always write (blocking when empty)."""
+    return _required_groups(node_type)[0]
+
+
+@lru_cache(maxsize=None)
+def required_references(node_type: str) -> Tuple[Tuple[str, ...], ...]:
+    """Registry-required references (tool, routes, ...): left empty, they only get a warning."""
+    return _required_groups(node_type)[1]
+
+
+@lru_cache(maxsize=None)
+def _required_groups(node_type: str):
+    text, references = [], []
     for alternatives in required_paths(node_type):
-        paths = tuple(f'{p}.value' if p in _VALUE_OBJECT_KEYS else p
-                      for p in alternatives if p.split('.')[0] not in _REFERENCE_KEYS)
+        paths = tuple(p for p in alternatives if p.split('.')[0] not in _REFERENCE_KEYS)
+        refs = tuple(p for p in alternatives if p.split('.')[0] in _REFERENCE_KEYS)
         if paths:
-            groups.append(paths)
-    return tuple(groups)
+            text.append(paths)
+        elif refs:
+            references.append(refs)
+    return tuple(text), tuple(references)
 
 
 class DraftInvalid(Exception):
@@ -69,6 +81,8 @@ def finalize(parsed, target: DraftTarget) -> GeneratePipelineNodeDraftResponse:
     if errors:
         raise DraftInvalid(errors)
 
+    # Before the repairs: a reference they clear already gets its own warning
+    warnings.extend(_empty_reference_warnings(node))
     _repair_targets(node, target, warnings)
     attachments = _repair_resources(node, target, warnings)
     new_state = _new_state(parsed.get('new_state'), node, target, warnings)
@@ -131,7 +145,7 @@ def _shape_errors(node: dict) -> List[dict]:
 def _content_errors(node: dict) -> List[dict]:
     errors = []
     for alternatives in required_text(node['type']):
-        if not any(_has_text(_get(node, path)) for path in alternatives):
+        if not any(_has_text(_value_text(_get(node, path))) for path in alternatives):
             errors.append(_detail(alternatives[0] if len(alternatives) == 1 else ' or '.join(alternatives),
                                   'is required and must not be empty'))
     # A printer has no `input`: the runtime formats its fstring over the whole state (propagate_the_input_mapping)
@@ -146,6 +160,14 @@ def _content_errors(node: dict) -> List[dict]:
         except jinja2.TemplateSyntaxError as exc:
             errors.append(_detail(jinja_key, f'is not a valid Jinja2 template: {exc.message}'))
     return errors
+
+
+def _empty_reference_warnings(node: dict) -> List[str]:
+    warnings = []
+    for alternatives in required_references(node['type']):
+        if not any(_has_reference(_get(node, path)) for path in alternatives):
+            warnings.append(f"`{' or '.join(alternatives)}` is required but empty. Set it before running the pipeline.")
+    return warnings
 
 
 def _fstring_errors(path: str, text: str, inputs: Optional[List[str]]) -> List[dict]:
@@ -237,8 +259,8 @@ def _repair_tool_node(node: dict, kind: str, target: DraftTarget, warnings: List
     if _has_text(tool) and tool not in tools:
         warnings.append(f"`{name}` has no tool `{tool}`. Pick one of: {', '.join(sorted(tools)) or 'none'}.")
         node['tool'] = ''
-    elif _has_text(tool):
-        params = tools[tool] or {}
+    elif _has_text(tool) and tools[tool] is not None:
+        params = tools[tool]
         mapping = node.get('input_mapping') if isinstance(node.get('input_mapping'), dict) else {}
         for key in [k for k in mapping if k not in params]:
             del mapping[key]
@@ -320,6 +342,12 @@ def _has_text(value) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
     return value not in (None, [], {})
+
+
+def _has_reference(value) -> bool:
+    if isinstance(value, dict):
+        return any(_has_text(v) for v in value.values())
+    return _has_text(value)
 
 
 def _is_str_list(value) -> bool:

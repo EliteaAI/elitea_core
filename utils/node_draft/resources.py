@@ -24,7 +24,7 @@ def toolkit_candidate(row: dict, schema: dict, attached_ids: Set[int],
     for tool in (row.get('settings') or {}).get('selected_tools') or []:
         item = {'name': tool, 'description': (args.get(tool) or {}).get('description', '')}
         params = _params(args.get(tool))
-        if params:
+        if params is not None:
             item['params'] = params
         tools.append(item)
     is_mcp = kind_type == 'mcp' or bool((row.get('meta') or {}).get('mcp'))
@@ -33,9 +33,10 @@ def toolkit_candidate(row: dict, schema: dict, attached_ids: Set[int],
             'description': row.get('description') or '', 'attached': row['id'] in attached_ids, 'tools': tools}
 
 
-def _params(schema: Optional[dict]) -> Dict[str, str]:
-    if not isinstance(schema, dict):
-        return {}
+def _params(schema: Optional[dict]) -> Optional[Dict[str, str]]:
+    """None when the tool's schema is unknown, so validation keeps its mapping as is."""
+    if not isinstance(schema, dict) or 'properties' not in schema:
+        return None
     required = set(schema.get('required') or [])
     return {name: _PARAM_TYPES.get((spec or {}).get('type'), 'str') + ('*' if name in required else '')
             for name, spec in (schema.get('properties') or {}).items()}
@@ -50,7 +51,9 @@ def agent_candidate(row: dict, attached_ids: Set[int]) -> dict:
 
 
 def index_resources(candidates: Iterable[dict]) -> Dict[str, Dict[str, dict]]:
-    """``{kind: {name: {id, attached, needs_login, entity_type, tools: {tool: {param: required}}}}}``.
+    """``{kind: {name: {id, attached, needs_login, entity_type, tools: {tool: {param: required} | None}}}}``.
+
+    A tool maps to None when its parameters are unknown (no schema).
 
     ``needs_login`` stays False: an MCP login lives in the browser, so the UI shows "Log in required"
     with its existing MCP status (PickerMcpStatus) when it lists the attachment.
@@ -60,7 +63,8 @@ def index_resources(candidates: Iterable[dict]) -> Dict[str, Dict[str, dict]]:
         index[cand['kind']][cand['name']] = {
             'id': cand['id'], 'attached': cand['attached'], 'needs_login': False,
             'entity_type': cand['entity_type'],
-            'tools': {t['name']: {p: kind.endswith('*') for p, kind in (t.get('params') or {}).items()}
+            'tools': {t['name']: ({p: kind.endswith('*') for p, kind in t['params'].items()}
+                                  if 'params' in t else None)
                       for t in cand['tools']},
         }
     return index

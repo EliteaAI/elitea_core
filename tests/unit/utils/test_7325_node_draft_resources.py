@@ -91,7 +91,7 @@ class TestIndexResources:
             "id": 1, "attached": True, "needs_login": False, "entity_type": "toolkit",
             "tools": {"get_issues": {"repo": True, "state": False}, "create_issue": {"title": True}},
         }
-        assert index["mcp"]["docs"]["tools"] == {"search": {}}
+        assert index["mcp"]["docs"]["tools"] == {"search": None}
         assert index["agent"]["A"]["entity_type"] == "agent"
 
     def test_prompt_view_hides_internal_fields(self):
