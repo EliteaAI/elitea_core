@@ -3,6 +3,7 @@ from flask import request
 
 from tools import api_tools, auth, config as c
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_starters_utils import fit_fork_starters
 
 from pylon.core.tools import log
 from ...utils.folder_access import fork_payload_access_error
@@ -34,6 +35,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         error = fork_payload_access_error(entities)
         if error is not None:
             return error
+        fit_fork_starters(applications)
 
         # Set fork parent metadata on each version (this makes is_forked = true)
         for entity in entities:

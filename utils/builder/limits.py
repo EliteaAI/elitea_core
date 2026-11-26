@@ -8,6 +8,7 @@ RESERVED_NAME_WORDS = ('claude', 'anthropic')
 PROJECT_CONTEXT_MAX = 2500
 ACTIVATION_DESCRIPTION_MAX = 300
 DEFAULT_MAX_STARTERS = 4
+STARTER_LENGTH_MAX = 768
 
 
 def _over(value: str, limit: int) -> str:
@@ -66,7 +67,7 @@ def _check_project_context(fields: dict) -> list:
     return errors
 
 
-def _check_application(fields: dict, max_starters: int) -> list:
+def _check_application(fields: dict, max_starters: int, previous_starters) -> list:
     errors = []
     if 'name' in fields and not str(fields['name'] or '').strip():
         errors.append(_error('name', 1, 'name must not be empty.'))
@@ -76,10 +77,18 @@ def _check_application(fields: dict, max_starters: int) -> list:
         if count > max_starters:
             errors.append(_error('conversation_starters', max_starters,
                                  f"{count} conversation starters given; at most {max_starters} are allowed."))
+        kept = {item.strip() for item in previous_starters or [] if isinstance(item, str)}
+        too_long = [item.strip() for item in starters if isinstance(item, str)
+                    and len(item.strip()) > STARTER_LENGTH_MAX and item.strip() not in kept]
+        if too_long:
+            errors.append(_error('conversation_starters', STARTER_LENGTH_MAX,
+                                 f"a conversation starter is {_over(too_long[0], STARTER_LENGTH_MAX)} "
+                                 f"the {STARTER_LENGTH_MAX}-character limit."))
     return errors
 
 
-def check(entity_type: str, fields: dict, max_starters: int = DEFAULT_MAX_STARTERS) -> list:
+def check(entity_type: str, fields: dict, max_starters: int = DEFAULT_MAX_STARTERS,
+          previous_starters=None) -> list:
     """Errors for the fields a write would store: [{field, limit, message, suggestion?}]."""
     fields = fields or {}
     if entity_type == 'skill':
@@ -87,5 +96,5 @@ def check(entity_type: str, fields: dict, max_starters: int = DEFAULT_MAX_STARTE
     if entity_type == 'project_context':
         return _check_project_context(fields)
     if entity_type in ('agent', 'pipeline'):
-        return _check_application(fields, max_starters)
+        return _check_application(fields, max_starters, previous_starters)
     return []

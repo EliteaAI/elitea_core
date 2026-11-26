@@ -92,7 +92,23 @@ class TestRule:
         mod.enforce_conversation_starters_limit(['a', 'b', 'c', '  '])
         with pytest.raises(mod.ConversationStartersLimitError):
             mod.enforce_conversation_starters_limit(['a', 'b', 'c', 'd'])
-        mod.enforce_conversation_starters_limit(['a', 'b', 'c', 'd'], previous_count=5)
+        mod.enforce_conversation_starters_limit(['a', 'b', 'c', 'd'], previous_starters=list('vwxyz'))
+
+    def test_length_allows_768_and_rejects_769(self, mod):
+        mod.check_conversation_starters_length(['a' * 768], None)
+        with pytest.raises(mod.ConversationStartersLimitError) as exc:
+            mod.check_conversation_starters_length(['a', 'a' * 769], None)
+        assert str(exc.value) == 'a conversation starter must be 768 characters or less, got 769'
+
+    def test_length_keeps_an_unchanged_saved_starter(self, mod):
+        mod.check_conversation_starters_length(['a' * 900], ['  ' + 'a' * 900 + ' '])
+        with pytest.raises(mod.ConversationStartersLimitError, match='got 901'):
+            mod.check_conversation_starters_length(['a' * 901], ['a' * 900])
+
+    def test_enforce_checks_the_length(self, mod, monkeypatch):
+        monkeypatch.setattr(mod, 'get_max_conversation_starters', lambda: 3)
+        with pytest.raises(mod.ConversationStartersLimitError, match='768 characters or less'):
+            mod.enforce_conversation_starters_limit(['a' * 769], previous_starters=['b'])
 
     def test_error_response_matches_the_pydantic_shape(self, mod):
         error = mod.ConversationStartersLimitError('conversation_starters cannot exceed 4 items, got 5')
@@ -103,6 +119,20 @@ class TestRule:
         }]
 
 
+class TestForkStarters:
+    def test_cuts_each_starter_to_the_limit(self, mod):
+        applications = [{'versions': [
+            {'conversation_starters': ['  ' + 'a' * 900 + ' ', 'ok', None]},
+            {'conversation_starters': None},
+            {},
+        ]}, {'entity': 'pipelines', 'versions': [{'conversation_starters': ['b' * 769]}]}]
+        mod.fit_fork_starters(applications)
+        assert applications[0]['versions'][0]['conversation_starters'] == ['a' * 768, 'ok', None]
+        assert applications[0]['versions'][1]['conversation_starters'] is None
+        assert applications[1]['versions'][0]['conversation_starters'] == ['b' * 768]
+        assert mod.import_starters_errors('A', applications[1]['versions']) == []
+
+
 class TestImportErrors:
     def test_names_the_agent_and_version(self, mod):
         versions = [
@@ -111,6 +141,15 @@ class TestImportErrors:
         ]
         assert mod.import_starters_errors('Refund Desk', versions) == [
             'Refund Desk / v2: conversation_starters cannot exceed 10 items, got 11',
+        ]
+
+    def test_names_the_version_with_an_over_length_starter(self, mod):
+        versions = [
+            {'name': 'base', 'conversation_starters': [None, 'a' * 768, '  ' + 'b' * 768 + ' ']},
+            {'name': 'v2', 'conversation_starters': ['ok', 'a' * 900, 'a' * 769]},
+        ]
+        assert mod.import_starters_errors('Refund Desk', versions) == [
+            'Refund Desk / v2: a conversation starter must be 768 characters or less, got 900',
         ]
 
     def test_no_starters_no_errors(self, mod):

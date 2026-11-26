@@ -313,7 +313,8 @@ class BuilderService:
         except cs.ChangeError as exc:
             return _invalid(str(exc), [{'field': str(exc).split(':')[0], 'message': str(exc)}])
         touched = {k: after.get(k) for k in changes}
-        errors = limits.check(entity_type, touched, max_starters=self.max_starters)
+        errors = limits.check(entity_type, touched, max_starters=self.max_starters,
+                              previous_starters=state.get('conversation_starters'))
         if errors:
             return _invalid('The change breaks a platform limit; nothing was saved.', errors)
         delta = cs.diff(state, after)
