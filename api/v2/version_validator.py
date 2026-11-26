@@ -27,7 +27,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # msg) rather than the generic `error` field the hook ignores — this is what makes
             # a misconfigured agent show a red chip at validate time instead of only hitting a
             # wall at predict time (PR #203 finding #1).
-            result['toolkit_errors'].append(e.to_toolkit_error())
+            result['toolkit_errors'].extend(e.to_toolkit_errors())
             return result, 400
         except ValidationError as e:
             for err in e.errors(include_url=False, include_context=False, include_input=False):

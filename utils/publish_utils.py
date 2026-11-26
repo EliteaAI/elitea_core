@@ -330,6 +330,10 @@ class SubAgentTreeError(PublishPreValidationError):
             'ctx': {'error': str(self)},
         }
 
+    def to_toolkit_errors(self) -> List[dict]:
+        """Every per-tool error this exception stands for (one, unless a subclass reports several)."""
+        return [self.to_toolkit_error()]
+
     def to_validation_result(self) -> dict:
         """Convert to a FAIL validation result with a single critical issue."""
         return {
@@ -508,6 +512,74 @@ def agent_tier_contribution(version) -> int:
     ``Agent -> Pipeline -> Sub-orchestrator -> Leaf``.
     """
     return 0 if version.agent_type == AgentTypes.pipeline.value else 1
+
+
+class SwarmSubAgentError(SubAgentTreeError):
+    """Agents bound as tools whose version has Swarm Mode enabled (issue #7736).
+
+    Swarm agents are only supported in direct chat, so a bound one is a misconfiguration. It is
+    reported per tool, like the other tree errors, so the Tools list can flag each offending card.
+    ``tool_errors`` holds ``(tool_id, message)`` pairs, one per bound swarm agent.
+    """
+
+    def __init__(self, tool_errors: List[Tuple[Optional[int], str]]):
+        first_id, first_message = tool_errors[0]
+        super().__init__(
+            first_message,
+            error_code='swarm_child_forbidden',
+            fix='Turn off Swarm Mode on the agent, or remove it from the tools.',
+            tool_id=first_id,
+        )
+        self.tool_errors = tool_errors
+
+    def to_toolkit_errors(self) -> List[dict]:
+        return [
+            {
+                'type': 'value_error',
+                'loc': ['tools', tool_id, '__root__'],
+                'msg': message,
+                'input': None,
+                'ctx': {'error': message},
+            }
+            for tool_id, message in self.tool_errors
+        ]
+
+
+def assert_no_swarm_sub_agents(project_id: int, version_id: int, session=None) -> None:
+    """Reject a version that binds an agent running in Swarm Mode as a tool (issue #7736).
+
+    Swarm Mode is switched on per version (``meta.internal_tools``), so it can be enabled on an agent
+    after a pipeline or agent already bound it; the bind-time guard in the UI never sees that.
+    Only the tools of ``version_id`` itself are checked, against the child version each one pins.
+    Raises ``SwarmSubAgentError`` listing every offending tool. Validation only: the runtime walk
+    stays as it is, so existing chats keep working.
+    """
+    if session is None:
+        with db.get_session(project_id) as project_session:
+            assert_no_swarm_sub_agents(project_id, version_id, session=project_session)
+        return
+
+    version = _load_version_with_tools(session, version_id)
+    if version is None:
+        return
+
+    cache: Dict[int, object] = {}
+    offenders: List[Tuple[Optional[int], str]] = []
+    for tool in (t for t in (version.tools or []) if t.type == 'application'):
+        child_ver_id = (tool.settings or {}).get('application_version_id')
+        if child_ver_id is None:
+            continue  # incomplete reference: reported by the nesting walk
+        child = _load_version_with_tools(session, child_ver_id, cache)
+        if child is None or 'swarm' not in ((child.meta or {}).get('internal_tools') or []):
+            continue
+        name = tool.name or f"application_{(tool.settings or {}).get('application_id')}"
+        offenders.append((
+            getattr(tool, 'id', None),
+            f"Agent '{name}' has Swarm Mode enabled and can't be used as a tool. "
+            f"Swarm agents are only supported in direct chat.",
+        ))
+    if offenders:
+        raise SwarmSubAgentError(offenders)
 
 
 def assert_no_invalid_nesting(

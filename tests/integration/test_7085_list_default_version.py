@@ -290,3 +290,25 @@ def test_a_row_without_versions_serializes_with_empty_tier_fields(list_model, fi
     dumped = row.model_dump(mode='json')
     assert dumped['agent_subtree_tiers'] is None
     assert dumped['max_agent_nesting_tiers'] is None
+
+
+SWARM = {'internal_tools': ['swarm']}
+
+
+def test_has_swarm_is_false_while_some_version_is_not_swarm(list_model):
+    # issue #7736: the agent can still be added, bound to a version without Swarm Mode
+    row = _row(list_model, [_version(10, 'base', 0), _version(11, 'v2', 1, SWARM)])
+
+    assert row.has_swarm is False
+
+
+def test_has_swarm_is_true_when_every_version_is_swarm(list_model):
+    row = _row(list_model, [_version(10, 'base', 0, SWARM), _version(11, 'v2', 1, SWARM)])
+
+    assert row.has_swarm is True
+
+
+def test_has_swarm_is_false_when_no_version_is_swarm(list_model):
+    row = _row(list_model, [_version(10, 'base', 0)])
+
+    assert row.has_swarm is False
