@@ -636,6 +636,10 @@ class Module(module.ModuleModel):
                 group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
+                "index_message_groups_by_conversation", self.index_message_groups_by_conversation,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_sharepoint_site_url_to_toolkit", self.migrate_sharepoint_site_url_to_toolkit,
                 group="R-2.0.9",
             )
@@ -1599,6 +1603,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "index_message_groups_by_conversation", self.index_message_groups_by_conversation
             )
             this.for_module("admin").module.unregister_admin_task(
                 "close_stuck_chat_runs", self.close_stuck_chat_runs

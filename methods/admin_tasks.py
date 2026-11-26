@@ -706,6 +706,35 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": False}
 
     @web.method()
+    def index_message_groups_by_conversation(self, *args, **kwargs):
+        """Admin task: index chat_message_group by (conversation_id, id) for the Run History status. Idempotent.
+
+        The run outcome reads each conversation's last message group; without this index the Status filter is slow
+        on a project with many chats (PR elitea_core#766 review). Built with CREATE INDEX CONCURRENTLY, so writes to
+        the table are not locked. A project that has the index is left alone; a failing project is listed and the
+        run goes on.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"              - dry run across all projects (default; changes nothing)
+            "project_id=34;dry_run=false" - build the index in project 34
+            "project_id=all;dry_run=false" - build it in every project
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.message_group_index import run_message_group_index  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("index_message_groups_by_conversation: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        return run_message_group_index(project_ids, dry_run_flag(param))
+
+    @web.method()
     def migrate_elitea_builder_keys(self, *args, **kwargs):
         """Admin task: merge the three builder modules into Elitea Builder (R-2.0.9, #7383). Idempotent.
 

@@ -23,34 +23,46 @@ from .running_conversations import is_live_run
 RUNNING = 'running'
 FAILED = 'failed'
 SUCCESS = 'success'
+BLOCKED = 'blocked'
 
 
-def _last_answer_failed_condition():
-    """The conversation's last message group (by id) has a tool call with is_error set.
-
-    Both subqueries are correlated to the outer conversation through a dedicated alias, so the conversation is not
-    re-added to their FROM clause (which would make every conversation match).
-    """
+def _last_group_id_subquery():
+    """The id of each conversation's last message group, found once and reused by every condition below."""
     group = aliased(ConversationMessageGroup)
-    last_group_id = (
+    return (
         select(func.max(group.id))
         .where(group.conversation_id == Conversation.id)
         .correlate(Conversation)
         .scalar_subquery()
     )
+
+
+def _last_answer_blocked_condition():
+    """The last group was refused by an input guardrail: a policy block, reported as Blocked, not Failed (review)."""
+    return exists().where(
+        ConversationMessageGroup.id == _last_group_id_subquery(),
+        ConversationMessageGroup.meta['input_guardrail'].isnot(None),
+    ).correlate(Conversation)
+
+
+def _last_answer_failed_condition():
+    """The conversation's last message group failed: a failed tool call, or the group flagged is_error.
+
+    A group the input guardrail refused is not a failure here (see `_last_answer_blocked_condition`). A run that failed
+    before any tool call (an MCP that cannot connect) leaves an error on its group, not a step.
+    """
+    last_group_id = _last_group_id_subquery()
     step = aliased(MessageTraceStep)
     failed_call = exists().where(
         step.message_group_id == last_group_id,
         step.kind == 'tool_call',
         step.is_error.is_(True),
     ).correlate(Conversation)
-    # A run that failed before any tool call (an MCP that cannot connect) leaves an error on its group, not a step
-    flagged_group = ConversationMessageGroup.id == last_group_id
-    flagged_group_error = and_(
-        flagged_group,
+    flagged_group_error = exists().where(
+        ConversationMessageGroup.id == last_group_id,
         ConversationMessageGroup.meta['is_error'].as_boolean().is_(True),
-    )
-    return or_(failed_call, exists().where(flagged_group_error).correlate(Conversation))
+    ).correlate(Conversation)
+    return and_(or_(failed_call, flagged_group_error), ~_last_answer_blocked_condition())
 
 
 def _has_live_run_condition():
@@ -95,18 +107,20 @@ def outcome_condition(outcome: str):
     rules. Each branch is parenthesised so AND and OR never mix.
     """
     record_match = _record_status_condition(outcome)
-    plain_running = and_(_without_record_condition(), _has_live_run_condition())
-    plain_failed = and_(_without_record_condition(), ~_has_live_run_condition(), _last_answer_failed_condition())
-    plain_success = and_(
-        _without_record_condition(), ~_has_live_run_condition(), ~_last_answer_failed_condition(),
-    )
+    plain = _without_record_condition()
+    not_live = ~_has_live_run_condition()
     if outcome == RUNNING:
-        return or_(record_match, plain_running)
+        return or_(record_match, and_(plain, _has_live_run_condition()))
     if outcome == FAILED:
-        return or_(record_match, plain_failed)
+        return or_(record_match, and_(plain, not_live, _last_answer_failed_condition()))
+    if outcome == BLOCKED:
+        return or_(record_match, and_(plain, not_live, _last_answer_blocked_condition()))
     if outcome == SUCCESS:
-        return or_(record_match, plain_success)
-    # Any other stored schedule status (skipped, blocked, waiting_for_approval) is matched by its record alone
+        return or_(
+            record_match,
+            and_(plain, not_live, ~_last_answer_failed_condition(), ~_last_answer_blocked_condition()),
+        )
+    # Any other stored schedule status (skipped, waiting_for_approval) is matched by its record alone
     return record_match
 
 
@@ -114,6 +128,8 @@ def run_outcomes(session, conversation_ids, statuses_by_conversation) -> dict[in
     """The outcome of each conversation, for the display; one batched read bounded by the page.
 
     `statuses_by_conversation` maps a conversation id to its schedule run status, for rows that have a record.
+    The rule is the filter's (`outcome_condition`): the last message group decides failed or blocked, and it is read
+    once here, with its guardrail marker and its failed tool calls, not one query per condition.
     """
     ids = [i for i in conversation_ids if i is not None]
     if not ids:
@@ -123,44 +139,44 @@ def run_outcomes(session, conversation_ids, statuses_by_conversation) -> dict[in
             ConversationMessageGroup.conversation_id.in_(ids), is_live_run(),
         ).distinct().all()
     )
-    failed = set(
-        row[0] for row in session.query(ConversationMessageGroup.conversation_id).join(
-            MessageTraceStep, MessageTraceStep.message_group_id == ConversationMessageGroup.id,
-        ).filter(
-            ConversationMessageGroup.conversation_id.in_(ids),
-            ConversationMessageGroup.id.in_(
-                select(func.max(ConversationMessageGroup.id)).where(
-                    ConversationMessageGroup.conversation_id.in_(ids)
-                ).group_by(ConversationMessageGroup.conversation_id)
-            ),
+    last_group = (
+        select(func.max(ConversationMessageGroup.id).label('id'))
+        .where(ConversationMessageGroup.conversation_id.in_(ids))
+        .group_by(ConversationMessageGroup.conversation_id)
+        .subquery()
+    )
+    last = session.query(
+        ConversationMessageGroup.conversation_id,
+        ConversationMessageGroup.meta,
+        exists().where(
+            MessageTraceStep.message_group_id == ConversationMessageGroup.id,
             MessageTraceStep.kind == 'tool_call',
             MessageTraceStep.is_error.is_(True),
-        ).distinct().all()
-    )
-    # The same error flag the filter reads: the last group of the conversation carries is_error in its meta
-    flagged = set(
-        row[0] for row in session.query(ConversationMessageGroup.conversation_id).filter(
-            ConversationMessageGroup.conversation_id.in_(ids),
-            ConversationMessageGroup.id.in_(
-                select(func.max(ConversationMessageGroup.id)).where(
-                    ConversationMessageGroup.conversation_id.in_(ids)
-                ).group_by(ConversationMessageGroup.conversation_id)
-            ),
-            ConversationMessageGroup.meta['is_error'].as_boolean().is_(True),
-        ).distinct().all()
-    )
-    failed = failed | flagged
+        ).label('failed_call'),
+    ).filter(ConversationMessageGroup.id.in_(select(last_group.c.id))).all()
+    last_by_conv = {row[0]: row for row in last}
     outcomes = {}
     for conv_id in ids:
         if conv_id in statuses_by_conversation:
             outcomes[conv_id] = statuses_by_conversation[conv_id]
         elif conv_id in running:
             outcomes[conv_id] = RUNNING
-        elif conv_id in failed:
-            outcomes[conv_id] = FAILED
         else:
-            outcomes[conv_id] = SUCCESS
+            outcomes[conv_id] = _outcome_of_last_group(last_by_conv.get(conv_id))
     return outcomes
+
+
+def _outcome_of_last_group(row) -> str:
+    """The chat rule for the last group: a guardrail block is Blocked, a failure is Failed, else Success."""
+    if row is None:
+        return SUCCESS
+    _conv_id, meta, failed_call = row
+    meta = meta or {}
+    if meta.get('input_guardrail') is not None:
+        return BLOCKED
+    if failed_call or meta.get('is_error') is True:
+        return FAILED
+    return SUCCESS
 
 
 def tool_names_by_conversation(session, conversation_ids) -> dict[int, list[str]]:

@@ -138,16 +138,21 @@ def test_the_tool_name_lookup_drops_a_blank_name():
 
 # --- AC-24: a failed tool result stores an error step, even without an error text ----------------------------
 
-def test_a_failed_tool_result_is_stored_as_an_error_step():
-    """A tool call that finished with finish_reason 'error' is an error step, so the run reads failed (AC-24)."""
+def test_the_trace_writer_keeps_is_error_on_the_error_text_only():
+    """The trace writer marks a step an error only from its error text. A finish_reason rule was reverted (PR 766):
+    it moved the evaluation tool-error metrics, which read the same column."""
     source = (PLUGIN_ROOT / 'utils' / 'trace_step_writer.py').read_text()
-    assert "entry.get('finish_reason') == 'error'" in source
+    assert "is_error=bool(entry.get('error'))," in source
+    assert "entry.get('finish_reason') == 'error'" not in source
 
 
 # --- AC-24: a run that failed before its first tool call reads failed, in the filter and the display ----------
 
 def test_a_flagged_last_group_reads_failed_in_the_filter_and_the_display():
-    """The last message group flagged is_error is a failed run on both sides of the rule (no tool-call step needed)."""
+    """The last message group flagged is_error is a failed run on both sides of the rule (no tool-call step needed).
+
+    The filter and the display share one last-group rule now, so the flag is read in the filter and in the display.
+    """
     source = (PLUGIN_ROOT / 'utils' / 'run_outcome.py').read_text()
     assert "ConversationMessageGroup.meta['is_error'].as_boolean().is_(True)" in source
-    assert source.count("ConversationMessageGroup.meta['is_error'].as_boolean().is_(True)") == 2
+    assert "meta.get('is_error') is True" in source
