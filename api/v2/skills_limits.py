@@ -1,7 +1,12 @@
 from tools import api_tools, auth, config as c
 
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.skill_utils import get_max_skills_per_agent
+from ...utils.skill_utils import (
+    get_max_file_bytes,
+    get_max_package_bytes,
+    get_max_package_files,
+    get_max_skills_per_agent,
+)
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -15,10 +20,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, **kwargs):
         """Platform skill limits, readable before an agent version exists (e.g. in the import dialog).
 
-        project_id only scopes the permission check: the limit is platform-wide today. The route keeps
-        the project in its path so the limit can become per-project without changing clients.
+        project_id only scopes the permission check: the limits are platform-wide today. The route keeps
+        the project in its path so they can become per-project without changing clients. The package caps are
+        the ones a skill ZIP import enforces, so the UI can refuse an oversize package before uploading it.
         """
-        return {'max_skills_per_agent': get_max_skills_per_agent()}, 200
+        return {
+            'max_skills_per_agent': get_max_skills_per_agent(),
+            'max_file_bytes': get_max_file_bytes(),
+            'max_package_bytes': get_max_package_bytes(),
+            'max_package_files': get_max_package_files(),
+        }, 200
 
 
 class API(api_tools.APIBase):
