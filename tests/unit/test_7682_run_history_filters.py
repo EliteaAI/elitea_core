@@ -113,8 +113,21 @@ def test_the_outcome_rule_order(record, running, failed, expected):
 def test_the_list_derives_a_status_for_api_and_mcp_rows():
     """The list RPC derives the status of every row, API and MCP runs included (the #7610 gate is not a status gate)."""
     source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
-    assert "run_outcomes(session, conv_ids, record_statuses)" in source
+    assert "run_outcomes(session, conv_ids, record_statuses) if run_columns else {}" in source
     assert "('api', 'mcp')" not in source
+
+
+def test_the_run_columns_are_computed_only_for_a_run_history_list():
+    """The sidebar and skill chat lists skip the outcome and tool name reads (review: the shared list paid for them)."""
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "run_columns = participant_id is not None" in source
+    assert "tool_names_by_conversation(session, conv_ids) if run_columns else {}" in source
+
+
+def test_the_null_run_conversations_are_left_out_of_the_record_subquery():
+    """A NULL conversation id must not reach a NOT IN list (review: one NULL made every plain run drop out)."""
+    source = (PLUGIN_ROOT / 'utils' / 'run_outcome.py').read_text()
+    assert "EntityScheduleRun.conversation_id.isnot(None)" in source
 
 
 def test_the_tool_name_lookup_drops_a_blank_name():

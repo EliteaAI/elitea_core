@@ -679,13 +679,14 @@ class RPC:
 
             schedule_runs = _schedule_runs(session, conversations)
             running_ids = running_conversation_ids(session, conv_ids)
-            # AC-24: a status on every row. A record's own status; a plain chat's status from stored data
+            # AC-24: a status on every row. A record's own status; a plain chat's status from stored data.
+            # Only the Run History of an entity (participant_id) draws these columns, so the sidebar and the skill
+            # chat lists skip the extra reads (review: the shared list paid for them on every load).
+            run_columns = participant_id is not None
             record_statuses = {conv_id: run['status'] for conv_id, run in schedule_runs.items()}
-            # Every row gets its status from stored data (AC-24), API and MCP runs included: the derived rule needs
-            # no recording, so the #7610 gate (record_api_runs) does not hide a status
-            outcomes = run_outcomes(session, conv_ids, record_statuses)
+            outcomes = run_outcomes(session, conv_ids, record_statuses) if run_columns else {}
             # AC-44: the tool names of each row, for the MCP Event column (one batched read over the page)
-            tools_of = tool_names_by_conversation(session, conv_ids)
+            tools_of = tool_names_by_conversation(session, conv_ids) if run_columns else {}
             chat_runs = chat_skill_runs(
                 session,
                 [c.id for c in conversations if 'single_participant' not in (c.meta or {})],

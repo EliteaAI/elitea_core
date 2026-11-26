@@ -5,7 +5,7 @@ the runs the caller may list (the same visibility as the run list), so a filter 
 caller cannot open. A deleted version or schedule that still has runs is listed with `deleted` set.
 One read answers all the filters of a page.
 """
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 
 from ..models.conversation import Conversation
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
@@ -14,13 +14,24 @@ from ..models.message_trace_step import MessageTraceStep
 from ..utils.schedule_run_detail import version_labels
 
 
+def _entity_conversations(entity_id: int):
+    """The conversations of this agent or pipeline: the ones whose single participant is the entity (the list's
+    rule)."""
+    return select(Conversation.id).where(
+        Conversation.meta.has_key('single_participant'),
+        cast(Conversation.meta['single_participant']['entity_meta']['id'].astext, String) == str(entity_id),
+    )
+
+
 def _runs_of_entity(entity_id: int, visible_conversation_ids):
-    """The schedule run rows of an agent or pipeline whose conversation the caller may list."""
-    return select(EntityScheduleRun).join(
-        EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id,
-    ).where(
-        EntitySchedule.application_id == entity_id,
+    """The run records of this entity's visible conversations, with or without a schedule (a Test Run has none).
+
+    The run's own conversation places it: a record without a schedule is found through its conversation, the same way
+    as one with a schedule, so a version used only in Test Runs is listed (review: Test Runs were dropped).
+    """
+    return select(EntityScheduleRun).where(
         EntityScheduleRun.conversation_id.in_(visible_conversation_ids),
+        EntityScheduleRun.conversation_id.in_(_entity_conversations(entity_id)),
     )
 
 
@@ -58,13 +69,17 @@ def _schedule_facets(session, entity_id: int, visible_conversation_ids) -> list[
     return [{'id': sid, 'name': name, 'trigger_kind': kind, 'deleted': False} for sid, name, kind in rows]
 
 
-def _tool_facets(session, visible_conversation_ids) -> list[str]:
-    """The tool names called in the caller's visible runs (AC-45): the options of an MCP's Event filter."""
+def _tool_facets(session, entity_id: int, visible_conversation_ids) -> list[str]:
+    """The tool names called in this entity's visible runs (AC-45): the options of an MCP's Event filter.
+
+    Scoped to the entity like the versions and schedules: a tool called only by another agent or toolkit is not listed.
+    """
     names = session.execute(
         select(MessageTraceStep.tool_name)
         .join(ConversationMessageGroup, MessageTraceStep.message_group_id == ConversationMessageGroup.id)
         .where(
             ConversationMessageGroup.conversation_id.in_(visible_conversation_ids),
+            ConversationMessageGroup.conversation_id.in_(_entity_conversations(entity_id)),
             MessageTraceStep.kind == 'tool_call',
             MessageTraceStep.tool_name.isnot(None),
         )
@@ -83,7 +98,7 @@ def run_facets(session, entity_id: int, visible_conversation_ids) -> dict:
     return {
         'versions': _version_facets(session, entity_id, visible_conversation_ids),
         'schedules': _schedule_facets(session, entity_id, visible_conversation_ids),
-        'tools': _tool_facets(session, visible_conversation_ids),
+        'tools': _tool_facets(session, entity_id, visible_conversation_ids),
     }
 
 

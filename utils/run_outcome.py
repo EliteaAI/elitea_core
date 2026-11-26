@@ -11,7 +11,7 @@ is worked out from data already stored; nothing is written when a run ends (PO d
 A stopped chat run reads success (AC-24a). The display (`run_outcomes`) and the filter (`outcome_condition`) apply
 the same rule, so a filter never lists a run its row would show differently.
 """
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import Integer, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import aliased
 
 from ..models.conversation import Conversation
@@ -61,16 +61,31 @@ def _has_live_run_condition():
     ).correlate(Conversation)
 
 
-def _record_status_condition(outcome: str):
-    """The conversation has a schedule run record with this status."""
+def _linked_record_condition(*extra):
+    """A conversation whose meta names a schedule run record that points back to it (the display's rule).
+
+    The display (`_schedule_runs`) reads the run only through `meta.schedule_run_id` and only when the run's own
+    conversation_id is this conversation. The filter uses the same two links, so a row and its filter agree. The
+    subquery drops NULL conversation ids, which would otherwise make a NOT IN test NULL for every row.
+    """
+    run_id = cast(Conversation.meta['schedule_run_id'].astext, Integer)
     return Conversation.id.in_(
-        select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.status == outcome)
+        select(EntityScheduleRun.conversation_id).where(
+            EntityScheduleRun.id == run_id,
+            EntityScheduleRun.conversation_id.isnot(None),
+            *extra,
+        )
     )
 
 
+def _record_status_condition(outcome: str):
+    """The conversation has its own schedule run record with this status."""
+    return _linked_record_condition(EntityScheduleRun.status == outcome)
+
+
 def _without_record_condition():
-    """The conversation has no schedule run record, so it is a plain chat, API or MCP run."""
-    return ~Conversation.id.in_(select(EntityScheduleRun.conversation_id))
+    """The conversation has no linked schedule run record, so it is a plain chat, API or MCP run."""
+    return ~_linked_record_condition()
 
 
 def outcome_condition(outcome: str):
@@ -157,9 +172,13 @@ def tool_names_by_conversation(session, conversation_ids) -> dict[int, list[str]
     ids = [i for i in conversation_ids if i is not None]
     if not ids:
         return {}
+    # One row per (conversation, tool), keeping the first call's time: the repeats are removed in SQL, not in Python,
+    # so a long run with thousands of steps sends only its distinct tools
+    first_call = func.min(MessageTraceStep.started_at).label('first_call')
     rows = session.query(
         ConversationMessageGroup.conversation_id,
         MessageTraceStep.tool_name,
+        first_call,
     ).join(
         MessageTraceStep, MessageTraceStep.message_group_id == ConversationMessageGroup.id,
     ).filter(
@@ -167,16 +186,17 @@ def tool_names_by_conversation(session, conversation_ids) -> dict[int, list[str]
         MessageTraceStep.kind == 'tool_call',
         MessageTraceStep.tool_name.isnot(None),
         MessageTraceStep.tool_name != '',
+    ).group_by(
+        ConversationMessageGroup.conversation_id,
+        MessageTraceStep.tool_name,
     ).order_by(
         ConversationMessageGroup.conversation_id,
-        MessageTraceStep.started_at,
-        MessageTraceStep.id,
+        first_call,
+        MessageTraceStep.tool_name,
     ).all()
     names: dict[int, list[str]] = {}
-    for conv_id, tool_name in rows:
-        bucket = names.setdefault(conv_id, [])
-        if tool_name not in bucket:
-            bucket.append(tool_name)
+    for conv_id, tool_name, _first in rows:
+        names.setdefault(conv_id, []).append(tool_name)
     return names
 
 
