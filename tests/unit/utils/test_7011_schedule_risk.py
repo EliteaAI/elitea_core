@@ -199,12 +199,9 @@ nodes:
 
 
 class TestEL7621InterruptNodes:
-    def test_a_pause_after_a_node_that_ends_the_run_does_not_block(self, scan):
-        scan.version = _version('pipeline', instructions=INTERRUPT_PIPELINE.format(key='after', step='LLM 2'))
-        assert scan.run() == []
-
-    def test_a_pause_before_a_node_that_ends_the_run_blocks(self, scan):
-        scan.version = _version('pipeline', instructions=INTERRUPT_PIPELINE.format(key='before', step='LLM 2'))
+    @pytest.mark.parametrize('key', ['before', 'after'])
+    def test_an_interrupt_on_a_node_that_ends_the_run_blocks(self, scan, key):
+        scan.version = _version('pipeline', instructions=INTERRUPT_PIPELINE.format(key=key, step='LLM 2'))
         assert [w['step'] for w in scan.review()['blocking']] == ['LLM 2']
 
     def test_a_malformed_interrupt_entry_keeps_the_other_findings(self, scan):
@@ -215,13 +212,7 @@ class TestEL7621InterruptNodes:
 
     @pytest.mark.parametrize('key', ['interrupt_before', 'interrupt_after'])
     def test_an_interrupt_written_as_text_blocks_as_one_entry(self, scan, key):
-        scan.version = _version('pipeline', instructions=f'nodes:\n  - id: A\n    type: llm\n    transition: B\n{key}: A\n')
-        assert [w['step'] for w in scan.review()['blocking']] == ['A']
-
-    def test_a_text_interrupt_after_naming_a_node_that_ends_the_run_blocks(self, scan):
-        scan.version = _version('pipeline', instructions=(
-            'interrupt_after: AB\nnodes:\n  - id: A\n    type: llm\n    transition: B\n'
-            '  - id: B\n    type: llm\n    transition: AB\n  - id: AB\n    type: llm\n    transition: END\n'))
+        scan.version = _version('pipeline', instructions=f'nodes:\n  - id: AB\n    type: llm\n    transition: END\n{key}: AB\n')
         assert [w['step'] for w in scan.review()['blocking']] == ['AB']
 
     @pytest.mark.parametrize('interrupts', ['interrupt_before: {A}', 'interrupt_after: !!set {A}', 'interrupt_after: {A: x}'])
@@ -232,13 +223,6 @@ class TestEL7621InterruptNodes:
     def test_an_interrupt_mapping_without_text_names_gives_no_finding(self, scan):
         scan.version = _version('pipeline', instructions='nodes:\n  - id: A\n    type: llm\ninterrupt_before: {1: a}\n')
         assert scan.run() == []
-
-    @pytest.mark.parametrize('type_', ['router', 'decision'])
-    def test_a_pause_after_a_routing_node_with_a_leftover_end_transition_blocks(self, scan, type_):
-        scan.version = _version('pipeline', instructions=(
-            f'interrupt_after: [Route]\nnodes:\n  - id: Route\n    type: {type_}\n    routes: [LLM 2]\n'
-            '    default_output: END\n    transition: END\n  - id: LLM 2\n    type: llm\n    transition: END\n'))
-        assert [w['step'] for w in scan.review()['blocking']] == ['Route']
 
     def test_a_node_id_that_is_not_text_keeps_the_other_findings(self, scan):
         scan.version = _version('pipeline', instructions=PIPELINE + '  - id: [odd]\n    type: llm\ninterrupt_before: [Think]\n')

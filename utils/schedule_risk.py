@@ -52,18 +52,12 @@ def _flag_pipeline_human_steps(schema: dict) -> list:
     """The human nodes, then the nodes the run pauses at (`interrupt_before` / `interrupt_after`), each once."""
     nodes = [node for node in schema.get('nodes') or [] if isinstance(node, dict) and isinstance(node.get('id'), str)]
     step_labels = {node.get('id'): node.get('name') or node.get('id') for node in nodes}
-    interrupt_after = schema.get('interrupt_after')
-    nodes_exempt_from_interrupt_after = {
-        node['id'] for node in nodes
-        if node.get('transition') == 'END' and node.get('type') not in {'router', 'decision'}
-    } if isinstance(interrupt_after, list) else set()
     human_nodes = [node.get('id') for node in nodes if node.get('type') in HUMAN_NODE_TYPES]
-    paused_before = _read_interrupt_node_ids(schema.get('interrupt_before'))
-    paused_after = [step for step in _read_interrupt_node_ids(interrupt_after)
-                    if step not in nodes_exempt_from_interrupt_after]
+    interrupt_nodes = [step for key in ('interrupt_before', 'interrupt_after')
+                       for step in _read_interrupt_node_ids(schema.get(key))]
     return [
         _warning('human_input_step', f'Node "{step}" waits for a person', step=step, step_label=step_labels.get(step, step))
-        for step in dict.fromkeys(human_nodes + paused_before + paused_after)
+        for step in dict.fromkeys(human_nodes + interrupt_nodes)
     ]
 
 
