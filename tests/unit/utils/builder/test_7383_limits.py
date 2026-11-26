@@ -64,5 +64,27 @@ class TestAgentStarters:
         err = builder.limits.check('pipeline', {'conversation_starters': ['a', 'b', 'c']}, max_starters=2)
         assert err[0]['limit'] == 2
 
+    def test_starter_over_768_rejected(self, builder):
+        err = errors_by_field(
+            builder.limits.check('agent', {'conversation_starters': ['a' * 768, 'b' * 770]})
+        )['conversation_starters']
+        assert err['limit'] == 768
+        assert '2 characters over the 768-character limit' in err['message']
+
+    def test_unchanged_saved_over_length_starter_allowed(self, builder):
+        assert builder.limits.check('agent', {'conversation_starters': ['a' * 900, 'new']},
+                                    previous_starters=['a' * 900]) == []
+
+    def test_edited_over_length_starter_rejected(self, builder):
+        errs = builder.limits.check('agent', {'conversation_starters': ['a' * 901]},
+                                    previous_starters=['a' * 900])
+        assert errors_by_field(errs)['conversation_starters']['limit'] == 768
+
+    def test_saved_over_length_starter_cannot_be_copied_into_more_slots(self, builder):
+        long = 'a' * 900
+        assert builder.limits.check('agent', {'conversation_starters': [long]}, previous_starters=[long, 'hi']) == []
+        errs = builder.limits.check('agent', {'conversation_starters': [long, long]}, previous_starters=[long, 'hi'])
+        assert errors_by_field(errs)['conversation_starters']['limit'] == 768
+
     def test_name_required_non_empty(self, builder):
         assert errors_by_field(builder.limits.check('agent', {'name': '  '}))['name']['limit'] == 1

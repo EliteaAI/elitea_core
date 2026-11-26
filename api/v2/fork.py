@@ -3,6 +3,7 @@ from flask import request
 
 from tools import api_tools, auth, config as c
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.starters_payload_check import reject_payload_with_bad_starters
 
 from pylon.core.tools import log
 from ...utils.folder_access import fork_payload_access_error
@@ -34,6 +35,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         error = fork_payload_access_error(entities)
         if error is not None:
             return error
+        rejection = reject_payload_with_bad_starters(
+            entities, 'Not forked: another item in this fork failed the conversation starter checks.',
+        )
+        if rejection is not None:
+            return rejection
 
         # Set fork parent metadata on each version (this makes is_forked = true)
         for entity in entities:

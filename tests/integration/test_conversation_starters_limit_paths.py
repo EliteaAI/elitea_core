@@ -94,6 +94,25 @@ class TestUpdateVersion:
     def test_body_without_starters_is_not_checked(self, limits, monkeypatch):
         _update(limits, monkeypatch, limit=3, saved=_starters(8), body_fields={"welcome_message": "hi"})
 
+    def test_accepts_768_characters(self, limits, monkeypatch):
+        _update(limits, monkeypatch, limit=4, saved=['a'],
+                body_fields={'conversation_starters': ['a' * 768]})
+
+    def test_rejects_a_new_769_character_starter(self, limits, monkeypatch):
+        with pytest.raises(limits.ConversationStartersLimitError,
+                           match='a conversation starter must be 768 characters or less, got 769'):
+            _update(limits, monkeypatch, limit=4, saved=['a'],
+                    body_fields={'conversation_starters': ['a', 'b' * 769]})
+
+    def test_saved_over_length_starter_may_stay_unchanged(self, limits, monkeypatch):
+        _update(limits, monkeypatch, limit=4, saved=['a' * 900, 'b'],
+                body_fields={'conversation_starters': ['a' * 900, 'edited'], 'instructions': 'new'})
+
+    def test_edited_over_length_starter_must_fit(self, limits, monkeypatch):
+        with pytest.raises(limits.ConversationStartersLimitError, match='got 901'):
+            _update(limits, monkeypatch, limit=4, saved=['a' * 900],
+                    body_fields={'conversation_starters': ['a' * 901]})
+
     def test_new_version_with_no_saved_starters_uses_the_limit(self, limits, monkeypatch):
         with pytest.raises(limits.ConversationStartersLimitError, match='cannot exceed 3 items, got 4'):
             _update(limits, monkeypatch, limit=3, saved=None,
@@ -126,6 +145,9 @@ class TestModelValidator:
             validator('a')
         with pytest.raises(ValueError, match='cannot be empty'):
             validator(['a', '  '])
+
+    def test_copies_keep_an_over_length_starter(self, validator):
+        assert validator(['a' * 769]) == ['a' * 769]
 
 
 def _publish_prompt_parts():
