@@ -13,11 +13,16 @@ from pylon.core.tools import web, log  # pylint: disable=E0401
 import requests  # pylint: disable=E0401
 
 
+def ui_marker(metadata):
+    """ UI identity: EliteaUI syncs bump ui_version without bumping the plugin version """
+    return f"{metadata.get('version', '')} ui {metadata.get('ui_version', '')}"
+
+
 def _write_ui_marker(module):
-    """ Record which plugin version the installed UI belongs to """
+    """ Record which plugin and UI version the installed UI belongs to """
     ui_path = Path(module.bp.static_folder).joinpath(module.elitea_base_path)
     if ui_path.joinpath("index.html").exists():
-        ui_path.joinpath(".installed_for").write_text(module.descriptor.metadata.get("version", ""))
+        ui_path.joinpath(".installed_for").write_text(ui_marker(module.descriptor.metadata))
 
 
 class RPC:  # pylint: disable=R0903

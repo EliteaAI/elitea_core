@@ -2028,17 +2028,22 @@ class Module(module.ModuleModel):
         #
         # Download UI if needed for first time
         #
+        from .rpc.ui_ci import ui_marker  # pylint: disable=C0415
+        #
         ui_path = Path(self.bp.static_folder).joinpath(self.elitea_base_path)
-        plugin_version = self.descriptor.metadata.get("version", "")
         marker_path = ui_path.joinpath(".installed_for")
         installed_for = marker_path.read_text().strip() if marker_path.exists() else None
+        expected = ui_marker(self.descriptor.metadata)
         if not ui_path.joinpath("index.html").exists():
             log.info("Downloading and installing initial release: %s", self.default_release)
             self.update_ui()
-        elif installed_for is not None and installed_for != plugin_version:
-            # UI carried over from the previous version during an update; no marker = locally built, keep
-            log.info("UI installed for %s, plugin is %s: refreshing UI", installed_for, plugin_version)
-            self.update_ui()
+        elif installed_for is not None and installed_for != expected:
+            # UI carried over during an update; no marker = locally built, keep
+            log.info("UI installed for '%s', plugin is '%s': refreshing UI", installed_for, expected)
+            try:
+                self.update_ui()
+            except:  # pylint: disable=W0702
+                log.exception("UI refresh failed, keeping current UI (retried on next boot)")
 
     # def init_db(self):
     #     log.info("DB init")
