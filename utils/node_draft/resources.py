@@ -21,7 +21,11 @@ def toolkit_candidate(row: dict, schema: dict, attached_ids: Set[int],
             args.setdefault(remote['value'], {**(remote.get('args_schema') or {}),
                                               'description': remote.get('description', '')})
     tools = []
-    for tool in (row.get('settings') or {}).get('selected_tools') or []:
+    for entry in (row.get('settings') or {}).get('selected_tools') or []:
+        # Legacy OpenAPI toolkits store selected tools as objects ({'name': ...}), like the UI normalizes
+        tool = entry.get('name') if isinstance(entry, dict) else entry
+        if not isinstance(tool, str) or not tool:
+            continue
         item = {'name': tool, 'description': (args.get(tool) or {}).get('description', '')}
         params = _params(args.get(tool))
         if params is not None:
