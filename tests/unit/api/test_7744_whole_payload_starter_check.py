@@ -1,8 +1,8 @@
-"""#7744 - a fork carrying a chat starter over 768 characters is rejected as a whole.
+"""#7744 - a fork or import carrying a chat starter over the limits is rejected as a whole.
 
-Runs the real fork handler against an import wizard that, like the real one, saves each application
-on its own and skips only the one that fails the real ``import_starters_errors``. A fork that trimmed
-the starters, or left the check to the wizard, would create some or all of the applications.
+Runs the real fork and import handlers against an import wizard that, like the real one, saves each
+application on its own and skips only the one that fails the real ``import_starters_errors``. A handler
+that trimmed the starters, or left the check to the wizard, would create some or all of the applications.
 """
 import importlib.util
 import pathlib
@@ -75,19 +75,30 @@ def _install_package():
 
     starters = _load(f'{PKG}.utils.conversation_starters_utils', 'utils/conversation_starters_utils.py')
     _load(f'{PKG}.utils.export_import_utils', 'utils/export_import_utils.py')
+    _load(f'{PKG}.utils.starters_payload_check', 'utils/starters_payload_check.py')
     fork = _load(f'{PKG}.api.v2.fork', 'api/v2/fork.py')
-    return fork, starters
+    import_wizard = _load(f'{PKG}.api.v2.import_wizard', 'api/v2/import_wizard.py')
+    return fork, import_wizard, starters
 
 
 NOT_FORKED = 'Not forked: another item in this fork failed the conversation starter checks.'
+NOT_IMPORTED = 'Not imported: another item in this import failed the conversation starter checks.'
+
+
+def _application(name, import_uuid, conversation_starters):
+    return {
+        'id': 234, 'owner_id': 2, 'name': name, 'entity': 'agents', 'import_uuid': import_uuid,
+        'versions': [{'id': 351, 'name': 'base', 'author_id': 1,
+                      'conversation_starters': conversation_starters}],
+    }
 
 
 @pytest.fixture
-def fork_with_starters():
+def handlers():
     touched = ('tools', 'flask')
     saved = {name: sys.modules.get(name) for name in touched}
     try:
-        fork, starters = _install_package()
+        fork, import_wizard, starters = _install_package()
         created = []
 
         def _import_wizard(entities, project_id, author_id, force_new_skills=False):
@@ -101,13 +112,6 @@ def fork_with_starters():
                     result['agents'].append(entity)
             return result, errors
 
-        def _application(name, import_uuid, conversation_starters):
-            return {
-                'id': 234, 'owner_id': 2, 'name': name, 'entity': 'agents', 'import_uuid': import_uuid,
-                'versions': [{'id': 351, 'name': 'base', 'author_id': 1,
-                              'conversation_starters': conversation_starters}],
-            }
-
         def _fork(agent_starters, sub_agent_starters=None, skills=None):
             created.clear()
             applications = [_application('Probe', 'u-1', agent_starters)]
@@ -119,7 +123,18 @@ def fork_with_starters():
             body, status = handler.post(project_id=6)
             return body, status, list(created)
 
-        yield _fork
+        def _import(agent_starters, sub_agent_starters):
+            created.clear()
+            handler = import_wizard.PromptLibAPI()
+            handler.module = types.SimpleNamespace(import_wizard=_import_wizard)
+            import_wizard.request.json = [
+                _application('Probe', 'u-1', agent_starters),
+                _application('Helper', 'u-2', sub_agent_starters),
+            ]
+            body, status = handler.post(project_id=6)
+            return body, status, list(created)
+
+        yield types.SimpleNamespace(fork=_fork, import_=_import)
     finally:
         for name, original in saved.items():
             if original is None:
@@ -132,8 +147,8 @@ def fork_with_starters():
 
 
 class TestForkStarterLength:
-    def test_769_characters_is_rejected_and_nothing_created(self, fork_with_starters):
-        body, status, created = fork_with_starters(['ok', 'a' * 769])
+    def test_769_characters_is_rejected_and_nothing_created(self, handlers):
+        body, status, created = handlers.fork(['ok', 'a' * 769])
         assert status == 400
         assert created == []
         assert body['errors']['agents'] == [{
@@ -141,8 +156,8 @@ class TestForkStarterLength:
             'msg': 'Probe / base: a conversation starter must be 768 characters or less, got 769',
         }]
 
-    def test_a_long_sub_agent_starter_rejects_the_whole_fork(self, fork_with_starters):
-        body, status, created = fork_with_starters(['ok'], sub_agent_starters=['b' * 900])
+    def test_a_long_sub_agent_starter_rejects_the_whole_fork(self, handlers):
+        body, status, created = handlers.fork(['ok'], sub_agent_starters=['b' * 900])
         assert status == 400
         assert created == []
         assert [(error['index'], error['msg']) for error in body['errors']['agents']] == [
@@ -151,8 +166,8 @@ class TestForkStarterLength:
         ]
         assert set(body['result']) == set(body['errors']) == {'agents', 'toolkits', 'skills'}
 
-    def test_an_over_count_agent_leaves_the_sibling_message_neutral(self, fork_with_starters):
-        body, status, created = fork_with_starters(['s'] * 11, sub_agent_starters=['ok'])
+    def test_an_over_count_agent_leaves_the_sibling_message_neutral(self, handlers):
+        body, status, created = handlers.fork(['s'] * 11, sub_agent_starters=['ok'])
         assert status == 400
         assert created == []
         assert [error['msg'] for error in body['errors']['agents']] == [
@@ -160,14 +175,30 @@ class TestForkStarterLength:
             NOT_FORKED,
         ]
 
-    def test_a_selected_skill_is_marked_not_forked(self, fork_with_starters):
-        body, status, created = fork_with_starters(['a' * 769], skills=[{'import_uuid': 's-1', 'entity': 'skills'}])
+    def test_a_selected_skill_is_marked_not_forked(self, handlers):
+        body, status, created = handlers.fork(['a' * 769], skills=[{'import_uuid': 's-1', 'entity': 'skills'}])
         assert status == 400
         assert created == []
         assert body['errors']['skills'] == [{'index': 1, 'import_uuid': 's-1', 'msg': NOT_FORKED}]
 
-    def test_768_characters_forks(self, fork_with_starters):
-        body, status, created = fork_with_starters(['ok', 'a' * 768], sub_agent_starters=['b' * 768])
+    def test_768_characters_forks(self, handlers):
+        body, status, created = handlers.fork(['ok', 'a' * 768], sub_agent_starters=['b' * 768])
         assert status == 201
         assert created == ['Probe', 'Helper']
         assert body['result']['agents'][0]['versions'][0]['conversation_starters'] == ['ok', 'a' * 768]
+
+
+class TestImportStarterLength:
+    def test_a_long_sub_agent_starter_rejects_the_whole_import(self, handlers):
+        body, status, created = handlers.import_(['ok'], ['b' * 900])
+        assert status == 400
+        assert created == []
+        assert [(error['index'], error['import_uuid'], error['msg']) for error in body['errors']['agents']] == [
+            (0, 'u-1', NOT_IMPORTED),
+            (1, 'u-2', 'Helper / base: a conversation starter must be 768 characters or less, got 900'),
+        ]
+
+    def test_768_characters_imports(self, handlers):
+        body, status, created = handlers.import_(['ok'], ['b' * 768])
+        assert status == 201
+        assert created == ['Probe', 'Helper']

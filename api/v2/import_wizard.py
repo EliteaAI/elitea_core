@@ -3,6 +3,7 @@ import copy
 from flask import request
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.starters_payload_check import reject_payload_with_bad_starters
 
 from tools import api_tools, auth, config as c
 
@@ -18,6 +19,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def post(self, project_id: int, **kwargs):
         import_data = copy.copy(request.json)
         author_id = auth.current_user().get("id")
+        if isinstance(import_data, list):
+            rejection = reject_payload_with_bad_starters(
+                import_data, 'Not imported: another item in this import failed the conversation starter checks.',
+            )
+            if rejection is not None:
+                return rejection
 
         result, errors = self.module.import_wizard(
             import_data, project_id, author_id

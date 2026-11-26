@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Optional
 
 from pylon.core.tools import log
@@ -71,10 +72,12 @@ def check_conversation_starters_limit(new_count: int, previous_count: int, limit
 def check_conversation_starters_length(starters: Optional[list], previous_starters: Optional[list]) -> None:
     """Same keep-what-it-had rule as the count: a starter saved over the length before the limit
     existed may stay unchanged, but a new or edited one must fit."""
-    kept = {item.strip() for item in previous_starters or [] if isinstance(item, str)}
+    kept = Counter(item.strip() for item in previous_starters or [] if isinstance(item, str))
     for item in starters or []:
-        if len(item) > MAX_CONVERSATION_STARTER_LENGTH and item not in kept:
-            raise ConversationStartersLimitError(starter_length_message(len(item)))
+        if len(item) > MAX_CONVERSATION_STARTER_LENGTH:
+            if not kept[item]:
+                raise ConversationStartersLimitError(starter_length_message(len(item)))
+            kept[item] -= 1
 
 
 def starter_length_message(length: int) -> str:

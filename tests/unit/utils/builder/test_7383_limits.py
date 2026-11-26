@@ -80,5 +80,11 @@ class TestAgentStarters:
                                     previous_starters=['a' * 900])
         assert errors_by_field(errs)['conversation_starters']['limit'] == 768
 
+    def test_saved_over_length_starter_cannot_be_copied_into_more_slots(self, builder):
+        long = 'a' * 900
+        assert builder.limits.check('agent', {'conversation_starters': [long]}, previous_starters=[long, 'hi']) == []
+        errs = builder.limits.check('agent', {'conversation_starters': [long, long]}, previous_starters=[long, 'hi'])
+        assert errors_by_field(errs)['conversation_starters']['limit'] == 768
+
     def test_name_required_non_empty(self, builder):
         assert errors_by_field(builder.limits.check('agent', {'name': '  '}))['name']['limit'] == 1

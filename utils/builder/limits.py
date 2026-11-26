@@ -1,5 +1,6 @@
 """Platform limits the Builder checks before a write (#7383 AC-19). Pure: numbers mirror the pydantic models."""
 import re
+from collections import Counter
 
 SKILL_NAME_MAX = 64
 SKILL_DESCRIPTION_MAX = 2304
@@ -67,6 +68,18 @@ def _check_project_context(fields: dict) -> list:
     return errors
 
 
+def _new_over_length_starters(starters: list, previous_starters) -> list:
+    kept = Counter(item.strip() for item in previous_starters or [] if isinstance(item, str))
+    too_long = []
+    for item in (item.strip() for item in starters if isinstance(item, str)):
+        if len(item) > STARTER_LENGTH_MAX:
+            if kept[item]:
+                kept[item] -= 1
+            else:
+                too_long.append(item)
+    return too_long
+
+
 def _check_application(fields: dict, max_starters: int, previous_starters) -> list:
     errors = []
     if 'name' in fields and not str(fields['name'] or '').strip():
@@ -77,9 +90,7 @@ def _check_application(fields: dict, max_starters: int, previous_starters) -> li
         if count > max_starters:
             errors.append(_error('conversation_starters', max_starters,
                                  f"{count} conversation starters given; at most {max_starters} are allowed."))
-        kept = {item.strip() for item in previous_starters or [] if isinstance(item, str)}
-        too_long = [item.strip() for item in starters if isinstance(item, str)
-                    and len(item.strip()) > STARTER_LENGTH_MAX and item.strip() not in kept]
+        too_long = _new_over_length_starters(starters, previous_starters)
         if too_long:
             errors.append(_error('conversation_starters', STARTER_LENGTH_MAX,
                                  f"a conversation starter is {_over(too_long[0], STARTER_LENGTH_MAX)} "

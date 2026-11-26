@@ -105,6 +105,12 @@ class TestRule:
         with pytest.raises(mod.ConversationStartersLimitError, match='got 901'):
             mod.check_conversation_starters_length(['a' * 901], ['a' * 900])
 
+    def test_length_keeps_a_saved_starter_only_as_often_as_it_was_saved(self, mod):
+        long = 'a' * 900
+        mod.check_conversation_starters_length([long, long], [long, 'hi', long])
+        with pytest.raises(mod.ConversationStartersLimitError, match='got 900'):
+            mod.check_conversation_starters_length([long, long, long], [long, 'hi'])
+
     def test_enforce_checks_the_length(self, mod, monkeypatch):
         monkeypatch.setattr(mod, 'get_max_conversation_starters', lambda: 3)
         with pytest.raises(mod.ConversationStartersLimitError, match='768 characters or less'):
