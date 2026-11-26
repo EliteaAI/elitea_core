@@ -125,10 +125,11 @@ class FakeTool:
 
 
 class FakeVersion:
-    def __init__(self, ver_id, agent_type='openai', tools=None):
+    def __init__(self, ver_id, agent_type='openai', tools=None, meta=None):
         self.id = ver_id
         self.agent_type = agent_type
         self.tools = tools or []
+        self.meta = meta or {}
 
 
 class _Query:
@@ -730,3 +731,39 @@ class TestCapNestingTiersPageSize:
 
     def test_the_cap_is_fifty(self, pu):
         assert pu.MAX_NESTING_TIERS_PAGE_SIZE == 50
+
+
+class TestSwarmSubAgents:
+    """Issue #7736: an agent bound as a tool that later got Swarm Mode is a per-tool error."""
+
+    def _swarm(self, ver_id):
+        return FakeVersion(ver_id, meta={'internal_tools': ['swarm']})
+
+    def test_swarm_child_is_reported_on_its_tool(self, pu):
+        tool = FakeTool(2, 20, name='Multipurpose', tool_id=501)
+        registry = {1: FakeVersion(1, agent_type='pipeline', tools=[tool]), 20: self._swarm(20)}
+        with pytest.raises(pu.SwarmSubAgentError) as ei:
+            pu.assert_no_swarm_sub_agents(1, 1, session=FakeSession(registry))
+        errors = ei.value.to_toolkit_errors()
+        assert [e['loc'] for e in errors] == [['tools', 501, '__root__']]
+        assert 'Swarm Mode' in errors[0]['msg'] and 'Multipurpose' in errors[0]['msg']
+
+    def test_every_swarm_child_is_reported(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 20, tool_id=601), FakeTool(3, 30, tool_id=602),
+                                     FakeTool(4, 40, tool_id=603)]),
+            20: self._swarm(20), 30: FakeVersion(30), 40: self._swarm(40),
+        }
+        with pytest.raises(pu.SwarmSubAgentError) as ei:
+            pu.assert_no_swarm_sub_agents(1, 1, session=FakeSession(registry))
+        assert [e['loc'][1] for e in ei.value.to_toolkit_errors()] == [601, 603]
+
+    def test_child_without_swarm_passes(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 20)]),
+            20: FakeVersion(20, meta={'internal_tools': ['attachments']}),
+        }
+        pu.assert_no_swarm_sub_agents(1, 1, session=FakeSession(registry))
+
+    def test_is_a_sub_agent_tree_error_for_existing_handlers(self, pu):
+        assert issubclass(pu.SwarmSubAgentError, pu.SubAgentTreeError)

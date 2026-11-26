@@ -1314,7 +1314,12 @@ def validate_application_version_details(
         # both. It reuses THIS session, so it is one transaction, not a second one (PR #203
         # finding #5).
         if top_level:
-            from .publish_utils import assert_no_invalid_nesting, MAX_SUB_AGENT_VALIDATION_DEPTH
+            from .publish_utils import (
+                assert_no_invalid_nesting, assert_no_swarm_sub_agents, MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+            # Swarm agents are chat-only (issue #7736); enabling Swarm Mode on an agent that is
+            # already bound as a tool must surface as a per-tool error.
+            assert_no_swarm_sub_agents(project_id, version_id, session=session)
             assert_no_invalid_nesting(
                 project_id, version_id,
                 session=session,
