@@ -3,7 +3,6 @@ from typing import List, Optional, Literal
 import uuid
 
 from .tool import (
-    ToolUpdateModel,
     ToolDetails,
     ToolValidatedDetails,
     ToolBase,
@@ -392,7 +391,11 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     application_id: int
     name: Optional[str] = None
     author_id: int
-    tools: Optional[List[ToolUpdateModel]] = None
+    # The version PUT never writes `tools` (applications_update_version excludes them; toolkits are
+    # changed through the toolkit endpoints). They are not validated here either: ToolUpdateModel
+    # expands every credential as the signed-in user, so a user without access to the owner's private
+    # credential (an editor of a shared chat) got a 400 that also named the credential (#7663).
+    tools: Optional[List[ToolBase]] = None
     variables: Optional[List[ApplicationVariableDetailedModel]] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
     meta: Optional[dict] = Field(default_factory=dict)
