@@ -44,4 +44,5 @@ class BuilderApplyModel(_Strict):
 
 
 class BuilderReferenceModel(_Strict):
-    topic: str = Field(description="playbook:<agent|pipeline|skill|project_context> or pipeline:overview")
+    topic: str = Field(description="playbook:<agent|pipeline|skill|project_context>, or pipeline: with comma-separated "
+                                   "pages, e.g. pipeline:overview,node:llm,pattern:loop")

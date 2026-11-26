@@ -2,9 +2,9 @@
 the project changeset table and the caller's write permission. Every find / read carries its type's playbook; the
 SDK BuilderMiddleware passes each playbook to the model once per conversation."""
 from pylon.core.tools import log
-from tools import auth, config as c, openapi_registry
+from tools import auth, config as c, openapi_registry, this
 
-from ..service_prompt_utils import get_service_prompt
+from . import pipelines
 from .catalog import BUILDER_TAGS, Catalog
 from .dispatch import make_call
 from .prompts import playbook
@@ -64,6 +64,22 @@ def _material_checks(project_id):
     return listed, material
 
 
+def _tool_schemas(toolkit_types) -> dict:
+    """``{toolkit_type: {tool_name: json_schema}}`` for built-in toolkit types (#6388).
+
+    Read from the schemas the module already holds, so the pipeline check costs no remote call. MCP and provider
+    hub toolkits are left out: their tools are listed by a live connection, and their parameters are not checked.
+    """
+    held = getattr(this.module, "toolkit_schemas", None) or {}
+    found = {}
+    for kind in toolkit_types:
+        selected = ((held.get(kind) or {}).get("properties") or {}).get("selected_tools") or {}
+        schemas = selected.get("args_schemas") or {}
+        if schemas:
+            found[kind] = schemas
+    return found
+
+
 def build_service(project_id, user_id, seen_playbooks=None) -> BuilderService:
     listed, material = _material_checks(project_id)
     catalog = Catalog(openapi_registry.get_mcp_api_tools(filter_tags=list(BUILDER_TAGS), public_only=True),
@@ -71,7 +87,7 @@ def build_service(project_id, user_id, seen_playbooks=None) -> BuilderService:
     return BuilderService(
         project_id=project_id, user_id=user_id, call=make_call(project_id, catalog), store=DbStore(project_id),
         catalog=catalog, can_write=_can_write(project_id), seen_playbooks=seen_playbooks,
-        max_starters=_max_starters(), material=material,
+        max_starters=_max_starters(), material=material, tool_schemas=_tool_schemas,
     )
 
 
@@ -80,11 +96,21 @@ def reference(topic: str) -> dict:
         text = playbook(topic.split(":", 1)[1])
         return {"status": "ok", "topic": topic, "text": text} if text else {
             "status": "invalid", "message": f"unknown topic '{topic}'"}
-    if topic.startswith("pipeline:"):
-        text = get_service_prompt("pipeline_authoring_reference")
-        return {"status": "ok", "topic": topic, "text": text} if text else {
-            "status": "error", "message": "The pipeline authoring reference is not configured."}
-    return {"status": "invalid", "message": "topic must be playbook:<type> or pipeline:overview"}
+    if topic.startswith(pipelines.TOPIC_PREFIX):
+        # The SDK knowledge pack (#6388): one entry per page, generated from the node registry. The SDK
+        # BuilderMiddleware keeps each page only in its first result in the conversation.
+        found = pipelines.reference_pages(topic)
+        result = {"status": "ok", "topic": topic, "reference_pages": found["pages"]}
+        if found["unknown"]:
+            result["unknown_pages"] = found["unknown"]
+            result["valid_pages"] = [t[len(pipelines.TOPIC_PREFIX):] for t in pipelines.topics()]
+        if found["not_loaded"]:
+            result["not_loaded"] = found["not_loaded"]
+            result["message"] = f"At most {pipelines.MAX_TOPICS_PER_CALL} pages per call; ask again for the rest."
+        return result
+    return {"status": "invalid", "message": "topic must be playbook:<type> or pipeline:<topic>, e.g. "
+                                            "pipeline:overview,node:llm",
+            "topics": pipelines.topics()}
 
 
 def handle(project_id, user_id, action, body) -> dict:

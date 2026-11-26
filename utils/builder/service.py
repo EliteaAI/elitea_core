@@ -10,6 +10,7 @@ import uuid
 
 from . import changeset as cs
 from . import limits
+from . import pipelines
 from .catalog import UnknownOperation
 from .prompts import playbook
 
@@ -126,7 +127,11 @@ class MemoryStore:
 
 class BuilderService:
     def __init__(self, project_id, user_id, call, store, catalog, can_write, seen_playbooks=None,
-                 max_starters=limits.DEFAULT_MAX_STARTERS, now=time.time, material=None):
+                 max_starters=limits.DEFAULT_MAX_STARTERS, now=time.time, material=None, tool_schemas=None):
+        # tool_schemas(toolkit_types) -> {toolkit_type: {tool_name: json_schema}}; lets the pipeline check
+        # compare tool parameters with the attached toolkits (#6388). None: parameters are not checked.
+        self.tool_schemas = tool_schemas
+        self._attached = {}  # (application_id, version_id) -> the version's attached tools, read in _state
         self.project_id = project_id
         self.user_id = user_id
         self.call = call
@@ -207,6 +212,9 @@ class BuilderService:
             app, version_id = self._application(entity_id, version_id)
             raw = self.call('get_version', {'application_id': entity_id, 'version_id': version_id}) or {}
             flat = {k: v for k, v in raw.items() if k in VERSION_FIELDS or k in ('id', 'status')}
+            if entity_type == 'pipeline':
+                # read-only, for the pipeline check (#6388): which toolkits the YAML's tool nodes can call
+                self._attached[(entity_id, version_id)] = raw.get('tools') or []
             flat.update({'name': app.get('name'), 'description': app.get('description'),
                          'version_name': raw.get('name'), 'version_id': version_id})
             return raw, flat
@@ -237,7 +245,12 @@ class BuilderService:
         if entity_type not in TYPED:
             return _invalid(f"read supports: {', '.join(TYPED + ('operation',))}")
         _, state = self._state(entity_type, entity_id, version_id)
-        return self._with_playbook(entity_type, {'status': 'ok', 'state': state, 'revision': cs.revision(state)})
+        result = {'status': 'ok', 'state': state, 'revision': cs.revision(state)}
+        if entity_type == 'pipeline' and state.get('instructions'):
+            # #6388: what is already wrong, so the Builder can fix it while it is there
+            result['pipeline_check'] = pipelines.health(state['instructions'],
+                                                        self._pipeline_context(state, entity_id))
+        return self._with_playbook(entity_type, result)
 
     def _with_playbook(self, entity_type, result):
         text = playbook(entity_type)
@@ -317,6 +330,9 @@ class BuilderService:
                               previous_starters=state.get('conversation_starters'))
         if errors:
             return _invalid('The change breaks a platform limit; nothing was saved.', errors)
+        refusal = self._pipeline_refusal(entity_type, state, after, changes, entity_id)
+        if refusal:
+            return refusal
         delta = cs.diff(state, after)
         if not delta:
             return {'status': 'unchanged', 'message': 'Nothing to change.'}
@@ -324,6 +340,29 @@ class BuilderService:
                             'version_id': version_id, 'before': state, 'after': after, 'fields': sorted(changes),
                             'raw_sha': (raw or {}).get('instructions_sha256'), 'destructive': False,
                             'name': display_name or after.get('name') or state.get('name')})
+
+    def _pipeline_refusal(self, entity_type, before, after, changes, entity_id=None):
+        """#6388: a pipeline change that introduces validator errors is refused before the Changes card."""
+        if entity_type != 'pipeline' or 'instructions' not in (changes or {}):
+            return None
+        errors = pipelines.new_errors((before or {}).get('instructions'), (after or {}).get('instructions'),
+                                      self._pipeline_context(after, entity_id))
+        return _invalid(pipelines.REFUSAL, pipelines.as_errors(errors)) if errors else None
+
+    def _pipeline_context(self, state, entity_id=None):
+        """The trigger and the attached toolkits' tool schemas, for the checks that need them."""
+        state = state or {}
+        schemas = None
+        attached = self._attached.get((entity_id, state.get('version_id'))) or []
+        types_by_name = {t.get('name'): t.get('type') for t in attached
+                         if isinstance(t, dict) and t.get('type') and t.get('name')}
+        if self.tool_schemas and types_by_name:
+            try:
+                by_type = self.tool_schemas(sorted(set(types_by_name.values()))) or {}
+                schemas = {name: by_type[kind] for name, kind in types_by_name.items() if by_type.get(kind)}
+            except Exception:  # pylint: disable=W0703
+                schemas = None  # a lookup failure never blocks a change; parameters are just not checked
+        return pipelines.context_for(pipelines.trigger_of(state), schemas)
 
     def _propose_create(self, entity_type, fields):
         try:
@@ -343,6 +382,9 @@ class BuilderService:
         errors = limits.check(entity_type, fields, max_starters=self.max_starters)
         if errors:
             return _invalid('The change breaks a platform limit; nothing was saved.', errors)
+        refusal = self._pipeline_refusal(entity_type, None, fields, fields)
+        if refusal:
+            return refusal
         return self._store({'entity_type': entity_type, 'op': 'create', 'entity_id': None, 'before': None,
                             'after': dict(fields), 'destructive': False, 'name': fields.get('name')})
 

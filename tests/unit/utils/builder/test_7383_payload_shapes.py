@@ -87,7 +87,10 @@ class TestCreate:
         assert result['chip'] == {'type': 'agent', 'id': 7, 'version_id': 70, 'name': 'Reviewer'}
 
     def test_pipeline_create_sets_the_agent_type_on_the_version(self, service, api):
-        result = apply(service, service.propose('pipeline', 'create', {'name': 'P', 'instructions': 'nodes: []'}))
+        # a pipeline that passes the #6388 save check; `nodes: []` is now refused before the Changes card
+        pipeline = ('entry_point: a\nnodes:\n  - {id: a, type: llm, transition: END,'
+                    ' input_mapping: {task: {type: fixed, value: hi}}}\n')
+        result = apply(service, service.propose('pipeline', 'create', {'name': 'P', 'instructions': pipeline}))
         assert api.writes[0][1]['versions'][0]['agent_type'] == 'pipeline'
         assert result['chip']['type'] == 'pipeline'
 

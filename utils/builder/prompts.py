@@ -66,9 +66,11 @@ PLAYBOOKS = {
 - If several agents match the name, ask which one.
 </playbook>""",
     'pipeline': """<playbook entity="pipeline">
-- A pipeline is YAML in its instructions. Load post_elitea_core_builder_ref("pipeline:overview") before writing YAML and
-  use only the node types listed there.
+- A pipeline is YAML in its instructions. Before writing YAML, load post_elitea_core_builder_ref once with the overview
+  and the node types you will use, e.g. "pipeline:overview,node:llm,node:router"; add a pattern when the task fits one
+  (pattern:loop, pattern:approval, ...). Use only the node types the overview lists.
 - Every pipeline needs an entry_point, a path to END and no orphan nodes. Only the final node writes to messages.
+- propose refuses YAML that would not build or run and lists each error with a fix: fix them all and propose again.
 - To change a pipeline, patch only the affected nodes with old_text / new_text; keep untouched nodes as they are.
 - If the goal fits a single agent better (no fixed steps), say so once and build what the user chooses.
 </playbook>""",
