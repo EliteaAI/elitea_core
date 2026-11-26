@@ -13,6 +13,13 @@ from pylon.core.tools import web, log  # pylint: disable=E0401
 import requests  # pylint: disable=E0401
 
 
+def _write_ui_marker(module):
+    """ Record which plugin version the installed UI belongs to """
+    ui_path = Path(module.bp.static_folder).joinpath(module.elitea_base_path)
+    if ui_path.joinpath("index.html").exists():
+        ui_path.joinpath(".installed_for").write_text(module.descriptor.metadata.get("version", ""))
+
+
 class RPC:  # pylint: disable=R0903
     """ RPC pseudo-class """
 
@@ -41,6 +48,7 @@ class RPC:  # pylint: disable=R0903
             log.info("Updated UI using bundle")
         except:  # pylint: disable=W0702
             self.update_ui_from_github(release=release)
+        _write_ui_marker(self)
 
     @web.rpc('update_ui_from_github', 'update_ui_from_github')
     def update_ui_from_github(self, release=None):
@@ -57,7 +65,8 @@ class RPC:  # pylint: disable=R0903
             "X-GitHub-Api-Version": "2022-11-28",
             "Accept": "application/json",
         }
-        if self.auth_token is not None:
+        # Unset ${LICENSE_PASSWORD} stays literal or empty; sending it would 401
+        if self.auth_token and not str(self.auth_token).startswith("$"):
             headers["Authorization"] = f"Bearer {self.auth_token}"
         #
         response = requests.get(
