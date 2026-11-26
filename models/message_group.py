@@ -5,7 +5,7 @@ from typing import List
 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, DateTime, func, ForeignKey, Boolean, UUID, String
+from sqlalchemy import Integer, DateTime, func, ForeignKey, Boolean, UUID, String, Index
 
 from . import db, config as c, CONVERSATION_MESSAGE_GROUP_TABLE_NAME
 from .conversation import Conversation
@@ -16,6 +16,9 @@ from .participants import Participant
 class ConversationMessageGroup(db.Base):
     __tablename__ = CONVERSATION_MESSAGE_GROUP_TABLE_NAME
     __table_args__ = (
+        # The run outcome reads each conversation's last group; the admin task index_message_groups_by_conversation
+        # builds this same index for the projects that exist already (EliteaAI/elitea_issues#7682)
+        Index('ix_chat_message_group_conversation_last', 'conversation_id', 'id'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -121,6 +121,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             execution_type=run_filters.execution_type,
             run_outcome=run_filters.run_outcome,
             tool_name=run_filters.tool_name,
+            complexity=run_filters.complexity,
         )
 
         return result, 200

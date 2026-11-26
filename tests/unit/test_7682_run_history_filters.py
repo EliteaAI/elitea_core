@@ -156,3 +156,47 @@ def test_a_flagged_last_group_reads_failed_in_the_filter_and_the_display():
     source = (PLUGIN_ROOT / 'utils' / 'run_outcome.py').read_text()
     assert "ConversationMessageGroup.meta['is_error'].as_boolean().is_(True)" in source
     assert "meta.get('is_error') is True" in source
+
+
+# --- BE-2: the complexity filter of the run list (labels from usage, failing closed) -------------------------------
+
+def test_a_complexity_label_is_a_scalar_or_a_list(schedule_list):
+    single = schedule_list.ConversationListFilters.model_validate({'complexity': 'L'})
+    assert single.complexity == 'L'
+    several = schedule_list.ConversationListFilters.model_validate({'complexity': 'L,not_scored'})
+    assert several.complexity == ['L', 'not_scored']
+
+
+def test_an_unknown_complexity_label_is_rejected(schedule_list):
+    with pytest.raises(Exception):
+        schedule_list.ConversationListFilters.model_validate({'complexity': 'bogus'})
+
+
+def test_the_list_route_passes_the_complexity_filter_on():
+    source = (PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py').read_text()
+    assert "complexity=run_filters.complexity," in source
+
+
+def test_the_complexity_lookup_fails_closed_when_usage_is_unreachable():
+    """A usage failure must not show every run as a match: the lookup returns None and the list says so."""
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "if labelled is None:" in source
+    assert "'complexity_unavailable': True" in source
+
+
+# --- the version and complexity filters match what the table shows (chats have no run record) ----------------------
+
+def test_a_version_filter_also_matches_the_chats_own_meta_version():
+    """A chat has no schedule run record; the table reads its version from the chat meta, so the filter does too."""
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "Conversation.meta['single_participant']['entity_settings']['version_id'].astext.in_(" in source
+    # Only a version alone may match through the meta: any other run option still needs the run record
+    assert "only_version = len(run_conditions) == 1 and version_in_meta is not None" in source
+
+
+def test_the_complexity_filter_matches_conversations_by_uuid():
+    """Usage names a run by the conversation uuid, so the ids are kept as strings and matched on the uuid column."""
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "return [str(value) for value in result['conversation_ids']]" in source
+    assert "cast(Conversation.uuid, String).in_(labelled)" in source
+    assert "str(value).isdigit()" not in source

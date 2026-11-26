@@ -1,10 +1,11 @@
+import datetime
 import time
 from typing import get_args
 
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, String, and_, or_, cast, func, select
+from sqlalchemy import desc, asc, Integer, String, and_, or_, cast, false, func, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import selectinload
 
@@ -141,6 +142,32 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
         for run_id, conversation_id, schedule_id, name, status, trigger in run_rows
     }
     return {conv_id: runs[(run_id, conv_id)] for conv_id, run_id in run_of.items() if (run_id, conv_id) in runs}
+
+
+
+# BE-2: the usage call for the complexity filter (a bounded wait, and a wide period: usage keeps a bounded window)
+RPC_TIMEOUT_SECONDS = 10
+COMPLEXITY_FROM = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
+COMPLEXITY_TO = datetime.datetime(2100, 1, 1, tzinfo=datetime.timezone.utc)
+
+def _complexity_conversation_ids(rpc_manager, labels, entity_id, entity_project_id):
+    """The conversation ids of an entity's runs with one of the complexity labels, from usage (BE-2).
+
+    None when the usage call fails or the entity is unknown, so the list says so instead of showing every run as a
+    match. The period is every run the entity keeps (usage retains a bounded window).
+    """
+    if entity_id is None or entity_project_id is None:
+        return None
+    try:
+        result = rpc_manager.timeout(RPC_TIMEOUT_SECONDS).usage_complexity_conversations_by_label(
+            entity_project_id, entity_id, COMPLEXITY_FROM, COMPLEXITY_TO, labels,
+        )
+    except Exception:  # pylint: disable=W0703
+        log.exception('complexity filter: the usage call failed')
+        return None
+    if not isinstance(result, dict) or 'conversation_ids' not in result:
+        return None
+    return [str(value) for value in result['conversation_ids']]
 
 
 class RPC:
@@ -505,6 +532,7 @@ class RPC:
         execution_type: str | list[str] | None = None,
         run_outcome: list[str] | None = None,
         tool_name: list[str] | None = None,
+        complexity: list[str] | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -606,19 +634,34 @@ class RPC:
                 run_conditions.append(_any_of(EntityScheduleRun.status, run_status))
             if run_trigger is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.trigger, run_trigger))
+            version_in_meta = None
             if run_version_id is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.version_id, run_version_id))
+                # A chat has no run record: the table shows its version from the chat's own meta, so the filter reads it
+                # there too. Text compare, because the meta is user-writable and may hold a non-integer.
+                version_in_meta = Conversation.meta['single_participant']['entity_settings']['version_id'].astext.in_(
+                    [str(value) for value in _as_values(run_version_id)]
+                )
             if run_conditions:
                 # One semi-join on the run row, which owns the link: the chat id column is indexed, and every
                 # option must hold for the same run. User-writable meta is never read for it.
-                base_query = base_query.filter(
-                    Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions)),
-                )
+                with_record = Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions))
+                only_version = len(run_conditions) == 1 and version_in_meta is not None
+                # A version alone also matches a chat without a record by its meta; any other run option needs the record
+                base_query = base_query.filter(or_(with_record, version_in_meta) if only_version else with_record)
 
             if execution_type is not None:
                 types = _as_values(execution_type)
                 base_query = base_query.filter(or_(*(_execution_type_condition(t) for t in types)))
 
+            if complexity:  # BE-2: the rows whose run has one of the complexity labels, from usage
+                labelled = _complexity_conversation_ids(
+                    self.context.rpc_manager, _as_values(complexity), participant_id, entity_project_id,
+                )
+                if labelled is None:
+                    return {'total': 0, 'rows': [], 'complexity_unavailable': True}
+                # Usage names a run by the conversation uuid, so the list matches the uuid column
+                base_query = base_query.filter(cast(Conversation.uuid, String).in_(labelled) if labelled else false())
             if run_outcome:  # AC-24, AC-26: the derived status of each row, OR within the filter
                 base_query = base_query.filter(or_(*(outcome_condition(o) for o in _as_values(run_outcome))))
 

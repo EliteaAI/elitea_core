@@ -85,14 +85,16 @@ def runner(monkeypatch):
     spec = importlib.util.spec_from_file_location("message_group_index_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    state = {"present": set(), "created": [], "fail": set()}
+    state = {"present": set(), "invalid": set(), "created": [], "dropped": [], "fail": set()}
 
     class Result:
-        def __init__(self, found):
-            self.found = found
+        """One row: (indisvalid,) when the index exists, nothing when it does not."""
+
+        def __init__(self, row):
+            self.row = row
 
         def first(self):
-            return (1,) if self.found else None
+            return self.row
 
     class Connection:
         def execution_options(self, **_):
@@ -106,13 +108,20 @@ def runner(monkeypatch):
 
         def execute(self, statement, params=None):
             text_sql = str(statement)
-            if "pg_indexes" in text_sql:
-                return Result(params["schema"] in state["present"] and params["index"] == module.INDEX_NAME)
+            if "indisvalid" in text_sql:
+                if params["index"] != module.INDEX_NAME:
+                    return Result(None)
+                if params["schema"] in state["invalid"]:
+                    return Result((False,))
+                return Result((True,)) if params["schema"] in state["present"] else Result(None)
+            if text_sql.startswith("DROP INDEX"):
+                state["dropped"].append(int(text_sql.split("p_")[1].split(".")[0]))
+                return Result(None)
             pid = int(text_sql.split(" ON p_")[1].split(".")[0])
             if pid in state["fail"]:
                 raise RuntimeError("cannot build")
             state["created"].append(pid)
-            return Result(False)
+            return Result(None)
 
     engine = types.SimpleNamespace(connect=lambda: Connection())
     tools = types.ModuleType("tools")
@@ -125,7 +134,7 @@ def test_a_dry_run_creates_nothing(runner):
     module, state = runner
     result = module.run_message_group_index([1, 2], dry_run=True)
     assert state["created"] == []
-    assert result == {"changed": [1, 2], "present": [], "failed": [], "dry_run": True}
+    assert result == {"changed": [1, 2], "present": [], "rebuilt": [], "failed": [], "dry_run": True}
 
 
 def test_a_project_that_has_the_index_is_left_alone(runner):
@@ -133,7 +142,7 @@ def test_a_project_that_has_the_index_is_left_alone(runner):
     state["present"] = {"p_1"}
     result = module.run_message_group_index([1, 2], dry_run=False)
     assert state["created"] == [2]
-    assert result == {"changed": [2], "present": [1], "failed": [], "dry_run": False}
+    assert result == {"changed": [2], "present": [1], "rebuilt": [], "failed": [], "dry_run": False}
 
 
 def test_a_failing_project_is_listed_and_the_run_goes_on(runner):
@@ -141,4 +150,36 @@ def test_a_failing_project_is_listed_and_the_run_goes_on(runner):
     state["fail"] = {1}
     result = module.run_message_group_index([1, 2], dry_run=False)
     assert state["created"] == [2]
-    assert result == {"changed": [2], "present": [], "failed": [{"project_id": 1}], "dry_run": False}
+    assert result == {"changed": [2], "present": [], "rebuilt": [], "failed": [{"project_id": 1}], "dry_run": False}
+
+
+# --- PR 766 review: a failed concurrent build leaves an INVALID index, which must be rebuilt, not reported present ---
+
+def test_an_invalid_index_is_dropped_and_built_again(runner):
+    module, state = runner
+    state["invalid"] = {"p_1"}
+    result = module.run_message_group_index([1, 2], dry_run=False)
+    assert state["dropped"] == [1]
+    assert state["created"] == [1, 2]
+    assert result == {"changed": [1, 2], "present": [], "rebuilt": [1], "failed": [], "dry_run": False}
+
+
+def test_a_dry_run_reports_an_invalid_index_but_changes_nothing(runner):
+    module, state = runner
+    state["invalid"] = {"p_1"}
+    result = module.run_message_group_index([1], dry_run=True)
+    assert state["dropped"] == [] and state["created"] == []
+    assert result == {"changed": [1], "present": [], "rebuilt": [1], "failed": [], "dry_run": True}
+
+
+def test_an_invalid_index_is_never_reported_as_present(runner):
+    module, state = runner
+    state["invalid"] = {"p_1"}
+    state["present"] = {"p_2"}
+    result = module.run_message_group_index([1, 2], dry_run=True)
+    assert result["present"] == [2] and result["rebuilt"] == [1]
+
+
+def test_the_model_declares_the_same_index_so_new_projects_get_it():
+    source = (pathlib.Path(__file__).resolve().parents[3] / "models" / "message_group.py").read_text()
+    assert "Index('ix_chat_message_group_conversation_last', 'conversation_id', 'id')" in source

@@ -18,6 +18,8 @@ ExecutionType = Literal['chat', 'api', 'mcp']
 # The status shown on a run row (AC-24): a schedule run's status, or for a plain chat one derived from stored data.
 # Stopped and Partial are index-run states only; they never reach this list.
 RunOutcome = Literal['running', 'waiting_for_approval', 'success', 'failed', 'skipped', 'blocked']
+# A complexity label of a run (the Run History Complexity filter): L, M, H, X, or not_scored (no score past the window)
+ComplexityLabel = Literal['L', 'M', 'H', 'X', 'not_scored']
 SortBy = Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled', 'last_delivery_at']
 SortOrder = Literal['asc', 'desc']
 
@@ -57,8 +59,10 @@ class ConversationListFilters(BaseModel):
     execution_type: ExecutionType | list[ExecutionType] | None = None
     run_outcome: RunOutcome | list[RunOutcome] | None = None  # the derived run_status of a row (AC-24, AC-26)
     tool_name: ToolName | list[ToolName] | None = None  # MCP runs: a tool called in the run (AC-45)
+    complexity: ComplexityLabel | list[ComplexityLabel] | None = None  # the run's complexity label (BE-2)
 
-    @field_validator('status', 'trigger', 'version_id', 'execution_type', 'run_outcome', 'tool_name', mode='before')
+    @field_validator('status', 'trigger', 'version_id', 'execution_type', 'run_outcome', 'tool_name', 'complexity',
+                     mode='before')
     @classmethod
     def _comma_list(cls, value):
         values = _split_comma_list(value)
