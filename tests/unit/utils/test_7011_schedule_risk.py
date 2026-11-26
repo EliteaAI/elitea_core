@@ -224,6 +224,15 @@ class TestEL7621InterruptNodes:
             '  - id: B\n    type: llm\n    transition: AB\n  - id: AB\n    type: llm\n    transition: END\n'))
         assert [w['step'] for w in scan.review()['blocking']] == ['AB']
 
+    @pytest.mark.parametrize('interrupts', ['interrupt_before: {A}', 'interrupt_after: !!set {A}', 'interrupt_after: {A: x}'])
+    def test_an_interrupt_written_as_a_mapping_or_set_blocks_its_node_names(self, scan, interrupts):
+        scan.version = _version('pipeline', instructions=f'nodes:\n  - id: A\n    type: llm\n    transition: END\n{interrupts}\n')
+        assert [w['step'] for w in scan.review()['blocking']] == ['A']
+
+    def test_an_interrupt_mapping_without_text_names_gives_no_finding(self, scan):
+        scan.version = _version('pipeline', instructions='nodes:\n  - id: A\n    type: llm\ninterrupt_before: {1: a}\n')
+        assert scan.run() == []
+
     @pytest.mark.parametrize('type_', ['router', 'decision'])
     def test_a_pause_after_a_routing_node_with_a_leftover_end_transition_blocks(self, scan, type_):
         scan.version = _version('pipeline', instructions=(

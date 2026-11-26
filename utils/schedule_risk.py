@@ -43,7 +43,9 @@ def _read_interrupt_node_ids(interrupts) -> list:
     """The node ids of an `interrupt_before` / `interrupt_after` value; a text value counts as one entry."""
     if isinstance(interrupts, str):
         return [interrupts] if interrupts else []
-    return [step for step in interrupts if isinstance(step, str)] if isinstance(interrupts, list) else []
+    if not isinstance(interrupts, (list, dict, set)):
+        return []
+    return [step for step in interrupts if isinstance(step, str)]
 
 
 def _flag_pipeline_human_steps(schema: dict) -> list:
