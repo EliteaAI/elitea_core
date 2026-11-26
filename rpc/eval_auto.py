@@ -43,13 +43,18 @@ class RPC:
 
     @web.rpc("elitea_core_eval_auto_list", "eval_auto_list")
     def eval_auto_list_rpc(self, project_id: int = None, status: str = None, limit: int = 500,
-                           offset: int = 0, search: str = None, reason: str = None, **kwargs) -> dict:
+                           offset: int = 0, search: str = None, reason: str = None, mode: str = None,
+                           **kwargs) -> dict:
         return service.list_latest(project_id=project_id, status=status, limit=limit, offset=offset,
-                                   search=search, reason=reason)
+                                   search=search, reason=reason, mode=mode)
 
     @web.rpc("elitea_core_eval_auto_history", "eval_auto_history")
     def eval_auto_history_rpc(self, project_id: int, application_id: int, limit: int = 20, **kwargs) -> dict:
         return service.list_history(project_id, application_id, limit=limit)
+
+    @web.rpc("elitea_core_eval_auto_history_consents", "eval_auto_history_consents")
+    def eval_auto_history_consents_rpc(self, **kwargs) -> dict:
+        return service.list_history_consents()
 
     @web.rpc("elitea_core_eval_auto_get_platform_dataset", "eval_auto_get_platform_dataset")
     def eval_auto_get_platform_dataset_rpc(self, **kwargs) -> dict:

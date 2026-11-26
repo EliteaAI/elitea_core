@@ -32,12 +32,15 @@ from .evaluation_run_orchestration import (
     build_run_snapshot,
     execute_run,
     cases_from_turns,
+    cases_from_history,
+    without_usage_bindings,
     resolve_version_id,
     all_bindings_structure_only,
     structure_only_case,
     RUN_TIME_BUDGET_SECONDS,
     TRIGGER_OFFLINE_BATCH,
     TRIGGER_ON_DEMAND,
+    TRIGGER_HISTORY,
 )
 
 
@@ -311,6 +314,57 @@ def create_on_demand_run(
             snapshot=snapshot, progress={'done': 0, 'total': len(cases)},
             owner_id=owner_id,
             meta={'conversation_id': conversation_id},
+        )
+        s.add(run)
+        s.flush()
+        s.refresh(run)
+        return run
+
+
+def create_history_run(
+    project_id: int,
+    suite_id: int,
+    turns: List[dict],
+    *,
+    application_version_id: Optional[int] = None,
+    judge_model: Optional[dict] = None,
+    owner_id: int,
+    meta: Optional[dict] = None,
+    session=None,
+):
+    """Freeze a run over sampled chat turns (``eval_auto_history.plan_history``) and persist it
+    ``created``. The suite gives the bindings only: its dataset is not used, and the agent is not
+    run, because each case is a turn a user already had. ``execute_run`` reads each case's
+    trajectory from the chat's trace steps."""
+    from ..models.evaluation import EvalRun, EvalRunStatus, EvalRunTrigger
+
+    if not turns:
+        raise EvalRunConfigError('history run requires at least one turn')
+    with _session(session, project_id) as s:
+        suite, bindings, dimensions = _load_suite_config(
+            s, suite_id, judge_model_override=judge_model)
+        bindings = without_usage_bindings(bindings)
+        if not bindings:
+            raise EvalRunConfigError('suite has no binding a history run can score')
+
+        version_id = _resolve_version(bindings, application_version_id)
+        _assert_version_in_application(s, version_id, suite.application_id)
+        cases = cases_from_history(turns)
+
+        snapshot = build_run_snapshot(
+            suite=_suite_dict(suite, judge_model),
+            dimensions=dimensions,
+            bindings=bindings, cases=cases,
+            application_id=suite.application_id, application_version_id=version_id,
+            dataset_id=None, trigger_type=TRIGGER_HISTORY,
+        )
+
+        run = EvalRun(
+            suite_id=suite_id, application_id=suite.application_id,
+            application_version_id=version_id, dataset_id=None,
+            trigger_type=EvalRunTrigger.history, status=EvalRunStatus.created,
+            snapshot=snapshot, progress={'done': 0, 'total': len(cases)},
+            owner_id=owner_id, meta=dict(meta or {}),
         )
         s.add(run)
         s.flush()

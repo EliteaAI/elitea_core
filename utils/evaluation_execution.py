@@ -346,6 +346,98 @@ def build_trajectory(predict_result, *, store_tool_outputs: bool = True) -> Opti
     return _fit(trajectory)
 
 
+def _iso(value) -> Optional[str]:
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+def _trace_tool_entry(row: dict) -> dict:
+    """A stored tool_call row as the ``tool_calls_dict`` entry it was written from
+    (``trace_step_writer._row_to_tool_call``), so :func:`_tool_step` reads both the same way."""
+    attrs = row.get('attrs') if isinstance(row.get('attrs'), dict) else {}
+    metadata = dict(attrs.get('metadata') or {})
+    metadata['parent_agent_name'] = row.get('parent_agent_name')
+    metadata['parent_agent_call_id'] = row.get('parent_agent_call_id')
+    return {
+        'tool_name': row.get('tool_name'),
+        'metadata': metadata,
+        'tool_inputs': row.get('tool_inputs'),
+        'tool_output': row.get('tool_output'),
+        'finish_reason': row.get('finish_reason'),
+        'error': None if not row.get('is_error') else (row.get('tool_output') or 'error'),
+        'timestamp_start': _iso(row.get('started_at')),
+        'timestamp_finish': _iso(row.get('finished_at')),
+    }
+
+
+def _trace_thinking_entry(row: dict) -> dict:
+    """A stored thinking_step row as its ``thinking_steps`` entry (``_row_to_thinking_step``)."""
+    return {
+        'text': row.get('text'),
+        'message': {'response_metadata': {'model_name': row.get('model_name')}},
+        'parent_agent_name': row.get('parent_agent_name'),
+        'parent_agent_call_id': row.get('parent_agent_call_id'),
+        'timestamp_start': _iso(row.get('started_at')),
+        'timestamp_finish': _iso(row.get('finished_at')),
+    }
+
+
+def trajectory_from_trace_steps(rows: List[dict], *, store_tool_outputs: bool = True,
+                                pause: Optional[dict] = None) -> dict:
+    """The trajectory :func:`build_trajectory` gives for a live run, rebuilt from a stored chat
+    turn's ``chat_message_trace_step`` rows (as dicts of their columns).
+
+    The chat persists the same tool_calls / thinking_steps the live envelope carries, so mapping a
+    row back to its entry and reusing the live step builders keeps masking, caps and ordering
+    identical. Steps keep their private ``_identity`` for :func:`trajectory_metrics`, like
+    :func:`build_trajectory`; :func:`recorded_execution` drops it.
+    """
+    raw: List[dict] = []
+    for row in rows or []:
+        if row.get('kind') == 'thinking_step':
+            raw.append(_llm_step(_trace_thinking_entry(row)))
+        elif row.get('kind') == 'tool_call':
+            raw.append(_tool_step(_trace_tool_entry(row), store_tool_outputs))
+
+    def _order(item):
+        seq, step = item
+        started = _parse_ts(step.get('started_at'))
+        return (started is None, started.timestamp() if started else 0.0, seq)
+
+    steps = [step for _, step in sorted(enumerate(raw), key=_order)]
+    for index, step in enumerate(steps):
+        step['i'] = index
+    trajectory = {
+        'steps': steps,
+        'tool_sequence': [s['tool_name'] for s in steps if s['kind'] == 'tool'],
+        'truncated': False,
+        'source': 'history',
+        'tool_outputs_stored': store_tool_outputs,
+    }
+    if pause:
+        trajectory['pause'] = pause
+        _mark_paused_steps(trajectory)
+    return _fit(trajectory)
+
+
+def recorded_execution(rows: List[dict], *, store_tool_outputs: bool = True,
+                       latency_ms: Optional[int] = None, error: Optional[str] = None,
+                       final_text: Optional[str] = None, pause: Optional[dict] = None) -> dict:
+    """The ``_execution`` of a case scored from a stored turn: what :func:`extract_execution`
+    returns for a live one, with ``source: history`` so a reader knows the agent was not run."""
+    trajectory = trajectory_from_trace_steps(rows, store_tool_outputs=store_tool_outputs, pause=pause)
+    metrics = trajectory_metrics(trajectory, latency_ms=latency_ms, error=error, final_text=final_text)
+    for step in trajectory['steps']:
+        step.pop('_identity', None)
+    return {
+        'trajectory_state': TRAJECTORY_RECORDED,
+        'trajectory_state_reason': None,
+        'trajectory': trajectory,
+        'metrics': metrics,
+        'status': 'ok',
+        'source': 'history',
+    }
+
+
 def is_parked(predict_result) -> bool:
     """The run parked on a sub-agent fan-out (indexer ``build_parked_result``). A batch run
     cannot resume a parked parent, so the case has no answer."""

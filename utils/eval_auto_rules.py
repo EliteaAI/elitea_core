@@ -35,12 +35,23 @@ TIMEOUT = 'TIMEOUT'
 OWNER_UNAVAILABLE = 'OWNER_UNAVAILABLE'
 BUDGET_BLOCKED = 'BUDGET_BLOCKED'
 NO_DATASET = 'NO_DATASET'
+NO_TRAFFIC = 'NO_TRAFFIC'
 OTHER = 'OTHER'
 REASON_CODES = (HITL_REQUIRED, OAUTH_REQUIRED, AGENT_BROKEN, TIMEOUT, OWNER_UNAVAILABLE,
-                BUDGET_BLOCKED, NO_DATASET, OTHER)
+                BUDGET_BLOCKED, NO_DATASET, NO_TRAFFIC, OTHER)
 # Not Evaluated for a reason that the next job would only meet again: retried when the default
 # version changes or the result is stale, not on every job, so such agents do not fill the cap.
+# NO_TRAFFIC is not one of them: an agent can be used any day.
 DETERMINISTIC_REASONS = (HITL_REQUIRED, OAUTH_REQUIRED, NO_DATASET, AGENT_BROKEN)
+
+MODE_LIVE = 'live'
+MODE_HISTORY = 'history'
+MODE_HYBRID = 'hybrid'
+
+HISTORY_VERSION_DEFAULT = 'default'
+HISTORY_VERSION_ANY = 'any'
+HISTORY_STRATEGY_STRATIFIED = 'stratified'
+HISTORY_STRATEGY_RECENT = 'recent'
 
 PASSED = 'passed'
 WARNING = 'warning'
@@ -63,6 +74,19 @@ DEFAULT_SETTINGS = {
     'reevaluate_after_days': 28,
     # {'start': 'HH:MM', 'end': 'HH:MM'} in UTC, or None for "any time"
     'window': None,
+    # live runs the agent on a dataset; history scores its stored chat turns; hybrid scores the
+    # turns when there are enough and runs live otherwise.
+    'mode': MODE_LIVE,
+    'history_window_days': 28,
+    'history_max_turns': 10,
+    'history_min_turns': 3,
+    'history_version': HISTORY_VERSION_DEFAULT,
+    'history_strategy': HISTORY_STRATEGY_STRATIFIED,
+    'history_max_turns_per_conversation': 2,
+    'history_max_share_per_user': 0.34,
+    'max_concurrent_history_runs': 4,
+    # Chats change when the version does not, so an agent scored from history is due sooner.
+    'history_reevaluate_after_days': 7,
 }
 
 # (minimum, maximum) of each numeric setting; a stored value outside it is clamped.
@@ -75,10 +99,20 @@ _BOUNDS = {
     'coverage_threshold': (0.0, 100.0),
     'classify_threshold': (0.0, 1.0),
     'reevaluate_after_days': (0, 365),
+    'history_window_days': (1, 90),
+    'history_max_turns': (1, 50),
+    'history_min_turns': (1, 50),
+    'history_max_turns_per_conversation': (1, 10),
+    'history_max_share_per_user': (0.1, 1.0),
+    'max_concurrent_history_runs': (1, 20),
+    'history_reevaluate_after_days': (1, 90),
 }
 _CHOICES = {
     'project_scope_mode': (SCOPE_ALL, SCOPE_ALLOW, SCOPE_DENY),
     'dataset_policy': (POLICY_AGENT_FIRST, POLICY_AGENT_ONLY, POLICY_PLATFORM_ONLY),
+    'mode': (MODE_LIVE, MODE_HISTORY, MODE_HYBRID),
+    'history_version': (HISTORY_VERSION_DEFAULT, HISTORY_VERSION_ANY),
+    'history_strategy': (HISTORY_STRATEGY_STRATIFIED, HISTORY_STRATEGY_RECENT),
 }
 
 _OPERATORS = {
@@ -158,6 +192,8 @@ def effective_config(stored: Optional[dict]) -> dict:
             settings[key] = _clean_window(value)
         elif isinstance(default, bool):
             settings[key] = bool(value)
+    # The minimum is bounded by the maximum, which only the pair of them knows.
+    settings['history_min_turns'] = min(settings['history_min_turns'], settings['history_max_turns'])
     return settings
 
 
@@ -246,12 +282,15 @@ def needs_evaluation(version_id: Optional[int], last: Optional[dict], now: datet
     An unchanged agent with a recent result keeps it ("carried forward") and costs nothing.
     ``last_attempt`` is its latest finished item of any status (adds ``status``, ``reason_code``).
     When that is a newer Not Evaluated, a deterministic reason waits for a new version or for the
-    staleness age (``blocked``); any other reason is tried again (``retry``).
+    staleness age (``blocked``); any other reason is tried again (``retry``). So is a reason a
+    history item read from the chats (``mode`` history, all but ``NO_DATASET``): new chats can clear
+    it without a new version, and checking costs reads only, no judge call.
     """
     if _not_evaluated_since(last_attempt, last):
         if last_attempt.get('application_version_id') != version_id:
             return True, 'changed'
-        if last_attempt.get('reason_code') not in DETERMINISTIC_REASONS:
+        reason = last_attempt.get('reason_code')
+        if reason not in DETERMINISTIC_REASONS or (last_attempt.get('mode') == MODE_HISTORY and reason != NO_DATASET):
             return True, 'retry'
         if now - last_attempt['finished_at'] < timedelta(days=reevaluate_after_days):
             return False, 'blocked'
@@ -393,6 +432,26 @@ def resolve_dataset_tier(policy: str, suites: List[dict], default_dataset_id: Op
     if project_dataset_id:
         return {'tier': TIER_PROJECT, 'suite_id': None, 'dataset_id': project_dataset_id}
     return platform
+
+
+def resolve_history_tier(policy: str, suites: List[dict], default_dataset_id: Optional[int] = None,
+                         project_dataset_id: Optional[int] = None) -> dict:
+    """:func:`resolve_dataset_tier` for history mode, where a suite gives its bindings only.
+
+    The cases are the agent's chats, so a suite without a dataset still counts, and an agent with no
+    suite of its own is scored on the generated one (``suite_id`` None) even under ``agent_only``:
+    history mode never ends in ``NO_DATASET``.
+    """
+    tier = resolve_dataset_tier(policy, suites, default_dataset_id, project_dataset_id)
+    if tier['tier'] in (TIER_AGENT_DEFAULT, TIER_AGENT_SUITE, TIER_AGENT_ONLY_SUITE):
+        return {**tier, 'dataset_id': None}
+    # The agent's own suite beats the project and platform tiers, which live mode only reaches
+    # because none of its suites had a dataset to run.
+    own = sorted(suites, key=lambda suite: (not suite.get('auto_evaluation'), suite['id']))
+    if own and policy != POLICY_PLATFORM_ONLY:
+        return {'tier': TIER_AGENT_SUITE if own[0].get('auto_evaluation') else TIER_AGENT_ONLY_SUITE,
+                'suite_id': own[0]['id'], 'dataset_id': None}
+    return {'tier': tier['tier'] or TIER_PLATFORM, 'suite_id': None, 'dataset_id': None}
 
 
 # ----------------------------------------------------------------------------

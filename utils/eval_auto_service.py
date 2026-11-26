@@ -15,6 +15,7 @@ from typing import List, Optional
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from sqlalchemy import func, or_, text
+from sqlalchemy.orm import object_session
 
 from tools import context, db  # pylint: disable=E0401
 
@@ -37,7 +38,12 @@ from .evaluation_dataset_utils import (
     GENERATED_KEY, MAX_CASES_PER_DATASET, _append_rows, get_project_default_dataset,
 )
 from .evaluation_library_utils import EvalLibraryError, EvalNameConflictError
-from .evaluation_run_utils import create_batch_run, delete_run, launch_run, mark_run_unstarted
+from .eval_auto_history import plan_history
+from .eval_auto_history_loader import load_texts, load_turns
+from .eval_history_consent import consenting_project_ids, has_history_consent
+from .evaluation_run_utils import (
+    EvalRunConfigError, create_batch_run, create_history_run, delete_run, launch_run, mark_run_unstarted,
+)
 from .evaluation_suite_utils import EvalBindingDuplicateError, add_binding, create_suite
 from .evaluation_trajectory_checks import builtin_key, registry_seed
 from .maintenance_gate import is_maintenance_active
@@ -53,6 +59,8 @@ MAX_STARTERS = 3
 # A queued agent that keeps failing to start (pool full, auth unreachable) is given up on, so a
 # job always ends.
 MAX_ATTEMPTS = 5
+# Set on a hybrid item with no consent or traffic: it is queued again for a live slot.
+LIVE_FALLBACK_KEY = 'live_fallback'
 # A claimed item with no run after this long lost its drain (a restart, a failed commit); it is
 # queued again so it neither holds a slot nor keeps its job open forever.
 STALE_CLAIM = timedelta(minutes=15)
@@ -62,6 +70,8 @@ UNSTARTED_RUN = timedelta(minutes=30)
 RUN_PERMISSION = 'models.applications.evaluation.run.create'
 # Serialises opening a job: a "Run now" racing the scheduled tick, or two pods, must not queue twice.
 _JOB_LOCK = text("SELECT pg_advisory_xact_lock(hashtext('eval-auto-job'))")
+# Serialises counting and taking live slots across drains (two pods, "Run now" during the tick).
+_LIVE_SLOT_LOCK = text("SELECT pg_advisory_xact_lock(hashtext('eval-auto-live-slot'))")
 _FINAL_RUN_STATUSES = (EvalRunStatus.finished, EvalRunStatus.errored, EvalRunStatus.cancelled)
 
 # The probes every agent without a dataset of its own is run on, plus its conversation starters.
@@ -349,11 +359,11 @@ def _last_scored(session, project_id: int) -> dict:
 
 
 def _last_attempt(session, project_id: int) -> dict:
-    """``application_id -> {application_version_id, finished_at, status, reason_code}`` of each
-    agent's latest finished item, Not Evaluated included: what the back-off is decided on."""
+    """``application_id -> {application_version_id, finished_at, status, reason_code, mode}`` of
+    each agent's latest finished item, Not Evaluated included: what the back-off is decided on."""
     rows = session.query(
         EvalAutoItem.application_id, EvalAutoItem.application_version_id, EvalAutoItem.finished_at,
-        EvalAutoItem.status, EvalAutoItem.reason_code,
+        EvalAutoItem.status, EvalAutoItem.reason_code, EvalAutoItem.mode,
     ).filter(
         EvalAutoItem.project_id == project_id,
         EvalAutoItem.state == EvalAutoItemState.done,
@@ -361,7 +371,7 @@ def _last_attempt(session, project_id: int) -> dict:
         EvalAutoItem.application_id, EvalAutoItem.finished_at.desc()).all()
     return {row.application_id: {'application_version_id': row.application_version_id,
                                  'finished_at': row.finished_at, 'status': row.status,
-                                 'reason_code': row.reason_code} for row in rows}
+                                 'reason_code': row.reason_code, 'mode': row.mode} for row in rows}
 
 
 def _default_versions(session) -> List[tuple]:
@@ -386,12 +396,14 @@ def _default_versions(session) -> List[tuple]:
 def _candidates(project_id: int, last: dict, attempts: dict, now: datetime, settings: dict) -> List[dict]:
     """The project's agents with whether each is due, and why. Pipelines are not evaluated."""
     due = []
+    # History changes while the version doesn't, so history modes re-score on their own cadence.
+    days = settings['reevaluate_after_days' if settings['mode'] == rules.MODE_LIVE else 'history_reevaluate_after_days']
     with db.get_session(project_id) as session:
         for application, version in _default_versions(session):
             if version['agent_type'] == AgentTypes.pipeline.value:
                 continue
             previous = last.get(application.id)
-            queue, why = rules.needs_evaluation(version['id'], previous, now, settings['reevaluate_after_days'],
+            queue, why = rules.needs_evaluation(version['id'], previous, now, days,
                                                 last_attempt=attempts.get(application.id))
             due.append({
                 'project_id': project_id, 'application_id': application.id,
@@ -421,6 +433,23 @@ def _enumerate(settings: dict) -> tuple:
             log.exception('eval auto tick: project %s could not be enumerated', project_id)
             failed_projects.append(project_id)
     return candidates, failed_projects
+
+
+def list_history_consents() -> dict:
+    """The projects whose admins let the evaluation read their chats, and whether each is in scope.
+
+    Names and ids only: the Super Admin sees who opted in, never the chats themselves. Read from the
+    shared consent index in one query, not from each project's record.
+    """
+    settings = get_config()
+    consenting = consenting_project_ids()
+    if not consenting:
+        return {'total': 0, 'projects': []}
+    listed = context.rpc_manager.timeout(120).project_list(filter_={'create_success': True})
+    projects = [{'project_id': int(project['id']), 'name': project.get('name'),
+                 'in_scope': rules.project_in_scope(project, settings)}
+                for project in listed if int(project['id']) in consenting]
+    return {'total': len(projects), 'projects': sorted(projects, key=lambda row: row['project_id'])}
 
 
 def tick(trigger: str = EvalAutoTrigger.scheduled, started_by: Optional[int] = None) -> dict:
@@ -580,7 +609,7 @@ def _generated_suite(session, application_id: int) -> Optional[EvalSuite]:
     ).order_by(EvalSuite.id.asc()).first()
 
 
-def _ensure_generated_suite(project_id: int, session, application_id: int, dataset_id: int,
+def _ensure_generated_suite(project_id: int, session, application_id: int, dataset_id: Optional[int],
                             owner_id: int) -> int:
     suite = _generated_suite(session, application_id)
     # A suite of the team's may already hold the name; the generated one then takes the second.
@@ -629,55 +658,37 @@ def _check_owner_rights(project_id: int, owner_id: int, application_id: int) -> 
     return None
 
 
-def _launch(item: EvalAutoItem, settings: dict, eval_task_node) -> str:
-    """Pre-flight, resolve the dataset, create and submit the run.
+def _resolve_suite(session, item: EvalAutoItem, settings: dict, application, version,
+                   history: bool = False) -> Optional[tuple]:
+    """``(tier, dataset_id, suite_id)`` the agent is evaluated on; None when it has no dataset.
 
-    Returns ``launched``, ``retry`` (left queued: the pool or a check was unavailable) or
-    ``done`` (the item has its Not Evaluated reason).
+    ``history`` resolves the bindings only: the dataset is None and no dataset is created.
     """
+    resolve = rules.resolve_history_tier if history else rules.resolve_dataset_tier
+    tier = resolve(
+        settings['dataset_policy'], _agent_suites(session, application.id),
+        (application.meta or {}).get(DEFAULT_EVAL_DATASET_KEY), _project_dataset_id(item.project_id, session))
+    if tier['tier'] is None:
+        return None
+    dataset_id = tier['dataset_id']
+    if tier['tier'] == rules.TIER_PLATFORM and not history:
+        dataset_id = _ensure_platform_dataset(item.project_id, session, application, version, item.owner_id)
+    suite_id = tier['suite_id'] or _ensure_generated_suite(
+        item.project_id, session, application.id, dataset_id, item.owner_id)
+    return tier['tier'], dataset_id, suite_id
+
+
+def _default_version(session, item: EvalAutoItem):
+    application = session.query(Application).filter(Application.id == item.application_id).first()
+    return application, application.get_default_version() if application else None
+
+
+def _submit(item: EvalAutoItem, settings: dict, eval_task_node, run_id: int, version_id: int,
+            snapshot_judge: Optional[dict]) -> str:
     from .publish_utils import get_validation_llm_settings  # pylint: disable=C0415
 
-    owner_code = (check_owner_access(item.project_id, item.owner_id)
-                  or _check_owner_rights(item.project_id, item.owner_id, item.application_id))
-    if owner_code == ACCESS_CHECK_UNAVAILABLE:
-        return 'retry'
-    budget = None if owner_code else closed_budget_scope(item.project_id, item.owner_id)
-    review = None
-    if not owner_code and not budget:
-        review = scan_schedule(item.project_id, item.application_version_id, item.owner_id)
-    reason = rules.preflight_reason(owner_code, budget, review)
-    if reason is not None:
-        _finish(item, rules.NOT_EVALUATED, *reason)
-        return 'done'
-
-    with db.get_session(item.project_id) as session:
-        application = session.query(Application).filter(Application.id == item.application_id).first()
-        version = application.get_default_version() if application else None
-        if version is None:
-            _finish(item, rules.NOT_EVALUATED, rules.AGENT_BROKEN, 'The agent or its default version is gone')
-            return 'done'
-        tier = rules.resolve_dataset_tier(
-            settings['dataset_policy'], _agent_suites(session, application.id),
-            (application.meta or {}).get(DEFAULT_EVAL_DATASET_KEY), _project_dataset_id(item.project_id, session))
-        if tier['tier'] is None:
-            _finish(item, rules.NOT_EVALUATED, rules.NO_DATASET, 'The agent has no evaluation dataset')
-            return 'done'
-        dataset_id = tier['dataset_id']
-        if tier['tier'] == rules.TIER_PLATFORM:
-            dataset_id = _ensure_platform_dataset(item.project_id, session, application, version, item.owner_id)
-        suite_id = tier['suite_id'] or _ensure_generated_suite(
-            item.project_id, session, application.id, dataset_id, item.owner_id)
-        run = create_batch_run(
-            item.project_id, suite_id, dataset_id=dataset_id, application_version_id=version.id,
-            owner_id=item.owner_id, trigger_type=EvalRunTrigger.scheduled,
-            meta={'auto_item_id': item.id, 'auto_job_id': item.job_id},
-            max_cases=settings['max_cases_per_agent'], session=session)
-        session.commit()
-        run_id, snapshot_judge = run.id, (run.snapshot or {}).get('suite', {}).get('judge_model')
-
-    item.application_version_id = version.id
-    item.suite_id, item.dataset_tier, item.eval_run_id = suite_id, tier['tier'], run_id
-    judge = snapshot_judge or get_validation_llm_settings(item.project_id, version.id)
+    item.eval_run_id = run_id
+    judge = snapshot_judge or get_validation_llm_settings(item.project_id, version_id)
     try:
         task_id = launch_run(item.project_id, run_id, eval_task_node=eval_task_node,
                              judge_llm_settings=judge, case_concurrency=settings['case_concurrency'])
@@ -693,26 +704,175 @@ def _launch(item: EvalAutoItem, settings: dict, eval_task_node) -> str:
     return 'launched'
 
 
+def _launch_history(item: EvalAutoItem, settings: dict, eval_task_node) -> Optional[str]:
+    """Score the agent from its stored chats; None when hybrid mode should run it live instead."""
+    hybrid = settings['mode'] == rules.MODE_HYBRID
+    if not has_history_consent(item.project_id):
+        if hybrid:
+            return None
+        _finish(item, rules.NOT_EVALUATED, rules.OTHER, 'History evaluation not enabled for this project')
+        return 'done'
+    with db.get_session(item.project_id) as session:
+        application, version = _default_version(session, item)
+        if version is None:
+            _finish(item, rules.NOT_EVALUATED, rules.AGENT_BROKEN, 'The agent or its default version is gone')
+            return 'done'
+        turns = load_turns(session, item.project_id, application.id, version.id, settings)
+        plan = plan_history(turns, settings, f'{item.job_id}:{item.application_id}')
+        item.meta = {**(item.meta or {}), 'history': plan['meta']}
+        if plan['reason'] is not None:
+            if hybrid and plan['reason'][0] == rules.NO_TRAFFIC:
+                return None
+            _finish(item, rules.NOT_EVALUATED, *plan['reason'])
+            return 'done'
+        tier, _dataset_id, suite_id = _resolve_suite(session, item, settings, application, version, history=True)
+        if not plan['sample']:
+            _finish(item, rules.NOT_EVALUATED, rules.NO_TRAFFIC, 'No chat turn could be sampled')
+            return 'done'
+        # Only the sampled turns' text is read, so the read is bounded by history_max_turns.
+        sample = load_texts(session, plan['sample'])
+        try:
+            run = create_history_run(
+                item.project_id, suite_id, sample, application_version_id=version.id,
+                owner_id=item.owner_id, session=session,
+                meta={'auto_item_id': item.id, 'auto_job_id': item.job_id, 'history': plan['meta']})
+        except EvalRunConfigError as exc:
+            # The suite has only usage checks, which a chat turn has no data for.
+            _finish(item, rules.NOT_EVALUATED, rules.NO_DATASET, f'The suite cannot score chat turns: {exc}')
+            return 'done'
+        session.commit()
+        run_id, snapshot_judge = run.id, (run.snapshot or {}).get('suite', {}).get('judge_model')
+
+    item.mode = rules.MODE_HISTORY
+    item.application_version_id = version.id
+    item.suite_id, item.dataset_tier = suite_id, tier
+    return _submit(item, settings, eval_task_node, run_id, version.id, snapshot_judge)
+
+
+def _launch_live(item: EvalAutoItem, settings: dict, eval_task_node) -> str:
+    review = scan_schedule(item.project_id, item.application_version_id, item.owner_id)
+    reason = rules.preflight_reason(None, None, review)
+    if reason is not None:
+        _finish(item, rules.NOT_EVALUATED, *reason)
+        return 'done'
+
+    with db.get_session(item.project_id) as session:
+        application, version = _default_version(session, item)
+        if version is None:
+            _finish(item, rules.NOT_EVALUATED, rules.AGENT_BROKEN, 'The agent or its default version is gone')
+            return 'done'
+        resolved = _resolve_suite(session, item, settings, application, version)
+        if resolved is None:
+            _finish(item, rules.NOT_EVALUATED, rules.NO_DATASET, 'The agent has no evaluation dataset')
+            return 'done'
+        tier, dataset_id, suite_id = resolved
+        run = create_batch_run(
+            item.project_id, suite_id, dataset_id=dataset_id, application_version_id=version.id,
+            owner_id=item.owner_id, trigger_type=EvalRunTrigger.scheduled,
+            meta={'auto_item_id': item.id, 'auto_job_id': item.job_id},
+            max_cases=settings['max_cases_per_agent'], session=session)
+        session.commit()
+        run_id, snapshot_judge = run.id, (run.snapshot or {}).get('suite', {}).get('judge_model')
+
+    item.mode = rules.MODE_LIVE
+    item.application_version_id = version.id
+    item.suite_id, item.dataset_tier = suite_id, tier
+    return _submit(item, settings, eval_task_node, run_id, version.id, snapshot_judge)
+
+
+def _lock_live_slots(session) -> None:
+    """Held until the commit; SQLite tests have no advisory locks."""
+    if session.get_bind().dialect.name == 'postgresql':
+        session.execute(_LIVE_SLOT_LOCK)
+
+
+def _live_slot_free(item: EvalAutoItem, settings: dict) -> bool:
+    """Counted in the item's own session, under the live-slot lock, so the slot stays taken until
+    :func:`_process_claimed` commits the item as a running live one."""
+    session = object_session(item)
+    _lock_live_slots(session)
+    running = session.query(func.count(EvalAutoItem.id)).filter(
+        EvalAutoItem.state == EvalAutoItemState.running, EvalAutoItem.mode != rules.MODE_HISTORY,
+        EvalAutoItem.id != item.id).scalar() or 0
+    return running < settings['max_concurrent_runs']
+
+
+def _launch(item: EvalAutoItem, settings: dict, eval_task_node) -> str:
+    """Pre-flight, then score the agent from its chats or run it live, as the mode says.
+
+    Returns ``launched``, ``retry`` (left queued: the pool or a check was unavailable),
+    ``requeue`` (a hybrid fallback waiting for a live slot) or ``done`` (the item has its Not
+    Evaluated reason).
+    """
+    owner_code = (check_owner_access(item.project_id, item.owner_id)
+                  or _check_owner_rights(item.project_id, item.owner_id, item.application_id))
+    if owner_code == ACCESS_CHECK_UNAVAILABLE:
+        return 'retry'
+    # The judge is billed to the owner in every mode.
+    budget = None if owner_code else closed_budget_scope(item.project_id, item.owner_id)
+    reason = rules.preflight_reason(owner_code, budget, None)
+    if reason is not None:
+        _finish(item, rules.NOT_EVALUATED, *reason)
+        return 'done'
+
+    # The fallback flag counts only in hybrid mode: in history mode a flag left by an earlier hybrid
+    # drain must not run the agent live, in a history slot and past the live cap.
+    fallback = settings['mode'] == rules.MODE_HYBRID and (item.meta or {}).get(LIVE_FALLBACK_KEY)
+    if settings['mode'] != rules.MODE_LIVE and not fallback:
+        outcome = _launch_history(item, settings, eval_task_node)
+        if outcome is not None:
+            return outcome
+        # Hybrid without consent or traffic: run live, but only in a live slot. The history it looked
+        # at does not describe a live result.
+        item.mode = rules.MODE_LIVE
+        item.meta = {key: value for key, value in (item.meta or {}).items() if key != 'history'}
+        if not _live_slot_free(item, settings):
+            item.meta = {**(item.meta or {}), LIVE_FALLBACK_KEY: True}
+            return 'requeue'
+    return _launch_live(item, settings, eval_task_node)
+
+
+def _claim_rows(pending, slots: int, mode: str) -> list:
+    if slots <= 0:
+        return []
+    rows = pending.order_by(EvalAutoItem.created_at.asc(), EvalAutoItem.id.asc()
+                            ).with_for_update(skip_locked=True).limit(slots).all()
+    for row in rows:
+        row.state = EvalAutoItemState.running
+        row.started_at = _now()
+        row.attempts = (row.attempts or 0) + 1
+        # Holds the slot it was claimed into until the launch says which mode ran.
+        row.mode = mode
+    return rows
+
+
 def _claim(settings: dict, manual_only: bool = False) -> List[int]:
     """Move up to the free run slots of pending items to running, without two drains sharing one.
 
-    ``manual_only`` claims only the items of a "Run now" job (outside the window).
+    Live runs take ``max_concurrent_runs`` slots; history runs use no agent worker and take
+    ``max_concurrent_history_runs`` slots instead. In hybrid mode an item is claimed into a history
+    slot unless it already fell back to live. ``manual_only`` claims only the items of a "Run now"
+    job (outside the window).
     """
     with db.with_project_schema_session(None) as session:
-        running = session.query(func.count(EvalAutoItem.id)).filter(
-            EvalAutoItem.state == EvalAutoItemState.running).scalar() or 0
-        slots = settings['max_concurrent_runs'] - running
-        if slots <= 0:
-            return []
+        _lock_live_slots(session)
+        running = dict(session.query(EvalAutoItem.mode == rules.MODE_HISTORY, func.count(EvalAutoItem.id)).filter(
+            EvalAutoItem.state == EvalAutoItemState.running).group_by(EvalAutoItem.mode == rules.MODE_HISTORY).all())
+        live_free = settings['max_concurrent_runs'] - running.get(False, 0)
+        history_free = settings['max_concurrent_history_runs'] - running.get(True, 0)
         pending = session.query(EvalAutoItem).filter(EvalAutoItem.state == EvalAutoItemState.pending)
         if manual_only:
             pending = pending.filter(EvalAutoItem.trigger == EvalAutoTrigger.manual)
-        rows = pending.order_by(EvalAutoItem.created_at.asc(), EvalAutoItem.id.asc()
-                   ).with_for_update(skip_locked=True).limit(slots).all()
-        for row in rows:
-            row.state = EvalAutoItemState.running
-            row.started_at = _now()
-            row.attempts = (row.attempts or 0) + 1
+        mode = settings['mode']
+        if mode == rules.MODE_LIVE:
+            rows = _claim_rows(pending, live_free, rules.MODE_LIVE)
+        elif mode == rules.MODE_HISTORY:
+            rows = _claim_rows(pending, history_free, rules.MODE_HISTORY)
+        else:
+            fallback = EvalAutoItem.meta[LIVE_FALLBACK_KEY].astext == 'true'
+            rows = (_claim_rows(pending.filter(fallback), live_free, rules.MODE_LIVE)
+                    + _claim_rows(pending.filter(or_(EvalAutoItem.meta[LIVE_FALLBACK_KEY].is_(None),
+                                                     ~fallback)), history_free, rules.MODE_HISTORY))
         session.commit()
         return [row.id for row in rows]
 
@@ -730,7 +890,12 @@ def _process_claimed(item_id: int, settings: dict, eval_task_node) -> str:
             log.exception('eval auto drain: item %s could not be launched', item_id)
             _finish(item, rules.NOT_EVALUATED, rules.OTHER, 'The evaluation could not be started')
             outcome = 'done'
-        if outcome == 'retry':
+        if outcome == 'requeue':
+            # Waiting for a live slot is not a failed attempt.
+            item.state = EvalAutoItemState.pending
+            item.started_at = None
+            item.attempts = max((item.attempts or 1) - 1, 0)
+        elif outcome == 'retry':
             if item.attempts >= MAX_ATTEMPTS:
                 _finish(item, rules.NOT_EVALUATED, rules.OTHER,
                         f'Could not be started after {item.attempts} attempts')
@@ -800,8 +965,8 @@ def drain(eval_task_node) -> dict:
         closed = _close_finished_jobs(session)
         session.commit()
     result = {'settled': settled, 'reclaimed': reclaimed, 'launched': outcomes.count('launched'),
-              'retried': outcomes.count('retry'), 'not_evaluated': outcomes.count('done'),
-              'closed_jobs': closed}
+              'retried': outcomes.count('retry'), 'requeued': outcomes.count('requeue'),
+              'not_evaluated': outcomes.count('done'), 'closed_jobs': closed}
     if settled or reclaimed or outcomes or closed:
         log.info('eval auto drain: %s', result)
     return result
@@ -819,7 +984,7 @@ def item_dict(item: EvalAutoItem) -> dict:
         'status': item.status, 'reason_code': item.reason_code, 'reason_detail': item.reason_detail,
         'eval_run_id': item.eval_run_id, 'suite_id': item.suite_id, 'headline_score': item.headline_score,
         'coverage': item.coverage, 'dataset_tier': item.dataset_tier, 'trigger': item.trigger,
-        'mode': item.mode, 'attempts': item.attempts,
+        'mode': item.mode, 'history': (item.meta or {}).get('history'), 'attempts': item.attempts,
         'created_at': item.created_at.isoformat() if item.created_at else None,
         'finished_at': item.finished_at.isoformat() if item.finished_at else None,
     }
@@ -836,7 +1001,7 @@ def job_dict(job: EvalAutoJob) -> dict:
 
 def list_latest(project_id: Optional[int] = None, status: Optional[str] = None,
                 limit: int = 500, offset: int = 0, search: Optional[str] = None,
-                reason: Optional[str] = None) -> dict:
+                reason: Optional[str] = None, mode: Optional[str] = None) -> dict:
     """Each agent's latest finished item: the dashboard's one row per agent.
 
     ``search`` matches the agent name, or the agent id when it is a number.
@@ -854,6 +1019,8 @@ def list_latest(project_id: Optional[int] = None, status: Optional[str] = None,
             query = query.filter(EvalAutoItem.status == status)
         if reason:
             query = query.filter(EvalAutoItem.reason_code == reason)
+        if mode:
+            query = query.filter(EvalAutoItem.mode == mode)
         term = (search or '').strip()
         if term:
             match = EvalAutoItem.agent_name.ilike(rules.like_pattern(term), escape='\\')

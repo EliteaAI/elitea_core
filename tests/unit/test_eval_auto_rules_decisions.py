@@ -222,6 +222,39 @@ def test_two_unflagged_suites_fall_through(rules):
     assert rules.resolve_dataset_tier('agent_only', suites, None, 11)['tier'] is None
 
 
+def test_history_mode_takes_bindings_and_never_a_dataset(rules):
+    suites = [{'id': 2, 'dataset_id': 8, 'auto_evaluation': True}]
+    assert rules.resolve_history_tier('agent_first', suites) == {
+        'tier': 'agent_suite', 'suite_id': 2, 'dataset_id': None}
+    assert rules.resolve_history_tier('agent_first', [], None, 11) == {
+        'tier': 'project', 'suite_id': None, 'dataset_id': None}
+
+
+def test_history_mode_never_ends_in_no_dataset(rules):
+    # Suites without a dataset still give bindings; the flagged one first.
+    no_dataset = [{'id': 4, 'dataset_id': None}, {'id': 6, 'dataset_id': None, 'auto_evaluation': True}]
+    assert rules.resolve_dataset_tier('agent_only', no_dataset)['tier'] is None
+    assert rules.resolve_history_tier('agent_only', no_dataset) == {
+        'tier': 'agent_suite', 'suite_id': 6, 'dataset_id': None}
+    two = [{'id': 1, 'dataset_id': 7}, {'id': 2, 'dataset_id': 8}]
+    assert rules.resolve_history_tier('agent_only', two)['suite_id'] == 1
+    # No suite of its own: the generated one.
+    assert rules.resolve_history_tier('agent_only', []) == {
+        'tier': 'platform', 'suite_id': None, 'dataset_id': None}
+
+
+def test_history_mode_prefers_the_agents_own_suite_under_agent_first(rules):
+    flagged_no_dataset = [{'id': 3, 'dataset_id': None, 'auto_evaluation': True}]
+    assert rules.resolve_dataset_tier('agent_first', flagged_no_dataset, None, 11)['tier'] == 'project'
+    assert rules.resolve_history_tier('agent_first', flagged_no_dataset, None, 11) == {
+        'tier': 'agent_suite', 'suite_id': 3, 'dataset_id': None}
+    two = [{'id': 1, 'dataset_id': 7}, {'id': 2, 'dataset_id': 8}]
+    assert rules.resolve_history_tier('agent_first', two) == {
+        'tier': 'agent_only_suite', 'suite_id': 1, 'dataset_id': None}
+    assert rules.resolve_history_tier('platform_only', two) == {
+        'tier': 'platform', 'suite_id': None, 'dataset_id': None}
+
+
 # --- pre-flight -------------------------------------------------------------
 
 def test_preflight_order(rules):
@@ -341,3 +374,19 @@ def test_probe_keys_keep_the_seeded_key_for_unchanged_text(rules):
 def test_health_check_inputs_append_starters_and_cap(rules):
     assert rules.health_check_inputs(['a', 'b'], ['b', ' ', 'c', 'd', 'e'], 3, 10) == ['a', 'b', 'c', 'd']
     assert rules.health_check_inputs(['a', 'b'], None, 3, 1) == ['a']
+
+
+@pytest.mark.parametrize('reason', ['HITL_REQUIRED', 'OAUTH_REQUIRED', 'AGENT_BROKEN'])
+def test_a_reason_read_from_history_is_retried(rules, reason):
+    # Old errors stay in the look-back window after a fix, so the chats are read again next tick.
+    now = datetime(2026, 11, 11)
+    attempt = {**_not_evaluated(5, reason, now - timedelta(days=1)), 'mode': rules.MODE_HISTORY}
+    assert rules.needs_evaluation(5, None, now, 90, last_attempt=attempt) == (True, 'retry')
+    live = {**attempt, 'mode': rules.MODE_LIVE}
+    assert rules.needs_evaluation(5, None, now, 90, last_attempt=live) == (False, 'blocked')
+
+
+def test_a_history_suite_that_cannot_score_turns_still_waits(rules):
+    now = datetime(2026, 11, 11)
+    attempt = {**_not_evaluated(5, 'NO_DATASET', now - timedelta(days=1)), 'mode': rules.MODE_HISTORY}
+    assert rules.needs_evaluation(5, None, now, 90, last_attempt=attempt) == (False, 'blocked')
