@@ -592,6 +592,9 @@ EXPOSED_WRITES = [
     ("POST", "elitea_core/builder_propose/{mode}/{project_id}", "read"),
     ("POST", "elitea_core/builder_ref/{mode}/{project_id}", "read"),
     ("POST", "elitea_core/builder_apply/{mode}/{project_id}", "build"),
+    # (#7228, live registry 2026-11-27) the folder create under its item path; the Builder's pipeline validator
+    ("POST", "elitea_core/folder/{mode}/{project_id}/{folder_id}", "build"),
+    ("POST", "elitea_core/validate_pipeline/{mode}/{project_id}", "read"),
 ]
 
 
