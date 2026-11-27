@@ -28,11 +28,13 @@ from ...utils.mcp_oauth import (
     dataverse_token_endpoint,
     exchange_token,
     get_oauth_configurations,
-    is_same_endpoint,
     pick_oauth_setting,
     refresh_token,
+    token_endpoint_allowed,
 )
 from ....configurations.utils import expand_configuration
+
+TOKEN_ENDPOINT_REFUSED = "token_endpoint is not the sign-in address of this credential"
 
 
 def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str):
@@ -205,13 +207,13 @@ class ProjectAPI(api_tools.APIModeHandler):
 
                     credential_sources = [settings, *oauth_configs]
 
-                    # A Dataverse credential can be shared with every toolkit editor, so its secret never
-                    # leaves for a caller-chosen host: only the Entra endpoint of its own tenant is served.
-                    dataverse_endpoint = dataverse_token_endpoint(settings)
-                    if dataverse_endpoint is not None and not is_same_endpoint(dataverse_endpoint, data.token_endpoint):
-                        log.warning(f"MCP OAuth proxy: token_endpoint refused for Dataverse toolkit {data.toolkit_id}")
+                    # A stored credential can be shared with every toolkit editor, so its secret never leaves
+                    # for a caller-chosen host: only the sign-in address of its own identity provider is
+                    # served, whatever the caller's rights.
+                    if token_endpoint_allowed(settings, data.token_endpoint) is False:
+                        log.warning(f"MCP OAuth proxy: token_endpoint refused for toolkit {data.toolkit_id}")
                         return {"error": "access_denied",
-                                "error_description": "token_endpoint does not match the Dataverse credential"}, 403
+                                "error_description": TOKEN_ENDPOINT_REFUSED}, 403
 
                     # FE always sends the DCR client_id in the same request, so the guard below
                     # is not hit in practice, but is included for symmetry with the secret guard

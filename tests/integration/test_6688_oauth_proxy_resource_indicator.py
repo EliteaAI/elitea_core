@@ -102,7 +102,8 @@ def proxy(monkeypatch):
     _load(monkeypatch, f'{PKG}.models.pd.mcp_oauth', PLUGIN_ROOT / 'models' / 'pd' / 'mcp_oauth.py')
     _package(monkeypatch, f'{PKG}.utils')
     _module(monkeypatch, f'{PKG}.utils.mcp_config', is_mcp_exposure_enabled=lambda: True)
-    oauth_utils = _load(monkeypatch, f'{PKG}.utils.mcp_oauth', PLUGIN_ROOT / 'utils' / 'mcp_oauth.py')
+    _load(monkeypatch, f'{PKG}.utils.entra_obo', PLUGIN_ROOT / 'utils' / 'entra_obo.py')  # mcp_oauth imports it
+    oauth_utils = _load(monkeypatch, f'{PKG}.utils.mcp_oauth',PLUGIN_ROOT / 'utils' / 'mcp_oauth.py')
 
     posted = []
 
