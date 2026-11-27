@@ -509,6 +509,30 @@ def test_the_token_endpoint_is_reached_only_over_https_on_the_authority_without_
     assert (trust_env, redirects, proxies) == (False, 0, {})
 
 
+@pytest.mark.parametrize("url", [
+    "https://user@login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://user:pw@login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://evil.example\\@login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://login.microsoftonline.com/t\n/oauth2/v2.0/token",
+    "https://login.microsoftonline.com\x00.evil.example/t",
+    "https://login.microsoftonline.com:notaport/t",
+    "https://[::1/t",
+    "", None, 5,
+])
+def test_the_authority_check_refuses_user_info_and_unusual_characters(ns, url):
+    assert ns.entra_obo.is_entra_authority_url(url) is False
+    with pytest.raises(ns.entra_obo.DelegationRefused):
+        ns.entra_obo._post(url, {})   # pylint: disable=W0212
+
+
+@pytest.mark.parametrize("url", [
+    "https://login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://LOGIN.MICROSOFTONLINE.COM:443/t/oauth2/v2.0/token",
+])
+def test_the_authority_check_accepts_the_authority_host_with_no_port_or_443(ns, url):
+    assert ns.entra_obo.is_entra_authority_url(url) is True
+
+
 def test_the_cache_is_bounded_and_serves_only_tokens_with_life_left(ns):
     obo = ns.entra_obo
     obo.forget()

@@ -35,6 +35,9 @@ from ...utils.mcp_oauth import (
 from ....configurations.utils import expand_configuration
 
 TOKEN_ENDPOINT_REFUSED = "token_endpoint is not the sign-in address of this credential"
+# The fields that name a shared credential: the same set a toolkit may hold for it
+# (utils/application_tools.py `_expand_toolkit_settings`)
+CREDENTIAL_REFERENCE_KEYS = frozenset({'elitea_title', 'private', 'configuration_uuid', 'configuration_project_id'})
 
 
 def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str):
@@ -148,6 +151,7 @@ class ProjectAPI(api_tools.APIModeHandler):
 
         vault_client = VaultClient(project_id)
         credential_sources = []
+        endpoint_from_app = False
 
         # Default app mode: the browser knows only the app reference, never its secret
         if data.oauth_app_id and not data.used_dcr:
@@ -156,6 +160,7 @@ class ProjectAPI(api_tools.APIModeHandler):
                 client_id, client_secret, app_token_endpoint, scope = _resolve_oauth_app_client(
                     data.oauth_app_id, project_id, data.credential_type)
                 data.token_endpoint = app_token_endpoint
+                endpoint_from_app = True
             except LookupError as e:  # OAuthAppUnavailable
                 return {"error": "app_unavailable", "error_description": str(e)}, 400
 
@@ -197,9 +202,10 @@ class ProjectAPI(api_tools.APIModeHandler):
                         if config_title and not oauth_config.get('client_id'):
                             log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
                             # The expansion overlays the shared credential on this dict, so a key it does not
-                            # hold would stay: an editor could plant the endpoint the secret is sent to
-                            oauth_config.pop('token_url', None)
-                            oauth_config.pop('token_endpoint', None)
+                            # hold would stay: an editor could plant the endpoint the secret is sent to, or
+                            # a key that decides the sign-in kind. Only the reference stays.
+                            for key in [key for key in oauth_config if key not in CREDENTIAL_REFERENCE_KEYS]:
+                                del oauth_config[key]
                             try:
                                 # Get user_id from auth context for private configuration lookup
                                 user_id = auth.current_user().get('id') if oauth_config.get('private') else None
@@ -214,7 +220,9 @@ class ProjectAPI(api_tools.APIModeHandler):
                     # A stored credential can be shared with every toolkit editor, so its secret never leaves
                     # for a caller-chosen host: only the sign-in address of its own identity provider is
                     # served, whatever the caller's rights.
-                    if token_endpoint_allowed(settings, data.token_endpoint) is False:
+                    # An endpoint taken from the admin app is the app's own: the admin may run a sovereign
+                    # cloud or a custom authority, and the app secret goes only there.
+                    if not endpoint_from_app and token_endpoint_allowed(settings, data.token_endpoint) is False:
                         log.warning(f"MCP OAuth proxy: token_endpoint refused for toolkit {data.toolkit_id}")
                         return {"error": "access_denied",
                                 "error_description": TOKEN_ENDPOINT_REFUSED}, 403

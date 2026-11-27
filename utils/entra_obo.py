@@ -313,10 +313,26 @@ def _session() -> requests.Session:
     return session
 
 
+def is_entra_authority_url(url) -> bool:
+    """Whether ``url`` is an https address on the Entra authority host, with no user info and port 443 at most.
+
+    Only the host is pinned: the tenant and the path may be of any shape. A backslash, a space or a control
+    character is refused because parsers differ on where the host ends. The one host rule of every caller.
+    """
+    if not isinstance(url, str) or any(char.isspace() or char == "\\" or ord(char) < 32 for char in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (parts.scheme == "https" and parts.hostname == AUTHORITY_HOST
+            and "@" not in parts.netloc and port in (None, 443))
+
+
 def _post(url, data, timeout=HTTP_TIMEOUT_S) -> requests.Response:
     """One form POST to the Entra authority: https, the authority host only, no redirect, a timeout."""
-    parts = urlsplit(url)
-    if parts.scheme != "https" or parts.hostname != AUTHORITY_HOST or parts.port not in (None, 443):
+    if not is_entra_authority_url(url):
         raise DelegationRefused(APP_UNAVAILABLE)
     with _session() as session:
         return session.post(url, data=data, timeout=timeout, allow_redirects=False, verify=True)

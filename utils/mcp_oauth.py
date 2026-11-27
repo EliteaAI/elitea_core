@@ -21,9 +21,9 @@ import re
 from typing import Optional
 
 import requests
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
-from .entra_obo import AUTHORITY_HOST
+from .entra_obo import is_entra_authority_url
 
 
 # Toolkit settings keys that reference a credential carrying the OAuth client
@@ -69,17 +69,8 @@ def is_microsoft_login_url(url: str | None) -> bool:
     """Whether ``url`` is an https address on the Microsoft login host, with no user info and port 443 at most.
 
     Only the host is pinned, so the tenant (a GUID or a domain name) and the path may be of any shape.
-    Copy of the host check of ``entra_obo._post``: the two must agree.
     """
-    if not isinstance(url, str) or any(char.isspace() or char == '\\' or ord(char) < 32 for char in url):
-        return False
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
-        return False
-    return (parts.scheme == 'https' and parts.hostname == AUTHORITY_HOST
-            and '@' not in parts.netloc and port in (None, 443))
+    return is_entra_authority_url(url)  # the one host rule, shared with the OBO exchange
 
 
 def token_endpoint_allowed(settings: dict, token_endpoint: str | None) -> bool | None:

@@ -350,6 +350,67 @@ def test_a_sharepoint_app_sign_in_replaces_a_foreign_endpoint_with_the_app_endpo
     assert (url, form['client_id'], form['client_secret']) == (MS_GUID_ENDPOINT, 'app-cid', 'app-secret')
 
 
+@ROLES
+@pytest.mark.parametrize('app_endpoint', [
+    'https://login.microsoftonline.us/tenant-1/oauth2/v2.0/token',
+    'https://idp.example/custom/authority/token',
+])
+@pytest.mark.parametrize('sent', ['', 'https://attacker.example/token'])
+def test_an_admin_app_is_served_at_its_own_endpoint_whatever_host_it_is_on(
+        toolkits, monkeypatch, permissions, app_endpoint, sent):
+    app = ('app-cid', 'app-secret', app_endpoint, 'offline_access Sites.Read.All')
+    monkeypatch.setattr(toolkits.proxy.handler, '_resolve_oauth_app_client', lambda *_: app)
+    toolkits.settings = {'sharepoint_configuration': {'oauth_app_id': 'app-1'}}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, sent, grant={'oauth_app_id': 'app-1', 'credential_type': 'sharepoint'})
+
+    assert status == 200, body
+    (url, form), = toolkits.proxy.posted
+    assert (url, form['client_id'], form['client_secret']) == (app_endpoint, 'app-cid', 'app-secret')
+
+
+@ROLES
+@pytest.mark.parametrize('planted', ['oauth_app_id', 'oauth_discovery_endpoint'])
+@BOTH_GRANTS
+def test_a_planted_key_does_not_turn_an_app_only_shared_credential_into_a_sign_in(
+        toolkits, monkeypatch, permissions, planted, grant):
+    def expand(payload, **_kwargs):  # the shared credential is ACS app-only: a client and no sign-in
+        payload.update({'client_id': 'cid', 'client_secret': 'real-secret'})
+
+    monkeypatch.setattr(toolkits.proxy.handler, 'expand_configuration', expand)
+    toolkits.settings = {'sharepoint_configuration': {'elitea_title': 'shared', planted: 'planted'}}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, MS_GUID_ENDPOINT, grant=grant)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == []
+
+
+def test_a_shared_credential_keeps_its_uuid_reference_when_expanded(toolkits, monkeypatch):
+    seen = []
+
+    def expand(payload, **_kwargs):
+        seen.append(dict(payload))
+        payload.update({'client_id': 'cid', 'client_secret': 'real-secret',
+                        'oauth_discovery_endpoint': 'https://login.microsoftonline.com/common/v2.0'})
+
+    monkeypatch.setattr(toolkits.proxy.handler, 'expand_configuration', expand)
+    toolkits.settings = {'teams_configuration': {
+        'elitea_title': 'shared', 'private': False, 'configuration_uuid': 'u-1', 'configuration_project_id': 7,
+        'token_url': 'https://attacker.example/token', 'client_secret': ''}}
+    toolkits.permissions = EDITOR_OR_ADMIN
+
+    _, status = _sign_in(toolkits, MS_GUID_ENDPOINT)
+
+    assert status == 200
+    assert seen == [{'elitea_title': 'shared', 'private': False, 'configuration_uuid': 'u-1',
+                     'configuration_project_id': 7}]
+    (_, form), = toolkits.proxy.posted
+    assert form['client_secret'] == 'real-secret'
+
+
 def test_a_toolkit_without_an_oauth_credential_keeps_the_edit_right_rule(toolkits):
     toolkits.settings = {'client_id': 'cid', 'client_secret': 'real-secret'}
     toolkits.permissions = EDITOR_OR_ADMIN
