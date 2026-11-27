@@ -295,8 +295,8 @@ class ProjectAPI(api_tools.APIModeHandler):
             try:
                 expand_configuration(credential, current_project_id=project_id,
                                      user_id=auth.current_user().get('id'), unsecret=True)
-            except Exception as e:  # pylint: disable=W0703
-                # A missing project or schema fails here too: the same answer for every cause, so the status
+            except Exception as e:  # noqa: BLE001  pylint: disable=W0703
+                # Any failure, a missing project or schema included, gives the same fixed 404, so the status
                 # does not tell which project ids exist; only the type of the error is logged
                 log.warning(f"MCP OAuth proxy: credential lookup failed ({type(e).__name__})")
                 return {"error": "not_found", "error_description": "Credential not found"}, 404
