@@ -903,7 +903,9 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, chat_skills=chat_skills, invoked_skills=invoked_skills, project_skills=project_skills)
+            # (#7228 follow-up) under enforce the participants are prefetched, so admission decides each with the chat
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, chat_skills=chat_skills, invoked_skills=invoked_skills, project_skills=project_skills,
+                                                     prefetch_participants=is_governed(self))
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
         except PredictPayloadError as e:

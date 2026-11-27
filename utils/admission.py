@@ -845,10 +845,45 @@ def _printable(value: str, limit=80) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "\u2026"
 
 
-def _admit_children(  # pylint: disable=R0913,R0914
+def _application_key(tool) -> Optional[str]:
+    """The prefetch key (``"<application id>:<version id>"``) an application tool names, None for any other tool."""
+    settings = tool.get("settings") if isinstance(tool, dict) and tool.get("type") == "application" else None
+    if not isinstance(settings, dict):
+        return None
+    return f"{settings.get('application_id')}:{settings.get('application_version_id')}"
+
+
+def _injected_participants(payload, request: AdmissionRequest) -> set:
+    """(#7228 follow-up) The prefetch keys of the conversation participants Main injected as callable sub-agents of a
+    plain chat or swarm turn (``participant_id`` on the tool, ``generate_toolkit_payload``). A version the run also has
+    configured (no mark) and the run's own version are never among them. Dict reads only."""
+    application = payload.get("application") if isinstance(payload.get("application"), dict) else {}
+    details = application.get("version_details") if isinstance(application.get("version_details"), dict) else {}
+    marked, configured = set(), set()
+    for tools in (payload.get("tools"), details.get("tools")):
+        for tool in tools if isinstance(tools, list) else []:
+            key = _application_key(tool)
+            if key is not None:
+                (marked if "participant_id" in tool else configured).add(key)
+    return marked - configured - {f"{request.application_id}:{request.version_id}"}
+
+
+def _subtree(prefetched, root) -> set:
+    """The prefetched keys a sub-agent reaches (itself included). Dict reads only."""
+    seen, queue = {root}, deque([root])
+    while queue:
+        for tool in prefetched.get(queue.popleft(), []):
+            key = _application_key(tool)
+            if key in prefetched and key not in seen:
+                seen.add(key)
+                queue.append(key)
+    return seen
+
+
+def _admit_children(  # pylint: disable=R0912,R0913,R0914
     module, request: AdmissionRequest, subject, payload, expires_at, root_id, *, development, shadow, can_use,
-    decisions=(), token_identity=None,
-) -> list:
+    decisions=(), token_identity=None, participants=frozenset(),
+) -> tuple:
     """Step 5c (#7227): the sub-agents the run calls in its own process, each decided on its own. A bound one (one active
     binding that still matches) is a governed child on its own binding and grants, for the same person (never a
     mandate): the parent's profile does not reach it. Under a development parent any other one is a development child
@@ -857,33 +892,110 @@ def _admit_children(  # pylint: disable=R0913,R0914
 
     A governed parent reads nothing here unless a sub-agent carries a configuration its own decisions do not name
     (``decisions``: a sub-agent that uses the run's own toolkit is sealed against the run's decision, as before). The
-    sub-agents are those the prefetch expanded (same project, its depth and node limits). ``[ChildAdmission]``, or
-    ``AdmissionDenied`` for the first refusal, which refuses the whole run."""
+    sub-agents are those the prefetch expanded (same project, its depth and node limits). ``AdmissionDenied`` for the
+    first refusal, which refuses the whole run.
+
+    (#7228 follow-up) ``participants``: the injected conversation participants (``_injected_participants``). A refusal
+    of one of them, or of a sub-agent it reaches (one that is not admitted and carries a credential counts as refused,
+    ``DENIED_BINDING``, as the seal would refuse it), skips that participant for the turn instead. ``(children,
+    {participant key: AdmissionDenied}, keys reached only through skipped participants)``."""
     prefetched = prefetched_tool_lists(payload)
     if not prefetched or (not development and not _uncovered(prefetched, decisions, payload.get("project_id"))):
-        return []
-    read = _read_children(request, _child_order(payload, prefetched), module.admission_settings)
-    admitted, children = {}, []
+        return [], {}, set()
+    order = _child_order(payload, prefetched)
+    read = _read_children(request, order, module.admission_settings)
+    reach = {root: _subtree(prefetched, root) for root in participants if root in prefetched}
+    # what the run reaches through its own configured sub-agents refuses the run as before, whoever else reaches it
+    fixed = set().union(*(_subtree(prefetched, key) for key, parent in order
+                          if parent is None and key not in reach)) if reach else set()
+    skipped, decided = {}, []
+
+    def refuse(key, denied):
+        owners = [root for root, keys in reach.items() if key in keys]
+        if not owners or key in fixed:
+            raise denied
+        for root in owners:
+            skipped.setdefault(root, denied)
+
     for key, parent, application_id, version_id, binding, rows in read:
         if binding is None and development:
-            raise _denied("DENIED_BINDING")   # a sub-agent of a draft that is not a version of its application
-        if binding is None or (not development and binding.id is None):
+            refuse(key, _denied("DENIED_BINDING"))   # a sub-agent of a draft that is not a version of its application
             continue
-        while parent is not None and parent not in admitted:   # the nearest caller that has a context of its own
-            parent = next(item[1] for item in read if item[0] == parent)
-        lineage = [*admitted[parent].lineage, str(admitted[parent].context_id)] if parent else [str(root_id)]
+        if binding is None or (not development and binding.id is None):
+            if reach and _uncovered({key: prefetched[key]}, decisions, payload.get("project_id")):
+                refuse(key, _denied("DENIED_BINDING"))   # (#7228 follow-up) as the seal would refuse it
+            continue
         try:
-            decisions = _decide_credentials(
+            uses = _decide_credentials(
                 module, request.model_copy(update={"application_id": application_id, "version_id": version_id}),
                 subject, binding, {"project_id": payload.get("project_id"), "tools": prefetched[key]}, expires_at,
                 shadow=shadow, rows=rows, can_use=can_use, token_identity=token_identity)
         except AdmissionDenied as denied:
-            raise _named_refusal(denied, payload, key, prefetched[key]) from None
+            refuse(key, _named_refusal(denied, payload, key, prefetched[key]))
+            continue
+        decided.append((key, parent, application_id, version_id, binding, uses))
+    removed = set(prefetched) - set().union(*(_subtree(prefetched, key) for key, parent in order
+                                               if parent is None and key not in skipped)) if skipped else set()
+    admitted, children = {}, []
+    for key, parent, application_id, version_id, binding, uses in decided:
+        if key in removed:
+            continue
+        while parent is not None and parent not in admitted:   # the nearest caller that has a context of its own
+            parent = next(item[1] for item in read if item[0] == parent)
+        lineage = [*admitted[parent].lineage, str(admitted[parent].context_id)] if parent else [str(root_id)]
         child = ChildAdmission(key, uuid.uuid4(), admitted[parent].context_id if parent else root_id, lineage,
-                               application_id, version_id, binding, decisions)
+                               application_id, version_id, binding, uses)
         admitted[key] = child
         children.append(child)
-    return children
+    return children, skipped, removed
+
+
+# The reason code of the audit event of a participant left out of a turn (#7228 follow-up); its own refusal code is the
+# event's ``operation_id`` (the audit schema has no free field)
+SUBAGENT_SKIPPED = "SUBAGENT_SKIPPED"
+UNAVAILABLE_LINE = ("These participants of the chat are not available for this turn; do not call them or say that you "
+                    "delegated to them: {}")
+
+
+def _skip_participants(payload, skipped, removed) -> None:
+    """(#7228 follow-up) Leave the skipped participants out of this turn: their tools and the prefetch of what only they
+    reach go, and the model is told in one line (each participant's saved name and the fixed sentence of its refusal
+    code: no ids, no exception text). A pipeline's instructions are its definition: it is not told."""
+    application = payload.get("application") if isinstance(payload.get("application"), dict) else {}
+    details = application.get("version_details") if isinstance(application.get("version_details"), dict) else None
+    prefetch = application.get("subagent_version_details") if isinstance(
+        application.get("subagent_version_details"), dict) else {}
+    names = []
+    for key, denied in skipped.items():
+        entry = prefetch.get(key)
+        name = entry.get("name") if isinstance(entry, dict) else None
+        label = _printable(name) if isinstance(name, str) and name.strip() else "a participant"
+        names.append(f"“{label}” ({MESSAGES.get(denied.reason_code, GENERIC_MESSAGE)})")
+    for tools in (payload.get("tools"), (details or {}).get("tools")):
+        if isinstance(tools, list):
+            tools[:] = [tool for tool in tools if not (
+                isinstance(tool, dict) and "participant_id" in tool and _application_key(tool) in skipped)]
+    for key in removed:
+        prefetch.pop(key, None)
+    target = application if details is None else details
+    if not application or target.get("agent_type") == "pipeline":
+        return
+    current = target.get("instructions")
+    line = UNAVAILABLE_LINE.format("; ".join(names))
+    target["instructions"] = f"{current}\n\n{line}" if isinstance(current, str) and current else line
+
+
+def _record_skips(module, request: AdmissionRequest, run_id, caller, skipped, shadow=False) -> None:
+    """(#7228 follow-up) One audit event per participant left out of the turn: its application and version, its own
+    refusal code and the reference fields of the refused credential (no values). Audit only: a would-skip."""
+    for key, denied in skipped.items():
+        application_id, version_id = (int(part) for part in key.split(":"))   # ``_read_children`` parsed it
+        _record_deny(module, SUBAGENT_SKIPPED, event_type="decision", would_deny=shadow,
+                     project_id=request.project_id, application_id=application_id, caller_ref=caller["ref"],
+                     run_id=run_id, traceparent=request.trace_ref, **denied.audit,
+                     target_ref=f"version:{version_id}", operation_id=denied.reason_code)
+        _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny" if shadow else "deny",
+                SUBAGENT_SKIPPED)
 
 
 def _author_permissions(request: AdmissionRequest) -> set:
@@ -1533,11 +1645,13 @@ def _admit(  # pylint: disable=R0914
         raise _named_refusal(denied, payload, None, _payload_toolkits(payload)) from None   # names the toolkit (D15)
     # 5c. the sub-agents it runs in its own process, each on its own decision (#7227)
     context_id = uuid.uuid4()
-    children = _admit_children(
+    children, skipped, removed = _admit_children(
         module, request, subject, payload, expires_at, context_id,
         development=binding.id is None and children_of_drafts is not False, shadow=shadow,
         can_use=can_use or user_may_use_credentials(request.caller_id, request.binding_project_id), decisions=decisions,
-        token_identity=token_reader)
+        token_identity=token_reader, participants=_injected_participants(payload or {}, request))
+    if skipped:   # (#7228 follow-up) a participant that cannot run is left out of the turn, not the whole chat
+        _skip_participants(payload, skipped, removed)
     if token_reader is not None and any(getattr(decision, "auth_mode", None) == DELEGATED_AUTH_MODE for decision in
                                         [*decisions, *(d for child in children for d in child.decisions)]):
         # (#7337) the run acts with the owner's consent: its context names the owner's linked subject, which the
@@ -1548,13 +1662,16 @@ def _admit(  # pylint: disable=R0914
     if shadow:
         _record_shadow_allow(module, request, run_id, binding=binding, subject=subject, decisions=decisions,
                              caller=caller, children=children)
+        _record_skips(module, request, run_id, caller, skipped, shadow=True)
         return ShadowAllowed([binding_ref(d) for d in decisions],
                              {child.key: [binding_ref(d) for d in child.decisions] for child in children})
     # 6. context rows and allow events, atomically
     epochs = principal.get("epochs") if isinstance(principal.get("epochs"), dict) else {}
-    return _store_admission(
+    view = _store_admission(
         module, request, run_id, binding=binding, subject=subject, decisions=decisions, caller=caller,
         user_epochs=epochs, extra_epochs={}, expires_at=expires_at, context_id=context_id, children=children)
+    _record_skips(module, request, run_id, caller, skipped)
+    return view
 
 
 # What audit only rehearses for a run: the decisions dispatch would seal against, the run's and each sub-agent's (#7227)
