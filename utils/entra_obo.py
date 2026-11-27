@@ -186,8 +186,7 @@ def app_client(module, delegation: dict, project_id) -> tuple:
     except Exception as exc:  # pylint: disable=W0703
         log.info("entra obo: the oauth app was not resolved (%s)", type(exc).__name__)
         raise DelegationRefused(APP_UNAVAILABLE) from None
-    endpoint = urlsplit(str((app or {}).get("token_endpoint") or ""))
-    if endpoint.scheme != "https" or endpoint.hostname != AUTHORITY_HOST or not app.get("client_id") \
+    if not is_entra_authority_url((app or {}).get("token_endpoint")) or not app.get("client_id") \
             or not app.get("client_secret"):
         raise DelegationRefused(APP_UNAVAILABLE)   # an app's secret goes only to the Entra authority
     return app["client_id"], app["client_secret"]

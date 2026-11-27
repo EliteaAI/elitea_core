@@ -407,6 +407,20 @@ def test_an_admin_app_resolves_through_the_7149_seam_and_its_secret_goes_to_entr
         ns.entra_obo.app_client(env.module(), descriptor(oauth_app_id=app_id), 1)
 
 
+@pytest.mark.parametrize("endpoint", [
+    f"https://user@login.microsoftonline.com/{TID}/oauth2/v2.0/token",
+    f"https://login.microsoftonline.com:8443/{TID}/oauth2/v2.0/token",
+    f"https://login.microsoftonline.com/{TID}/oauth2/v2.0/token\\@evil.example",
+    None,
+], ids=["user info", "port 8443", "backslash", "missing"])
+def test_an_admin_app_endpoint_the_one_host_rule_refuses_gets_no_secret(ns, env, monkeypatch, endpoint):
+    app = {"client_id": "admin-app", "client_secret": "admin-secret-made-up", "token_endpoint": endpoint}
+    monkeypatch.setattr(ns.entra_obo, "_resolver", lambda: lambda *a: app)
+    with pytest.raises(ns.entra_obo.DelegationRefused) as refused:
+        ns.entra_obo.app_client(env.module(), descriptor(oauth_app_id=str(uuid.uuid4())), 1)
+    assert refused.value.code == "DENIED_OAUTH_APP_UNAVAILABLE"
+
+
 # --- readiness gap 2: the paths that hold a long-lived token never serve a delegated credential --------------------
 
 def test_a_mandate_is_refused_a_delegated_credential_at_decision_time(ns, env):

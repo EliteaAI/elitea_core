@@ -199,11 +199,13 @@ class ProjectAPI(api_tools.APIModeHandler):
                     oauth_configs = get_oauth_configurations(settings)
                     for oauth_config in oauth_configs:
                         config_title = oauth_config.get('elitea_title')
-                        if config_title and not oauth_config.get('client_id'):
+                        if config_title:
                             log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
                             # The expansion overlays the shared credential on this dict, so a key it does not
                             # hold would stay: an editor could plant the endpoint the secret is sent to, or
-                            # a key that decides the sign-in kind. Only the reference stays.
+                            # a key that decides the sign-in kind. Only the reference stays, an inline
+                            # client_id included: a toolkit type with no credential field in its schema is
+                            # saved without the reference-only check.
                             for key in [key for key in oauth_config if key not in CREDENTIAL_REFERENCE_KEYS]:
                                 del oauth_config[key]
                             try:

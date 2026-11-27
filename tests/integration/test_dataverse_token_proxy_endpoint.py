@@ -323,6 +323,23 @@ def test_an_endpoint_planted_in_the_inline_credential_is_not_the_saved_one(
     assert toolkits.proxy.posted == []
 
 
+@ROLES
+@BOTH_GRANTS
+def test_an_inline_client_next_to_a_credential_reference_does_not_make_its_endpoint_the_saved_one(
+        toolkits, shared_credential, permissions, grant):
+    # a toolkit of a type with no credential field in its schema is saved with whatever its settings hold
+    shared_credential.pop('token_url')
+    toolkits.settings = {'openapi_configuration': {
+        'elitea_title': 'shared', 'client_id': 'planted-cid', 'client_secret': '{{secret.shared}}',
+        'token_url': 'https://attacker.example/token'}}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, 'https://attacker.example/token', grant=grant)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == []
+
+
 def test_a_shared_credential_still_signs_in_at_its_own_saved_endpoint(toolkits, shared_credential):
     toolkits.settings = {'openapi_configuration': {'elitea_title': 'shared', 'token_url': 'https://attacker.example/t'}}
     toolkits.permissions = EDITOR_OR_ADMIN
