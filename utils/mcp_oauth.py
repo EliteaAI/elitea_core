@@ -23,7 +23,7 @@ from typing import Optional
 import requests
 from urllib.parse import parse_qs
 
-from .entra_obo import is_entra_authority_url
+from .entra_host import is_entra_authority_url
 
 
 # Toolkit settings keys that reference a credential carrying the OAuth client
@@ -65,14 +65,6 @@ def is_same_endpoint(expected: str, given: Optional[str]) -> bool:
     return bool(expected) and expected.rstrip('/') == (given or '').strip().rstrip('/')
 
 
-def is_microsoft_login_url(url: str | None) -> bool:
-    """Whether ``url`` is an https address on the Microsoft login host, with no user info and port 443 at most.
-
-    Only the host is pinned, so the tenant (a GUID or a domain name) and the path may be of any shape.
-    """
-    return is_entra_authority_url(url)  # the one host rule, shared with the OBO exchange
-
-
 def token_endpoint_allowed(settings: dict, token_endpoint: str | None) -> bool | None:
     """Whether the stored secret of every OAuth credential of the toolkit may go to ``token_endpoint``.
 
@@ -89,11 +81,11 @@ def token_endpoint_allowed(settings: dict, token_endpoint: str | None) -> bool |
         if key == DATAVERSE_CONFIGURATION_KEY:
             verdicts.append(is_same_endpoint(dataverse_token_endpoint(settings), token_endpoint))
         elif key in _MICROSOFT_LOGIN_KEYS:
-            verdicts.append(is_microsoft_login_url(token_endpoint))
+            verdicts.append(is_entra_authority_url(token_endpoint))
         elif key == 'sharepoint_configuration':
             # Without a discovery endpoint or an app it is ACS app-only: no sign-in, so no endpoint
             delegated = bool(config.get('oauth_discovery_endpoint') or config.get('oauth_app_id'))
-            verdicts.append(delegated and is_microsoft_login_url(token_endpoint))
+            verdicts.append(delegated and is_entra_authority_url(token_endpoint))
         else:
             saved = config.get('token_url') or config.get('token_endpoint')
             verdicts.append(is_same_endpoint(saved if isinstance(saved, str) else '', token_endpoint))

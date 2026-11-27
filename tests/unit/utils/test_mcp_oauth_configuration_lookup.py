@@ -16,7 +16,7 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope='module')
 def mcp_oauth():
-    # mcp_oauth imports its sibling entra_obo with a relative import, so both load under one
+    # mcp_oauth imports its sibling entra_host with a relative import, so both load under one
     # throwaway package whose path is the utils folder (the package __init__ is never run).
     package = types.ModuleType('mcp_oauth_pkg_under_test')
     package.__path__ = [str(PLUGIN_ROOT / 'utils')]
@@ -138,37 +138,6 @@ def test_an_endpoint_is_the_same_only_when_it_is_the_pinned_one(mcp_oauth, given
 
 SOME_GUID = '11111111-2222-3333-4444-555555555555'
 MS_TOKEN = f'https://login.microsoftonline.com/{SOME_GUID}/oauth2/v2.0/token'
-
-
-@pytest.mark.parametrize('url', [
-    MS_TOKEN,
-    'https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0/oauth2/token',
-    'https://LOGIN.MICROSOFTONLINE.COM/common/oauth2/v2.0/token',
-    'https://login.microsoftonline.com/common/oauth2/v2.0/token/',
-    'https://login.microsoftonline.com:443/common/oauth2/v2.0/token',
-])
-def test_the_microsoft_login_host_is_accepted_for_any_tenant_form(mcp_oauth, url):
-    assert mcp_oauth.is_microsoft_login_url(url) is True
-
-
-@pytest.mark.parametrize('url', [
-    'http://login.microsoftonline.com/common/oauth2/v2.0/token',
-    'https://login.microsoftonline.com.attacker.example/common/oauth2/v2.0/token',
-    'https://attacker.example/login.microsoftonline.com/token',
-    'https://user@login.microsoftonline.com/common/oauth2/v2.0/token',
-    'https://user:pw@login.microsoftonline.com/common/oauth2/v2.0/token',
-    'https://attacker.example\\@login.microsoftonline.com/token',
-    'https://login.microsoftonline.com:8443/common/oauth2/v2.0/token',
-    'https://login.microsoftonline.com:notaport/token',
-    'https://login.microsoftonline.us/common/oauth2/v2.0/token',
-    'https://login.chinacloudapi.cn/common/oauth2/v2.0/token',
-    'https://login.microsoftonline.com\x00.attacker.example/token',
-    ' https://login.microsoftonline.com/common/oauth2/v2.0/token',
-    'https://[::1/token',
-    '', None, 5, ['https://login.microsoftonline.com/token'],
-])
-def test_any_other_login_address_is_refused(mcp_oauth, url):
-    assert mcp_oauth.is_microsoft_login_url(url) is False
 
 
 OPENAPI_SAVED = 'https://idp.example/oauth/token'

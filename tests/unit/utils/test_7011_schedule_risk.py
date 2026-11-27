@@ -110,6 +110,7 @@ def scan(isolated_sys_modules):
     pd_package = types.ModuleType(f'{PKG}.models.pd')
     pd_package.__path__ = []
     sys.modules[pd_package.__name__] = pd_package
+    load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'schedule_list.py', f'{PKG}.models.pd.schedule_list')
     load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'mcp_oauth.py', f'{PKG}.models.pd.mcp_oauth')
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'stored_oauth_tokens.py', f'{PKG}.utils.stored_oauth_tokens')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_risk.py', f'{PKG}.utils.schedule_risk')

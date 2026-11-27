@@ -36,9 +36,21 @@ from ...utils.mcp_oauth import (
 from ....configurations.utils import expand_configuration
 
 TOKEN_ENDPOINT_REFUSED = "token_endpoint is not the sign-in address of this credential"
+VAULT_REFERENCE_REFUSED = "a vault reference needs a saved credential or toolkit"
 # The fields that name a shared credential: the same set a toolkit may hold for it
 # (utils/application_tools.py `_expand_toolkit_settings`)
 CREDENTIAL_REFERENCE_KEYS = frozenset({'elitea_title', 'private', 'configuration_uuid', 'configuration_project_id'})
+
+
+def _holds_reference(value, reference: str) -> bool:
+    """Whether the saved settings hold exactly ``reference`` as a value, at any depth."""
+    if isinstance(value, str):
+        return value == reference
+    if isinstance(value, dict):
+        return any(_holds_reference(item, reference) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_reference(item, reference) for item in value)
+    return False
 
 
 def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str):
@@ -165,8 +177,13 @@ class ProjectAPI(api_tools.APIModeHandler):
             except LookupError as e:  # OAuthAppUnavailable
                 return {"error": "app_unavailable", "error_description": str(e)}, 400
 
+        # A sign-in that names a saved credential is served from that credential alone, a saved toolkit next to
+        # it included: the form may have picked another credential than the one the toolkit row still holds
+        use_credential = bool(data.configuration_uuid) and saved_login is None and not endpoint_from_app
+        toolkit_holds_reference = False
+
         # If toolkit_id is provided, fetch credentials from database
-        if data.toolkit_id:
+        if data.toolkit_id and not use_credential:
             try:
                 with db.with_project_schema_session(project_id) as session:
                     toolkit = session.query(EliteATool).filter(
@@ -178,6 +195,9 @@ class ProjectAPI(api_tools.APIModeHandler):
                     
                     settings = toolkit.settings or {}
                     server_name = settings.get('server_name', '')
+                    # Before the vault is read: a reference the caller sends counts only when the row holds it
+                    toolkit_holds_reference = bool(
+                        data.client_secret and _holds_reference(settings, data.client_secret))
 
                     # Unsecret the settings to resolve any vault secret references (e.g., {{secret.my_secret}})
                     try:
@@ -200,8 +220,9 @@ class ProjectAPI(api_tools.APIModeHandler):
                     oauth_configs = get_oauth_configurations(settings)
                     for oauth_config in oauth_configs:
                         config_title = oauth_config.get('elitea_title')
-                        if config_title:
-                            log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
+                        # A reference by uuid alone is a reference too (the form saves it without a title)
+                        if config_title or oauth_config.get('configuration_uuid'):
+                            log.debug(f"MCP OAuth proxy: expanding configuration: {config_title or oauth_config.get('configuration_uuid')}")
                             # The expansion overlays the shared credential on this dict, so a key it does not
                             # hold would stay: an editor could plant the endpoint the secret is sent to, or
                             # a key that decides the sign-in kind. Only the reference stays, an inline
@@ -261,10 +282,9 @@ class ProjectAPI(api_tools.APIModeHandler):
                 log.error(f"MCP OAuth proxy: error fetching toolkit - {e}")
                 return {"error": "Database error", "details": str(e)}, 500
 
-        # A sign-in that names a saved credential and no toolkit: the server loads the credential itself, so a
-        # vault reference sent next to it is never resolved and the browser's endpoint is checked against the
-        # type of the loaded credential
-        if data.configuration_uuid and not data.toolkit_id and saved_login is None and not endpoint_from_app:
+        # The server loads the credential itself, so a vault reference sent next to it is never resolved and the
+        # browser's endpoint is checked against the type of the loaded credential
+        if use_credential:
             if client_secret and VAULT_SECRET_PATTERN.match(client_secret):
                 client_secret = None
             credential = {'configuration_uuid': data.configuration_uuid}
@@ -275,7 +295,10 @@ class ProjectAPI(api_tools.APIModeHandler):
             try:
                 expand_configuration(credential, current_project_id=project_id,
                                      user_id=auth.current_user().get('id'), unsecret=True)
-            except (LookupError, ValueError):
+            except Exception as e:  # pylint: disable=W0703
+                # A missing project or schema fails here too: the same answer for every cause, so the status
+                # does not tell which project ids exist; only the type of the error is logged
+                log.warning(f"MCP OAuth proxy: credential lookup failed ({type(e).__name__})")
                 return {"error": "not_found", "error_description": "Credential not found"}, 404
             credential_type = credential.get('configuration_type')
             if data.credential_type is not None and data.credential_type != credential_type:
@@ -300,10 +323,11 @@ class ProjectAPI(api_tools.APIModeHandler):
                 if isinstance(scope, list):
                     scope = ' '.join(scope)
 
-        # A vault reference with no toolkit or credential behind it names a secret the caller never proved to own
+        # A vault reference needs a saved credential (served above, the reference dropped) or a saved toolkit that
+        # holds that exact reference: any other names a secret the caller never proved to own
         if (client_secret and client_secret == data.client_secret and VAULT_SECRET_PATTERN.match(client_secret)
-                and not data.oauth_app_id and not data.toolkit_id and not data.configuration_uuid):
-            return {"error": "access_denied", "error_description": TOKEN_ENDPOINT_REFUSED}, 403
+                and not data.oauth_app_id and not toolkit_holds_reference):
+            return {"error": "access_denied", "error_description": VAULT_REFERENCE_REFUSED}, 403
 
         # Unsecret vault references sent in the request (e.g., {{secret.my_secret}})
         if client_secret and data.client_secret and client_secret == data.client_secret and not data.oauth_app_id:

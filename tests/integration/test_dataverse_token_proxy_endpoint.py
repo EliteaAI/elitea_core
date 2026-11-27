@@ -149,7 +149,7 @@ def test_a_member_without_the_edit_right_gets_no_vault_secret_even_at_the_own_en
 
 
 def test_a_toolkit_editor_resolves_a_vault_reference_at_the_own_endpoint(toolkits, vault):
-    toolkits.settings = {'dataverse_configuration': dict(DATAVERSE)}
+    toolkits.settings = {'dataverse_configuration': dict(DATAVERSE), 'client_secret': '{{secret.shared}}'}
     toolkits.permissions = [PATCH]
 
     _, status = _sign_in(toolkits, OWN_ENDPOINT, client_secret='{{secret.shared}}')
@@ -164,6 +164,7 @@ MS_GUID_ENDPOINT = f'https://login.microsoftonline.com/{SOME_GUID}/oauth2/v2.0/t
 MS_DOMAIN_ENDPOINT = 'https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0/oauth2/token'
 OPENAPI_TOKEN_URL = 'https://idp.example/oauth/token'
 REFUSED_TEXT = 'token_endpoint is not the sign-in address of this credential'
+VAULT_REFUSED_TEXT = 'a vault reference needs a saved credential or toolkit'
 FOREIGN_ENDPOINTS = [
     'https://attacker.example/token',
     'https://webhook.site/6f1d0c2e-0000-4000-8000-000000000000',
@@ -503,7 +504,7 @@ def test_a_vault_reference_without_a_toolkit_or_credential_is_refused_for_every_
 
     body, status = toolkits.proxy.api.post(2)
 
-    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': VAULT_REFUSED_TEXT}), body
     assert toolkits.proxy.posted == [] and counting_vault == []
 
 
@@ -632,3 +633,170 @@ def test_a_dcr_client_next_to_a_credential_reference_keeps_its_own_secret_and_lo
     assert status == 200
     (_, form), = credential.proxy.posted
     assert (form['client_id'], form['client_secret']) == ('dcr-client', 'dcr-secret')
+
+
+@pytest.fixture
+def uuid_only_credential(toolkits, monkeypatch):
+    """Expanding fills the shared values on the dict the proxy hands over, whatever keys it held."""
+    seen = []
+
+    def expand(payload, **_kwargs):
+        seen.append(dict(payload))
+        payload.update(OPENAPI_CREDENTIAL['openapi_configuration'])
+
+    monkeypatch.setattr(toolkits.proxy.handler, 'expand_configuration', expand)
+    return seen
+
+
+@ROLES
+def test_a_toolkit_credential_reference_with_only_a_uuid_is_expanded(toolkits, uuid_only_credential, permissions):
+    toolkits.settings = {'openapi_configuration': {'configuration_uuid': CREDENTIAL_UUID, 'client_secret': ''}}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, OPENAPI_TOKEN_URL)
+
+    assert status == 200, body
+    assert uuid_only_credential == [{'configuration_uuid': CREDENTIAL_UUID}]
+    (_, form), = toolkits.proxy.posted
+    assert (form['client_id'], form['client_secret']) == ('cid', 'real-secret')
+
+
+@ROLES
+def test_an_endpoint_planted_next_to_a_uuid_only_reference_is_not_the_saved_one(
+        toolkits, uuid_only_credential, permissions):
+    toolkits.settings = {'openapi_configuration': {
+        'configuration_uuid': CREDENTIAL_UUID, 'token_url': 'https://attacker.example/token'}}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, 'https://attacker.example/token')
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == []
+
+
+# A saved toolkit whose form picked another credential: the UI sends toolkit_id and configuration_uuid together
+OLD_TOOLKIT_SETTINGS = {'openapi_configuration': {'client_id': 'old-cid', 'client_secret': 'old-secret',
+                                                  'token_url': 'https://old.example/token'}}
+
+
+@ROLES
+def test_a_saved_toolkit_with_another_picked_credential_signs_in_with_the_picked_one(credential, permissions):
+    credential.toolkits.settings = OLD_TOOLKIT_SETTINGS
+
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, permissions,
+                                       extra={'toolkit_id': 1, 'client_id': 'new-cid'})
+
+    assert status == 200, body
+    (url, form), = credential.proxy.posted
+    assert (url, form['client_id'], form['client_secret']) == (OPENAPI_TOKEN_URL, 'new-cid', 'real-secret')
+    assert len(credential.seen) == 1
+
+
+@ROLES
+def test_a_saved_toolkit_with_a_picked_credential_never_sends_the_old_endpoint_a_secret(credential, permissions):
+    credential.toolkits.settings = OLD_TOOLKIT_SETTINGS
+
+    body, status = _credential_sign_in(credential, 'https://old.example/token', permissions,
+                                       extra={'toolkit_id': 1, 'client_id': 'new-cid'})
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert credential.proxy.posted == []
+
+
+def test_a_saved_toolkit_with_a_picked_credential_takes_its_type_from_the_credential(credential):
+    credential.toolkits.settings = OLD_TOOLKIT_SETTINGS
+
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN,
+                                       extra={'toolkit_id': 1, 'credential_type': 'teams'})
+
+    assert status == 400, body
+    assert credential.proxy.posted == []
+
+
+def test_a_saved_toolkit_without_a_picked_credential_keeps_the_toolkit_branch(credential):
+    credential.toolkits.settings = OLD_TOOLKIT_SETTINGS
+
+    _, status = _credential_sign_in(credential, 'https://old.example/token', EDITOR_OR_ADMIN,
+                                    extra={'toolkit_id': 1, 'configuration_uuid': None})
+
+    assert status == 200
+    assert credential.seen == []
+    (_, form), = credential.proxy.posted
+    assert form['client_secret'] == 'old-secret'
+
+
+@pytest.mark.parametrize('error', [RuntimeError('relation "p_9.configurations" does not exist'),
+                                   KeyError('p_9'), Exception('connection to server at 10.0.0.5 failed')])
+@ROLES
+def test_a_failing_credential_lookup_is_the_same_not_found_and_logs_only_the_type(
+        credential, monkeypatch, permissions, error):
+    logged = []
+    monkeypatch.setattr(credential.proxy.handler, 'log', types.SimpleNamespace(
+        debug=logged.append, warning=logged.append, error=logged.append))
+    credential.error = error
+
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, permissions)
+
+    assert (status, body) == (404, {'error': 'not_found', 'error_description': 'Credential not found'})
+    assert credential.proxy.posted == []
+    assert not any(token in ' '.join(map(str, logged)) for token in ('p_9', '10.0.0.5'))
+
+
+@ROLES
+def test_a_vault_reference_a_plain_saved_toolkit_does_not_hold_is_refused_for_every_role(
+        toolkits, counting_vault, permissions):
+    toolkits.settings = {'client_id': 'cid', 'client_secret': 'plain', 'nested': [{'other': '{{secret.other}}'}]}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, 'https://attacker.example/token', client_secret='{{secret.shared}}')
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': VAULT_REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == []
+    assert '{{secret.shared}}' not in counting_vault
+
+
+def test_an_editor_resolves_the_vault_reference_a_plain_saved_toolkit_holds(toolkits, vault):
+    toolkits.settings = {'client_id': 'cid', 'nested': [{'client_secret': '{{secret.shared}}'}]}
+    toolkits.permissions = EDITOR_OR_ADMIN
+
+    body, status = _sign_in(toolkits, 'https://mcp.example/token', client_secret='{{secret.shared}}')
+
+    assert status == 200, body
+    (_, form), = toolkits.proxy.posted
+    assert form['client_secret'] == 'vault-secret'
+
+
+def test_a_viewer_gets_no_vault_secret_even_when_the_plain_toolkit_holds_the_reference(toolkits, vault):
+    toolkits.settings = {'client_id': 'cid', 'client_secret': '{{secret.shared}}'}
+    toolkits.permissions = []
+
+    body, status = _sign_in(toolkits, 'https://mcp.example/token', client_secret='{{secret.shared}}')
+
+    assert (status, body['error']) == (403, 'access_denied')
+    assert toolkits.proxy.posted == []
+
+
+@pytest.mark.parametrize('field, value', [
+    ('configuration_uuid', 'u' * 65), ('credential_type', 't' * 101),
+    ('configuration_uuid', ['a']), ('credential_type', 5),
+], ids=['uuid one over', 'type one over', 'uuid list', 'type number'])
+def test_the_credential_reference_fields_are_bounded(credential, field, value):
+    credential.proxy.request.json = {'token_endpoint': OPENAPI_TOKEN_URL, 'code': 'c',
+                                     'redirect_uri': 'http://localhost/cb', 'configuration_uuid': CREDENTIAL_UUID,
+                                     field: value}
+
+    body, status = credential.proxy.api.post(2)
+
+    assert status == 400, body
+    assert credential.seen == [] and credential.proxy.posted == []
+
+
+def test_the_credential_reference_fields_accept_their_cap(credential):
+    credential.type, credential.data = 't' * 100, {**OPENAPI_CREDENTIAL['openapi_configuration']}
+    credential.proxy.request.json = {'token_endpoint': OPENAPI_TOKEN_URL, 'code': 'c',
+                                     'redirect_uri': 'http://localhost/cb', 'configuration_uuid': 'u' * 64,
+                                     'credential_type': 't' * 100}
+
+    body, status = credential.proxy.api.post(2)
+
+    assert status == 200, body
