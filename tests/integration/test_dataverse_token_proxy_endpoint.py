@@ -36,14 +36,7 @@ class _Session:
 
 
 @pytest.fixture
-def id_bound(monkeypatch):
-    """The request model reads the database id bound from the schedule model; the harness stubs the package."""
-    harness._load(monkeypatch, f'{harness.PKG}.models.pd.schedule_list',
-                  harness.PLUGIN_ROOT / 'models' / 'pd' / 'schedule_list.py')
-
-
-@pytest.fixture
-def toolkits(id_bound, proxy, monkeypatch):
+def toolkits(proxy, monkeypatch):
     """Serve one toolkit row; ``permissions`` is what the caller holds in the project."""
     state = types.SimpleNamespace(settings={}, permissions=[])
 
@@ -464,7 +457,8 @@ def credential(toolkits, monkeypatch):
                                   error=None, seen=[], proxy=toolkits.proxy, toolkits=toolkits)
     handler = toolkits.proxy.handler
 
-    def expand(payload, **kwargs):
+    def expand(payload, current_project_id, user_id=None, unsecret=False, already_done=None, config_type=None):
+        kwargs = {'current_project_id': current_project_id, 'user_id': user_id, 'unsecret': unsecret}
         state.seen.append((dict(payload), kwargs))
         if state.error:
             raise state.error
@@ -476,11 +470,11 @@ def credential(toolkits, monkeypatch):
     return state
 
 
-def _credential_sign_in(credential, token_endpoint, permissions=(), grant=None, **body):
+def _credential_sign_in(credential, token_endpoint, permissions=(), grant=None, extra=None):
     credential.toolkits.permissions = list(permissions)
     proxy = credential.proxy
     proxy.request.json = {'token_endpoint': token_endpoint, 'code': 'auth-code', 'redirect_uri': 'http://localhost/cb',
-                          'configuration_uuid': CREDENTIAL_UUID, **(grant or {}), **body}
+                          'configuration_uuid': CREDENTIAL_UUID, **(grant or {}), **(extra or {})}
     return proxy.api.post(2)
 
 
@@ -526,7 +520,7 @@ def test_a_credential_reference_signs_in_with_the_stored_secret_at_its_own_endpo
     _use(credential, credential_type, saved)
     extra = {'credential_type': credential_type} if sent_type else {}
 
-    body, status = _credential_sign_in(credential, endpoint, permissions, **extra)
+    body, status = _credential_sign_in(credential, endpoint, permissions, extra=extra)
 
     assert status == 200, body
     (url, form), = credential.proxy.posted
@@ -561,7 +555,7 @@ def test_a_credential_the_caller_cannot_see_is_not_found(credential, permissions
 
 @pytest.mark.parametrize('sent', ['teams', 'sharepoint', 'dataverse', ''])
 def test_a_credential_type_that_differs_from_the_request_is_refused(credential, sent):
-    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, credential_type=sent)
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, extra={'credential_type': sent})
 
     assert status == 400, body
     assert body['error'] == 'invalid_request'
@@ -570,7 +564,8 @@ def test_a_credential_type_that_differs_from_the_request_is_refused(credential, 
 
 @pytest.mark.parametrize('project_id', [0, -1, 2**31, 'abc', [7], {'a': 1}])
 def test_a_credential_project_id_outside_the_database_range_is_a_bad_request(credential, project_id):
-    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, configuration_project_id=project_id)
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN,
+                                       extra={'configuration_project_id': project_id})
 
     assert status == 400, body
     assert credential.proxy.posted == [] and credential.seen == []
@@ -583,13 +578,14 @@ def test_a_credential_project_id_outside_the_database_range_is_a_bad_request(cre
     ({'configuration_project_id': 9}, {'configuration_uuid': CREDENTIAL_UUID, 'configuration_project_id': 9, 'private': True}),
 ], ids=['none', 'this project', 'another project'])
 def test_the_credential_is_looked_up_for_this_project_and_the_current_user(credential, extra, payload):
-    _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, **extra)
+    _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, extra=extra)
 
     assert credential.seen == [(payload, {'current_project_id': 2, 'user_id': 3, 'unsecret': True})]
 
 
 def test_a_vault_reference_next_to_a_credential_reference_is_not_resolved(credential, counting_vault):
-    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, client_secret='{{secret.shared}}')
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN,
+                                       extra={'client_secret': '{{secret.shared}}'})
 
     assert status == 200, body
     (_, form), = credential.proxy.posted
@@ -631,7 +627,7 @@ def test_a_credential_of_another_type_with_no_saved_endpoint_signs_in_nowhere(cr
 
 def test_a_dcr_client_next_to_a_credential_reference_keeps_its_own_secret_and_loads_no_stored_one(credential):
     _, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN,
-                                    client_id='dcr-client', client_secret='dcr-secret', used_dcr=True)
+                                    extra={'client_id': 'dcr-client', 'client_secret': 'dcr-secret', 'used_dcr': True})
 
     assert status == 200
     (_, form), = credential.proxy.posted
