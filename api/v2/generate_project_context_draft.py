@@ -35,6 +35,7 @@ from ...utils.draft_llm_utils import (
     describe_predict_failure,
     describe_validation_failure,
     extract_answer,
+    llm_schema,
     resolve_model,
     timeout_response,
 )
@@ -144,6 +145,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     "await_task_timeout": _AWAIT_TASK_TIMEOUT,
                 },
                 await_task_timeout=_AWAIT_TASK_TIMEOUT,
+                output_schema=llm_schema(GenerateProjectContextDraftResponse),
                 user_id=user_id,
                 skip_expansion=True,
                 return_chat_history=True,

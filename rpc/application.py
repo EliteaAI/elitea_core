@@ -803,6 +803,7 @@ class RPC:
                         chat_skills: Optional[list] = None,
                         invoked_skills: Optional[list] = None,
                         project_skills: Optional[list] = None,
+                        output_schema: Optional[dict] = None,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -821,6 +822,8 @@ class RPC:
             user_id: user id
             is_system_user: no real user behind the run (cron); implies skip_expansion
             skip_expansion: skip tool/configuration expand but keep the real user's identity
+            output_schema: JSON schema of the answer (EL-7679): one structured model call, no agent.
+                Server-side only, never taken from request data.
 
         Returns:
             Dictionary with task_id (SIO) or result (API blocking)
@@ -908,6 +911,8 @@ class RPC:
                                                      prefetch_participants=is_governed(self))
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
+            if output_schema:
+                payload['output_schema'] = output_schema
         except PredictPayloadError as e:
             if sid:
                 raise SioValidationError(

@@ -285,17 +285,36 @@ def extract_answer(result) -> str:
     if isinstance(history, list):
         answer = next(
             (
-                entry["content"] for entry in reversed(history)
-                if isinstance(entry, dict)
-                and (entry.get("role") in ASSISTANT_ROLES or entry.get("type") == "ai")
-                and isinstance(entry.get("content"), str)
-                and entry["content"].strip()
+                text for text in (
+                    content_text(entry.get("content")) for entry in reversed(history)
+                    if isinstance(entry, dict)
+                    and (entry.get("role") in ASSISTANT_ROLES or entry.get("type") == "ai")
+                )
+                if text.strip()
             ),
             None,
         )
         if answer:
             return answer
     return extract_draft_text(result)
+
+
+def content_text(content) -> str:
+    """Answer text of a message ``content``: a string, or a list of blocks (EL-7679).
+
+    With thinking on, Claude returns ``[{'type': 'thinking', ...}, {'type': 'text', ...}]`` or bare
+    strings beside the thinking block; text blocks and strings are joined, thinking and reasoning
+    blocks are skipped (same rule as the SDK's ``structured_text``).
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        block if isinstance(block, str) else block.get("text", "")
+        for block in content
+        if isinstance(block, str) or (isinstance(block, dict) and block.get("type") == "text")
+    )
 
 
 def describe_parse_failure(raw_text: str, candidate: str, error, result) -> str:
@@ -527,3 +546,19 @@ def apply_offered_origins(
     _filter("suggested_agents", agents, "application_id", attached.get("attached_agents"))
     _filter("suggested_pipelines", pipelines, "application_id", attached.get("attached_pipelines"))
     _filter("suggested_skills", skills, "id", attached.get("attached_skills"))
+
+
+
+def llm_schema(model, exclude=()) -> dict:
+    """JSON schema of ``model`` for the model to answer in (EL-7679).
+
+    ``exclude`` removes fields the server fills in after the model answers. Bounds are kept so the
+    model sees the real limits; the SDK checks only the required fields, the endpoint validates fully.
+    """
+    schema = model.model_json_schema()
+    excluded = set(exclude)
+    for name in excluded:
+        schema.get("properties", {}).pop(name, None)
+    if "required" in schema:
+        schema["required"] = [name for name in schema["required"] if name not in excluded]
+    return schema

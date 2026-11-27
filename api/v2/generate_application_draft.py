@@ -39,6 +39,7 @@ from ...utils.draft_llm_utils import (
     describe_parse_failure,
     describe_predict_failure,
     extract_answer,
+    llm_schema,
     resolve_draft_llm_settings,
     timeout_response,
 )
@@ -170,6 +171,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     "await_task_timeout": _AWAIT_TASK_TIMEOUT,
                 },
                 await_task_timeout=_AWAIT_TASK_TIMEOUT,
+                output_schema=llm_schema(GenerateApplicationDraftResponse),
                 user_id=user_id,
                 skip_expansion=True,
                 return_chat_history=True,
