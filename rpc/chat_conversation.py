@@ -146,24 +146,27 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
 
 
 
-# BE-2: the usage call for the complexity filter (a bounded wait, and a wide period: usage keeps a bounded window)
-RPC_TIMEOUT_SECONDS = 10
+# The usage call of the complexity filter: a wide period (usage keeps a bounded window) and a bounded wait. The wait
+# must stay clearly shorter than the API's wait for this whole list call (10 s), so a slow usage answers
+# complexity_unavailable (503) before the API gives up with a generic error.
+RPC_TIMEOUT_SECONDS = 5
 COMPLEXITY_FROM = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
 COMPLEXITY_TO = datetime.datetime(2100, 1, 1, tzinfo=datetime.timezone.utc)
 
-def _complexity_conversation_ids(rpc_manager, labels, entity_id, entity_project_id):
+def _complexity_conversation_ids(rpc_manager, labels, entity_id, entity_project_id, project_id=None):
     """The conversation uuids of an entity's runs with one of the complexity labels, from usage (BE-2).
 
     Returns (uuids, truncated), where truncated says usage held more runs than it returned (it returns the newest
     ones). Returns None when the labels are not available: the entity is unknown, usage failed, or the feature is
     off ("skipped"), so the list says so instead of showing an empty page as "no run matches". The period is every
-    run the entity keeps (usage retains a bounded window).
+    run the entity keeps (usage retains a bounded window). `project_id` is the project whose conversations are
+    listed: usage's indexes start with it, so naming it keeps the lookup on them.
     """
     if entity_id is None or entity_project_id is None:
         return None
     try:
         result = rpc_manager.timeout(RPC_TIMEOUT_SECONDS).usage_complexity_conversations_by_label(
-            entity_project_id, entity_id, COMPLEXITY_FROM, COMPLEXITY_TO, labels,
+            entity_project_id, entity_id, COMPLEXITY_FROM, COMPLEXITY_TO, labels, project_id=project_id,
         )
     except Exception:  # pylint: disable=W0703
         log.exception('complexity filter: the usage call failed')
@@ -670,6 +673,7 @@ class RPC:
             if complexity:  # BE-2: the rows whose run has one of the complexity labels, from usage
                 found = _complexity_conversation_ids(
                     self.context.rpc_manager, _as_values(complexity), participant_id, entity_project_id,
+                    project_id=project_id,
                 )
                 if found is None:
                     return {'total': 0, 'rows': [], 'complexity_unavailable': True}

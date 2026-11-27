@@ -203,7 +203,7 @@ def _load_complexity_helper(log=None):
 def _rpc_manager(answer):
     import types
 
-    def by_label(*_args):
+    def by_label(*_args, **_kwargs):
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -279,3 +279,32 @@ def test_the_meta_version_is_read_only_with_an_entity_filter():
     source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
     guard = source.index("if participant_id is not None:\n                    version_in_meta")
     assert guard < source.index("'version_id'].astext.in_(")
+
+
+def test_the_list_names_its_project_so_usage_can_use_its_indexes():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "labels, project_id=project_id," in source
+    assert "participant_id, entity_project_id,\n                    project_id=project_id," in source
+
+
+def test_the_project_reaches_usage_with_the_labels():
+    import types
+    seen = {}
+
+    def by_label(*args, **kwargs):
+        seen['args'], seen['kwargs'] = args, kwargs
+        return {'conversation_ids': [], 'truncated': False}
+    manager = types.SimpleNamespace(timeout=lambda _s: types.SimpleNamespace(
+        usage_complexity_conversations_by_label=by_label))
+    _load_complexity_helper()(manager, ['L'], 26, 3, project_id=7)
+    assert seen['kwargs'] == {'project_id': 7} and seen['args'][:2] == (3, 26)
+
+
+def test_the_usage_wait_is_shorter_than_the_api_wait_so_the_503_can_be_reached():
+    import re
+    rpc_source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    api_source = (PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py').read_text()
+    inner = int(re.search(r'^RPC_TIMEOUT_SECONDS = (\d+)$', rpc_source, re.M).group(1))
+    outer = int(re.search(r'rpc\.timeout\((\d+)\)\.chat_list_conversations_rpc', api_source).group(1))
+    assert inner < outer
+    assert outer - inner >= 3  # room for the count and page queries that still run after a usage answer
