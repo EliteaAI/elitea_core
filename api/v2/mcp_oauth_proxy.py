@@ -22,9 +22,10 @@ from tools import api_tools, auth, config as c, db, VaultClient, register_openap
 from pylon.core.tools import log
 
 from ...models.elitea_tools import EliteATool
-from ...models.pd.mcp_oauth import McpOAuthTokenRequest
+from ...models.pd.mcp_oauth import VAULT_SECRET_PATTERN, McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import (
+    credential_token_endpoint_allowed,
     dataverse_token_endpoint,
     exchange_token,
     get_oauth_configurations,
@@ -259,6 +260,50 @@ class ProjectAPI(api_tools.APIModeHandler):
             except Exception as e:
                 log.error(f"MCP OAuth proxy: error fetching toolkit - {e}")
                 return {"error": "Database error", "details": str(e)}, 500
+
+        # A sign-in that names a saved credential and no toolkit: the server loads the credential itself, so a
+        # vault reference sent next to it is never resolved and the browser's endpoint is checked against the
+        # type of the loaded credential
+        if data.configuration_uuid and not data.toolkit_id and saved_login is None and not endpoint_from_app:
+            if client_secret and VAULT_SECRET_PATTERN.match(client_secret):
+                client_secret = None
+            credential = {'configuration_uuid': data.configuration_uuid}
+            if data.configuration_project_id:
+                # A credential of another project is visible only as the caller's own personal one or a shared
+                # one; `private` makes the expansion count the personal project
+                credential.update(configuration_project_id=data.configuration_project_id, private=True)
+            try:
+                expand_configuration(credential, current_project_id=project_id,
+                                     user_id=auth.current_user().get('id'), unsecret=True)
+            except (LookupError, ValueError):
+                return {"error": "not_found", "error_description": "Credential not found"}, 404
+            credential_type = credential.get('configuration_type')
+            if data.credential_type is not None and data.credential_type != credential_type:
+                return {"error": "invalid_request",
+                        "error_description": "credential_type is not the type of this credential"}, 400
+            # Before any secret is read: the caller chooses token_endpoint, the credential decides where its secret goes
+            if not credential_token_endpoint_allowed(credential_type, credential, data.token_endpoint):
+                log.warning(f"MCP OAuth proxy: token_endpoint refused for a {credential_type} credential")
+                return {"error": "access_denied", "error_description": TOKEN_ENDPOINT_REFUSED}, 403
+            if not client_id and not data.used_dcr:
+                client_id = credential.get('client_id')
+            if not client_secret and not data.used_dcr:
+                client_secret = credential.get('client_secret')
+                # the wrapper first: a Dataverse credential saves no endpoint, its tenant endpoint counts as the declared one
+                sources = [{f'{credential_type}_configuration': credential}, credential]
+                if client_secret and not _may_send_stored_secret(project_id, data.token_endpoint, sources):
+                    log.warning(f"MCP OAuth proxy: stored client_secret withheld for a {credential_type} credential, "
+                                f"token_endpoint is not its saved one and caller cannot edit toolkits")
+                    client_secret = None
+            if not scope:
+                scope = credential.get('scopes') or credential.get('scope')
+                if isinstance(scope, list):
+                    scope = ' '.join(scope)
+
+        # A vault reference with no toolkit or credential behind it names a secret the caller never proved to own
+        if (client_secret and client_secret == data.client_secret and VAULT_SECRET_PATTERN.match(client_secret)
+                and not data.oauth_app_id and not data.toolkit_id and not data.configuration_uuid):
+            return {"error": "access_denied", "error_description": TOKEN_ENDPOINT_REFUSED}, 403
 
         # Unsecret vault references sent in the request (e.g., {{secret.my_secret}})
         if client_secret and data.client_secret and client_secret == data.client_secret and not data.oauth_app_id:

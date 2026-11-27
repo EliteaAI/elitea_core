@@ -36,7 +36,14 @@ class _Session:
 
 
 @pytest.fixture
-def toolkits(proxy, monkeypatch):
+def id_bound(monkeypatch):
+    """The request model reads the database id bound from the schedule model; the harness stubs the package."""
+    harness._load(monkeypatch, f'{harness.PKG}.models.pd.schedule_list',
+                  harness.PLUGIN_ROOT / 'models' / 'pd' / 'schedule_list.py')
+
+
+@pytest.fixture
+def toolkits(id_bound, proxy, monkeypatch):
     """Serve one toolkit row; ``permissions`` is what the caller holds in the project."""
     state = types.SimpleNamespace(settings={}, permissions=[])
 
@@ -437,3 +444,195 @@ def test_a_toolkit_without_an_oauth_credential_keeps_the_edit_right_rule(toolkit
     assert status == 200
     (_, form), = toolkits.proxy.posted
     assert form['client_secret'] == 'real-secret'
+
+
+# A sign-in that names a saved credential and no toolkit: the server loads it and decides the endpoint by its type
+CREDENTIAL_UUID = '11111111-aaaa-4bbb-8ccc-222222222222'
+CREDENTIAL_TYPES = {
+    **{name: (name, config[f'{name}_configuration']) for name, config in MICROSOFT_CREDENTIALS.items()},
+    'openapi': ('openapi', OPENAPI_CREDENTIAL['openapi_configuration']),
+    'dataverse': ('dataverse', DATAVERSE),
+}
+EVERY_CREDENTIAL = pytest.mark.parametrize('credential_type, saved', CREDENTIAL_TYPES.values(),
+                                           ids=list(CREDENTIAL_TYPES))
+
+
+@pytest.fixture
+def credential(toolkits, monkeypatch):
+    """The saved credential the reference names; ``seen`` records what the handler asked the expansion for."""
+    state = types.SimpleNamespace(type='openapi', data=dict(OPENAPI_CREDENTIAL['openapi_configuration']),
+                                  error=None, seen=[], proxy=toolkits.proxy, toolkits=toolkits)
+    handler = toolkits.proxy.handler
+
+    def expand(payload, **kwargs):
+        state.seen.append((dict(payload), kwargs))
+        if state.error:
+            raise state.error
+        payload.update(state.data)
+        payload['configuration_type'] = state.type
+
+    monkeypatch.setattr(handler, 'expand_configuration', expand)
+    monkeypatch.setattr(handler.auth, 'current_user', lambda: {'id': 3}, raising=False)
+    return state
+
+
+def _credential_sign_in(credential, token_endpoint, permissions=(), grant=None, **body):
+    credential.toolkits.permissions = list(permissions)
+    proxy = credential.proxy
+    proxy.request.json = {'token_endpoint': token_endpoint, 'code': 'auth-code', 'redirect_uri': 'http://localhost/cb',
+                          'configuration_uuid': CREDENTIAL_UUID, **(grant or {}), **body}
+    return proxy.api.post(2)
+
+
+def _use(credential, credential_type, saved):
+    credential.type, credential.data = credential_type, dict(saved)
+
+
+@pytest.fixture
+def counting_vault(toolkits, monkeypatch):
+    """A vault that resolves ``{{secret.shared}}`` and counts every call."""
+    calls = []
+
+    def unsecret(value):
+        calls.append(value)
+        return 'vault-secret' if value == '{{secret.shared}}' else value
+
+    monkeypatch.setattr(toolkits.proxy.handler, 'VaultClient', lambda project_id: types.SimpleNamespace(unsecret=unsecret))
+    return calls
+
+
+@ROLES
+def test_a_vault_reference_without_a_toolkit_or_credential_is_refused_for_every_role(toolkits, counting_vault, permissions):
+    toolkits.permissions = permissions
+    toolkits.proxy.request.json = {'token_endpoint': 'https://attacker.example/token', 'code': 'auth-code',
+                                   'redirect_uri': 'http://localhost/cb', 'client_secret': '{{secret.shared}}'}
+
+    body, status = toolkits.proxy.api.post(2)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == [] and counting_vault == []
+
+
+@pytest.mark.parametrize('credential_type, saved, endpoint, permissions', [
+    ('teams', MICROSOFT_CREDENTIALS['teams']['teams_configuration'], MS_GUID_ENDPOINT, EDITOR_OR_ADMIN),
+    ('openapi', OPENAPI_CREDENTIAL['openapi_configuration'], OPENAPI_TOKEN_URL, []),
+    ('openapi', OPENAPI_CREDENTIAL['openapi_configuration'], OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN),
+    ('dataverse', DATAVERSE, OWN_ENDPOINT, []),
+    ('dataverse', DATAVERSE, OWN_ENDPOINT, EDITOR_OR_ADMIN),
+], ids=['teams editor', 'openapi viewer', 'openapi editor', 'dataverse viewer', 'dataverse editor'])
+@pytest.mark.parametrize('sent_type', [False, True], ids=['no type sent', 'same type sent'])
+def test_a_credential_reference_signs_in_with_the_stored_secret_at_its_own_endpoint(
+        credential, credential_type, saved, endpoint, permissions, sent_type):
+    _use(credential, credential_type, saved)
+    extra = {'credential_type': credential_type} if sent_type else {}
+
+    body, status = _credential_sign_in(credential, endpoint, permissions, **extra)
+
+    assert status == 200, body
+    (url, form), = credential.proxy.posted
+    assert (url, form['client_id'], form['client_secret']) == (endpoint, 'cid', 'real-secret')
+
+
+@EVERY_CREDENTIAL
+@ROLES
+@BOTH_GRANTS
+@pytest.mark.parametrize('endpoint', FOREIGN_ENDPOINTS)
+def test_a_credential_reference_refuses_a_foreign_endpoint_and_posts_nothing(
+        credential, credential_type, saved, permissions, grant, endpoint):
+    _use(credential, credential_type, saved)
+
+    body, status = _credential_sign_in(credential, endpoint, permissions, grant=grant)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert credential.proxy.posted == []
+
+
+@pytest.mark.parametrize('error', [LookupError('no such credential in /tmp/secret-path'), ValueError('Recursion error')])
+@ROLES
+def test_a_credential_the_caller_cannot_see_is_not_found(credential, permissions, error):
+    credential.error = error
+
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, permissions)
+
+    assert status == 404, body
+    assert 'secret-path' not in str(body) and 'Recursion' not in str(body)
+    assert credential.proxy.posted == []
+
+
+@pytest.mark.parametrize('sent', ['teams', 'sharepoint', 'dataverse', ''])
+def test_a_credential_type_that_differs_from_the_request_is_refused(credential, sent):
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, credential_type=sent)
+
+    assert status == 400, body
+    assert body['error'] == 'invalid_request'
+    assert credential.proxy.posted == []
+
+
+@pytest.mark.parametrize('project_id', [0, -1, 2**31, 'abc', [7], {'a': 1}])
+def test_a_credential_project_id_outside_the_database_range_is_a_bad_request(credential, project_id):
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, configuration_project_id=project_id)
+
+    assert status == 400, body
+    assert credential.proxy.posted == [] and credential.seen == []
+
+
+@pytest.mark.parametrize('extra, payload', [
+    ({}, {'configuration_uuid': CREDENTIAL_UUID}),
+    # a project id also marks the lookup private: only then does the expansion count the caller's personal project as visible
+    ({'configuration_project_id': 2}, {'configuration_uuid': CREDENTIAL_UUID, 'configuration_project_id': 2, 'private': True}),
+    ({'configuration_project_id': 9}, {'configuration_uuid': CREDENTIAL_UUID, 'configuration_project_id': 9, 'private': True}),
+], ids=['none', 'this project', 'another project'])
+def test_the_credential_is_looked_up_for_this_project_and_the_current_user(credential, extra, payload):
+    _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, **extra)
+
+    assert credential.seen == [(payload, {'current_project_id': 2, 'user_id': 3, 'unsecret': True})]
+
+
+def test_a_vault_reference_next_to_a_credential_reference_is_not_resolved(credential, counting_vault):
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN, client_secret='{{secret.shared}}')
+
+    assert status == 200, body
+    (_, form), = credential.proxy.posted
+    assert form['client_secret'] == 'real-secret'
+    assert counting_vault == []
+
+
+def test_a_viewer_gets_no_stored_secret_of_a_microsoft_credential(credential):
+    _use(credential, 'teams', MICROSOFT_CREDENTIALS['teams']['teams_configuration'])
+
+    _, status = _credential_sign_in(credential, MS_GUID_ENDPOINT, [])
+
+    assert status == 200
+    (url, form), = credential.proxy.posted
+    assert url == MS_GUID_ENDPOINT and 'client_secret' not in form
+
+
+@ROLES
+def test_a_credential_of_another_type_signs_in_only_at_its_saved_endpoint(credential, permissions):
+    _use(credential, 'jira', {'client_id': 'cid', 'client_secret': 'real-secret', 'token_url': OPENAPI_TOKEN_URL})
+
+    _, own = _credential_sign_in(credential, OPENAPI_TOKEN_URL, permissions)
+    _, foreign = _credential_sign_in(credential, 'https://attacker.example/token', permissions)
+
+    assert (own, foreign) == (200, 403)
+    assert [(url, form['client_secret']) for url, form in credential.proxy.posted] == [(OPENAPI_TOKEN_URL, 'real-secret')]
+
+
+@ROLES
+@pytest.mark.parametrize('saved', [{'client_id': 'cid', 'client_secret': 'real-secret'}, {}],
+                         ids=['no saved endpoint', 'empty credential'])
+def test_a_credential_of_another_type_with_no_saved_endpoint_signs_in_nowhere(credential, permissions, saved):
+    _use(credential, 'jira', saved)
+
+    _, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, permissions)
+
+    assert status == 403 and credential.proxy.posted == []
+
+
+def test_a_dcr_client_next_to_a_credential_reference_keeps_its_own_secret_and_loads_no_stored_one(credential):
+    _, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, EDITOR_OR_ADMIN,
+                                    client_id='dcr-client', client_secret='dcr-secret', used_dcr=True)
+
+    assert status == 200
+    (_, form), = credential.proxy.posted
+    assert (form['client_id'], form['client_secret']) == ('dcr-client', 'dcr-secret')

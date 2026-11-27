@@ -100,6 +100,23 @@ def token_endpoint_allowed(settings: dict, token_endpoint: str | None) -> bool |
     return all(verdicts) if verdicts else None
 
 
+def credential_token_endpoint_allowed(credential_type: str | None, data: dict, token_endpoint: str | None) -> bool:
+    """Whether the stored secret of one loaded credential may go to ``token_endpoint``.
+
+    ``credential_type`` is the type of the credential row, never a value of the request. The same rules as
+    ``token_endpoint_allowed``: the Microsoft types sign in at the Microsoft host, SharePoint only when
+    delegated, Dataverse at its tenant. Any other type accepts only the endpoint it saved. The answer is
+    never None, so a type nobody wrote a rule for is refused, not let through.
+    """
+    key = f'{credential_type}_configuration'
+    if key in OAUTH_CONFIGURATION_KEYS:
+        verdict = token_endpoint_allowed({key: data}, token_endpoint)
+        if verdict is not None:
+            return verdict
+    saved = (data or {}).get('token_url') or (data or {}).get('token_endpoint')
+    return is_same_endpoint(saved if isinstance(saved, str) else '', token_endpoint)
+
+
 class TokenRefreshError(ValueError):
     """A refresh refused by the token endpoint; `error` is the OAuth error code, when it sent one."""
 

@@ -241,3 +241,41 @@ def test_every_credential_of_a_toolkit_must_accept_the_endpoint(mcp_oauth):
 
     assert mcp_oauth.token_endpoint_allowed(settings, OPENAPI_SAVED) is False
     assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is False
+
+
+TENANT_TOKEN = 'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token'
+DISCOVERY = 'https://login.microsoftonline.com/common/v2.0'
+# (credential type, the loaded credential data, the endpoint asked for, accepted)
+CREDENTIAL_RULE_CASES = [
+    ('teams', {'client_id': 'c'}, MS_TOKEN, True),
+    ('outlook', {'client_id': 'c'}, MS_TOKEN, True),
+    ('ms_graph', {'client_id': 'c'}, MS_TOKEN, True),
+    ('teams', {'client_id': 'c'}, 'https://attacker.example/token', False),
+    ('ms_graph', {'client_id': 'c'}, OPENAPI_SAVED, False),
+    ('sharepoint', {'oauth_discovery_endpoint': DISCOVERY}, MS_TOKEN, True),
+    ('sharepoint', {'oauth_app_id': 'app-1'}, MS_TOKEN, True),
+    ('sharepoint', {'oauth_discovery_endpoint': DISCOVERY}, 'https://attacker.example/token', False),
+    ('sharepoint', {'site_url': 'https://contoso.sharepoint.com'}, MS_TOKEN, False),
+    ('openapi', {'token_url': OPENAPI_SAVED}, OPENAPI_SAVED + '/', True),
+    ('openapi', {'token_endpoint': OPENAPI_SAVED}, OPENAPI_SAVED, True),
+    ('openapi', {'token_url': OPENAPI_SAVED}, 'https://attacker.example/token', False),
+    ('openapi', {'token_url': OPENAPI_SAVED}, MS_TOKEN, False),
+    ('openapi', {'oauth_discovery_endpoint': 'https://idp.example/.well-known'}, OPENAPI_SAVED, False),
+    ('openapi', {'token_url': ['not', 'a', 'string']}, OPENAPI_SAVED, False),
+    ('openapi', {'token_url': OPENAPI_SAVED}, None, False),
+    ('openapi', {}, OPENAPI_SAVED, False),
+    ('dataverse', {'tenant_id': 'tenant-1'}, TENANT_TOKEN, True),
+    ('dataverse', {'tenant_id': 'tenant-1'}, MS_TOKEN, False),
+    ('dataverse', {'tenant_id': 'a/../b'}, 'https://login.microsoftonline.com/a/../b/oauth2/v2.0/token', False),
+    ('dataverse', {}, TENANT_TOKEN, False),
+    ('jira', {'token_url': OPENAPI_SAVED}, OPENAPI_SAVED, True),
+    ('jira', {'token_url': OPENAPI_SAVED}, 'https://attacker.example/token', False),
+    ('jira', {'client_id': 'c'}, OPENAPI_SAVED, False),
+    ('', {'token_url': OPENAPI_SAVED}, OPENAPI_SAVED, True),
+    (None, {'client_id': 'c'}, OPENAPI_SAVED, False),
+]
+
+
+@pytest.mark.parametrize('credential_type, data, endpoint, accepted', CREDENTIAL_RULE_CASES)
+def test_credential_token_endpoint_allowed_follows_the_rule_of_its_type(mcp_oauth, credential_type, data, endpoint, accepted):
+    assert mcp_oauth.credential_token_endpoint_allowed(credential_type, data, endpoint) is accepted
