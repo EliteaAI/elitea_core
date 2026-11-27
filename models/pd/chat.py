@@ -1,7 +1,9 @@
 import uuid
 from typing import Optional, List, Dict, Any, Literal
 
-from jinja2 import Environment, DebugUndefined
+from jinja2 import DebugUndefined
+from jinja2.exceptions import SecurityError
+from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 # from .tool import ToolUpdateModel
 from .tool import ToolChatModel
@@ -12,10 +14,13 @@ from .version import ApplicationVariableModel, LLMSettingsModel
 
 
 def _resolve_variables(text, vars) -> str:
-    environment = Environment(undefined=DebugUndefined)
-    template = environment.from_string(text)
+    # Sandboxed (#7681); an unsafe template is returned unrendered.
+    environment = SandboxedEnvironment(undefined=DebugUndefined)
     converted_vars = {d.name: d.value for d in vars}
-    return template.render(**converted_vars)
+    try:
+        return environment.from_string(text).render(**converted_vars)
+    except SecurityError:
+        return text
 
 
 # Merged from promptlib_shared.models.pd.chat
@@ -23,6 +28,19 @@ class ChatHistory(BaseModel):
     role: str
     content: str | list
     additional_kwargs: Optional[Dict[str, Any]] = {}
+    # Replayed tool-call stubs (#7460); omitted from dumps when unset so plain turns stay unchanged
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+
+    def model_dump(self, **kwargs):
+        data = super().model_dump(**kwargs)
+        for key in ('tool_calls', 'tool_call_id'):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+    def dict(self, **kwargs):
+        return self.model_dump(**kwargs)
 
 
 ChatHistoryMessage = ChatHistory
@@ -86,6 +104,10 @@ class ApplicationChatRequest(MergeUpdateBase):
     project_context: Optional[Dict[str, str]] = Field(
         default=None,
         description="Enabled Project Context prepared for SDK-side on-demand loading.",
+    )
+    builder: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Elitea Builder block (#7383, builder_v2): core prompt for the SDK BuilderMiddleware.",
     )
     invoked_skills: Optional[List[dict]] = Field(
         default=None,
@@ -175,6 +197,10 @@ class LLMChatRequest(MergeUpdateBase):
     project_context: Optional[Dict[str, str]] = Field(
         default=None,
         description="Enabled Project Context prepared for SDK-side on-demand loading.",
+    )
+    builder: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Elitea Builder block (#7383, builder_v2): core prompt for the SDK BuilderMiddleware.",
     )
     invoked_skills: Optional[List[dict]] = Field(
         default=None,

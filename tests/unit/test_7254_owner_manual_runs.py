@@ -160,7 +160,7 @@ def test_the_run_endpoint_builds_the_owners_request_and_predict_takes_its_ticket
     holder(monkeypatch, ns)
     module = env.module(governed=governed, audit=audit)
     built = ns.mandate_admission.owner_run_request(
-        module, project_id=1, application_id=7, version_id=70, schedule_id=41)
+        module, project_id=1, application_id=7, version_id=70, trigger_ref=SCHEDULE)
     monkeypatch.setattr(ns.mandate_admission, "this", types.SimpleNamespace(module=module))
     ticket = ns.mandate_admission.mint_owner_run_ticket(built)
     request = ns.mandate_admission.take_trigger_admission(module, ticket, project_id=1, version_id=70)
@@ -174,4 +174,4 @@ def test_off_the_run_endpoint_builds_nothing_and_reads_no_holder(ns, env, monkey
     monkeypatch.setattr(ns.pd_admission, "_holder", lambda sid: (_ for _ in ()).throw(AssertionError("holder read")))
     module = env.module(governed=False)
     assert ns.mandate_admission.owner_run_request(
-        module, project_id=1, application_id=7, version_id=70, schedule_id=41) is None
+        module, project_id=1, application_id=7, version_id=70, trigger_ref=SCHEDULE) is None

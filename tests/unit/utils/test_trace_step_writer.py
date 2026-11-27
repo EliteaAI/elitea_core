@@ -78,6 +78,16 @@ def test_tool_attrs_keep_display_lineage_and_drop_arbitrary_metadata():
     assert 'description' not in row.attrs['tool_meta']
 
 
+def test_code_mode_mark_persists_only_as_a_bool():
+    # #7580: bridged calls carry via_code_mode so the reloaded chip keeps its mark
+    marked = tool_call_to_row(1, 'run-2', {'run_id': 'run-2', 'tool_name': 'get_issue',
+                                           'metadata': {'via_code_mode': True, 'toolkit_type': 'github'}})
+    bogus = tool_call_to_row(1, 'run-3', {'run_id': 'run-3', 'tool_name': 'get_issue',
+                                          'metadata': {'via_code_mode': 'yes', 'toolkit_type': 'github'}})
+    assert marked.attrs['metadata']['via_code_mode'] is True
+    assert 'via_code_mode' not in bogus.attrs['metadata']
+
+
 def test_thinking_row_round_trips_in_process_hierarchy_and_visibility():
     path = [{'name': 'Full Name resolver', 'call_id': 'root-1', 'sibling_ordinal': 2}]
     row = thinking_step_to_row(1, {

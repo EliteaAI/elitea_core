@@ -6,13 +6,17 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from pylon.core.tools import log
-from tools import MinioClient, this
+from sqlalchemy.orm import selectinload
+from tools import MinioClient, db, this
 
 from ..models.enums.all import ParticipantTypes
 from ..models.folder import ConversationFolder
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.base import MessageItem
+from ..models.participants import ParticipantMapping
+from ..models.skill import Skill
 from .authors import get_authors_data
+from .utils import get_public_project_id_or_none
 
 EXPORT_FORMAT_VERSION = '1.0'
 ATTACHMENTS_DIR = 'attachments'
@@ -177,6 +181,9 @@ def build_export_payload(
                     'entity_name': p['entity_name'],
                     'name': participant_display_name(p),
                     **({'version': p['version']} if p.get('version') else {}),
+                    **({'public': True} if p.get('public') else {}),
+                    **({'toolkit_type': p['toolkit_type']} if p.get('toolkit_type') else {}),
+                    **({'ref': p['ref']} if p.get('ref') else {}),
                 }
                 for p in participants
             ],
@@ -219,7 +226,13 @@ def load_conversation_export_data(session, project_id: int, conversation) -> tup
         'created_at': conversation.created_at,
         'updated_at': conversation.updated_at,
     }
-    participants = _resolve_participants(conversation.participants)
+    pinned_versions = {
+        participant_id: (entity_settings or {}).get('version_id')
+        for participant_id, entity_settings in session.query(
+            ParticipantMapping.participant_id, ParticipantMapping.entity_settings,
+        ).filter(ParticipantMapping.conversation_id == conversation.id).all()
+    }
+    participants = _resolve_participants(conversation.participants, pinned_versions)
 
     groups = session.query(ConversationMessageGroup).filter(
         ConversationMessageGroup.conversation_id == conversation.id
@@ -277,7 +290,23 @@ def _item_to_dict(item) -> dict:
     return result
 
 
-def _resolve_participants(participants) -> list[dict]:
+_PUBLIC_ENTITY_NAMES = {ParticipantTypes.application.value, ParticipantTypes.skill.value}
+_LINKABLE_ENTITY_NAMES = _PUBLIC_ENTITY_NAMES | {ParticipantTypes.toolkit.value}
+
+
+def _load_skill_export_details(entity_meta: dict, pinned_version_id) -> dict:
+    """Skill name and pinned version name, read without the participant-detail helper shared with chat."""
+    with db.with_project_schema_session(entity_meta.get('project_id')) as session:
+        skill = session.query(Skill).options(selectinload(Skill.versions)).filter(
+            Skill.id == entity_meta.get('id')
+        ).first()
+        if skill is None:
+            return {}
+        version = next((v for v in skill.versions if v.id == pinned_version_id), None) or skill.get_default_version()
+        return {'name': skill.name, 'version': version.name if version else None}
+
+
+def _resolve_participants(participants, pinned_versions: dict) -> list[dict]:
     result = [
         {
             'id': p.id,
@@ -289,9 +318,16 @@ def _resolve_participants(participants) -> list[dict]:
     ]
     user_ids = [p['entity_meta'].get('id') for p in result if p['entity_name'] == ParticipantTypes.user.value]
     authors_by_id = {a['id']: a for a in (get_authors_data(user_ids) if user_ids else [])}
+    public_project_id = get_public_project_id_or_none()
 
     for p in result:
         entity_meta = p['entity_meta']
+        if public_project_id is not None and p['entity_name'] in _PUBLIC_ENTITY_NAMES \
+                and entity_meta.get('project_id') == public_project_id:
+            p['public'] = True
+        if p['entity_name'] in _LINKABLE_ENTITY_NAMES:
+            p['ref'] = {'project_id': entity_meta.get('project_id'), 'entity_id': entity_meta.get('id')}
+        pinned_version_id = pinned_versions.get(p['id'])
         try:
             match p['entity_name']:
                 case ParticipantTypes.user.value:
@@ -306,7 +342,11 @@ def _resolve_participants(participants) -> list[dict]:
                         first_existing_version=True,
                     ) or {}
                     p['meta']['name'] = details.get('name')
-                    version = (details.get('version_details') or {}).get('name')
+                    pinned_version_name = next(
+                        (v.get('name') for v in details.get('versions') or [] if v.get('id') == pinned_version_id),
+                        None,
+                    )
+                    version = pinned_version_name or (details.get('version_details') or {}).get('name')
                     if version:
                         p['version'] = version
                 case ParticipantTypes.toolkit.value:
@@ -315,9 +355,13 @@ def _resolve_participants(participants) -> list[dict]:
                         toolkit_id=entity_meta.get('id'),
                     ) or {}
                     p['meta']['name'] = details.get('name') or details.get('toolkit_name')
+                    if details.get('type'):
+                        p['toolkit_type'] = details['type']
                 case ParticipantTypes.skill.value:
-                    from .skill_participant_utils import load_skill_participant_details  # pylint: disable=C0415
-                    p['meta']['name'] = load_skill_participant_details(entity_meta).get('name')
+                    details = _load_skill_export_details(entity_meta, pinned_version_id)
+                    p['meta']['name'] = details.get('name')
+                    if details.get('version'):
+                        p['version'] = details['version']
         except Exception as e:  # pylint: disable=W0703
             log.warning("Chat export: failed to resolve participant %s name: %s", p['id'], e)
     return result

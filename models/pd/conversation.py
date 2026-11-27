@@ -32,8 +32,8 @@ class ConversationList(ConversationBase):
 class ScheduleRunRef(BaseModel):
     """The run record of a run history row: the schedule is read live, the status stays raw (CR-22, US-38 D6)."""
     id: int
-    schedule_id: int
-    schedule_name: str
+    schedule_id: int | None  # null for a Test Run, which has no schedule row
+    schedule_name: str | None
     status: str
     trigger: str
 
@@ -48,12 +48,18 @@ class ConversationListExtended(ConversationList):
     run_started_at: Optional[datetime] = None
     execution_type: str = 'chat'  # no stored value: a plain chat (owner decision 2026-10-21, US-50 R3.1)
     schedule_run: ScheduleRunRef | None = None  # the run record of a run row (CR-22, US-16 R2.4)
+    has_running_task: bool = False  # a message group still streaming: the list spinner (EL-7385)
+    run_status: Optional[str] = None  # the status of the run row (AC-24), derived for every row
+    tool_names: list[str] = Field(default_factory=list)  # tool calls of the run, in call order (AC-44)
 
     @model_validator(mode='after')
     def compute_execution_type(self):
         # Late import: that module loads the DB models
         from ...utils.pipeline_execution import TriggerType
         stored = self.meta.get('execution_type')
+        if stored == 'schedule_test':
+            # Old rows exist whose meta still holds the dropped test type; a test run reads schedule_manual now
+            stored = TriggerType.SCHEDULE_MANUAL
         if stored in TriggerType.VALUES:
             self.execution_type = stored
         elif self.meta.get('scheduled_run') is True:

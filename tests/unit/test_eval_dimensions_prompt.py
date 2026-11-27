@@ -9,6 +9,7 @@ The template used here mirrors the placeholder set of the seeded
 JSON block, so a placeholder rename on either side of that cross-repo contract shows up as a
 failure here.
 """
+import enum
 import importlib.util
 import pathlib
 import sys
@@ -54,6 +55,27 @@ def _load_builder():
     elitea_tools.EliteATool = type('EliteATool', (), {})
     skill = types.ModuleType(f'{PKG}.models.skill')
     skill.Skill = type('Skill', (), {})
+    skill.SkillVersion = type('SkillVersion', (), {})
+    enums_pkg = types.ModuleType(f'{PKG}.models.enums')
+    enums_pkg.__path__ = []
+    enums_all = types.ModuleType(f'{PKG}.models.enums.all')
+    enums_all.PublishStatus = enum.Enum('PublishStatus', {
+        'draft': 'draft', 'on_moderation': 'on_moderation', 'published': 'published',
+        'rejected': 'rejected', 'user_approval': 'user_approval',
+        'unpublished': 'unpublished', 'embedded': 'embedded',
+    })
+
+    # Stub pylon and tools for when the test runs without a prior test having leaked them.
+    pylon_pkg = sys.modules.setdefault('pylon', types.ModuleType('pylon'))
+    pylon_core = sys.modules.setdefault('pylon.core', types.ModuleType('pylon.core'))
+    if 'pylon.core.tools' not in sys.modules:
+        pylon_tools = types.ModuleType('pylon.core.tools')
+        pylon_tools.log = types.SimpleNamespace(
+            warning=lambda *a, **k: None, exception=lambda *a, **k: None,
+            debug=lambda *a, **k: None, info=lambda *a, **k: None,
+        )
+        sys.modules['pylon.core.tools'] = pylon_tools
+    sys.modules.setdefault('tools', types.SimpleNamespace(db=types.SimpleNamespace()))
 
     for name, mod in {
         PKG: pkg,
@@ -61,6 +83,8 @@ def _load_builder():
         f'{PKG}.models.all': all_models,
         f'{PKG}.models.elitea_tools': elitea_tools,
         f'{PKG}.models.skill': skill,
+        f'{PKG}.models.enums': enums_pkg,
+        f'{PKG}.models.enums.all': enums_all,
         f'{PKG}.utils': utils_pkg,
     }.items():
         sys.modules[name] = mod

@@ -33,10 +33,16 @@ def slugify(text: str) -> str:
     return text[:50]
 
 
-def _wrap_import_error(ind, msg):
+def _wrap_import_error(ind, msg, **details):
+    """Error entry of an import/fork result.
+
+    Optional ``details`` (e.g. ``import_uuid``, ``version_name``) are added as extra keys so a
+    client can attach the error to its target without parsing ``msg``.
+    """
     return {
         "index": ind,
-        "msg": msg
+        "msg": msg,
+        **{key: value for key, value in details.items() if value is not None},
     }
 
 

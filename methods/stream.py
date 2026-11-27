@@ -163,6 +163,17 @@ class Method:
         except Exception as e:
             log.error(f"Failed to maintain active index registry: {e}")
 
+        # A scheduled index run ends with the task it started; best-effort, the stale sweep closes a missed one
+        try:
+            # Imported here: the stream methods load without the schedule models
+            from ..utils.schedule_index_starter import close_index_schedule_run
+            close_index_schedule_run(
+                response_metadata.get('project_id'), response_metadata.get('toolkit_id'),
+                response_metadata.get('index_name'), response_metadata.get('task_id'),
+                response_metadata.get('state'), response_metadata.get('error'))
+        except Exception as e:
+            log.error(f"Failed to close the index schedule run: {e}")
+
         # Handle failure events with error
         if response_metadata.get('state') == IndexDataStatus.failed and response_metadata.get('error'):
             try:

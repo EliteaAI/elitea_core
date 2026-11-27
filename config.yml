@@ -20,6 +20,16 @@ max_published_versions_per_agent: 3
 # Stop the worker when a blocking predict exceeds await_task_timeout
 cancel_on_timeout: true
 
+# Record agent and pipeline runs started over REST predict or MCP in Run History (#7610).
+# Off by default: each run is a private chat, and chats are kept until someone deletes them
+record_api_runs: false
+
+chat_history:
+  # Replay recent turns' tool calls as compact tool_call/tool_result stubs so models don't fake tool success (#7460)
+  tool_call_stubs:
+    enabled: true
+    last_n: 3
+
 # Bounds for expanding sub-agents before a predict; what is cut off is fetched by the runtime
 predict:
   subagent_prefetch:
@@ -34,6 +44,10 @@ scheduler:
   index_scheduling:
     enabled: true
     cron: "* * * * *"
+  # The environment-wide scheduled evaluation; the job's scope and limits are set on its Admin page
+  eval_auto_run:
+    enabled: false
+    cron: "17 2 * * 0"
   schedules:
     min_interval_minutes: 5
     max_enabled_per_project: 50
@@ -42,7 +56,15 @@ scheduler:
     stale_run_minutes: 120
     max_parallel_runs: 100
     approval_wait_hours: 24
+    # Webhook run caps (#7400): only `running` runs count; a project may set a lower per-webhook value
+    webhook_max_concurrent_runs: 3
+    webhook_max_concurrent_runs_limit: 20
+    webhook_project_max_concurrent_runs: 10
+    webhook_max_waiting_runs: 10
     legacy_step_enabled: true
+    toolkit_index_scheduling_enabled: true
+    toolkit_index_min_interval_minutes: 1440
+    legacy_index_step_enabled: false
 
 # Optional badge and effect text of a sensitive tool, shown by the schedule risk review (EL-7011).
 # Badges: sends_messages, deletes_data, changes_data, runs_code, needs_approval (the default).

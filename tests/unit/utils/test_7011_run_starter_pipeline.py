@@ -42,7 +42,8 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
             "scan_complete": lambda found: not any(n["code"] == "scan_incomplete" for n in found["notices"])},
         "models.all": {"Application": object, "ApplicationVersion": object},
         "models.conversation": {"Conversation": object},
-        "models.entity_schedule": {"EntitySchedule": object, "EntityScheduleRun": object},
+        "models.entity_schedule": {"EntitySchedule": object, "EntityScheduleRun": object,
+                                   "RUN_FORM": object, "RUN_APPLICATION_ID": object},
         "utils.pipeline_execution": {
             "TriggerType": types.SimpleNamespace(SCHEDULED="scheduled"),
             "create_trigger_run_conversation": create,
@@ -54,6 +55,7 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
         "utils.schedule_prerun": {"run_prerun_check": prerun, "credential_toolkit_refs": lambda version: []},
         "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block,
                                 "finish_schedule_run": finish, "run_failure_reason": str,
+                                "run_actor_id": lambda session, run: None,   # no stored start owner: the live owner acts
                                 "count_refusal": _ignore, "end_refusal_streak": _ignore,  # #7254: own tests
                                 "record_run_events": lambda *args, **kwargs: None, "run_event": lambda *args, **kwargs: {}},
         "utils.budget_door": {"closed_budget_scope": budget_scope},
@@ -80,7 +82,8 @@ def world(monkeypatch):
 
     def run(entity_type="pipeline", run_mode=None, prompt="", variables=()):
         loaded = types.SimpleNamespace(
-            schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type=entity_type, run_mode=run_mode, approval_rule="pause_and_ask"),
+            schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type=entity_type, run_mode=run_mode, approval_rule="pause_and_ask",
+                                           trigger_kind="cron"),
             version=types.SimpleNamespace(id=9, name="v3"), entity_name="Nightly flow", prompt=prompt, variables=list(variables))
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(34, SCHEDULE_ID, RUN_ID)

@@ -24,9 +24,17 @@ class _Criterion:
         self.value = value
 
 
+class _InCriterion:
+    def __init__(self, values):
+        self.values = set(values)
+
+
 class _IdColumn:
     def __eq__(self, other):
         return _Criterion(other)
+
+    def in_(self, values):
+        return _InCriterion(values)
 
 
 class _AgentTypes:
@@ -73,9 +81,12 @@ def pu():
         'plugins.elitea_core.utils.skill_frontmatter': {'FRONTMATTER_META_KEY': 'frontmatter'},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': None},
         'plugins.elitea_core.utils.export_import': {
-            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': None,
+            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'PUBLISHED_PIPELINES_META_KEY': 'fork_pipelines',
+            'export_version_toolkit': None,
         },
+        'plugins.elitea_core.utils.trigger_write_rule': {'strip_trigger_secrets': lambda settings: dict(settings)},
         'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': None},
+        'plugins.elitea_core.utils.conversation_starters_utils': {'get_max_conversation_starters': lambda: 4},
     }.items():
         mod = types.ModuleType(modname)
         for k, v in attrs.items():
@@ -114,40 +125,69 @@ class FakeTool:
 
 
 class FakeVersion:
-    def __init__(self, ver_id, agent_type='openai', tools=None):
+    def __init__(self, ver_id, agent_type='openai', tools=None, meta=None):
         self.id = ver_id
         self.agent_type = agent_type
         self.tools = tools or []
+        self.meta = meta or {}
 
 
 class _Query:
-    def __init__(self, registry):
+    def __init__(self, registry, session=None):
         self._registry = registry
+        self._session = session
         self._vid = None
+        self._vids = None
 
     def filter(self, *criteria):
         for c in criteria:
             if hasattr(c, 'value'):
                 self._vid = c.value
+            elif hasattr(c, 'values'):
+                self._vids = c.values
         return self
 
     def options(self, *_a, **_k):
         return self
 
     def first(self):
+        if self._session is not None and self._vid in self._session._fail_on:
+            self._session.broken = True
+            raise RuntimeError('connection dropped')
         return self._registry.get(self._vid)
+
+    def all(self):
+        if self._session is not None and self._session._fail_bulk:
+            self._session.broken = True
+            raise RuntimeError('connection dropped')
+        return [self._registry[v] for v in sorted(self._vids or ()) if v in self._registry]
 
 
 class FakeSession:
-    """registry maps version_id -> FakeVersion."""
+    """registry maps version_id -> FakeVersion.
 
-    def __init__(self, registry):
+    ``fail_on`` is a set of version ids whose single-version load raises like a dropped
+    connection; once one does, the session stays broken (every query raises) until
+    ``rollback()``, the way a failed transaction behaves.
+    """
+
+    def __init__(self, registry, fail_on=(), fail_bulk=False):
         self._registry = registry
+        self._fail_on = set(fail_on)
+        self._fail_bulk = fail_bulk
         self.query_count = 0
+        self.rollback_count = 0
+        self.broken = False
 
     def query(self, _model):
         self.query_count += 1
-        return _Query(self._registry)
+        if self.broken:
+            raise RuntimeError('current transaction is aborted')
+        return _Query(self._registry, self)
+
+    def rollback(self):
+        self.rollback_count += 1
+        self.broken = False
 
 
 def _collect(pu, registry, root_id):
@@ -569,3 +609,161 @@ class TestCollectReachableVersionIds:
         registry = {1: FakeVersion(1, tools=[])}
         reachable = self._reachable_vids(pu, registry, 1)
         assert reachable == set()
+
+
+class _FakeListApp:
+    """The slice of a listed application the nesting-tier fill reads and writes."""
+
+    def __init__(self, app_id, versions, meta=None):
+        self.id = app_id
+        self.versions = versions
+        self.meta = meta or {}
+        self.agent_subtree_tiers = None
+        self.max_agent_nesting_tiers = None
+
+
+class _ListVersion:
+    def __init__(self, ver_id, name):
+        self.id = ver_id
+        self.name = name
+
+
+class TestFillListAgentNestingTiers:
+    """List rows carry the default version's depth so the picker can disable too-deep agents."""
+
+    @staticmethod
+    def _registry():
+        return {
+            # 10: leaf, 20: container of leaves, 30: three-tier chain (30 -> 20 -> 10)
+            10: FakeVersion(10, tools=[]),
+            20: FakeVersion(20, tools=[FakeTool(1, 10)]),
+            30: FakeVersion(30, tools=[FakeTool(2, 20)]),
+        }
+
+    def test_measures_the_default_version(self, pu):
+        apps = [
+            _FakeListApp(
+                2, [_ListVersion(20, 'base'), _ListVersion(30, 'v2')], meta={'default_version_id': 30}
+            ),
+        ]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers == 3
+        assert apps[0].max_agent_nesting_tiers == pu.MAX_AGENT_NESTING_TIERS
+
+    def test_falls_back_to_base_without_a_default(self, pu):
+        apps = [_FakeListApp(2, [_ListVersion(30, 'v2'), _ListVersion(20, 'base')])]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers == 2
+
+    def test_leaves_the_fields_empty_when_there_is_no_version_to_measure(self, pu):
+        apps = [_FakeListApp(2, [])]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers is None
+        assert apps[0].max_agent_nesting_tiers is None
+
+    def test_one_bad_row_does_not_fail_the_list(self, pu):
+        apps = [
+            _FakeListApp(1, [_ListVersion(999, 'base')]),  # version missing from the registry
+            _FakeListApp(2, [_ListVersion(10, 'base')]),
+        ]
+        pu.fill_list_agent_nesting_tiers(1, apps, session=FakeSession(self._registry()))
+        assert apps[0].agent_subtree_tiers is None
+        assert apps[1].agent_subtree_tiers == 1
+
+    def test_query_count_does_not_grow_with_the_number_of_rows(self, pu):
+        def run(rows):
+            # every row's default version uses the same sub-agent (version 10)
+            registry = {10: FakeVersion(10, tools=[])}
+            apps = []
+            for i in range(rows):
+                registry[100 + i] = FakeVersion(100 + i, tools=[FakeTool(1, 10)])
+                apps.append(_FakeListApp(i, [_ListVersion(100 + i, 'base')]))
+            session = FakeSession(registry)
+            pu.fill_list_agent_nesting_tiers(1, apps, session=session)
+            assert all(app.agent_subtree_tiers == 2 for app in apps)
+            return session.query_count
+
+        # one bulk load of the default versions + the shared sub-agent loaded once
+        assert run(3) == run(50) == 2
+
+    def test_a_database_error_rolls_back_so_later_rows_still_get_their_tiers(self, pu):
+        registry = {
+            10: FakeVersion(10, tools=[]),
+            40: FakeVersion(40, tools=[FakeTool(7, 777)]),  # its sub-agent load will fail
+            777: FakeVersion(777, tools=[]),
+        }
+        apps = [
+            _FakeListApp(4, [_ListVersion(40, 'base')]),
+            _FakeListApp(1, [_ListVersion(10, 'base')]),
+        ]
+        session = FakeSession(registry, fail_on={777})
+        pu.fill_list_agent_nesting_tiers(1, apps, session=session)
+
+        assert apps[0].agent_subtree_tiers is None
+        assert apps[1].agent_subtree_tiers == 1
+        assert session.rollback_count == 1
+
+    def test_a_failed_bulk_load_leaves_every_row_empty_without_raising(self, pu):
+        apps = [_FakeListApp(1, [_ListVersion(10, 'base')])]
+        session = FakeSession(self._registry(), fail_bulk=True)
+        pu.fill_list_agent_nesting_tiers(1, apps, session=session)
+
+        assert apps[0].agent_subtree_tiers is None
+        assert session.rollback_count == 1
+
+
+class TestCapNestingTiersPageSize:
+    """The page size of a list that measures nesting depth can never be unbounded."""
+
+    @pytest.mark.parametrize('limit, expected', [
+        (20, 20),    # the pickers' page size is kept
+        (50, 50),
+        (51, 50),    # above the cap
+        (100000, 50),
+        (1, 1),
+        (0, 50),     # falsy limit means "no limit" downstream, so it lands on the cap
+        (-1, 50),    # not a page size
+        (-100, 50),
+        (None, 50),  # nothing given
+    ])
+    def test_limit_is_bounded(self, pu, limit, expected):
+        assert pu.cap_nesting_tiers_page_size(limit) == expected
+
+    def test_the_cap_is_fifty(self, pu):
+        assert pu.MAX_NESTING_TIERS_PAGE_SIZE == 50
+
+
+class TestSwarmSubAgents:
+    """Issue #7736: an agent bound as a tool that later got Swarm Mode is a per-tool error."""
+
+    def _swarm(self, ver_id):
+        return FakeVersion(ver_id, meta={'internal_tools': ['swarm']})
+
+    def test_swarm_child_is_reported_on_its_tool(self, pu):
+        tool = FakeTool(2, 20, name='Multipurpose', tool_id=501)
+        registry = {1: FakeVersion(1, agent_type='pipeline', tools=[tool]), 20: self._swarm(20)}
+        with pytest.raises(pu.SwarmSubAgentError) as ei:
+            pu.assert_no_swarm_sub_agents(1, 1, session=FakeSession(registry))
+        errors = ei.value.to_toolkit_errors()
+        assert [e['loc'] for e in errors] == [['tools', 501, '__root__']]
+        assert 'Swarm Mode' in errors[0]['msg'] and 'Multipurpose' in errors[0]['msg']
+
+    def test_every_swarm_child_is_reported(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 20, tool_id=601), FakeTool(3, 30, tool_id=602),
+                                     FakeTool(4, 40, tool_id=603)]),
+            20: self._swarm(20), 30: FakeVersion(30), 40: self._swarm(40),
+        }
+        with pytest.raises(pu.SwarmSubAgentError) as ei:
+            pu.assert_no_swarm_sub_agents(1, 1, session=FakeSession(registry))
+        assert [e['loc'][1] for e in ei.value.to_toolkit_errors()] == [601, 603]
+
+    def test_child_without_swarm_passes(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 20)]),
+            20: FakeVersion(20, meta={'internal_tools': ['attachments']}),
+        }
+        pu.assert_no_swarm_sub_agents(1, 1, session=FakeSession(registry))
+
+    def test_is_a_sub_agent_tree_error_for_existing_handlers(self, pu):
+        assert issubclass(pu.SwarmSubAgentError, pu.SubAgentTreeError)

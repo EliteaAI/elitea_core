@@ -110,6 +110,26 @@ class TestStore:
         assert heads == [(f'p--{PROJECT}.skill-files', _sha(data))] * 2
         assert env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(data))] == data
 
+    @pytest.mark.parametrize('exc', [
+        FileNotFoundError('/data/p--7.skill-files/abc'),
+        type('ObjectDoesNotExistError', (Exception,), {})(),
+        type('ContainerDoesNotExistError', (Exception,), {})(),
+        types.SimpleNamespace(response={'Error': {'Code': 'NoSuchKey'}}),
+        types.SimpleNamespace(response={'Error': {'Code': 'NoSuchBucket'}}),
+    ], ids=['filesystem', 'libcloud-object', 'libcloud-container', 's3-key', 's3-bucket'])
+    def test_each_engines_absent_object_reads_as_missing(self, env, exc):
+        assert env.store.is_missing_content_error(exc)
+
+    @pytest.mark.parametrize('exc', [
+        RuntimeError('storage unavailable'),
+        ConnectionError('connection refused'),
+        type('LibcloudError', (Exception,), {})(),
+        types.SimpleNamespace(response={'Error': {'Code': 'InternalError'}}),
+        types.SimpleNamespace(response={'Error': {'Code': 'AccessDenied'}}),
+    ], ids=['outage', 'connection', 'libcloud-other', 's3-internal', 's3-denied'])
+    def test_a_storage_failure_never_reads_as_missing(self, env, exc):
+        assert not env.store.is_missing_content_error(exc)
+
     def test_each_project_has_its_own_bucket(self, env):
         env.store.put_content(PROJECT, 'a' * 64, b'x')
 
@@ -432,6 +452,84 @@ class TestRead:
         env.storage.broken_reads = True
 
         with pytest.raises(env.files.SkillFileContentUnavailableError, match="'forms.md'") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 503
+
+    def test_content_storage_does_not_hold_is_a_410_saying_it_is_missing_not_to_retry(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        del env.storage.objects[(f'p--{PROJECT}.skill-files', _sha(b'# Forms\n'))]
+        env.storage.clients.clear()
+
+        with pytest.raises(env.files.SkillFileContentMissingError, match="'forms.md' is missing") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 410
+        assert 'try again' not in str(info.value)
+        assert env.storage.clients == [PROJECT]
+
+    def test_a_project_without_a_skill_files_bucket_reads_its_rows_as_missing(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        env.storage.buckets = {f'p--{PROJECT}.attachments': {'type': 'system', 'retention_days': None}}
+        env.storage.objects.clear()
+
+        with pytest.raises(env.files.SkillFileContentMissingError, match="'forms.md' is missing") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 410
+
+    def test_an_absent_object_on_an_unmounted_storage_root_that_lists_nothing_is_a_503(self, env, session):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        env.storage.buckets.clear()
+        env.storage.objects.clear()
+
+        with pytest.raises(env.files.SkillFileContentUnavailableError, match="try again later") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 503
+
+    def test_an_absent_object_on_storage_that_does_not_answer_a_listing_is_a_503(self, env, session, monkeypatch):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        env.storage.objects.clear()
+
+        def unreachable(_client):
+            raise ConnectionError('storage unreachable')
+        monkeypatch.setattr(env.store.MinioClient, 'list_bucket', unreachable)
+
+        with pytest.raises(env.files.SkillFileContentUnavailableError, match="try again later") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 503
+
+    def test_a_read_that_races_a_replace_of_the_file_is_a_503_since_a_retry_reads_the_new_content(
+            self, env, session, monkeypatch):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Old\n')
+        read = env.files.get_content
+
+        def replaced_meanwhile(project_id, sha256, client=None):
+            _write(env, session, 'forms.md', b'# New\n')
+            return read(project_id, sha256, client)
+        monkeypatch.setattr(env.files, 'get_content', replaced_meanwhile)
+
+        with pytest.raises(env.files.SkillFileContentUnavailableError, match="try again later") as info:
+            env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
+        assert info.value.http_status == 503
+        monkeypatch.setattr(env.files, 'get_content', read)
+        assert env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)[1] == b'# New\n'
+
+    def test_an_absent_object_whose_row_cannot_be_read_again_is_a_503(self, env, session, monkeypatch):
+        _version(session)
+        _write(env, session, 'forms.md', b'# Forms\n')
+        env.storage.objects.clear()
+        query = session.query
+
+        def dropped_on_the_recheck(target, *more_targets):
+            if target is env.files.SkillVersionFile.sha256:
+                raise ConnectionError('server closed the connection unexpectedly')
+            return query(target, *more_targets)
+        monkeypatch.setattr(session, 'query', dropped_on_the_recheck)
+
+        with pytest.raises(env.files.SkillFileContentUnavailableError, match="try again later") as info:
             env.files.read_version_file(PROJECT, SKILL, 10, 'forms.md', session=session)
         assert info.value.http_status == 503
 

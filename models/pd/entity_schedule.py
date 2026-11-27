@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from ...utils.schedule_timing import compute_next_run, end_of_day, schedule_limits
 from .index import _cron_gaps, _validate_cron_expression
@@ -44,7 +44,7 @@ class ScheduleTiming(BaseModel):
     @classmethod
     def validate_expires_at(cls, v: date | None, info: ValidationInfo) -> date | None:
         # A bad cron or time zone already failed its own field; nothing to compare against
-        if v is None or 'cron' not in info.data or 'timezone' not in info.data:
+        if v is None or info.data.get('cron') is None or info.data.get('timezone') is None:
             return v
         cron, zone = info.data['cron'], info.data['timezone']
         now = datetime.now(UTC)
@@ -55,10 +55,17 @@ class ScheduleTiming(BaseModel):
         return v
 
 
+# The database integer range. schedule_list holds the same type; the body-model tests load this module without it
+DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]
 NAME_MAX = 256
 DESCRIPTION_MAX = 2304  # the entity_schedules.description column width
 RunMode = Literal['entry_point', 'prompt']
 ApprovalRule = Literal['pause_and_ask', 'run_without_asking']
+TriggerKind = Literal['cron', 'webhook']
+WebhookType = Literal['github', 'gitlab', 'custom']
+GitlabAuthMethod = Literal['secret_token', 'signing_token']
+WEBHOOK_FIELDS = ('webhook_type', 'gitlab_auth_method')
+CRON_FIELDS = ('cron', 'timezone', 'expires_at')
 NAME_TEXT = 'Schedule name'
 DESCRIPTION_TEXT = 'Free text about the schedule'
 VERSION_TEXT = 'Id of the entity version that runs'
@@ -87,9 +94,18 @@ class RiskAck(BaseModel):
 
 
 # The scheduled entity and version, the same in the risk check and the create body
-EntityType = Annotated[Literal['agent', 'pipeline'], Field(description='Kind of the scheduled entity', examples=['agent'])]
+# A Toolkit Index has no version and no risk review, so the risk check keeps the narrower type
+RiskEntityType = Annotated[Literal['agent', 'pipeline'], Field(description='Kind of the scheduled entity',
+                                                              examples=['agent'])]
+EntityType = Annotated[Literal['agent', 'pipeline', 'toolkit_index'],
+                       Field(description='Kind of the scheduled entity', examples=['agent'])]
 ApplicationId = Annotated[int, Field(description='Id of the agent or pipeline', examples=[12])]
 VersionId = Annotated[int, Field(description=VERSION_TEXT, examples=[34])]
+# The upper bound (the database integer range) is checked in the handler: this module loads without `schedule_list`
+RunId = Annotated[int, Field(ge=1, description='Id of a run of `schedule_id`', examples=[41])]
+INDEX_NAME_MAX = 256  # the entity_schedules.index_name column width
+TOOLKIT_ID_TEXT = 'Id of the toolkit whose index runs; Toolkit Index rows only'
+INDEX_NAME_TEXT = 'Name of the index of that toolkit; Toolkit Index rows only'
 
 
 class ScheduleRiskCheck(BaseModel):
@@ -97,16 +113,44 @@ class ScheduleRiskCheck(BaseModel):
     model_config = ConfigDict(json_schema_extra={'examples': [
         {'entity_type': 'agent', 'application_id': 12, 'version_id': 34}]})
 
-    entity_type: EntityType
+    entity_type: RiskEntityType
     application_id: ApplicationId
     version_id: VersionId
     schedule_id: int | None = Field(
         default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
         'adds `confirmed`', examples=[7])
+    run_id: RunId | None = Field(
+        default=None, description='Id of a run of `schedule_id`: the scan runs as the user the run acts as, '
+        'not as the schedule owner. Needs `schedule_id`')
     approval_rule: ApprovalRule | None = Field(
         None, description='The rule to check under. With `pause_and_ask`, a missing credential or a personal '
         'sign-in is a notice, not a block. Without it, an edit uses the rule of the stored schedule',
         examples=['pause_and_ask'])
+    trigger_kind: TriggerKind | None = Field(
+        None, description='The trigger to check for. A `webhook` never waits for a sign-in, so those findings block '
+        'under both rules. Without it, an edit uses the kind of the stored schedule', examples=['webhook'])
+
+    @field_validator('run_id')
+    @classmethod
+    def validate_run_needs_schedule(cls, v: int | None, info: ValidationInfo) -> int | None:
+        if v is not None and info.data.get('schedule_id') is None:
+            raise ValueError('run_id needs schedule_id')
+        return v
+
+
+class ScheduleConnectionsCheck(BaseModel):
+    """The body of the Connections check (#7401): can each toolkit of the version run with no person signed in."""
+    model_config = ConfigDict(json_schema_extra={'examples': [
+        {'entity_type': 'agent', 'application_id': 12, 'version_id': 34, 'trigger_kind': 'webhook'}]})
+
+    entity_type: EntityType
+    application_id: ApplicationId
+    version_id: VersionId
+    trigger_kind: TriggerKind = Field('cron', description='A `webhook` blocks on any row that is not ok',
+                                      examples=['webhook'])
+    schedule_id: int | None = Field(
+        None, description='The trigger the check is for: its owner checks, and its credential references are saved',
+        examples=[7])
 
 
 class ScheduleVariable(BaseModel):
@@ -126,8 +170,12 @@ class ScheduleCreate(ScheduleTiming):
     description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
                                     examples=[DESCRIPTION_EXAMPLE])
     entity_type: EntityType
-    application_id: ApplicationId
-    version_id: VersionId
+    application_id: DbId | None = Field(None, validate_default=True, description='Id of the agent or pipeline',
+                                       examples=[12])
+    version_id: VersionId | None = Field(None, validate_default=True, description=VERSION_TEXT, examples=[34])
+    toolkit_id: DbId | None = Field(None, validate_default=True, description=TOOLKIT_ID_TEXT, examples=[7])
+    index_name: str | None = Field(None, validate_default=True, min_length=1, max_length=INDEX_NAME_MAX,
+                                   description=INDEX_NAME_TEXT, examples=['docs'])
     run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT, examples=['prompt'])
     prompt: str | None = Field(None, description=PROMPT_TEXT, examples=[PROMPT_EXAMPLE])
     variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
@@ -135,6 +183,54 @@ class ScheduleCreate(ScheduleTiming):
     approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
     risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
                                      examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
+    trigger_kind: TriggerKind = Field('cron', description='`cron` runs on a schedule, `webhook` on an HTTP delivery',
+                                      examples=['cron'])
+    cron: str | None = Field(None, description=CRON_TEXT + '; cron rows only', examples=['0 9 * * 1-5'])
+    timezone: str | None = Field(None, description=TIMEZONE_TEXT + '; cron rows only', examples=['Europe/Warsaw'])
+    webhook_type: WebhookType | None = Field(None, description='Webhook rows: the sender', examples=['github'])
+    gitlab_auth_method: GitlabAuthMethod | None = Field(
+        None, description='GitLab webhook rows: how GitLab proves the request', examples=['secret_token'])
+    signing_secret_value: str | None = Field(
+        None, description='GitLab signing-token rows: the `whsec_` token GitLab issued; stored, never returned',
+        examples=['whsec_...'])
+
+    @field_validator('cron')
+    @classmethod
+    def validate_cron(cls, v: str | None) -> str | None:
+        return v if v is None else ScheduleTiming.validate_cron(v)
+
+    @field_validator('timezone')
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        return v if v is None else ScheduleTiming.validate_timezone(v)
+
+    @field_validator('application_id', 'version_id', 'toolkit_id', 'index_name')
+    @classmethod
+    def need_target_field(cls, v, info: ValidationInfo):
+        """A target field is required for the kinds that use it. Other kinds that send it are refused by the service."""
+        entity_type = info.data.get('entity_type')  # None when the type is missing or failed its own check
+        needed = ('toolkit_id', 'index_name') if entity_type == 'toolkit_index' else ('application_id', 'version_id')
+        if v is None and info.field_name in needed:
+            raise ValueError('Field required')
+        return v
+
+    @model_validator(mode='after')
+    def check_trigger_fields(self):
+        if self.trigger_kind == 'cron':
+            if self.cron is None or self.timezone is None:
+                raise ValueError('A schedule needs cron and timezone')
+            if any(getattr(self, f) is not None for f in (*WEBHOOK_FIELDS, 'signing_secret_value')):
+                raise ValueError('Webhook fields are only allowed on webhooks')
+            return self
+        if any(getattr(self, f) is not None for f in CRON_FIELDS):
+            raise ValueError('A webhook has no cron, timezone or stop date')
+        if self.webhook_type is None:
+            raise ValueError('A webhook needs webhook_type')
+        if (self.webhook_type == 'gitlab') != (self.gitlab_auth_method is not None):
+            raise ValueError('gitlab_auth_method is required for GitLab webhooks and only for them')
+        if (self.gitlab_auth_method == 'signing_token') != bool(self.signing_secret_value):
+            raise ValueError('signing_secret_value is required for GitLab signing tokens and only for them')
+        return self
 
 
 class ScheduleEdit(BaseModel):
@@ -173,6 +269,15 @@ class ScheduleUpdate(ScheduleEdit):
     enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
 
 
+class WebhookSecretAction(BaseModel):
+    """`rotate` keeps the old secret valid for 24 h; `regenerate` replaces it at once."""
+    model_config = ConfigDict(extra='forbid', json_schema_extra={'examples': [{'mode': 'rotate'}]})
+
+    mode: Literal['rotate', 'regenerate'] = Field(description='How the new secret replaces the current one')
+    signing_secret_value: str | None = Field(
+        None, description='GitLab signing-token rows only: the new `whsec_` token GitLab issued')
+
+
 class ScheduleOwner(BaseModel):
     id: int
     name: str | None = None
@@ -186,13 +291,15 @@ class ScheduleDetails(BaseModel):
     name: str
     description: str | None
     entity_type: str
-    application_id: int
+    application_id: DbId | None
+    toolkit_id: DbId | None = None
+    index_name: str | None = None
     version_id: int | None
     run_mode: str | None
     prompt: str | None
     variables: list[ScheduleVariable]
-    cron: str
-    timezone: str
+    cron: str | None
+    timezone: str | None
     expires_at: datetime | None
     enabled: bool
     created_by: int
@@ -206,3 +313,10 @@ class ScheduleDetails(BaseModel):
     approval_confirmed_by: str | None = None  # the name of who confirmed "Run without asking"
     approval_confirmed_at: datetime | None = None
     allowed_actions: list[str]
+    trigger_kind: str = 'cron'
+    webhook_type: str | None = None
+    gitlab_auth_method: str | None = None
+    webhook_url: str | None = None
+    previous_secret_until: datetime | None = None
+    last_delivery_at: datetime | None = None
+    last_delivery_outcome: str | None = None

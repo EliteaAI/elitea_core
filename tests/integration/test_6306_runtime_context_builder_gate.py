@@ -121,9 +121,9 @@ class TestSameProjectAgent:
 
     def test_version_meta_tools_are_surfaced(self, loaded):
         resolve, _db = loaded
-        session = FakeSession(_mapping(77), None, _version_meta(['skill_builder']))
+        session = FakeSession(_mapping(77), None, _version_meta(['elitea_builder']))
 
-        assert resolve(session, 1, _participant(), 2) == (False, ['skill_builder'])
+        assert resolve(session, 1, _participant(), 2) == (False, ['elitea_builder'])
 
     def test_pipeline_detected(self, loaded):
         resolve, _db = loaded
@@ -134,7 +134,7 @@ class TestSameProjectAgent:
 
     def test_never_opens_a_second_session(self, loaded):
         resolve, fake_db = loaded
-        session = FakeSession(_mapping(77), None, _version_meta(['skill_builder']))
+        session = FakeSession(_mapping(77), None, _version_meta(['elitea_builder']))
 
         resolve(session, 1, _participant(project_id=2), 2)
         assert fake_db.opened_project_ids == []
@@ -144,11 +144,11 @@ class TestCrossProjectAgent:
 
     def test_reads_its_own_schema(self, loaded):
         resolve, fake_db = loaded
-        fake_db.owner_session = FakeSession(None, _version_meta(['project_context_builder']))
+        fake_db.owner_session = FakeSession(None, _version_meta(['elitea_builder']))
         ambient = FakeSession(_mapping(77), ('WRONG',), _version_meta(['WRONG']))
 
         assert resolve(ambient, 1, _participant(project_id=7), 2) == (
-            False, ['project_context_builder']
+            False, ['elitea_builder']
         )
         assert fake_db.opened_project_ids == [7]
 
@@ -206,9 +206,9 @@ class TestDegenerateInputs:
     def test_participant_without_application_id(self, loaded):
         resolve, _db = loaded
         participant = types.SimpleNamespace(id=9, entity_meta={'project_id': 2})
-        session = FakeSession(_mapping(77), _version_meta(['skill_builder']))
+        session = FakeSession(_mapping(77), _version_meta(['elitea_builder']))
 
-        assert resolve(session, 1, participant, 2) == (False, ['skill_builder'])
+        assert resolve(session, 1, participant, 2) == (False, ['elitea_builder'])
 
     def test_deleted_version_yields_no_tools(self, loaded):
         resolve, _db = loaded

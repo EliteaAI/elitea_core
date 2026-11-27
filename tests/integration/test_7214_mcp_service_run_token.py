@@ -298,7 +298,9 @@ def test_a_refused_agent_call_over_the_mcp_server_says_why(mcp_service_module, m
     session = types.SimpleNamespace(project_id=5, dispatch_message=sent.append)
     mcp_service_module.this.module = types.SimpleNamespace(do_predict=do_predict)
     service = mcp_service_module.McpService(session)
-    monkeypatch.setattr(service, "_McpService__get_ver_id_by_agent_name", lambda name: 6)
+    monkeypatch.setattr(service, "_McpService__get_exposed_version_by_tool_name",
+                        lambda name: types.SimpleNamespace(version_id=6))
+    monkeypatch.setattr(service, "_McpService__is_dispatched_to_agent_first", lambda exposed: True)
     request = mcp_service_module.types.CallToolRequest(
         method="tools/call", params={"name": "agent", "arguments": {"task": "hello"}})
     service._McpService__handle_call_tool_request(type("R", (), {"id": "1", "params": request.params})())  # pylint: disable=W0212

@@ -1,5 +1,5 @@
 from pylon.core.tools import log
-from tools import rpc_tools
+from tools import auth, rpc_tools
 
 from ..models.enums.all import ParticipantTypes
 from ..models.folder import ConversationFolder
@@ -10,6 +10,8 @@ from .support_utils import get_support_config
 NOT_FOUND = ({'error': 'Conversation not found'}, 404)
 NOT_PARTICIPANT = ({'error': 'Only conversation participants can do this'}, 403)
 NOT_PRIVILEGED = ({'error': 'Only the conversation author or a project admin can do this'}, 403)
+NOT_OWNER = ({'error': 'Only the chat owner can change who has access'}, 403)
+MENTION_REFUSED = "{names} can't be mentioned: they don't have access to this chat."
 
 
 def find_user_participant_id(participants, user_id: int) -> int | None:
@@ -122,6 +124,29 @@ def can_join_room(project_id: int, user_id: int, is_private: bool, is_author: bo
     return denied is None or _is_support_project(project_id)
 
 
+def changes_privacy(conversation, data: dict) -> bool:
+    return data.get('is_private') is not None and bool(data['is_private']) != bool(conversation.is_private)
+
+
+def adds_other_users(participants, user_id: int) -> bool:
+    return any(
+        p.entity_name == ParticipantTypes.user.value and str(p.entity_meta.id) != str(user_id)
+        for p in participants
+    )
+
+
+def removes_other_user(conversation, participant_id: int, user_id: int) -> bool:
+    for p in conversation.participants:
+        if p.id == participant_id:
+            return p.entity_name == ParticipantTypes.user.value and str((p.entity_meta or {}).get('id')) != str(user_id)
+    return False
+
+
+def check_owner(conversation, user_id: int):
+    # Who has access is the owner's call only (#7489)
+    return None if conversation.author_id == user_id else NOT_OWNER
+
+
 def is_privileged_update(conversation, data: dict) -> bool:
     # UI resends unchanged fields (e.g. full meta), so only real changes count
     if data.get('instructions') is not None and data['instructions'] != conversation.instructions:
@@ -144,3 +169,38 @@ def is_own_folder(session, folder_id: int, user_id: int) -> bool:
         ConversationFolder.id == folder_id,
         ConversationFolder.owner_id == user_id,
     ).first() is not None
+
+
+def check_mentions(project_id: int, conversation, sender_id: int, mentioned_user_ids) -> tuple[list[int], dict | None]:
+    """Split mentioned project user ids into people to mention and a refusal naming those who cannot open the chat."""
+    candidates = [uid for uid in dict.fromkeys(mentioned_user_ids or []) if uid != sender_id]
+    if not candidates:
+        return [], None
+    project_members = {
+        str(uid) for uid in rpc_tools.RpcMixin().rpc.timeout(5).admin_get_users_ids_in_project(project_id=project_id) or []
+    }
+    selected_people = {str(conversation.author_id)} | {
+        str((p.entity_meta or {}).get('id'))
+        for p in conversation.participants
+        if p.entity_name == ParticipantTypes.user.value
+    }
+    can_open = project_members & selected_people if conversation.is_private else project_members
+    rejected = [uid for uid in candidates if str(uid) not in can_open]
+    if not rejected:
+        return candidates, None
+    return [], {
+        'error': MENTION_REFUSED.format(names=format_refused_mention_names(rejected, project_members)),
+        'rejected_user_ids': rejected,
+    }
+
+
+def format_refused_mention_names(user_ids: list[int], project_members: set[str]) -> str:
+    """Names of project members among the ids; anyone else stays a bare id so an id never reveals its owner."""
+    members = [uid for uid in user_ids if str(uid) in project_members]
+    names = {}
+    if members:
+        try:
+            names = {user['id']: user.get('name') or user.get('email') for user in auth.list_users(user_ids=members)}
+        except Exception as e:  # pylint: disable=W0703
+            log.warning("Mentioned users not resolved: %s", e)
+    return ', '.join(names.get(uid) or f'User {uid}' for uid in user_ids)

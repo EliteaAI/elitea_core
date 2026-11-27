@@ -78,6 +78,7 @@ STATUS_SKIPPED = 'skipped'          # a code script returned 'na', a trajectory/
 
 TRIGGER_OFFLINE_BATCH = 'offline_batch'
 TRIGGER_ON_DEMAND = 'on_demand'
+TRIGGER_HISTORY = 'history'
 
 
 # Plain exceptions (not EvalLibraryError subclasses) so this module keeps loading without ``tools``.
@@ -166,6 +167,10 @@ def _snapshot_cases(cases: List[dict]) -> List[dict]:
         if expected_trajectory is not None and not dropped:
             case['expected_trajectory'] = expected_trajectory
             spent += len(json.dumps(expected_trajectory, default=str))
+        # Where a history case came from (conversation, groups, author); the run reads its trace by it.
+        source = c.get('source')
+        if isinstance(source, dict):
+            case['source'] = source
         if dropped:
             case['truncated'] = True
             case['dropped'] = True
@@ -274,6 +279,41 @@ def cases_from_turns(turns) -> List[dict]:
             'order_index': i,
         })
     return cases
+
+
+def cases_from_history(turns) -> List[dict]:
+    """History case set: the sampled chat turns (``eval_auto_history`` turn dicts) → snapshot case
+    dicts, reference-free like :func:`cases_from_turns`. The text is masked before it is frozen,
+    because the snapshot is what a run viewer reads. ``source`` says where each case came from,
+    which the run reads the trace by and the run detail redacts a private chat by."""
+    from .evaluation_masking import mask_text
+    cases: List[dict] = []
+    for i, turn in enumerate(turns):
+        created_at = turn.get('created_at')
+        cases.append({
+            'id': i + 1,
+            'input': mask_text(turn.get('input') or ''),
+            'output': mask_text(turn.get('output') or ''),
+            'expected_output': None,
+            'structure': None,
+            'order_index': i,
+            'source': {
+                'conversation_id': turn.get('conversation_id'),
+                'group_ids': list(turn.get('group_ids') or []),
+                'created_at': created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
+                'version_id': turn.get('version_id'),
+                'author_id': turn.get('user_id'),
+                'is_private': bool(turn.get('is_private')),
+                'latency_ms': turn.get('latency_ms'),
+            },
+        })
+    return cases
+
+
+def without_usage_bindings(bindings: List[dict]) -> List[dict]:
+    """A history run has no per-turn token usage (the chat does not keep it), so usage-scoped
+    bindings are dropped rather than skipped on every case."""
+    return [b for b in bindings if not (b.get('evidence_scope') or {}).get('usage', False)]
 
 
 def structure_only_case() -> dict:
@@ -1170,6 +1210,25 @@ def split_case_executions(cases: List[dict]) -> tuple:
     return rows, stripped
 
 
+def attach_recorded_executions(cases: List[dict], rows_by_group: dict, *,
+                               store_tool_outputs: bool = True) -> List[dict]:
+    """History cases with the ``_execution`` their stored turn recorded, so the run scores the
+    trajectory the agent took for the user and :func:`case_execution_row` persists it as for a
+    live run. ``rows_by_group`` maps a message group id to its trace step rows (as dicts)."""
+    from .evaluation_execution import recorded_execution
+    attached = []
+    for index, case in enumerate(cases):
+        source = case.get('source') if isinstance(case, dict) else None
+        if not isinstance(source, dict):
+            attached.append(case)
+            continue
+        rows = [row for group_id in source.get('group_ids') or [] for row in rows_by_group.get(group_id, [])]
+        execution = recorded_execution(rows, store_tool_outputs=store_tool_outputs,
+                                       latency_ms=source.get('latency_ms'), final_text=case.get('output'))
+        attached.append({**case, '_execution': {**execution, 'case_index': index}})
+    return attached
+
+
 def case_execution_row(case, index: int) -> Optional[dict]:
     """The ``eval_case_execution`` row for one resolved case, or None if it never reached the agent."""
     execution = case.get('_execution') if isinstance(case, dict) else None
@@ -1388,6 +1447,45 @@ def _make_code_scorer(snapshot: dict, executor):
         )
 
     return _score
+
+
+def _load_trace_rows(project_id: int, cases: List[dict]) -> dict:
+    """``{message_group_id: [trace step row as a dict]}`` for every history case's agent groups,
+    in one query. A chat deleted since the run was planned leaves its cases with no rows."""
+    from ..models.message_trace_step import MessageTraceStep
+    from tools import db  # pylint: disable=E0401
+    group_ids = sorted({group_id for case in cases if isinstance(case.get('source'), dict)
+                        for group_id in case['source'].get('group_ids') or []})
+    if not group_ids:
+        return {}
+    columns = [column.name for column in MessageTraceStep.__table__.columns]
+    by_group: dict = {}
+    with db.get_session(project_id) as s:
+        rows = (s.query(MessageTraceStep)
+                .filter(MessageTraceStep.message_group_id.in_(group_ids))
+                .order_by(MessageTraceStep.started_at, MessageTraceStep.id)
+                .all())
+        for row in rows:
+            by_group.setdefault(row.message_group_id, []).append(
+                {name: getattr(row, name) for name in columns})
+    return by_group
+
+
+def _history_structure(project_id: int, snapshot: dict, *, user_id: int) -> Optional[dict]:
+    """The pinned version's structure for a history run's structure-scoped bindings, as a live run
+    stamps it; None when no binding asks for it or the version cannot be loaded (those bindings
+    then score on what the case has)."""
+    if not any((b.get('evidence_scope') or {}).get('structure', False) for b in snapshot.get('bindings') or []):
+        return None
+    try:
+        from .application_utils import get_application_version_details_expanded
+        from .evaluation_agent_runner import agent_structure_snapshot
+        return agent_structure_snapshot(get_application_version_details_expanded(
+            project_id, snapshot.get('application_id'), snapshot.get('application_version_id'), user_id))
+    except Exception:  # noqa: BLE001 - structure is one scope's evidence, never a reason to fail the run
+        from pylon.core.tools import log  # local: this module loads without pylon present
+        log.warning('Eval run: could not load structure for version %s', snapshot.get('application_version_id'))
+        return None
 
 
 def execute_run(
@@ -1616,6 +1714,17 @@ def execute_run(
             persisted_executions.append({k: v for k, v in row.items() if k != 'trajectory'})
             return {k: v for k, v in case.items() if k != '_execution'}
 
+        if snapshot.get('trigger_type') == TRIGGER_HISTORY:
+            # The agent is not run: each case already holds the user's turn, and its trajectory
+            # is read back from the chat's trace steps.
+            cases = attach_recorded_executions(
+                snapshot.get('cases') or [], _load_trace_rows(project_id, snapshot.get('cases') or []),
+                store_tool_outputs=(snapshot.get('suite') or {}).get('store_tool_outputs') is not False)
+            structure = _history_structure(project_id, snapshot, user_id=owner_id)
+            if structure is not None:
+                cases = [{**case, 'structure': structure} for case in cases]
+            snapshot = {**snapshot, 'cases': cases}
+
         agent_runner = None
         if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
             agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id,
@@ -1639,6 +1748,11 @@ def execute_run(
 
     # --- usage (priced before the session: one RPC per case × role × model) ----------------
     usage_rows, cases = [], outcome['cases']
+    if snapshot.get('trigger_type') == TRIGGER_HISTORY:
+        # A scored case's trajectory is already persisted and stripped; one still carrying it
+        # was never reached (the run stopped early) and gets no execution row.
+        cases = [{k: v for k, v in c.items() if k != '_execution'} if isinstance(c, dict) else c
+                 for c in cases]
     try:
         from tools import context as pylon_context  # pylint: disable=E0401
 

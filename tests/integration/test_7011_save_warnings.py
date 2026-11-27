@@ -56,7 +56,7 @@ class FakeScanSession:
 @pytest.fixture
 def real_scan(harness):
     """Swap the harness scan stub for the real module, fed by one HITL pipeline version."""
-    version = types.SimpleNamespace(application_id=2, agent_type='pipeline', instructions=PIPELINE_YAML, meta={}, tools=[])
+    version = types.SimpleNamespace(application_id=2, agent_type='pipeline', instructions=PIPELINE_YAML, meta={}, tools=[], variables=[])
     sys.modules[f'{PACKAGE}.models.all'] = types.SimpleNamespace(ApplicationVersion=type('ApplicationVersion', (), {}))
     sys.modules[f'{PACKAGE}.utils.application_tools'] = types.SimpleNamespace(
         ConfigurationExpandError=Exception, expand_toolkit_settings=lambda *args: {},
@@ -68,6 +68,12 @@ def real_scan(harness):
     ))
     load_module_with_stubs(PLUGIN_ROOT / 'utils/toolkit_security.py', f'{PACKAGE}.utils.toolkit_security')
     load_module_with_stubs(PLUGIN_ROOT / 'utils/pipeline_utils.py', f'{PACKAGE}.utils.pipeline_utils')
+    # the package stubs have an empty __path__, so the two real modules the sign-in rule reads are loaded by hand
+    pd_package = types.ModuleType(f'{PACKAGE}.models.pd')
+    pd_package.__path__ = []
+    sys.modules[pd_package.__name__] = pd_package
+    load_module_with_stubs(PLUGIN_ROOT / 'models/pd/mcp_oauth.py', f'{PACKAGE}.models.pd.mcp_oauth')
+    load_module_with_stubs(PLUGIN_ROOT / 'utils/stored_oauth_tokens.py', f'{PACKAGE}.utils.stored_oauth_tokens')
     sys.modules[f'{PACKAGE}.utils.schedule_risk'] = load_module_with_stubs(
         PLUGIN_ROOT / 'utils/schedule_risk.py', f'{PACKAGE}.utils.schedule_risk',
     )

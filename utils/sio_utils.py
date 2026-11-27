@@ -30,6 +30,9 @@ class SioEvents(StrEnum):
     chat_message_delete = 'chat_message_delete'
     chat_message_delete_all = 'chat_message_delete_all'
     chat_message_sync = 'chat_message_sync'
+    # Run state of a chat for its users' chat lists, sent to their user rooms (EL-7385)
+    chat_run_status = 'chat_run_status'
+    chat_conversation_name_updated = 'chat_conversation_name_updated'
     notifications_notify = 'notifications_notify'
     schedule_run_finished = 'schedule_run_finished'
     # chat_conversation_create = 'chat_conversation_create'
@@ -38,7 +41,6 @@ class SioEvents(StrEnum):
     mcp_connect = 'mcp_connect'
     mcp_tools_call = 'mcp_tools_call'
     mcp_notification = 'mcp_notification'
-    mcp_tools_list = 'mcp_tools_list'
     mcp_ping = 'mcp_ping'
     mcp_status = 'mcp_status'
 
@@ -94,9 +96,10 @@ SOCKET_UNAUTHENTICATED_MESSAGE = (
 SEND_FAILED_MESSAGE = 'The request could not be started. Please try again.'
 
 
-def refusal_frame(event, error, stream_id, message_id, code=None) -> dict:
+def refusal_frame(event, error, stream_id, message_id, code=None, details=None) -> dict:
     """The ``socket_validation_error`` frame the client settles a reply placeholder with."""
     frame = {
+        **(details or {}),
         'event': event,
         'content': error,
         'type': 'error',
@@ -126,7 +129,7 @@ def emit_refusal(sio, sid, room, event, error, stream_id, message_id) -> None:
 class SioValidationError(Exception):
     def __init__(
         self, sio, sid: str | None, event: str, error, stream_id: str = '',
-        message_id: str | None = None, code: str | None = None,
+        message_id: str | None = None, code: str | None = None, details: dict | None = None,
     ):
         self.sio = sio
         self.type = 'error'
@@ -136,6 +139,7 @@ class SioValidationError(Exception):
         self.sid = sid
         self.message_id = message_id
         self.code = code
+        self.details = details
         # self.room = get_event_room(
         #     event_name=event,
         #     room_id=stream_id
@@ -151,7 +155,7 @@ class SioValidationError(Exception):
     def emit_error(self) -> None:
         self.sio.emit(
             event=SioEvents.socket_validation_error.value,
-            data=refusal_frame(self.event, self.error, self.stream_id, self.message_id, self.code),
+            data=refusal_frame(self.event, self.error, self.stream_id, self.message_id, self.code, self.details),
             to=self.sid,
         )
 
@@ -165,6 +169,11 @@ def get_chat_room(room_uuid: str, **kwargs):
         event_name=SioEvents.chat_predict.value,
         room_id=str(room_uuid)
     )
+
+
+def get_user_room(user_id: int | str) -> str:
+    """The room every authenticated socket of a user joins on connect (notifications plugin)."""
+    return get_event_room(event_name='notifications', room_id=str(user_id))
 
 
 def get_eval_run_room(run_id: int | str, **kwargs):

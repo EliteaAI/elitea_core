@@ -193,6 +193,9 @@ def predict_utils(package_graph, internal_tools):
         f"{PACKAGE}.utils.application_tools": {
             "expand_toolkit_settings": lambda tools_, *args: tools_,
         },
+        f"{PACKAGE}.utils.skill_scratch": {
+            "skill_scratch_for_run": lambda project_id, conversation_uuid, user_id: {},
+        },
         f"{PACKAGE}.models.elitea_tools": {"EliteATool": object},
         f"{PACKAGE}.models.enums.all": {"AgentTypes": types.SimpleNamespace()},
         f"{PACKAGE}.models.pd.chat": {

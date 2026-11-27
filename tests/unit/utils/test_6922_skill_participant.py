@@ -180,9 +180,19 @@ def env(isolated_sys_modules):
     _stub('utils.application_utils', validate_and_resolve_llm_settings=resolve_fake_llm_settings)
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
+    def model_only_names(candidates):
+        winners = {}
+        for skill in candidates:
+            winners.setdefault((skill.get('name') or '').lower(), skill)
+        return {key for key, skill in winners.items() if key and skill.get('user_invocable') is False}
+
     _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)),
           get_max_invoked_skills_per_turn=lambda: 5,
           validate_message_skill_limit=lambda content, candidates: None,
+          model_only_names=model_only_names,
+          merge_invoked_skills=lambda message, resumed: [*message, *(resumed or [])],
+          apply_recipient_skill_argument=lambda result, source, names: None,
+          SKILL_ARGUMENT_KEY='skill_argument',
           SkillInvocationLimitError=SkillInvocationLimitError)
     _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
           build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)
@@ -203,8 +213,8 @@ def env(isolated_sys_modules):
     for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant', 'skill_file'):
         _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
-                 'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override',
-                 'project_skills'):
+                 'skill_frontmatter', 'skill_run_settings', 'skill_run_utils', 'skill_mentions',
+                 'skill_llm_override', 'project_skills'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
     module = _load('utils/skill_participant_utils.py', f'{PACKAGE}.utils.skill_participant_utils')
 
@@ -323,6 +333,14 @@ class TestPayload:
 
 
 class TestDispatch:
+    def test_dispatch_carries_the_answering_skills_argument_out_of_the_request_data(self, env):
+        session, msg_group = build_msg_group(PUBLIC_PROJECT_ID)
+        payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {})
+        payload['skill_argument'] = 'Anna'
+        rpc_kwargs, _start_event = env.mod.pop_skill_dispatch(payload, {})
+        assert rpc_kwargs['skill_argument'] == 'Anna'
+        assert 'skill_argument' not in payload
+
     def test_non_skill_payload_dispatches_unchanged(self, env):
         payload = {'user_input': 'hi'}
         start = {'participant_id': 1}

@@ -30,20 +30,25 @@ def version_is_bound(session, project_id, application_id, version_id) -> bool:
     ).first() is not None
 
 
-def governance_notice_for(module, session, project_id, application_id, version_id, trigger_type):
+def governance_notice_for(module, session, project_id, application_id, version_id, trigger_type, entity_type=None):
     """The notice for a saved trigger, or None: an unattended trigger, governance on (audit only or enforce), no active
-    binding. Governance off asks nothing of the database."""
-    if trigger_type not in UNATTENDED_TRIGGERS or not (is_governed(module) or is_auditing(module)):
+    binding. Governance off asks nothing of the database. A Toolkit Index schedule has no version to bind: None."""
+    if entity_type == "toolkit_index" or trigger_type not in UNATTENDED_TRIGGERS:
+        return None
+    if not (is_governed(module) or is_auditing(module)):
         return None
     if version_is_bound(session, project_id, application_id, version_id):
         return None
     return UNBOUND_NOTICE
 
 
-def schedule_governance_notice(module, session, project_id, application_id, version_id, owner_id, saver_id):
+def schedule_governance_notice(module, session, project_id, application_id, version_id, owner_id, saver_id,
+                               entity_type=None):
     """The notice for a saved owner schedule (#7011), or None: the unbound notice first; else, governance on, the
     owner's mandate on the version (one indexed read in ``session``) as a run would need it. Governance off asks
-    nothing of the database."""
+    nothing of the database. A Toolkit Index schedule has no version and no mandate: None."""
+    if entity_type == "toolkit_index":
+        return None
     notice = governance_notice_for(module, session, project_id, application_id, version_id, "schedule")
     if notice is not None or not (is_governed(module) or is_auditing(module)):
         return notice

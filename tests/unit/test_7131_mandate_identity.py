@@ -459,7 +459,8 @@ def _scheduler_writes(env, ns, schedule_id, seen):
         session.commit()
 
 
-def test_a_schedule_someone_else_changed_last_needs_the_owner_to_save_it(ns, env):
+@pytest.mark.parametrize("kind", ["schedule", "webhook"])   # a webhook row has the same rule (#7454)
+def test_a_schedule_someone_else_changed_last_needs_the_owner_to_save_it(ns, env, kind):
     """C9-SEC-46: a schedule an operator changed last does not run with the owner's sign-in until the owner saves it;
     the scheduler's own writes (claim, run row) change nothing about that, in either direction."""
     binding = env.seed_agent()
@@ -469,7 +470,7 @@ def test_a_schedule_someone_else_changed_last_needs_the_owner_to_save_it(ns, env
         session.commit()
     schedule_id, seen = _schedule(env, ns, updated_by=77)                # an operator's edit
     _scheduler_writes(env, ns, schedule_id, seen)
-    trigger = {"trigger_ref": f"schedule:entity:{schedule_id}"}
+    trigger = {"trigger_ref": f"{kind}:entity:{schedule_id}"}
     assert refused(ns, env, mandate, Delegated(env, binding, mandate), **trigger) == "DENIED_MANDATE_CONSENT_REQUIRED"
     assert "must save the schedule" in ns.adm.MESSAGES["DENIED_MANDATE_CONSENT_REQUIRED"]
     with ns.sa_orm.Session(env.engine(1)) as session:                    # the owner saves it
@@ -485,7 +486,7 @@ def test_a_schedule_someone_else_changed_last_needs_the_owner_to_save_it(ns, env
         _scheduler_writes(env, ns, schedule_id, seen_now)
         admit(ns, env, mandate, Delegated(env, binding, mandate, tool_id=tool_id), **trigger)
     assert slot == 1
-    assert refused(ns, env, mandate, Delegated(env, binding, mandate, tool_id=4), trigger_ref="schedule:entity:999") \
+    assert refused(ns, env, mandate, Delegated(env, binding, mandate, tool_id=4), trigger_ref=f"{kind}:entity:999") \
         == "DENIED_MANDATE_CONSENT_REQUIRED"   # no such schedule: fail closed
 
 
@@ -872,7 +873,7 @@ def task(ns, env, param, actor=3):
 
 
 CREATE = "project_id=1;action=create;version_id=70;owner_user_id=5;operations=run:schedule;max_runtime_s=600;" \
-         "valid_until=2026-11-15T00:00:00+00:00"
+         f"valid_until={(mandate_env.NOW + timedelta(days=30)).isoformat()}"
 
 
 def test_the_task_creates_a_mandate_naming_an_identity_the_deployment_allows(ns, env):

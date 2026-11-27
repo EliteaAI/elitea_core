@@ -189,7 +189,7 @@ SWEEP_SCHEDULE = 'skill_files_sweep'
 def platform_schedules():
     created = []
     managed = [{'name': name, 'rpc_func': f'{name}_rpc', 'cron': '* * * * *', 'active': True}
-               for name in ('index_scheduling', 'pipeline_scheduling')]
+               for name in ('index_scheduling', 'pipeline_scheduling', 'eval_auto_run')]
     namespace = {
         "build_scheduler_sync_plan": lambda config: managed,
         "Empty": type("Empty", (Exception,), {}),

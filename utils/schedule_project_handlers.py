@@ -5,14 +5,14 @@
 from flask import request
 from pydantic import BaseModel, Field, StrictBool, ValidationError
 from pylon.core.tools import log
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from tools import auth, db
 
 from ..models.entity_schedule import EntitySchedulePreference
 from ..models.pd.schedule_list import ScheduleListFilters, ScheduleListItem
 from .authors import get_authors_data
 from .error_text import public_reason
-from .schedule_access import allowed_actions, schedule_check_spec, schedule_scope
+from .schedule_access import allowed_actions, row_webhook_url, schedule_check_spec, schedule_scope
 from .schedule_queries import list_schedules
 
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
@@ -22,6 +22,13 @@ INVALID_INPUT = "invalid_input"
 INVALID_PREFERENCE = {"code": INVALID_INPUT, "error": "get_notified must be true or false", "field": "get_notified"}
 INVALID_SETTING = {"code": INVALID_INPUT, "error": "allow_run_without_asking must be true or false",
                    "field": "allow_run_without_asking"}
+INVALID_WEBHOOK_CAP = {"code": INVALID_INPUT, "error": "Running runs per webhook must be a whole number of at least 1",
+                      "field": "webhook_max_concurrent_runs"}
+# A project schema without the release columns; the answer names the admin tasks instead of a bare 500
+UNDEFINED_COLUMN = "42703"
+SCHEDULES_UNAVAILABLE = {"code": "schedules_unavailable",
+                         "error": "Schedules are not available yet: the administrator must run the admin tasks "
+                                  "ensure_webhook_trigger_columns and ensure_toolkit_index_schedule_columns"}
 SETTINGS_UNAVAILABLE = {"code": "settings_unavailable", "error": "The project settings store is unavailable; try again later"}
 
 
@@ -54,6 +61,19 @@ def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
         return {}
 
 
+def _webhook_load(session, project_id: int, rows) -> dict[int, dict]:
+    """`running_runs` and `run_cap` of the webhook rows of one page: one grouped count, never a query per row."""
+    ids = [row.id for row in rows if getattr(row, "trigger_kind", None) == "webhook"]
+    if not ids:
+        return {}
+    from .schedule_settings import project_webhook_cap
+    from .schedule_timing import webhook_limits
+    from .schedule_claim import running_webhook_runs
+    cap = project_webhook_cap(project_id, webhook_limits())
+    running = running_webhook_runs(session, ids)
+    return {row_id: {"running_runs": running.get(row_id, 0), "run_cap": cap} for row_id in ids}
+
+
 class ScheduleProjectHandlers:
     """The schedules of a project. Each handler is called with keyword arguments: check_api reads `project_id`."""
 
@@ -62,7 +82,7 @@ class ScheduleProjectHandlers:
         """Answer one page of schedules as `{"total", "rows"}`, with owner names and allowed actions (R1.1-R5.3).
 
         Who may call: a project member with `schedules.list`; only a schedules admin sees other owners' schedules.
-        Errors: 400 invalid query option; 403.
+        Errors: 400 invalid query option; 403; 503 `schedules_unavailable` (a release schema task did not run).
         """
         args = request.args.to_dict()
         owner_ids = request.args.getlist('owner_ids')
@@ -76,12 +96,20 @@ class ScheduleProjectHandlers:
             return {"code": INVALID_INPUT, "error": text, "field": name}, 400
 
         scope = schedule_scope(project_id)
-        with db.get_session(project_id) as session:
-            total, rows = list_schedules(session, scope, filters, filters.limit, filters.offset)
+        try:
+            with db.get_session(project_id) as session:
+                total, rows = list_schedules(session, scope, filters, filters.limit, filters.offset)
+                running = _webhook_load(session, project_id, rows)
+        except DBAPIError as error:
+            if getattr(error.orig, "pgcode", None) != UNDEFINED_COLUMN:
+                raise
+            log.warning("Schedules of project %s need the release schema tasks: %s", project_id, error.orig)
+            return SCHEDULES_UNAVAILABLE, 503
         names = _owner_names({row.created_by for row in rows})
         items = [
             ScheduleListItem(
-                **{**row._mapping, "last_run_reason": public_reason(row.last_run_reason)},
+                **{**row._mapping, "last_run_reason": public_reason(row.last_run_reason),
+                   "webhook_url": row_webhook_url(project_id, row), **running.get(row.id, {})},
                 owner={"id": row.created_by, "name": names.get(row.created_by)},
                 allowed_actions=allowed_actions(row, scope),
             ).model_dump(mode="json")  # one ISO offset per date; serialize() adds a second 'Z'
@@ -186,25 +214,44 @@ class ScheduleProjectHandlers:
         Who may call: a project member with `schedules.list`.
         Errors: 403. A store error answers false, as every other reader of the setting does (fail closed).
         """
-        from .schedule_settings import is_run_without_asking_allowed
-        return {"allow_run_without_asking": is_run_without_asking_allowed(project_id)}, 200
+        from .schedule_settings import is_run_without_asking_allowed, saved_webhook_cap
+        from .schedule_timing import webhook_limits
+        limits = webhook_limits()
+        return {"allow_run_without_asking": is_run_without_asking_allowed(project_id),
+                "webhook_max_concurrent_runs": saved_webhook_cap(project_id),
+                "webhook_max_concurrent_runs_default": limits.per_webhook,
+                "webhook_max_concurrent_runs_limit": limits.per_webhook_limit}, 200
 
     @auth.decorators.check_api(schedule_check_spec("admin"))
     def _save_settings(self, project_id: int):
-        """Allow or forbid "Run without asking" in the project. Saved schedules keep their rule; while it is
-        off, their runs pause and ask.
+        """Allow or forbid "Run without asking", or set the project's per-webhook running cap; a key left out keeps its value.
+        Saved schedules keep their rule; while "Run without asking" is off, their runs pause and ask.
 
         Who may call: a schedules admin (`schedules.admin`) only.
         Errors: 400 an unknown key or a value that is not true or false, with `field`; 403; 503 the store fails.
         """
-        from .schedule_settings import ScheduleProjectSettings, save_schedule_settings
+        from .schedule_settings import ScheduleProjectSettings, read_saved_settings, save_schedule_settings
+        body = request.get_json(silent=True)
+        # Each control saves only its own key: the others come from one read, and a failed read writes nothing
+        if isinstance(body, dict) and body and set(body) < set(ScheduleProjectSettings.model_fields):
+            try:
+                body = {**read_saved_settings(project_id), **body}
+            except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the configurations store failed
+                log.exception("Project %s: the schedule settings could not be read before a save", project_id)
+                return SETTINGS_UNAVAILABLE, 503
         try:
-            settings = ScheduleProjectSettings.model_validate(request.get_json(silent=True))
+            settings = ScheduleProjectSettings.model_validate(body)
         except ValidationError as e:
             unknown = [error["loc"][0] for error in e.errors() if error["type"] == "extra_forbidden"]
             if unknown:
                 return {"code": INVALID_INPUT, "error": f"{unknown[0]} is not a schedule setting", "field": unknown[0]}, 400
+            if any(error["loc"][:1] == ("webhook_max_concurrent_runs",) for error in e.errors()):
+                return INVALID_WEBHOOK_CAP, 400
             return INVALID_SETTING, 400
+        from .schedule_timing import webhook_limits
+        limit = webhook_limits().per_webhook_limit
+        if (settings.webhook_max_concurrent_runs or 0) > limit:
+            return {**INVALID_WEBHOOK_CAP, "error": f"Running runs per webhook can be at most {limit}", "limit": limit}, 400
         try:
             return save_schedule_settings(project_id, settings), 200
         except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the configurations store failed

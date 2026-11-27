@@ -5,6 +5,7 @@ ERROR_LINE_MAX_LENGTH = 300
 FAILED_REASON = 'The run failed'
 # Shown when the error text is written for engineers; the text itself goes to the server log only
 GENERIC_FAILED_REASON = f'{FAILED_REASON}. Open the run log or ask an administrator for details.'
+NOT_FOUND_TEXT = 'The requested item could not be found'
 # A query string of an http(s) URL: it may hold a token, so only its place is kept
 _URL_QUERY = re.compile(r'(https?://[^\s?#]+)\?[^\s#]*')
 # A Windows path (C:\work\x.py) or a POSIX absolute path (/data/x.py, /x.py), up to the first space. The
@@ -22,6 +23,28 @@ _INVISIBLE = re.compile(r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u
 _TECHNICAL = re.compile(r'\b[A-Z]\w*(?:Error|Exception)\b|Traceback|validation errors? for|input_value=|\[type=|pydantic|\.py\b|[A-Za-z]:\\|(?:^|[\s\'"(=])/[\w.\-]+/')
 # Characters that a notice or a log could show as a link, a tag or code
 _MARKUP = re.compile(r'[\[\]<>`]+')
+
+
+# The SDK returns a failed model call as the answer text ("Error: Error code: 400 - {...}", "Error: LLM stream
+# stalled ...") and the error flag may be missing (older SDK or worker), so the text is the second signal of a failed run
+_PROVIDER_ERROR_ANSWER = re.compile(r'\AError: (?:Error code: ([45]\d\d)\b|LLM stream (stalled|interrupted)\b)')
+_STREAM_FAILURE_REASONS = {
+    'stalled': 'The model provider stopped responding.',
+    'interrupted': 'The connection to the model provider closed before the answer finished.',
+}
+
+
+def provider_error_answer(content):
+    """One short sentence when the whole answer is a failed model call (HTTP error, stalled or cut stream); None for any other answer."""
+    match = _PROVIDER_ERROR_ANSWER.match(content.lstrip()) if isinstance(content, str) else None
+    if not match:
+        return None
+    status = match.group(1)
+    if status:
+        if status.startswith('5'):
+            return f'The model provider failed to answer (HTTP {status}).'
+        return f'The model provider rejected the request (HTTP {status}).'
+    return _STREAM_FAILURE_REASONS[match.group(2)]
 
 
 def is_technical(text) -> bool:

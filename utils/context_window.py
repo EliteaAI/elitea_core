@@ -68,11 +68,15 @@ def resolve_context_budget(
         model_window: Optional[int],
         model_max_output: Optional[int] = None,
         llm_max_tokens: Optional[int] = None,
+        window_source: Optional[str] = None,
 ) -> dict:
-    """Every budget number the UI shows and the SDK trigger uses, for one request's model."""
+    """Every budget number the UI shows and the SDK trigger uses, for one request's model.
+
+    ``window_source`` names where a resolved window came from ('auto' for Auto selection); 'model' when omitted.
+    """
     mode = normalize_mode(mode)
     window = _positive_int(model_window)
-    window_source = 'model' if window else 'default'
+    window_source = (window_source or 'model') if window else 'default'
     window = window or DEFAULT_MODEL_WINDOW
 
     effective_window = min(BALANCED_WINDOW_TOKENS, window) if mode == BALANCED else window
@@ -157,10 +161,30 @@ def get_model_limits(project_id: Optional[int], model_name: Optional[str]) -> di
     return limits
 
 
-def budget_for_model_config(mode: Optional[str], model_config: Optional[dict], llm_max_tokens=None) -> dict:
+def get_auto_model_limits(project_id: Optional[int], user_id: Optional[int]) -> dict:
+    """Smallest {context_window, max_output_tokens} among the models Auto can pick, or {} (TTL-cached per actor)."""
+    if not project_id or not user_id:
+        return {}
+
+    def load():
+        from tools import rpc_tools  # pylint: disable=E0401,C0415
+        limits = rpc_tools.RpcMixin().rpc.timeout(_RPC_TIMEOUT).configurations_get_auto_model_limits(
+            int(project_id), int(user_id),
+        ) or {}
+        if not limits:
+            from pylon.core.tools import log  # pylint: disable=E0611,E0401,C0415
+            log.warning('No model Auto can pick in project %s; the context window uses the default', project_id)
+        return limits
+    return _cached(('auto_model_limits', int(project_id), int(user_id)), load, {})
+
+
+def budget_for_model_config(
+        mode: Optional[str], model_config: Optional[dict], llm_max_tokens=None, window_source: Optional[str] = None,
+) -> dict:
     model_config = model_config or {}
     return resolve_context_budget(
         mode, model_config.get('context_window'), model_config.get('max_output_tokens'), llm_max_tokens,
+        window_source,
     )
 
 
@@ -257,15 +281,20 @@ def status_max_tokens(budget: dict, manual: Optional[int] = None, legacy: Option
     return budget['available_window']
 
 
+def is_auto_selection(llm_settings: Optional[dict]) -> bool:
+    return ((llm_settings or {}).get('selection') or {}).get('mode') == 'auto'
+
+
 def pick_chat_llm_settings(participants) -> dict:
     """llm_settings of the chat model: the user participant's, else the first participant with a model.
 
+    An Auto selection (no model_name) counts as a model.
     ``participants`` is an iterable of (entity_name, entity_settings).
     """
     fallback = {}
     for entity_name, entity_settings in participants:
         candidate = (entity_settings or {}).get('llm_settings') or {}
-        if not candidate.get('model_name'):
+        if not candidate.get('model_name') and not is_auto_selection(candidate):
             continue
         if str(entity_name) == 'user':
             return candidate

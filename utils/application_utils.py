@@ -33,10 +33,12 @@ from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
 from ..models.pd.tool import ToolValidatedDetails
 from ..models.pd.skill_file import describe_runtime_files
+from .skill_frontmatter import invocation_flags
 from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
 from .trigger_write_rule import sanitize_trigger_for_write
 from .folder_access import folder_exclusion_clause
+from .conversation_starters_utils import enforce_conversation_starters_limit
 
 
 class _AuthorSortRow(NamedTuple):
@@ -82,6 +84,26 @@ def _nested_governed_refusal(ex) -> str | None:
         if isinstance(found, dict) and set(found) == {'code', 'error'}:
             return body
     return None
+
+
+def _nested_connection_errors(ex) -> list | None:
+    """The connection errors a sub-agent's validation raised, when they are all it raised (``Value error, <json>``)."""
+    if not isinstance(ex, ValidationError):
+        return None
+    sentinel = ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
+    collected = []
+    for err in ex.errors(include_url=False, include_context=False, include_input=False):
+        message = err.get('msg') or ''
+        body = message[len('Value error, '):] if message.startswith('Value error, ') else ''
+        try:
+            found = json.loads(body) if body.startswith('{') else None
+        except ValueError:
+            found = None
+        if not (isinstance(found, dict) and set(found) == {sentinel} and isinstance(found[sentinel], list)
+                and all(isinstance(error, dict) for error in found[sentinel])):
+            return None
+        collected.extend(found[sentinel])
+    return collected or None
 
 
 def apply_selected_tools_intersection(tools, tool_mappings):
@@ -147,6 +169,7 @@ def build_skill_mappings_list(skill_mappings, skill_project_id=None) -> list:
             'version_name': version.name if version else None,
             'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
             'instructions': version.instructions if version else None,
+            **(invocation_flags(version.meta) if version else {}),
         }
         if skill_project_id is not None:
             entry['skill_project_id'] = skill_project_id
@@ -220,6 +243,12 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
             f'Version id {version_data.id} is {version.status} and can not be updated'
         )
 
+    if 'conversation_starters' in fields:
+        enforce_conversation_starters_limit(
+            version_data.conversation_starters,
+            previous_starters=version.conversation_starters,
+        )
+
     if version_data.variables is not None:
         variable_names = [var.name for var in version_data.variables]
         session.query(ApplicationVariable).filter(
@@ -266,6 +295,9 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
                 if requested.get('type') == 'schedule' and value['trigger'] != requested:
                     warning = 'A schedule trigger is not saved on a version. Create the schedule in Schedules.'
                     log.warning('applications_update_version: schedule trigger of version %s not stored', version.id)
+                elif requested.get('type') == 'webhook' and value['trigger'] != requested:
+                    warning = 'A webhook trigger is not saved on a version. Create the webhook in Settings → Webhooks.'
+                    log.warning('applications_update_version: webhook trigger of version %s not stored', version.id)
             elif existing_trigger:
                 value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
@@ -343,7 +375,7 @@ def application_update(project_id: int, application_id: int, update_data: Applic
     session.commit()
 
     context.event_manager.fire_event(
-        ApplicationEvents.application_updated,
+        ApplicationEvents.application_updated.value,
         {
             "id": application_id,
             "owner_id": project_id,
@@ -1068,8 +1100,9 @@ def _toolkit_connection_entry(tool_id, err_input, connection_errors) -> dict | N
     if refusal is not None:
         return {'type': 'value_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
                 'ctx': {'error': refusal}}
-    return {'type': 'connection_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
-            'ctx': connection_errors}
+    # 'connection_error' is not a valid pydantic type and ctx must be a dict
+    return {'type': 'value_error', 'loc': ('tools', tool_id, '__root__'), 'input': err_input,
+            'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})}}
 
 
 def _governed_connection_error(config: dict, project_id, user_id) -> dict | None:
@@ -1239,10 +1272,14 @@ def _validate_toolkit_type_application(
         refusal = _nested_governed_refusal(ex)   # the sub-agent's credential was refused: say what, and where (#7281)
         if refusal is not None:
             found = json.loads(refusal)
-            refusal = json.dumps({'code': found['code'], 'error': f"{agent_name}: {found['error']}"})
-        raise ValueError(
-            refusal or f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}"
-        ) from None
+            raise ValueError(json.dumps({'code': found['code'], 'error': f"{agent_name}: {found['error']}"})) from None
+        connection_errors = _nested_connection_errors(ex)
+        if connection_errors is not None:
+            raise ValueError(json.dumps({ToolValidatedDetails.CONNECTION_ERROR_SENTINEL: [
+                {**error, 'message': f"{agent_name}: {error.get('message') or 'Connection error'}"}
+                for error in connection_errors
+            ]})) from None
+        raise ValueError(f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}") from None
 
     return True
 
@@ -1277,7 +1314,12 @@ def validate_application_version_details(
         # both. It reuses THIS session, so it is one transaction, not a second one (PR #203
         # finding #5).
         if top_level:
-            from .publish_utils import assert_no_invalid_nesting, MAX_SUB_AGENT_VALIDATION_DEPTH
+            from .publish_utils import (
+                assert_no_invalid_nesting, assert_no_swarm_sub_agents, MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+            # Swarm agents are chat-only (issue #7736); enabling Swarm Mode on an agent that is
+            # already bound as a tool must surface as a per-tool error.
+            assert_no_swarm_sub_agents(project_id, version_id, session=session)
             assert_no_invalid_nesting(
                 project_id, version_id,
                 session=session,
@@ -1385,11 +1427,12 @@ def _validate_version_toolkits(session, version_toolkits, project_id, user_id, _
                             'ctx': {'error': refusal},
                         })
                     elif connection_errors is not None:
+                        # 'connection_error' is not a valid pydantic type and ctx must be a dict
                         application_toolkit_errors.append({
-                            'type': 'connection_error',
+                            'type': 'value_error',
                             'loc': ('tools', tool['id'], '__root__'),
                             'input': err.get('input'),
-                            'ctx': connection_errors,
+                            'ctx': {'error': json.dumps({'__connection_errors__': connection_errors})},
                         })
                     else:
                         application_toolkit_errors.append({

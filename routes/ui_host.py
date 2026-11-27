@@ -30,7 +30,9 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
 
 from werkzeug.datastructures.headers import Headers  # pylint: disable=E0401
 
-from tools import context, auth  # pylint: disable=E0401
+from tools import auth  # pylint: disable=E0401
+
+from ..utils.project_access import get_accessible_project
 
 
 class Route:  # pylint: disable=E1101,R0903
@@ -60,15 +62,10 @@ class Route:  # pylint: disable=E1101,R0903
         user = auth.current_user()
         user_id = user["id"]
         #
-        user_projects = {
-            project["id"]: project
-            for project in context.rpc_manager.call.list_user_projects(user_id)
-        }
+        project = get_accessible_project(project_id, user_id)
         #
-        if project_id not in user_projects:
+        if project is None:
             return "No project access", 403
-        #
-        project = user_projects[project_id]
         #
         provider = self.lookup_provider(user_id, project_id, provider_name)
         #
@@ -269,15 +266,10 @@ class Route:  # pylint: disable=E1101,R0903
         user = auth.current_user()
         user_id = user["id"]
         #
-        user_projects = {
-            project["id"]: project
-            for project in context.rpc_manager.call.list_user_projects(user_id)
-        }
+        project = get_accessible_project(project_id, user_id)
         #
-        if project_id not in user_projects:
+        if project is None:
             return "No project access", 403
-        #
-        project = user_projects[project_id]
         #
         provider = self.lookup_provider(user_id, project_id, provider_name)
         #

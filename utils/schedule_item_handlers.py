@@ -2,45 +2,77 @@
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Literal
 
 from flask import request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, constr
 from pylon.core.tools import log
-from sqlalchemy import func, select
-from tools import auth, db
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import DBAPIError
+from tools import VaultClient, auth, db
 
-from ..models.entity_schedule import EntityScheduleRun
+from ..models.all import EliteATool
+from ..models.entity_schedule import ACTIVE_STATUSES, EntitySchedule, EntityScheduleRun
 from ..models.enums.all import NotificationEventTypes
 from ..models.pd.entity_schedule import (
+    INDEX_NAME_MAX,
+    ScheduleConnectionsCheck,
     ScheduleCreate,
     ScheduleDetails,
     ScheduleEdit,
     ScheduleRiskCheck,
     ScheduleUpdate,
+    WebhookSecretAction,
 )
-from ..models.pd.schedule_list import DbId, RunStatus
+from ..models.pd.schedule_list import MAX_DB_ID, DbId, RunFilters
 from ..models.pd.schedule_run import ScheduleRunDecision, ScheduleRunRequest
 from .error_text import public_event, public_reason
 from .schedule_access import (
     SCHEDULE_PERMISSIONS,
     ScheduleScope,
     allowed_actions,
+    row_webhook_url,
     schedule_check_spec,
+    webhook_signing,
     schedule_scope,
 )
 from .schedule_claim import fail_run, insert_run, merge_events
 from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
+from .schedule_rights import may_run
 from .schedule_service import (
     INVALID_INPUT,
+    TOOLKIT_INDEX,
     ScheduleError,
+    ScheduleNotFound,
+    audit_schedule_event,
     check_entity,
+    check_index_body,
+    check_index_rights,
+    check_schedule_body,
+    check_webhook_owner_edit,
     create_schedule,
     delete_schedule,
     load_schedule_in_scope,
+    notify_owner,
     refusal,
+    update_changes,
     update_schedule,
+)
+from .schedule_test_runs import (
+    OLD_SCHEMA,
+    TestRunUnavailable,
+    active_index_test_run_id,
+    active_test_run_id,
+    error_code,
+    form_of_test_run,
+    insert_test_run,
+    load_test_run,
+    remove_trimmed_chats,
+    test_run_scope,
+    trim_test_runs,
 )
 from .schedule_timing import ScheduleLimitError
 from .trigger_governance import schedule_governance_notice
@@ -50,7 +82,11 @@ RUN_FIELDS = (
     "id", "trigger", "status", "reason", "conversation_id", "requested_by", "started_at", "finished_at",
     "version_id",
 )
-RUN_NOT_FOUND = refusal("run_not_found", "Run not found", 404)
+RUN_NOT_FOUND = ScheduleNotFound().response
+TEST_RUN_UNAVAILABLE = refusal(
+    "test_run_unavailable", "Test runs are not available yet: the administrator must run the task migrate_schedule_test_runs",
+    503,
+)
 ENABLED_NOT_EDITABLE = refusal(
     INVALID_INPUT, "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
     field="enabled",
@@ -64,10 +100,12 @@ BLOCKED = "You can't save this schedule: a scheduled run cannot do what the bloc
 SCAN_INCOMPLETE = 'Some tools could not be checked, so "Run without asking" is not allowed; use "Pause and ask me"'
 CONFIRM = "Review the sensitive tools, then save again with `risk_ack` and this fingerprint"
 CHANGED = "The sensitive tools changed since you reviewed them; review them again and confirm"
+ROTATION_IN_PROGRESS = "The previous secret still works until the time shown; use regenerate to replace it now"
+OWNER_CHANGED_PAUSED = "it is paused until the new owner checks its connections and switches it on"
 NAME_MISMATCH = 'Type the schedule name exactly to confirm "Run without asking"'
 
 
-def _started(entity_type: str, project_id: int, schedule_id: DbId, run_id: int) -> bool:
+def _started(entity_type: str, project_id: int, schedule_id: DbId | None, run_id: int) -> bool:
     """Start an approved run; an error counts as "not started", so the caller fails the run with a reason.
 
     The decision is already committed and the run is running. An error that escaped would leave it running
@@ -80,12 +118,217 @@ def _started(entity_type: str, project_id: int, schedule_id: DbId, run_id: int) 
         return False
 
 
-class RunsQuery(BaseModel):
+class RunsQuery(RunFilters):
     """Query of the run records list; `limit` above the cap is lowered to it (R3.3, R3.5)."""
 
     limit: int = Field(default=20, ge=1)
-    offset: int = Field(default=0, ge=0)
-    status: RunStatus | None = None
+    offset: int = Field(default=0, ge=0, le=MAX_DB_ID)
+
+
+class TestRunTarget(BaseModel):
+    """What a Test Run list or detail names: an agent or pipeline, or a Toolkit Index (both names)."""
+
+    __test__ = False  # not a pytest class, although the name starts with Test
+
+    application_id: DbId | None = None
+    toolkit_id: DbId | None = None
+    index_name: constr(min_length=1, max_length=INDEX_NAME_MAX) | None = None
+
+
+class TestRunsQuery(RunsQuery, TestRunTarget):
+    """Query of the Test Run list: the runs list options and the target of the runs."""
+
+    __test__ = False  # not a pytest class, although the name starts with Test
+
+
+def _test_run_target(query: TestRunTarget):
+    """The scope keywords of the target a query names, or the 400 answer when it names none or two.
+
+    Returns:
+        ``(keywords, None)`` or ``(None, refusal)``.
+    """
+    index = (query.toolkit_id, query.index_name)
+    if query.application_id is not None and any(part is not None for part in index):
+        return None, refusal(INVALID_INPUT, "Name an agent or pipeline, or a toolkit and an index, not both",
+                             field="application_id")
+    if query.application_id is not None:
+        return {"application_id": query.application_id}, None
+    if all(part is not None for part in index):
+        return {"toolkit_id": query.toolkit_id, "index_name": query.index_name}, None
+    field = "application_id" if not any(part is not None for part in index) else (
+        "index_name" if query.index_name is None else "toolkit_id")
+    return None, refusal(INVALID_INPUT, "Name an agent or pipeline (application_id), or a toolkit and an index", field=field)
+
+
+def _reply_target(row) -> dict:
+    """The target fields of a run reply: the toolkit and index of a Toolkit Index, else the agent or pipeline."""
+    if row.entity_type == TOOLKIT_INDEX:
+        return {"toolkit_id": row.toolkit_id, "index_name": row.index_name}
+    return {"application_id": row.application_id}
+
+
+def _governance_notice(module, session, project_id: int, row, saver_id: int):
+    """The governance notice of a saved schedule; a Toolkit Index row names its type, because it has no version to bind."""
+    extra = {"entity_type": row.entity_type} if row.entity_type == TOOLKIT_INDEX else {}
+    return schedule_governance_notice(
+        module, session, project_id, row.application_id, row.version_id, row.created_by, saver_id, **extra)
+
+
+def _start_run(session, project_id: int, schedule_id: int, entity_type: str, target: dict, trigger: str,
+               user_id: int, owner_request):
+    """Insert the running run, start it and answer 202; 409 `run_active` when the schedule has an active run."""
+    run_id = insert_run(session, schedule_id, trigger, user_id)
+    if run_id is None:
+        session.rollback()  # a draft written for this call must not stay half-saved
+        active_id = session.scalar(select(EntityScheduleRun.id).where(
+            EntityScheduleRun.schedule_id == schedule_id,
+            EntityScheduleRun.status.in_(ACTIVE_STATUSES),
+        ))
+        return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
+    session.commit()
+    if not start_schedule_run(entity_type, project_id, schedule_id, run_id, owner_request):
+        fail_run(session, run_id, START_FAILED)
+        session.commit()
+        return refusal("run_start_failed", "The run could not start", 500)
+    return {"run_id": run_id, **target}, 202
+
+
+def _sample_body_error(row, body):
+    """A webhook row runs only as `test` with a sample `payload`; a cron row takes no `payload` (#7455)."""
+    if row.trigger_kind != "webhook":
+        if body.payload is not None:
+            return refusal(INVALID_INPUT, "Only a webhook takes a sample payload", field="payload")
+        return None
+    if body.trigger != "test":
+        return refusal(INVALID_INPUT, "A webhook is run as a test with a sample payload", field="trigger")
+    if body.payload is None:
+        return refusal(INVALID_INPUT, "A webhook run needs a sample payload", field="payload")
+    return None
+
+
+def _start_sample_run(session, project_id: int, row, payload: str, requested_by: int):
+    """Run a webhook row with the caller's sample body through the delivery path; the body is never stored.
+
+    The run stores who asked, so a sample an admin sends acts as that admin, like Run now.
+    """
+    from .webhook_door import Capped, admit_webhook_run  # pylint: disable=C0415 -- late: only webhook rows reach it
+    schedule_id = row.id
+    run_id = admit_webhook_run(session, project_id, schedule_id, trigger="test", requested_by=requested_by)
+    if isinstance(run_id, Capped):  # no skipped row: the caller sees the answer at once
+        session.rollback()
+        return refusal(run_id.code, f"Too many runs at once ({run_id.running} running, cap {run_id.cap}); try again later",
+                       429, running=run_id.running, cap=run_id.cap)
+    if run_id is None:  # one sample at a time; deliveries are not limited by the active-run index
+        session.rollback()
+        active_id = session.scalar(select(EntityScheduleRun.id).where(
+            EntityScheduleRun.schedule_id == schedule_id, EntityScheduleRun.trigger == "test",
+            EntityScheduleRun.status.in_(ACTIVE_STATUSES)))
+        return refusal("run_active", "A sample run of this webhook is active", 409, active_run_id=active_id)
+    session.commit()
+    if not start_schedule_run(row.entity_type, project_id, schedule_id, run_id, payload=payload.encode("utf-8")):
+        fail_run(session, run_id, START_FAILED)
+        session.commit()
+        return refusal("run_start_failed", "The run could not start", 500)
+    return {"run_id": run_id, "application_id": row.application_id}, 202
+
+
+def _runs_page(session, where: list, query: RunsQuery) -> tuple[dict, list]:
+    """The `{total, rows}` page of the runs picked by `where`, newest first, for the runs list and the Test Run list.
+
+    The rows have no usage figures yet. The second value is what `_add_usage` needs, so the caller reads the usage
+    store after it closed the project session.
+    """
+    # Late: only the run routes read the usage store
+    from .schedule_run_detail import conversation_uuids, version_labels
+    where = [*where, *_run_filters(query)]
+    rows = session.execute(
+        select(*(getattr(EntityScheduleRun, name) for name in RUN_FIELDS)).where(*where)
+        .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc())
+        .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
+    ).mappings().all()
+    total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
+    # One lookup for the whole page: a call per row would cost a query per run
+    labels = version_labels(session, [row["version_id"] for row in rows])
+    uuids = conversation_uuids(session, [row["conversation_id"] for row in rows])
+    usage_runs = [SimpleNamespace(id=row["id"], conversation_uuid=uuids.get(row["conversation_id"]),
+                                  conversation_id=row["conversation_id"], started_at=row["started_at"],
+                                  finished_at=row["finished_at"]) for row in rows]
+    return {"total": total, "rows": [
+        {**_run_row(row), "version_label": labels.get(row["version_id"])} for row in rows
+    ]}, usage_runs
+
+
+def _add_usage(project_id: int, page: dict, usage_runs: list) -> dict:
+    """Add `tokens` and `cost_usd` to the rows of a page. Called after the project session closed, so a request
+    holds one pooled connection at a time."""
+    from .schedule_run_detail import usage_summaries  # late, as `_runs_page`
+    usage = usage_summaries(project_id, usage_runs)
+    for row in page["rows"]:
+        row["tokens"], row["cost_usd"] = usage[row["id"]]
+    return page
+
+
+def _run_filters(query: RunFilters) -> list:
+    where = []
+    if query.status:
+        where.append(EntityScheduleRun.status == query.status)
+    if query.trigger:
+        where.append(EntityScheduleRun.trigger == query.trigger)
+    if query.version_id:
+        where.append(EntityScheduleRun.version_id == query.version_id)
+    return where
+
+
+def _load_schedule_for_run(session, schedule_id: int, run_id: int, scope):
+    """The schedule row for a run route: in the caller's scope, or the row of a run the caller decides.
+
+    After a Change owner the old owner no longer owns the schedule but still decides the runs that started under
+    them (`run_decider_id`), so the run routes let that user through. Anyone else gets the same not-found.
+    """
+    try:
+        return load_schedule_in_scope(session, schedule_id, scope)
+    except ScheduleNotFound:
+        # Late: the run writers load the run models, which the handler tests fake
+        from .schedule_runs import run_decider_id
+        run = session.get(EntityScheduleRun, run_id) if run_id <= MAX_DB_ID else None
+        row = session.get(EntitySchedule, schedule_id) if schedule_id <= MAX_DB_ID else None
+        if run is None or row is None or run.schedule_id != schedule_id or run_decider_id(session, run) != scope.user_id:
+            raise
+        return row
+
+
+def _hides_tool_output(run, viewer_id: int) -> bool:
+    """True when a Run now or Test run was started by another user than the viewer: the tool results are the starter's."""
+    return run.trigger in ('manual', 'test') and run.requested_by is not None and run.requested_by != viewer_id
+
+
+def _run_detail_body(session, project_id: int, run, approval_rule: str | None, viewer_id: int):
+    """The `(body, status)` of one run, with the approval rule of its schedule or of its Test Run form.
+
+    The tool results (`summary` and the preview of a `tool_call` event) go only to the user who started a manual or test run.
+    `decider_id` is the user who approves, rejects or signs in for the run, so a client shows the buttons to that user only.
+    `can_approve_all` is true when the viewer may choose "approve all" on this waiting run now, so the UI shows the
+    choice only then.
+    """
+    # Late: only the detail routes read the conversation and the usage store
+    from .schedule_run_detail import tool_call_events, usage_summary, version_label
+    from .schedule_runs import can_approve_all, run_decider_id
+    row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
+    tokens, cost_usd = usage_summary(session, project_id, run)
+    tool_events = tool_call_events(session, run.conversation_id, with_output=not _hides_tool_output(run, viewer_id))
+    events = [public_event(e) for e in merge_events(run.events, tool_events)]
+    return {
+        **row,
+        "version_label": version_label(session, run.version_id),
+        "principal_label": run.principal_label,
+        "risk_outcome": run.risk_outcome,
+        "decider_id": run_decider_id(session, run),
+        "approval_rule": approval_rule,
+        "approval_expires_at": _iso(run.approval_expires_at),
+        "can_approve_all": can_approve_all(session, project_id, run, viewer_id),
+        "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
+        "events": events,
+    }, 200
 
 
 def _iso(moment) -> str | None:
@@ -116,7 +359,7 @@ def _owner_name(owner_id: int) -> str | None:
 
 def _details(row, scope: ScheduleScope) -> dict:
     """Shape a row as the API answers it, with the owner's and the confirmer's name for the edit page (US-32)."""
-    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by"}
+    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by", "webhook_url"}
     confirmer = row.approval_confirmed_by
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
@@ -153,8 +396,45 @@ def _check_scope_error(row, body, scope: ScheduleScope) -> dict | None:
     return None
 
 
+CONNECTIONS_NOT_READY = "Every toolkit must run without a person signed in; sign in on the rows that are not OK"
+# A switch-off for one of these is lifted only after the Connections check passes again (#7401)
+RECHECK_ON_RESUME = frozenset({"credential_expired", "connections_changed", "owner_changed"})
+
+
+def _connections(project_id: int, application_id: int, version_id: int | None, owner_id: int, refresh: bool = True):
+    from .schedule_prerun import check_connections  # pylint: disable=C0415 -- late: the check expands toolkits
+    if version_id is None:
+        return {"rows": [], "credential_refs": None}
+    return check_connections(project_id, application_id, version_id, owner_id, refresh)
+
+
+def _connections_gate(project_id: int, application_id: int, version_id: int | None, owner_id: int,
+                      trigger_kind: str) -> list | None:
+    """The version's credential references; a webhook that cannot run unattended raises 409 `connections_not_ready`."""
+    from .schedule_prerun import connections_ready  # pylint: disable=C0415
+    webhook = trigger_kind == "webhook"
+    result = _connections(project_id, application_id, version_id, owner_id, refresh=webhook)
+    if webhook and not connections_ready(result):
+        raise ScheduleError("connections_not_ready", CONNECTIONS_NOT_READY, 409, rows=result["rows"])
+    return result["credential_refs"]
+
+
+def _resume_check(project_id: int, row) -> None:
+    """Resume of a trigger switched off for its connections: 409 `connections_not_ready` while they still fail."""
+    # A schedule only needs its saved logins back: it may wait for a sign-in during a run (#7304)
+    from .schedule_prerun import connections_ready, lost_logins  # pylint: disable=C0415
+    if row.disabled_reason not in RECHECK_ON_RESUME or row.version_id is None:
+        return
+    result = _connections(project_id, row.application_id, row.version_id, row.created_by)
+    failing = not connections_ready(result) if row.trigger_kind == "webhook" else bool(lost_logins(result))
+    if failing:
+        raise ScheduleError("connections_not_ready", CONNECTIONS_NOT_READY, 409, rows=result["rows"])
+    if result["credential_refs"] is not None:
+        row.credential_refs = result["credential_refs"]
+
+
 def _review_save(project_id: int, version_id: int | None, owner_id: int, name: str, rule: str, ack,
-                 stored_fingerprint: str | None = None):
+                 stored_fingerprint: str | None = None, trigger_kind: str = "cron"):
     """Check a save against the risk review; return the review and, for a confirmed "Run without asking", it again.
 
     An edit without `risk_ack` that keeps "Run without asking" and the stored fingerprint keeps the stored
@@ -165,7 +445,7 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
             `approval_rule_not_allowed` (incomplete scan) or `risk_name_mismatch` (`field: risk_ack`).
     """
     from .schedule_risk import scan_complete, scan_schedule
-    review = scan_schedule(project_id, version_id, owner_id, rule)
+    review = scan_schedule(project_id, version_id, owner_id, rule, trigger_kind)
     without_asking = rule == RUN_WITHOUT_ASKING
     if review["blocking"]:
         raise ScheduleError("schedule_blocked", BLOCKED, 409, **review)
@@ -195,14 +475,33 @@ def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = Non
     """
     if review is None:
         from .schedule_risk import scan_schedule
-        review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule)
+        review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule, row.trigger_kind)
     warnings = review["blocking"] + review["sensitive"] + review["notices"]
-    return {**_read_answer(row, scope, project_id), "warnings": warnings, "governance_notice": notice}
+    return {**_read_answer(row, scope, project_id, review), "warnings": warnings, "governance_notice": notice}
 
 
-def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
+def _needs_reconfirm(row, project_id: int, review: dict | None) -> bool | None:
+    """True when "Run without asking" would not hold on the next run (as `_may_auto_approve`); None if unscanned."""
+    if row.approval_rule != RUN_WITHOUT_ASKING:
+        return False
+    try:
+        if review is None:
+            from .schedule_risk import scan_schedule  # pylint: disable=C0415 -- late: the scan expands toolkits
+            review = scan_schedule(project_id, row.version_id, row.created_by, row.approval_rule, row.trigger_kind)
+    except Exception:  # noqa: BLE001 -- a failed scan must not break the read
+        log.exception("Schedule %s: cannot scan for needs_reconfirm", row.id)
+        return None
+    if not review["sensitive"]:
+        return False
+    return review["fingerprint"] != row.approval_fingerprint or row.approval_confirmed_by != row.created_by
+
+
+def _read_answer(row, scope: ScheduleScope, project_id: int, review: dict | None = None) -> dict:
+    """One row as detail, edit and save answer it; only here `needs_reconfirm` is scanned, never per list row."""
     from .schedule_settings import is_run_without_asking_allowed
-    return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
+    return {**_details(row, scope), "webhook_url": row_webhook_url(project_id, row),
+            "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id)),
+            "needs_reconfirm": _needs_reconfirm(row, project_id, review), **webhook_signing(row)}
 
 
 def _credential_check(project_id: int, owner) -> str:
@@ -257,18 +556,26 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
     with db.get_session(project_id) as session:
         try:
             row = load_schedule_in_scope(session, schedule_id, scope)
+            # Before the risk scan: an admin edit of a webhook is refused without scanning
+            check_webhook_owner_edit(row, scope, update_changes(body))
             review = confirmed = None
             if reviewed:
                 if body.version_id is not None:  # no scan of a version the caller may not use
                     check_entity(session, project_id, row.entity_type, row.application_id, body.version_id)
                 review, confirmed = _review_save(
                     project_id, body.version_id or row.version_id, row.created_by, body.name or row.name,
-                    body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row),
+                    body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row), row.trigger_kind,
                 )
+                # A rename or a prompt edit leaves the toolkits as they are: no token calls, no new refusal
+                if (body.version_id or row.version_id) != row.version_id or row.credential_refs is None:
+                    refs = _connections_gate(project_id, row.application_id, body.version_id or row.version_id,
+                                             row.created_by, row.trigger_kind)
+                    if refs is not None:
+                        row.credential_refs = refs
+            elif body.enabled is True and not row.enabled:
+                _resume_check(project_id, row)
             row = update_schedule(session, project_id, row, body, scope, confirmed)
-            notice = schedule_governance_notice(
-                module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id,
-            ) if reviewed else None
+            notice = _governance_notice(module, session, project_id, row, scope.user_id) if reviewed else None
             return _saved(row, scope, project_id, review, notice), 200
         except ScheduleError as e:
             return e.response
@@ -280,11 +587,201 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
 
 def _notify_owner_change(project_id: int, row, change: dict) -> None:
     """Tell the old and the new owner, both ids in the meta (R3.2); a failure is logged, the change stays."""
+    extra = {**change, "reason": OWNER_CHANGED_PAUSED} if row.trigger_kind == "webhook" else change
     for user_id in change.values():
         try:
-            notify_schedule_event(project_id, user_id, NotificationEventTypes.schedule_owner_changed, row, extra=change)
+            notify_schedule_event(project_id, user_id, NotificationEventTypes.schedule_owner_changed, row, extra=extra)
         except Exception as e:  # noqa: BLE001 -- the change is committed; a lost notice must not fail it
             log.error("Schedule %s: cannot send the owner change notice: %s", row.id, e)
+
+
+def _decide(project_id: int, session, scope, run, entity_type: str, owner, body):
+    """The decision on a waiting run, shared by a saved run and a Test Run; `owner` has the values the credential
+    check needs. Reads in `session`, which this function leaves open for the caller to close."""
+    # Late: the decision writers load the run models, which the handler tests fake
+    from .schedule_runs import (
+        DECISION_REFUSED,
+        ScheduleDecisionForbidden,
+        ScheduleRunNotWaiting,
+        apply_schedule_decision,
+        check_schedule_decision,
+        run_actor_id,
+    )
+    if run.conversation_id is not None:
+        return refusal("run_has_chat", "Decide this run in its chat", 409)
+    run_id, schedule_id = run.id, run.schedule_id
+    owner.created_by = run_actor_id(session, run)  # the credentials are checked for the user the run acts as
+    session.close()  # the checks below open their own sessions
+    try:
+        decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
+        checked = _credential_check(project_id, owner) if decision == "approve" else "unknown"
+        if checked == "missing":
+            return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
+        apply_schedule_decision(project_id, run_id, decision)
+        if checked == "clean":  # only after the write: a lost race must leave no mark behind
+            _remember_checked(run_id)
+    except ScheduleDecisionForbidden:
+        return refusal("not_owner", DECISION_REFUSED, 403)
+    except ScheduleRunNotWaiting:
+        return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
+    if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
+        _forget_checked(run_id)
+        with db.get_session(project_id) as failed_session:
+            fail_run(failed_session, run_id, START_FAILED)
+            failed_session.commit()
+        return refusal("run_start_failed", "The run could not start", 500)
+    return {"run_id": run_id, "status": "running" if decision == "approve" else "failed"}, 200
+
+
+def _unavailable_or_raise(error: DBAPIError):
+    """The 503 answer for a database error of a schema without the Test Run columns; any other error goes on."""
+    if error_code(error) in OLD_SCHEMA:
+        return TEST_RUN_UNAVAILABLE
+    raise error
+
+
+INDEX_RUN_ACTIVE_TEXT = "A run of this index is active"
+
+
+class IndexRiskCheck(BaseModel):
+    """The body of the dry-run check of a Toolkit Index: the toolkit and the index, no version."""
+
+    entity_type: Literal["toolkit_index"]
+    toolkit_id: DbId
+    index_name: constr(min_length=1, max_length=INDEX_NAME_MAX)
+    schedule_id: DbId | None = None
+
+
+def _check_index_target(session, project_id: int, toolkit_id: int | None, index_name: str | None) -> None:
+    """`check_entity` for an index, without the "already scheduled" refusal.
+
+    A Test Run and a risk check try a form, so the index may already hold the schedule the form belongs to.
+    """
+    try:
+        check_entity(session, project_id, TOOLKIT_INDEX, None, None, toolkit_id, index_name)
+    except ScheduleError as e:
+        if e.response[0]["code"] != "index_scheduled":
+            raise
+
+
+def _check_test_body(session, project_id: int, body: ScheduleCreate) -> None:
+    """The Save rules of a Test Run body; a Toolkit Index body is checked by the index rules."""
+    if body.entity_type != TOOLKIT_INDEX:
+        return check_schedule_body(session, project_id, body)
+    check_index_body(body)
+    return _check_index_target(session, project_id, body.toolkit_id, body.index_name)
+
+
+def _body_target(body: ScheduleCreate) -> dict:
+    """The target fields of a Test Run reply, as `_reply_target` gives them for a saved row."""
+    if body.entity_type == TOOLKIT_INDEX:
+        return {"toolkit_id": body.toolkit_id, "index_name": body.index_name}
+    return {"application_id": body.application_id}
+
+
+def _index_row_is_live(project_id: int, toolkit, index_name: str) -> bool:
+    """True when the index row says `in_progress` and its run still beats; false when it cannot be read.
+
+    A failed read does not block the run: the starter reads the same row again and skips a live run itself.
+    """
+    # Late: the vector store helpers load only when an index run is asked for
+    from .application_tools import DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC, resolve_index_staleness
+    from .schedule_index_starter import _read_index, _toolkit  # pylint: disable=C0415,W0212
+    try:
+        _, connection_string = _toolkit(project_id, toolkit.author_id, toolkit.id)
+        index = _read_index(connection_string, toolkit.id, index_name, with_heartbeat=True)
+        state = str((index.meta if index else {}).get("state") or "").lower()
+        if state != "in_progress":
+            return False
+        timeout = int(VaultClient(project_id).get_secrets().get(
+            "task_disconnected_timeout_sec", DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC))
+        # No heartbeat horizon: the same control rule as the starter and the dispatch guard
+        return not resolve_index_staleness(state, index.meta.get("updated_on", 0), timeout, index.heartbeat)
+    except Exception as error:  # noqa: BLE001 -- the starter decides again at the start
+        log.warning("Index %s of toolkit %s: liveness not read: %r", index_name, toolkit.id, error)
+        return False
+
+
+def _index_busy(session, project_id: int, user_id: int, toolkit_id: int, index_name: str,
+                schedule_id: int | None = None):
+    """The 409 `run_active` answer while a run of the index is active, else None.
+
+    The unique index of an active Test Run keys on the agent, which an index run does not have, so the toolkit row
+    is locked first: a second caller waits for the commit of the first and then sees its run. The answer names the
+    run only when the caller owns it: another user's Test Run id stays out of the body.
+
+    The index row lives in the vector store and its read can be slow, so it is read before the lock: the lock holds
+    only the active-run queries.
+    """
+    toolkit = session.get(EliteATool, toolkit_id)
+    live = toolkit is not None and _index_row_is_live(project_id, toolkit, index_name)
+    session.scalars(select(EliteATool.id).where(EliteATool.id == toolkit_id).with_for_update()).one_or_none()
+    shown_id = None
+    try:
+        with session.begin_nested():  # a missing Test Run column must not abort the outer transaction
+            active_id = active_index_test_run_id(session, toolkit_id, index_name)
+            if active_id is not None:
+                shown_id = active_test_run_id(session, user_id, toolkit_id=toolkit_id, index_name=index_name)
+    except TestRunUnavailable:
+        active_id = None  # no Test Run column yet, so no Test Run exists
+    if active_id is None and schedule_id is not None:
+        active_id = shown_id = session.scalar(select(EntityScheduleRun.id).where(
+            EntityScheduleRun.schedule_id == schedule_id, EntityScheduleRun.status.in_(ACTIVE_STATUSES)).limit(1))
+    if active_id is not None or live:
+        return refusal("run_active", INDEX_RUN_ACTIVE_TEXT, 409, active_run_id=shown_id)
+    return None
+
+
+def _index_admission(module, project_id: int, toolkit_id: int, trigger_ref: str):
+    """The admission request of an index Run now or Test run; None when governance is off.
+
+    An index has no version, so `owner_run_request` does not fit: the entry point is the on-demand index run.
+    """
+    from ..models.pd.admission import ENTRY_INDEX_ON_DEMAND, admission_request_from  # pylint: disable=C0415
+    request = admission_request_from(
+        module, sid=None, project_id=project_id, binding_project_id=project_id,
+        version_row=SimpleNamespace(id=None, application_id=None), run_kind="interactive",
+        entry_point=ENTRY_INDEX_ON_DEMAND, toolkit_id=toolkit_id)
+    return None if request is None else request.model_copy(update={"trigger_ref": trigger_ref})
+
+
+def _index_review(session, project_id: int, toolkit_id: int, owner_id: int) -> dict:
+    """The risk review of a Toolkit Index: the credential of its toolkit, as the owner would run it.
+
+    An index has no tool to approve, so `sensitive` stays empty and there is no fingerprint to confirm.
+    A credential the owner cannot use blocks; a personal credential is a notice.
+    """
+    # Late and private: the scan helpers of an agent version are reused, not copied
+    from .application_tools import ConfigurationExpandError, expand_toolkit_settings
+    from .schedule_risk import (  # pylint: disable=C0415,W0212
+        CREDENTIAL_ERRORS,
+        INCOMPLETE_CODE,
+        _error_types,
+        _personal_credential,
+        _uses_private_credential,
+        _warning,
+    )
+    review = {"blocking": [], "sensitive": [], "notices": [], "fingerprint": None}
+    toolkit = session.get(EliteATool, toolkit_id)
+    name = toolkit.name or toolkit.type
+    try:
+        expand_toolkit_settings(toolkit.type, toolkit.settings or {}, project_id, owner_id)
+    except ConfigurationExpandError as error:
+        if _error_types(error.errors) & CREDENTIAL_ERRORS:
+            review["blocking"].append(_warning(
+                "credential_missing", f'Toolkit "{name}" has no usable credential for the owner',
+                toolkit=name, toolkit_type=toolkit.type))
+        else:
+            review["notices"].append(_warning(INCOMPLETE_CODE, f'Toolkit "{name}" could not be checked',
+                                              toolkit=name, toolkit_type=toolkit.type))
+    except Exception:  # noqa: BLE001 -- a failed scan is an incomplete notice, never a 500
+        log.exception("Index check: cannot expand the settings of toolkit %s", toolkit_id)
+        review["notices"].append(_warning(INCOMPLETE_CODE, f'Toolkit "{name}" could not be checked',
+                                          toolkit=name, toolkit_type=toolkit.type))
+    else:
+        if _uses_private_credential(toolkit):
+            review["notices"].append(_personal_credential(toolkit, name))
+    return review
 
 
 class ScheduleItemHandlers:
@@ -303,17 +800,27 @@ class ScheduleItemHandlers:
         With `schedule_id` (an edit) the scan runs as the schedule owner, so an admin gets the owner's
         fingerprint, and the answer adds `confirmed`: true when the schedule keeps "Run without asking"
         with this fingerprint stored (R9.2).
-        Who may call: a project member with `schedules.create`, as for a create.
-        Errors: 400 invalid field, a version that is not of the agent or pipeline, or an agent or pipeline
-        that is not the one of `schedule_id`; 403, also `not_owner` for another version without the right
-        to edit the schedule; 404 not visible, also a `schedule_id` the caller may not see.
+        With `schedule_id` and `run_id` (a waiting run) the scan runs as the user the run acts as: the person
+        who pressed Run now or Test run, else the schedule owner. The client never names that user. The answer
+        has no `confirmed`: the stored fingerprint is the owner's, not the run actor's.
+        A Toolkit Index (`entity_type` `toolkit_index`, with `toolkit_id` and `index_name`, no version) is
+        checked by the credential of its toolkit: `blocking` has `credential_missing`, `notices` has
+        `personal_credential`, `sensitive` is empty and `fingerprint` is null.
+        Who may call: a project member with `schedules.create`, as for a create; with `run_id` also `schedules.run`.
+        Errors: 400 invalid field (also `run_id` without `schedule_id`), a version that is not of the agent or
+        pipeline, or an agent or pipeline that is not the one of `schedule_id`; 403, also `not_owner` for another
+        version without the right to edit the schedule, and for a `run_id` without `schedules.run`; 404 not
+        visible, also a `schedule_id` the caller may not see, and a `run_id` that is unknown or of another schedule.
         """
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict) and payload.get("entity_type") == TOOLKIT_INDEX:
+            return self._check_index_risks(project_id)
         from .schedule_risk import scan_complete, scan_schedule
         from .schedule_settings import is_run_without_asking_allowed
         body, error = _parse_body(ScheduleRiskCheck)
         if error:
             return error
-        owner_id, stored, rule = auth.current_user()["id"], None, body.approval_rule
+        owner_id, stored, rule, kind = auth.current_user()["id"], None, body.approval_rule, body.trigger_kind
         with db.get_session(project_id) as session:
             try:
                 if body.schedule_id is not None:
@@ -324,15 +831,86 @@ class ScheduleItemHandlers:
                         return refused
                     owner_id, stored = row.created_by, _kept_fingerprint(row)
                     rule = rule or row.approval_rule
+                    kind = row.trigger_kind
+                    if body.run_id is not None:
+                        if SCHEDULE_PERMISSIONS["run"] not in scope.permissions:
+                            return refusal("not_owner", "Only a user who may run this schedule can check a run", 403)
+                        # Late: the run writers load the run models, which the handler tests fake
+                        from .schedule_runs import run_actor_id
+                        run = session.get(EntityScheduleRun, body.run_id) if body.run_id <= MAX_DB_ID else None
+                        if run is None or run.schedule_id != row.id:
+                            return RUN_NOT_FOUND
+                        owner_id = run_actor_id(session, run)
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response
-        review = scan_schedule(project_id, body.version_id, owner_id, rule)
+        review = scan_schedule(project_id, body.version_id, owner_id, rule, kind or "cron")
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
         answer = {**review, "run_without_asking_allowed": allowed}
-        if body.schedule_id is not None:
+        if body.schedule_id is not None and body.run_id is None:
             answer["confirmed"] = stored is not None and stored == review["fingerprint"]
         return answer, 200
+
+    def _check_index_risks(self, project_id: int):
+        """The risk check of a Toolkit Index; the rights are the ones of `_check_risks`, which calls it."""
+        body, error = _parse_body(IndexRiskCheck)
+        if error:
+            return error
+        owner_id = auth.current_user()["id"]
+        with db.get_session(project_id) as session:
+            try:
+                if body.schedule_id is not None:
+                    row = load_schedule_in_scope(session, body.schedule_id, schedule_scope(project_id))
+                    for field in ("entity_type", "toolkit_id", "index_name"):
+                        if getattr(body, field) != getattr(row, field):
+                            return refusal(INVALID_INPUT, f"{field} must be the one of the schedule", field=field)
+                    owner_id = row.created_by
+                _check_index_target(session, project_id, body.toolkit_id, body.index_name)
+            except ScheduleError as e:
+                return e.response
+            answer = {**_index_review(session, project_id, body.toolkit_id, owner_id),
+                      "run_without_asking_allowed": False}
+        if body.schedule_id is not None:
+            answer["confirmed"] = False
+        return answer, 200
+
+    @auth.decorators.check_api(schedule_check_spec("create"))
+    def _check_connections(self, project_id: int):
+        """Can every toolkit of a version run with no person signed in (#7401); the Swagger text has the details."""
+        # The owner's check of a trigger also saves its refs and switches off on a lost login
+        from .schedule_prerun import connections_ready, lost_logins, switch_off_for_login
+        body, error = _parse_body(ScheduleConnectionsCheck)
+        if error:
+            return error
+        owner_id, kind, row_id = auth.current_user()["id"], body.trigger_kind, None
+        caller_id = owner_id
+        with db.get_session(project_id) as session:
+            try:
+                if body.schedule_id is not None:
+                    scope = schedule_scope(project_id)
+                    row = load_schedule_in_scope(session, body.schedule_id, scope)
+                    refused = _check_scope_error(row, body, scope)
+                    if refused:
+                        return refused
+                    owner_id, kind, row_id = row.created_by, row.trigger_kind, row.id
+                check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+            except ScheduleError as e:
+                return e.response
+        result = _connections(project_id, body.application_id, body.version_id, owner_id)
+        lost_login = False
+        if row_id is not None and caller_id == owner_id:
+            for lost in {item["credential_uuid"]: item for item in lost_logins(result)}.values():
+                switch_off_for_login(project_id, owner_id, lost)
+                lost_login = True
+            if result["credential_refs"] is not None:
+                with db.get_session(project_id) as session:  # only if the row still has this owner and version
+                    session.execute(update(EntitySchedule).where(
+                        EntitySchedule.id == row_id, EntitySchedule.created_by == owner_id,
+                        EntitySchedule.version_id == body.version_id).values(credential_refs=result["credential_refs"]))
+                    session.commit()
+        ready = connections_ready(result)
+        return {"rows": result["rows"], "all_ok": ready, "blocking": kind == "webhook" and not ready,
+                "lost_login": lost_login}, 200
 
     @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):
@@ -355,18 +933,26 @@ class ScheduleItemHandlers:
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+                check_entity(session, project_id, body.entity_type, body.application_id, body.version_id,
+                             body.toolkit_id, body.index_name)
                 review, confirmed = _review_save(
                     project_id, body.version_id, scope.user_id, body.name, body.approval_rule, body.risk_ack,
+                    trigger_kind=body.trigger_kind,
                 )
+                refs = _connections_gate(project_id, body.application_id, body.version_id, scope.user_id,
+                                         body.trigger_kind)
                 row = create_schedule(session, project_id, body, scope, confirmed=confirmed)
+                row.credential_refs = refs
+                session.commit()
             except ScheduleError as e:
                 return e.response
             except ScheduleLimitError as e:
                 return refusal(LIMIT_REACHED, str(e), 409)
-            notice = schedule_governance_notice(
-                self.module, session, project_id, row.application_id, row.version_id, row.created_by, scope.user_id)
-            return _saved(row, scope, project_id, review, notice), 201
+            notice = _governance_notice(self.module, session, project_id, row, scope.user_id)
+            answer = _saved(row, scope, project_id, review, notice)
+            if getattr(row, "new_secret", None):  # shown once: no read answers it again
+                answer["secret"] = row.new_secret
+            return answer, 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _read(self, project_id: int, schedule_id: int):
@@ -438,10 +1024,15 @@ class ScheduleItemHandlers:
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _run(self, project_id: int, schedule_id: int):
-        """Start a run now (`manual`) or a test run (`test`) of the caller's own schedule.
+        """Start a run now (`manual`) or a test run (`test`) of a schedule.
 
-        Who may call: the owner with `schedules.run`; an admin sees the schedule but cannot run it.
-        Errors: 400 invalid trigger; 403 not the owner; 404; 409 deleted version or an active run
+        A webhook runs only as `test` with a sample `payload`, through the delivery path (#7455).
+
+        Who may call: the owner or a holder of `schedules.admin`, with `schedules.run`. The run acts as the caller
+        and always pauses before a sensitive action; the owner of the schedule approves or rejects the pause.
+        A Toolkit Index has no version: it answers 409 `run_active` while a run of the index is active, and the
+        202 names `toolkit_id` and `index_name` instead of `application_id`.
+        Errors: 400 invalid trigger or payload; 403; 404 not found, or a schedule outside the caller's scope; 409 deleted version or an active run
         (the body has `active_run_id`); 500 the run could not start.
         """
         body, error = _parse_body(ScheduleRunRequest)
@@ -453,31 +1044,114 @@ class ScheduleItemHandlers:
                 row = load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            if row.created_by != scope.user_id:  # an admin sees the row but never runs it as the owner
-                return refusal("not_owner", "Only the owner of this schedule can run it", 403)
-            if row.version_id is None:
+            if not may_run(row.created_by, scope.user_id, scope.is_admin):
+                return refusal("not_owner", "Only the owner of this schedule or a project admin can run it", 403)
+            is_index = row.entity_type == TOOLKIT_INDEX
+            if is_index and not scope.is_admin:  # the owner needs the rights a save needs
+                try:
+                    check_index_rights(project_id, row.toolkit_id, scope)
+                except ScheduleError as e:
+                    return e.response
+            if row.version_id is None and not is_index:  # an index has no version by design
                 return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
+            sample_error = _sample_body_error(row, body)
+            if sample_error:
+                return sample_error
+            if row.trigger_kind == "webhook":
+                sampled = _start_sample_run(session, project_id, row, body.payload, scope.user_id)
+                if sampled[1] == 202 and row.created_by != scope.user_id:  # the run acts as the admin: tell the owner
+                    notify_owner(project_id, row.created_by, row, action='started a run of')
+                return sampled
             entity_type = row.entity_type
-            try:   # the owner's own run (#7254), from this signed-in request; None when off. Built before the run row
-                from .mandate_admission import owner_run_request  # pylint: disable=C0415
-                owner_request = owner_run_request(self.module, project_id=project_id, application_id=row.application_id,
-                                                  version_id=row.version_id, schedule_id=schedule_id)
-            except Exception:  # noqa: BLE001 -- nothing is stored yet; the owner can try again
+            try:   # the caller's own run (#7254), from this signed-in request; None when off. Built before the run row
+                if is_index:
+                    busy = _index_busy(session, project_id, scope.user_id, row.toolkit_id, row.index_name)
+                    if busy:
+                        return busy
+                from .mandate_admission import owner_run_request, schedule_trigger_ref  # pylint: disable=C0415
+                if is_index:
+                    owner_request = _index_admission(
+                        self.module, project_id, row.toolkit_id, schedule_trigger_ref(schedule_id))
+                else:
+                    owner_request = owner_run_request(
+                        self.module, project_id=project_id, application_id=row.application_id,
+                        version_id=row.version_id, trigger_ref=schedule_trigger_ref(schedule_id))
+            except Exception:  # noqa: BLE001 -- nothing is stored yet; the caller can try again
                 log.exception('Schedule %s: cannot build the owner run request', schedule_id)
                 return refusal("run_start_failed", "The run could not start", 500)
-            run_id = insert_run(session, schedule_id, body.trigger, scope.user_id)
-            if run_id is None:
-                active_id = session.scalar(select(EntityScheduleRun.id).where(
-                    EntityScheduleRun.schedule_id == schedule_id,
-                    EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
-                ))
-                return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
+            owner_id = row.created_by
+            started = _start_run(
+                session, project_id, schedule_id, entity_type, _reply_target(row), body.trigger, scope.user_id,
+                owner_request)
+            if started[1] == 202 and owner_id != scope.user_id:  # the run acts as the admin: tell the owner
+                notify_owner(project_id, owner_id, row, action='started a run of')
+            return started
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _test_run(self, project_id: int):
+        """Test the form of a schedule that is not saved yet; no schedule row is written.
+
+        The body is the Save body. It is stored on one run row of trigger `test` that has no schedule, and the run
+        starts with the same checks as a saved run. The run never reaches the schedule list, Last Run, Next Run,
+        the tick, the cap or an export. The caller keeps the newest 50 Test Runs of an agent, pipeline or index.
+        A Toolkit Index body names `toolkit_id` and `index_name`; an active run of that index, whoever started it,
+        refuses the Test Run.
+        Who may call: a project member with `schedules.run`.
+        Errors: 400 invalid field (the Save rules, `approval_rule_not_allowed`); 403; 404 agent or pipeline not
+        found or not visible; 409 `run_active` (a Test Run of this agent, pipeline or index is active, the body has
+        `active_run_id`); 500 `run_start_failed`; 503 `test_run_unavailable` (the admin task
+        `migrate_schedule_test_runs` did not run in this project).
+        """
+        body, error = _parse_body(ScheduleCreate)
+        if error:
+            return error
+        if body.trigger_kind == "webhook":  # a webhook is tried with a sample body (#7399), not with a Test Run
+            return refusal(INVALID_INPUT, "A Test Run is for schedules; a webhook is tried with a sample delivery",
+                           field="trigger_kind")
+        refused = _refuse_unallowed_rule(project_id, body)
+        if refused:
+            return refused
+        scope = schedule_scope(project_id)
+        is_index = body.entity_type == TOOLKIT_INDEX
+        with db.get_session(project_id) as session:
+            try:
+                _check_test_body(session, project_id, body)
+                if is_index:
+                    busy = _index_busy(session, project_id, scope.user_id, body.toolkit_id, body.index_name)
+                    if busy:
+                        return busy
+                run_id = insert_test_run(session, scope.user_id, body)
+                if run_id is None:
+                    active_id = active_test_run_id(session, scope.user_id, body.application_id)
+                    return refusal("run_active", "A test run of this schedule is active", 409, active_run_id=active_id)
+            except ScheduleError as e:
+                return e.response
+            except TestRunUnavailable:
+                session.rollback()
+                return TEST_RUN_UNAVAILABLE
+            try:
+                from .mandate_admission import owner_run_request, test_run_trigger_ref  # pylint: disable=C0415
+                if is_index:
+                    owner_request = _index_admission(
+                        self.module, project_id, body.toolkit_id, test_run_trigger_ref(run_id))
+                else:
+                    owner_request = owner_run_request(
+                        self.module, project_id=project_id, application_id=body.application_id,
+                        version_id=body.version_id, trigger_ref=test_run_trigger_ref(run_id))
+            except Exception:  # noqa: BLE001 -- the owner can try again; the rollback leaves nothing stored
+                session.rollback()
+                log.exception('Test run of %s: cannot build the owner run request', _body_target(body))
+                return refusal("run_start_failed", "The run could not start", 500)
+            trimmed = trim_test_runs(session, scope.user_id, **_body_target(body))
             session.commit()
-            if not start_schedule_run(entity_type, project_id, schedule_id, run_id, owner_request):
+            started = start_schedule_run(body.entity_type, project_id, None, run_id, owner_request)
+            if not started:
                 fail_run(session, run_id, START_FAILED)
                 session.commit()
-                return refusal("run_start_failed", "The run could not start", 500)
-            return {"run_id": run_id}, 202
+        remove_trimmed_chats(project_id, trimmed)  # after the commit: a bucket cannot be rolled back
+        if not started:
+            return refusal("run_start_failed", "The run could not start", 500)
+        return {"run_id": run_id, **_body_target(body)}, 202
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _decide_run(self, project_id: int, schedule_id: int, run_id: int):
@@ -485,59 +1159,115 @@ class ScheduleItemHandlers:
 
         Approve checks the credentials first: while one is missing the answer is 409 and the run keeps waiting.
         Otherwise approve starts the run again. A run with a chat is decided in that chat.
-        Who may call: the owner with `schedules.run`; an admin cannot decide.
-        Errors: 400 invalid action; 403 not the owner; 404; 409 the run is not waiting, has a chat, or a credential is still missing.
+        Who may call: the owner of the schedule when the run started, with `schedules.run`, also after a Change
+        owner. An admin who is not that owner gets 403, also for a run the admin started with Run now; the run
+        keeps the admin's credentials. The new owner gets 403 for a run that started under the old owner.
+        Errors: 400 invalid action; 403 not the owner of the run; 404 not found, or a schedule outside the caller's scope;
+        409 the run is not waiting, has a chat, or a credential is still missing.
         """
         body, error = _parse_body(ScheduleRunDecision)
         if error:
             return error
-        # Late: the decision writers load the run models, which the handler tests fake
-        from .schedule_runs import (
-            ScheduleDecisionForbidden,
-            ScheduleRunNotWaiting,
-            apply_schedule_decision,
-            check_schedule_decision,
-        )
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                row = load_schedule_in_scope(session, schedule_id, scope)
+                row = _load_schedule_for_run(session, schedule_id, run_id, scope)
             except ScheduleError as e:
                 return e.response
             run = session.get(EntityScheduleRun, run_id)
             if run is None or run.schedule_id != schedule_id:
                 return RUN_NOT_FOUND
-            if run.conversation_id is not None:
-                return refusal("run_has_chat", "Decide this run in its chat", 409)
-            entity_type = row.entity_type
-            owner = SimpleNamespace(created_by=row.created_by, application_id=row.application_id,
-                                    version_id=row.version_id)
+            owner = SimpleNamespace(created_by=None, application_id=row.application_id, version_id=row.version_id)
+            return _decide(project_id, session, scope, run, row.entity_type, owner, body)
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _decide_test_run(self, project_id: int, run_id: int):
+        """Approve or reject a waiting Test Run that has no chat to answer in (it waits for credentials).
+
+        The same checks as the decision on a saved run. The credential check uses the agent or pipeline and the
+        version of the stored form.
+        Who may call: the caller who started the Test Run, with `schedules.run`.
+        Errors: 400 invalid action; 403; 404 not the caller's Test Run; 409 `run_not_waiting`, `run_has_chat` or
+        `credential_missing`; 500 `run_start_failed`; 503 `test_run_unavailable`.
+        """
+        body, error = _parse_body(ScheduleRunDecision)
+        if error:
+            return error
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                run = load_test_run(session, scope.user_id, run_id)
+                if run is None:
+                    return RUN_NOT_FOUND
+                form = form_of_test_run(session, run_id)
+            except TestRunUnavailable:
+                return TEST_RUN_UNAVAILABLE
+            owner = SimpleNamespace(created_by=None, application_id=form.get("application_id"),
+                                    version_id=form.get("version_id"))
+            return _decide(project_id, session, scope, run, form.get("entity_type"), owner, body)
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _test_runs(self, project_id: int):
+        """List the caller's own Test Runs of an agent, pipeline or Toolkit Index, newest first.
+
+        Query: `application_id`, or `toolkit_id` with `index_name` (one of the two is required), `limit`, `offset`, and the `status`, `trigger`, `version_id` filters of the
+        runs list. The answer is `{rows, total}` with the row fields of the runs list.
+        Who may call: a project member with `schedules.run`; only the caller's own runs are read.
+        Errors: 400 invalid query option, or no target or two targets; 403; 503 `test_run_unavailable`.
+        """
         try:
-            decision = check_schedule_decision(project_id, run_id, scope.user_id, [body.action])
-            checked = _credential_check(project_id, owner) if decision == "approve" else "unknown"
-            if checked == "missing":
-                return refusal("credential_missing", CREDENTIAL_STILL_MISSING, 409)
-            apply_schedule_decision(project_id, run_id, decision)
-            if checked == "clean":  # only after the write: a lost race must leave no mark behind
-                _remember_checked(run_id)
-        except ScheduleDecisionForbidden:
-            return refusal("not_owner", "Only the schedule owner can approve or reject this run", 403)
-        except ScheduleRunNotWaiting:
-            return refusal("run_not_waiting", "This schedule run is not waiting for approval", 409)
-        if decision == "approve" and not _started(entity_type, project_id, schedule_id, run_id):
-            _forget_checked(run_id)
-            with db.get_session(project_id) as session:
-                fail_run(session, run_id, START_FAILED)
-                session.commit()
-            return refusal("run_start_failed", "The run could not start", 500)
-        return {"run_id": run_id, "status": "running" if decision == "approve" else "failed"}, 200
+            query = TestRunsQuery.model_validate(dict(request.args))
+        except ValidationError as e:
+            return _validation_response(e)
+        target, refused = _test_run_target(query)
+        if refused:
+            return refused
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                page, usage_runs = _runs_page(session, test_run_scope(scope.user_id, **target), query)
+            except DBAPIError as e:
+                return _unavailable_or_raise(e)
+        return _add_usage(project_id, page, usage_runs), 200
+
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _test_run_detail(self, project_id: int, run_id: int):
+        """Answer one of the caller's own Test Runs, with the body of the run detail of a saved schedule.
+
+        Query: `application_id`, or `toolkit_id` with `index_name` (one of the two is required). The `approval_rule`
+        is the one of the stored form.
+        Who may call: a project member with `schedules.run`; another owner's run, a run of a saved schedule and a
+        run of another agent, pipeline or index are 404.
+        Errors: 400 invalid target, or no target or two targets; 403; 404; 503 `test_run_unavailable`.
+        """
+        try:
+            query = TestRunTarget.model_validate(dict(request.args))
+        except ValidationError as e:
+            return _validation_response(e)
+        target, refused = _test_run_target(query)
+        if refused:
+            return refused
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                run = load_test_run(session, scope.user_id, run_id, **target)
+                if run is None:
+                    return RUN_NOT_FOUND
+                rule = form_of_test_run(session, run_id).get("approval_rule")
+            except TestRunUnavailable:
+                return TEST_RUN_UNAVAILABLE
+            return _run_detail_body(session, project_id, run, rule, scope.user_id)
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _runs(self, project_id: int, schedule_id: int):
         """Answer the run records of a schedule, newest first, with the total before paging.
 
         Who may call: the owner with `schedules.details`, or a schedules admin.
-        Errors: 400 invalid query option; 403; 404.
+        Each row has `version_label`, `duration_ms`, `tokens` and `cost_usd` (null while the version is gone or
+        the usage store has no row). `trigger` is the stored value: `cron`, `manual` or `test`.
+        Filters: `status`, `trigger` and `version_id`; they combine.
+        Errors: 400 invalid query option (an unknown `status` or `trigger`, or a `version_id` that is not an id);
+        403; 404.
         """
         try:
             query = RunsQuery.model_validate(dict(request.args))
@@ -549,16 +1279,8 @@ class ScheduleItemHandlers:
                 load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            where = [EntityScheduleRun.schedule_id == schedule_id]
-            if query.status:
-                where.append(EntityScheduleRun.status == query.status)
-            rows = session.execute(
-                select(*(getattr(EntityScheduleRun, name) for name in RUN_FIELDS)).where(*where)
-                .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc())
-                .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
-            ).mappings().all()
-            total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
-            return {"total": total, "rows": [_run_row(row) for row in rows]}, 200
+            page, usage_runs = _runs_page(session, [EntityScheduleRun.schedule_id == schedule_id], query)
+        return _add_usage(project_id, page, usage_runs), 200
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _run_detail(self, project_id: int, schedule_id: int, run_id: int):
@@ -566,35 +1288,25 @@ class ScheduleItemHandlers:
 
         The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
         A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
+        A manual or test run started by another user carries no tool result, only toolkit, tool and duration.
+        `decider_id` is the user who approves, rejects or signs in for a waiting run: the schedule owner at the start
+        of the run, also after a Change owner; for a Test Run its starter.
         Tokens and cost are null while the usage store has no row for the conversation.
-        Who may call: the owner with `schedules.details`, or a schedules admin.
+        Who may call: the owner with `schedules.details`, or a schedules admin; also the user who decides the run
+        (`decider_id`), the owner it started under after a Change owner.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
         """
-        # Late, like schedule_risk: only this route reads the conversation and the usage store
-        from .schedule_run_detail import tool_call_events, usage_summary, version_label
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                schedule = load_schedule_in_scope(session, schedule_id, scope)
+                schedule = _load_schedule_for_run(session, schedule_id, run_id, scope)
             except ScheduleError as e:
                 return e.response
             run = session.scalar(select(EntityScheduleRun).where(
-                EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule_id))
+                EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule.id))
             if run is None:
                 return RUN_NOT_FOUND
-            row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
-            tokens, cost_usd = usage_summary(session, project_id, run)
-            events = [public_event(e) for e in merge_events(run.events, tool_call_events(session, run.conversation_id))]
-            return {
-                **row,
-                "version_label": version_label(session, run.version_id),
-                "principal_label": run.principal_label,
-                "risk_outcome": run.risk_outcome,
-                "approval_rule": schedule.approval_rule,
-                "approval_expires_at": _iso(run.approval_expires_at),
-                "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
-                "events": events,
-            }, 200
+            return _run_detail_body(session, project_id, run, schedule.approval_rule, scope.user_id)
 
     @auth.decorators.check_api(schedule_check_spec("admin"))
     def _change_owner(self, project_id: int, schedule_id: int):
@@ -621,7 +1333,8 @@ class ScheduleItemHandlers:
                 row = load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            reason = validate_new_owner(project_id, owner_id, row.entity_type, row.application_id)
+            entity_id = row.toolkit_id if row.entity_type == TOOLKIT_INDEX else row.application_id
+            reason = validate_new_owner(project_id, owner_id, row.entity_type, entity_id)
             if reason == ACCESS_CHECK_UNAVAILABLE:
                 return refusal("access_check_unavailable", reason, 503)
             if reason:
@@ -629,5 +1342,58 @@ class ScheduleItemHandlers:
             change = change_schedule_owner(session, row, owner_id, scope.user_id)
             if change:
                 mark_owner_change_span(row)
+                if row.trigger_kind == "webhook":
+                    audit_schedule_event(project_id, row, scope.user_id, "webhook_owner_changed",
+                                         f"{change['old_owner_id']} -> {owner_id}")
                 _notify_owner_change(project_id, row, change)
             return _read_answer(row, scope, project_id), 200
+
+    @auth.decorators.check_api(schedule_check_spec("update"))
+    def _secret(self, project_id: int, schedule_id: int):
+        """Rotate (old secret valid 24 h more) or regenerate (at once) a webhook secret; answers it once."""
+        body, error = _parse_body(WebhookSecretAction)
+        if error:
+            return error
+        from .webhook_secrets import (  # pylint: disable=C0415 -- late: only this route writes secrets
+            RotationInProgress,
+            is_signing_row,
+            regenerate_row_secret,
+            rotate_row_secret,
+            signing_value_error,
+        )
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                row = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            if row.trigger_kind != "webhook":
+                return refusal("not_a_webhook", "Only a webhook has a secret", 400)
+            signing = is_signing_row(row)
+            if signing != (body.signing_secret_value is not None):
+                return refusal(INVALID_INPUT, "Send signing_secret_value for GitLab signing tokens, and only then",
+                               field="signing_secret_value")
+            if signing and (reason := signing_value_error(body.signing_secret_value)):
+                return refusal(INVALID_INPUT, reason, field="signing_secret_value")
+            try:
+                if body.mode == "rotate":
+                    value = rotate_row_secret(session, project_id, row, datetime.now(UTC), body.signing_secret_value,
+                                              updated_by=scope.user_id)
+                else:
+                    value = regenerate_row_secret(session, project_id, row, body.signing_secret_value,
+                                                  updated_by=scope.user_id)
+            except RotationInProgress:
+                until = row.previous_secret_until
+                session.rollback()
+                return refusal("rotation_in_progress", ROTATION_IN_PROGRESS, 409, previous_secret_until=_iso(until))
+            except Exception as e:  # noqa: BLE001 -- the vault answer must not leak; the old secret stays
+                session.rollback()
+                log.error("Schedule %s: cannot %s the webhook secret: %s", schedule_id, body.mode, type(e).__name__)
+                return refusal("secret_store_unavailable", "The webhook secret could not be changed; try again", 503)
+            audit_schedule_event(project_id, row, scope.user_id, f"webhook_secret_{body.mode}d")
+            if row.created_by != scope.user_id:
+                notify_owner(project_id, row.created_by, row, action=f"{body.mode}d the secret of")
+            answer = _read_answer(row, scope, project_id)
+            if not signing:
+                answer["secret"] = value
+            return answer, 200

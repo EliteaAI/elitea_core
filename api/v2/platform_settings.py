@@ -13,8 +13,14 @@ from ...utils.midturn_injection_utils import (
     get_midturn_injection_blocked,
     get_midturn_injection_whitelist,
 )
+from ...utils.code_mode_utils import (
+    CODE_MODE_LIMITATIONS,
+    get_code_mode_whitelist,
+    is_code_mode_allowed,
+)
 from ...utils.skill_publish_utils import get_skill_publish_blocked, get_skill_publish_whitelist
 from ...utils.skill_utils import get_max_instructions_length
+from ...utils.conversation_starters_utils import get_max_conversation_starters
 
 
 _DEFAULT_NEW_ITEM_DAYS = 14
@@ -44,16 +50,16 @@ def _is_analytics_enabled():
 
 
 def _usage_mode_settings():
-    """Mode plus warning-dismissibility in a single RPC hop; both live in the usage config."""
+    """Mode, warning-dismissibility and complexity gate in a single RPC hop (usage config)."""
     try:
         settings = rpc_tools.RpcMixin().rpc.timeout(5).usage_mode_settings()
     except Exception:  # pylint: disable=W0703
-        return None, True
+        return None, True, False
     #
     mode = settings.get("mode")
     return (mode if mode in ("enforce", "observe") else None), settings.get(
         "warnings_dismissible", True
-    ) is not False
+    ) is not False, settings.get("complexity_enabled") is True
 
 
 def _tool_spend_availability():
@@ -87,6 +93,11 @@ def _tool_spend_availability():
         return {}
 
 
+def _code_mode_available():
+    from flask import request  # pylint: disable=C0415
+    return is_code_mode_allowed(request.args.get("project_id", type=int))
+
+
 def _governance_enforced():
     from ...utils.governance import is_governed  # pylint: disable=C0415
     try:
@@ -105,7 +116,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         UI visibility and functionality availability.
         """
         # One RPC hop for both: mode and dismissibility live in the same usage config
-        budgets_mode, warning_dismissible = _usage_mode_settings()
+        budgets_mode, warning_dismissible, complexity_enabled = _usage_mode_settings()
         #
         settings = {
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
@@ -118,6 +129,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # that requests are about to become unavailable would not be true there.
             "cost_budgets_enforcing": budgets_mode == "enforce",
             "cost_budgets_warning_dismissible": warning_dismissible,
+            # Complexity switch on AND metering on; resolved by the usage plugin
+            "complexity_enabled": complexity_enabled,
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
@@ -135,7 +148,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 'skill_publishing_guardrail'
             ),
             "tool_spend": _tool_spend_availability(),
+            "is_code_mode_available": _code_mode_available(),
+            "code_mode_whitelist_project_ids": list(get_code_mode_whitelist()),
+            "code_mode_limitations": CODE_MODE_LIMITATIONS,
             "skill_instructions_max_length": get_max_instructions_length(),
+            "conversation_starters_max": get_max_conversation_starters(),
         }
         # (#7269) the project Governance tab shows only while credential governance is enforced; under off and audit
         # only the answer is as before (no field)

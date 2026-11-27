@@ -62,6 +62,7 @@ from ...utils.enhancement_utils import (
     fetch_evaluated_version,
     fetch_run_for_enhancement,
 )
+from ...utils.eval_history_redaction import viewer_hidden_case_ids, without_hidden_cases
 from ...utils.evaluation_human_score_utils import EvalRunNotFoundError
 from ...utils.exceptions import PoolSaturationError
 from ...utils.predict_utils import PredictPayloadError
@@ -119,6 +120,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": str(exc)}, 409
         except EvalRunTooLargeError as exc:
             return {"error": str(exc)}, 413
+        # A history run's private chats are left out for a viewer who may not read them: everything
+        # below goes to an LLM and back to the caller.
+        hidden = viewer_hidden_case_ids(project_id, run["snapshot"], user_id)
+        run = without_hidden_cases(run, hidden)
 
         agent = fetch_evaluated_version(project_id, run["application_id"], run["version_id"])
         if agent is None:
@@ -148,7 +153,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 version_id=agent["version_id"],
                 instructions_sha256=agent["instructions_sha256"],
                 diagnosis=(
-                    "No dimension missed its target in this run, so there is nothing to diagnose."
+                    "No dimension missed its target in the cases you can read, so there is nothing "
+                    "to diagnose. Cases from private chats you cannot open are left out."
+                    if hidden
+                    else "No dimension missed its target in this run, so there is nothing to diagnose."
                 ),
                 coverage=coverage,
             ).model_dump(), 200

@@ -5,7 +5,9 @@ from pylon.core.tools import log
 
 from ...models.conversation import Conversation
 from ...models.pd.conversation import ConversationUpdate
-from ...utils.conversation_access import check_conversation_access, is_privileged_update, is_own_folder
+from ...utils.conversation_access import (
+    check_conversation_access, is_privileged_update, is_own_folder, changes_privacy, check_owner,
+)
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.chat_usage import strip_server_owned_meta
 from ...utils.context_window import keep_server_owned_strategy
@@ -128,6 +130,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             if denied:
                 return denied
+            if changes_privacy(conversation, data):
+                denied = check_owner(conversation, user_id)
+                if denied:
+                    return denied
             if data.get('folder_id') is not None and not is_own_folder(session, data['folder_id'], user_id):
                 return {'error': 'Folder not found'}, 404
             # Usage, budget and analytics are server-owned; the window mode and the summarization

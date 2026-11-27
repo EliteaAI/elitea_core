@@ -138,6 +138,7 @@ def world(monkeypatch):
             "START_FAILED": "the run could not start",
         },
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NEXT},
+        "utils.constants": {"LEGACY_INDEX_STEP_DEFAULT": False},
         "utils.schedule_runs": {"record_skipped_run": lambda *a: 1, "fail_stale_runs": lambda *a: 0,
                                 "expire_waiting_runs": lambda *a: 0},
     }

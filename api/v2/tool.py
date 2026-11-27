@@ -109,7 +109,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if tool := session.query(EliteATool).get(tool_id):
                 toolkit_data = delete_toolkit(session, project_id, tool)
                 self.module.context.event_manager.fire_event(
-                    ApplicationEvents.toolkit_deleted, toolkit_data
+                    ApplicationEvents.toolkit_deleted.value, toolkit_data
                 )
                 return '', 204
             return {"ok": False, "error": "Tool is not found"}, 400
@@ -154,6 +154,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception(f"Error while changing toolkit relation: {str(e)}")
             return {'error': 'Can not change toolkit relation'}, 500
 
+        # #7401: a newly linked toolkit may not run unattended; the triggers of that version check again
+        from ...utils.schedule_prerun import recheck_version_triggers_later
+        recheck_version_triggers_later(project_id, update_relation_data.get('entity_version_id'))
         return result, 201
 
     @register_openapi(
@@ -286,10 +289,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     }
                 )
             session.commit()
+            # #7401: a changed credential or endpoint may no longer run unattended
+            from ...utils.schedule_prerun import recheck_toolkit_triggers_later
+            recheck_toolkit_triggers_later(project_id, tool_id)
             toolkit_data = new_tool_parsed.dict()
             toolkit_data['project_id'] = project_id
             self.module.context.event_manager.fire_event(
-                ApplicationEvents.toolkit_updated,
+                ApplicationEvents.toolkit_updated.value,
                 {
                     "id": tool_id,
                     "owner_id": project_id,

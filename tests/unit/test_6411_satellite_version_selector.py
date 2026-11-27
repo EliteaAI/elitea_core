@@ -165,7 +165,7 @@ def _install_package():
 
     export_import = types.ModuleType(f'{PKG}.utils.skill_export_import')
     export_import.export_skill_md = _record(
-        'export', {'ok': True, 'content': 'md', 'filename': 'skill.md'})
+        'export', {'ok': True, 'content': 'md', 'filename': 'skill.md', 'mimetype': 'text/markdown; charset=utf-8'})
     export_import.build_skill_fork_payload = _record('fork', {'name': 'skill'})
 
     export_import_utils = types.ModuleType(f'{PKG}.utils.export_import_utils')

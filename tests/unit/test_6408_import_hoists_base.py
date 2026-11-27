@@ -59,16 +59,27 @@ def export_import():
     _package(f'{PKG}.utils')
 
     _module(f'{PKG}.models.skill', Skill=object, SkillVersion=object)
-    _module(f'{PKG}.models.pd.skill', SkillExportModel=object)
+    _module(f'{PKG}.models.pd.skill', RESERVED_NAME_WORDS=(), SkillExportModel=object, validate_skill_name=None)
     _module(f'{PKG}.utils.export_import_utils', slugify=lambda value: value)
     _module(
         f'{PKG}.utils.skill_utils',
         _skill_session=None,
         get_skill_details=None,
         import_skill=None,
+        SkillError=ValueError,
+        SkillFileError=ValueError,
+        get_max_file_bytes=None,
+        get_max_package_bytes=None,
+        get_max_package_files=None,
+        validate_instructions_length=None,
+        validate_new_skill_fields=None,
     )
-    _module(f'{PKG}.utils.skill_files', list_version_manifest=None, read_version_contents=None,
+    _module(f'{PKG}.utils.skill_files', add_version_files=None, build_file_entry=None, describe_size=None,
+            list_version_manifest=None,
+            read_version_contents=None, stage_version_files=None, validate_package=None,
             SkillFileContentUnavailableError=Exception, SkillVersionExportUnavailableError=RuntimeError)
+    _module(f'{PKG}.utils.zip_safety', is_compression_bomb=None, is_encrypted_zip_member=None,
+            is_unsafe_zip_member=None)
 
     frontmatter_name = f'{PKG}.utils.skill_frontmatter'
     frontmatter_spec = importlib.util.spec_from_file_location(
@@ -121,13 +132,24 @@ class TestEnsureBaseVersion:
 
         assert _names(result) == ['base', 'yoda', 'vader', 'leia']
 
-    def test_a_base_clone_is_still_prepended_when_none_exists(self, export_import):
+    def test_a_sole_named_version_is_renamed_to_base_not_cloned(self, export_import):
+        """Issue #7636: a forked agent's skill arrived as both 'base' and 'v1.2'."""
+        source = {'name': 'v1.2', 'id': 42, 'instructions': 'hmm', 'meta': {'parent_entity_id': 5},
+                  'files': [{'path': 'a.txt'}]}
+
+        result = export_import.ensure_base_version([source])
+
+        assert result == [{**source, 'name': 'base'}]
+        assert source['name'] == 'v1.2'
+
+    def test_the_first_of_several_named_versions_is_renamed_to_base_not_cloned(self, export_import):
+        """Issue #7636: agent versions linking v1.1 and v1.2 left 'base' and 'v1.1' as identical twins."""
         result = export_import.ensure_base_version([
-            {'name': 'yoda', 'instructions': 'hmm'},
+            {'name': 'v1.1', 'instructions': 'old'},
+            {'name': 'v1.2', 'instructions': 'new'},
         ])
 
-        assert _names(result) == ['base', 'yoda']
-        assert result[0]['instructions'] == 'hmm'
+        assert result == [{'name': 'base', 'instructions': 'old'}, {'name': 'v1.2', 'instructions': 'new'}]
 
     def test_an_empty_list_is_unchanged(self, export_import):
         assert export_import.ensure_base_version([]) == []

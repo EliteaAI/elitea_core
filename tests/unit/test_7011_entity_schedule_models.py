@@ -33,7 +33,7 @@ def entity_schedule_models(isolated_sys_modules):
         pass
 
     # Parent tables the foreign keys point at, so the DDL compiles.
-    for parent in ("applications", "application_versions"):
+    for parent in ("applications", "application_versions", "elitea_tools"):
         Table(parent, _Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
 
     # Stub tools package
@@ -151,12 +151,12 @@ def test_7011_r3_4_run_mode_check(entity_schedule_models):
     ) in ddl
 
 
-# R3.2: one active run per schedule, partial unique index
+# R3.2: one active run per schedule, partial unique index; webhook runs are exempt (#7398)
 def test_7011_r3_2_active_run_unique_index(entity_schedule_models):
     index = _index(entity_schedule_models.EntityScheduleRun, "uq_entity_schedule_runs_active")
     assert index.unique
     assert [col.name for col in index.columns] == ["schedule_id"]
-    where = "status IN ('running', 'waiting_for_approval')"
+    where = "status IN ('running', 'waiting_for_approval') AND trigger <> 'webhook'"
     assert str(index.dialect_options["postgresql"]["where"]) == where
     assert str(index.dialect_options["sqlite"]["where"]) == where
 
@@ -222,7 +222,7 @@ def test_7011_r1_1_block_has_schedule_indexes(sql_block):
 
 # R1.2: every statement of the block is idempotent
 def test_7011_r1_2_every_statement_is_if_not_exists(sql_block):
-    # 3 tables, 7 indexes (the runs list and the conversation filter among them), 7 column statements (#7254 streak)
+    # 3 tables, 8 indexes, 6 column statements (the refusal streak among them)
     assert len(sql_block) == 17
     for stmt in sql_block:
         assert re.match(

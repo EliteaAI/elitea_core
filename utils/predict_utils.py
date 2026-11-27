@@ -9,16 +9,18 @@ from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
+from .code_mode_utils import strip_code_mode
 from .context_window import (
-    BALANCED, budget_for_model_config, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed,
-    strategy_for_predict,
+    BALANCED, budget_for_model_config, get_auto_model_limits, is_platform_admin, manual_context_tokens,
+    manual_context_tokens_allowed, strategy_for_predict,
 )
 from .llm_settings import normalize_runtime_max_tokens
 from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates, strip_skill_bodies
-from .skill_utils import SkillInvocationLimitError, consume_message_skills, resolve_runtime_skills
-from .stored_oauth_tokens import inject_stored_oauth_tokens
+from .skill_scratch import skill_scratch_for_run
+from .skill_utils import SkillInvocationLimitError, consume_message_skills, merge_invoked_skills, resolve_runtime_skills
+from .stored_oauth_tokens import inject_stored_oauth_tokens, make_rotation_saver
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
@@ -264,13 +266,15 @@ def allowed_manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
 
 def apply_context_budget(
         context_settings, model_configuration: dict, llm_max_tokens=None, manual_max_context_tokens=None,
+        window_source: Optional[str] = None,
 ) -> Optional[dict]:
     """Resolve the window mode against the request's model and set the SDK summarization trigger."""
     if context_settings is None:
         return None
     mode = getattr(context_settings, 'context_window_mode', None)
     legacy_trigger = getattr(context_settings, 'max_context_tokens', None)
-    budget = budget_for_model_config(mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens))
+    budget = budget_for_model_config(
+        mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens), window_source)
     if mode is None and legacy_trigger:
         log.warning('context_settings.max_context_tokens without context_window_mode is deprecated')
         context_settings.max_context_tokens = min(int(legacy_trigger), budget['usable_input'])
@@ -310,8 +314,13 @@ def store_context_budget(project_id: int, conversation_id, budget: Optional[dict
         log.warning(f"Could not store context budget for conversation {conversation_id}: {e}")
 
 
+def _discovered_token_endpoints(server_url: str) -> set:
+    from .mcp_saved_login import discovered_token_endpoints  # pylint: disable=C0415
+    return discovered_token_endpoints(server_url)
+
+
 def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int) -> None:
-    """Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules."""
+    """Stored OAuth logins (Microsoft toolkits, MCP logins) for runs that carry no browser token, e.g. schedules."""
     try:
         rpc = rpc_tools.RpcMixin().rpc.timeout(5)
         inject_stored_oauth_tokens(
@@ -319,6 +328,8 @@ def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int)
             lambda uuid_, type_: rpc.configurations_get_stored_login(
                 project_id=project_id, user_id=expansion_user_id,
                 configuration_uuid=uuid_, expected_type=type_),
+            save_fn=make_rotation_saver(rpc),
+            discover_fn=_discovered_token_endpoints,
         )
     except Exception as e:  # pylint: disable=W0703
         log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)
@@ -333,6 +344,7 @@ def generate_predict_payload(
     chat_skills: Optional[list] = None,
     invoked_skills: Optional[list] = None,
     project_skills: Optional[list] = None,
+    skill_argument: Optional[str] = None,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_run: bool = False,
 ) -> dict:
@@ -412,9 +424,12 @@ def generate_predict_payload(
     if parsed.context_settings is not None:
         context_conversation_id = getattr(parsed, 'conversation_id', None) or parsed.stream_id
         context_meta = load_context_meta(parsed.project_id, context_conversation_id)
+        # Auto: the smallest limits among the models it can pick; model parameters stay the Gateway's
+        context_model_limits = get_auto_model_limits(parsed.project_id, user_id) if is_auto else llm_model_configuration
         context_budget = apply_context_budget(
-            parsed.context_settings, llm_model_configuration, getattr(parsed.llm_settings, 'max_tokens', None),
-            allowed_manual_context_tokens(context_meta.get('context_strategy')))
+            parsed.context_settings, context_model_limits, getattr(parsed.llm_settings, 'max_tokens', None),
+            allowed_manual_context_tokens(context_meta.get('context_strategy')),
+            window_source='auto' if is_auto else None)
         store_context_budget(
             parsed.project_id, context_conversation_id, context_budget, context_meta.get('context_budget'))
 
@@ -487,8 +502,9 @@ def generate_predict_payload(
         'application': {
             'instructions': parsed.instructions,
         },
-        'internal_tools': parsed.internal_tools or [],
+        'internal_tools': strip_code_mode(parsed.internal_tools or [], parsed.project_id),
         'project_context': getattr(parsed, 'project_context', None),
+        'builder': getattr(parsed, 'builder', None),
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
         'mcp_tokens': parsed.mcp_tokens or {},
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],
@@ -507,6 +523,9 @@ def generate_predict_payload(
         'is_regenerate': getattr(parsed, 'is_regenerate', False),
         'meta': parsed.meta,
         'conversation_id': getattr(parsed, 'conversation_id', None) or parsed.stream_id,  # For planning toolkit scoping (fallback to stream_id)
+        'skill_scratch': skill_scratch_for_run(
+            parsed.project_id, getattr(parsed, 'conversation_id', None) or parsed.stream_id, user_id,
+        ),
         'persona': getattr(parsed, 'persona', 'generic'),  # Default persona for chat
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
@@ -520,6 +539,10 @@ def generate_predict_payload(
             'sid': sid,
         },
     }
+
+    # Elitea Builder (#7383): a run with no socket (scheduled, webhook, blocking REST) has no one to answer its cards
+    if payload['builder'] and not sid:
+        payload['builder'] = {**payload['builder'], 'interactive': False}
 
     if chat_skills and not isinstance(parsed, ApplicationChatRequest):
         payload['attached_skills'] = merge_disclosable_skills([], chat_skills)
@@ -587,9 +610,10 @@ def generate_predict_payload(
         mention_candidates = merge_mention_candidates(attached_skills, chat_skills, project_skills)
         try:
             payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
+            # A resume also carries the skills of the message being resumed.
+            payload['invoked_skills'] = merge_invoked_skills(message_skills, invoked_skills)
         except SkillInvocationLimitError as e:
             raise PredictPayloadError(str(e)) from e
-        payload['invoked_skills'] = message_skills
 
         # Message-invoked only: an instruction-referenced skill counts as applied
         # only when the model actually loads it (folded in by the indexer).
@@ -652,6 +676,8 @@ def generate_predict_payload(
     if inspected:
         # Accepted history (#6886): without it checkpoint B re-inspects those turns
         payload['input_guardrail_inspected'] = list(inspected)
+    if skill_argument:
+        payload['skill_argument'] = skill_argument
 
     if not skip_expansion:
         try:
@@ -664,6 +690,19 @@ def generate_predict_payload(
                 resolve_internal_mcp_tools(tool_list, user_id, parsed.project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
+
+    # #7580: a version saved with code_mode has no effect once the gate is closed; the runtime reads both metas
+    if isinstance(payload.get('meta'), dict) and payload['meta'].get('internal_tools'):
+        payload['meta'] = {**payload['meta'], 'internal_tools': strip_code_mode(
+            payload['meta']['internal_tools'], parsed.project_id,
+        )}
+    application = payload.get('application')
+    version_details = application.get('version_details') if isinstance(application, dict) else None
+    if (isinstance(version_details, dict) and isinstance(version_details.get('meta'), dict)
+            and version_details['meta'].get('internal_tools')):
+        version_details['meta'] = {**version_details['meta'], 'internal_tools': strip_code_mode(
+            version_details['meta'].get('internal_tools'), parsed.project_id,
+        )}
 
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)

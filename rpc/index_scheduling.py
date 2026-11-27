@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, UTC
 
 from pylon.core.tools import web, log
+from sqlalchemy import select
 from tools import VaultClient, db, rpc_tools, this
 
 from ..models.elitea_tools import EliteATool
@@ -64,6 +65,24 @@ def _read_toolkit_mandates(project_id):
         return _UNREADABLE
 
 
+def _scheduled_index_keys(project_id):
+    """The (toolkit id, index name) pairs that hold a schedule row, read in a short session of its own;
+    ``_UNREADABLE`` when it failed. The index of such a pair runs from its row, so this tick leaves it alone."""
+    # Late: the tick module loads without the schedule models
+    from ..models.entity_schedule import EntitySchedule
+    try:
+        with db.get_session(project_id) as session:
+            rows = session.execute(
+                select(EntitySchedule.toolkit_id, EntitySchedule.index_name)
+                .where(EntitySchedule.toolkit_id.is_not(None))
+            ).all()
+    except Exception as e:  # noqa: BLE001 -- the project is skipped and the next tick reads again
+        log.error(f"check_index_scheduling: the scheduled indexes of project {project_id} could not be read "
+                  f"({type(e).__name__})")
+        return _UNREADABLE
+    return {(toolkit_id, index_name) for toolkit_id, index_name in rows}
+
+
 class RPC:
     @web.rpc("applications_check_index_scheduling")
     def check_index_scheduling(self, **kwargs):
@@ -118,6 +137,12 @@ class RPC:
                 # the project's toolkit mandates (#7305): read once, at its first due schedule under enforce or audit
                 # only; never when governance is off
                 toolkit_mandates = None
+                # An index with a schedule row runs from that row. A failed read skips the project until the next
+                # tick: running its legacy entries could fire an index twice.
+                scheduled_indexes = _scheduled_index_keys(project_id)
+                if scheduled_indexes is _UNREADABLE:
+                    stats['failed'] += 1
+                    continue
                 with db.get_session(project_id) as project_session:
                     for toolkit in project_session.query(EliteATool).filter(
                         EliteATool.meta['indexes_meta'].isnot(None)
@@ -141,6 +166,8 @@ class RPC:
                         )
                         for index_meta_id, index_entry in indexes_meta.items():
                             yield_to_hub()
+                            if (toolkit.id, index_meta_id) in scheduled_indexes:
+                                continue
                             schedules = index_entry.get('schedules', {})
                             # Owners only — a schedule body carries the credential title.
                             log.debug(

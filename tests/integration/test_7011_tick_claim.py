@@ -58,7 +58,7 @@ def world(monkeypatch, request):
     class Base(orm.DeclarativeBase):
         pass
 
-    for parent in ("applications", "application_versions"):  # the foreign keys need their parents
+    for parent in ("applications", "application_versions", "elitea_tools"):  # the foreign keys need their parents
         sa.Table(parent, Base.metadata, sa.Column("id", sa.Integer, primary_key=True), schema="tenant")
 
     world = types.SimpleNamespace(engine=engine, events=[], starts=[], legacy=[])

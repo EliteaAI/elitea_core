@@ -2,6 +2,12 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.9 — Keep chat runs going when switching chats (EL-7385)
+# End the response rows left "streaming" for over a day: sends that broke before their run started, and runs whose
+# task died without a stream end (dry run first):
+Run admin task close_stuck_chat_runs with param: project_id=all
+Run admin task close_stuck_chat_runs with param: project_id=all;dry_run=false
+
 # R-2.0.8 — Schedules (EL-7011)
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
 # New projects get the tables via create_all() on project creation.
@@ -356,7 +362,7 @@ Run admin task migrate_share_token_columns
 # Platform dimensions are scored by AI or Human, exactly like project-tier ones, so the
 # engine set is part of the registry and is projected into every p_N.eval_dimension row.
 # Only needed where the table was created by a pre-release build without this column;
-# fresh environments get it from create_tables. Shared-schema table, so no per-project loop.
+# fresh environments get it from create_tables (project_id=all;dry_run=false). Shared-schema table, so no per-project loop.
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 Run admin task migrate_eval_platform_dimension_columns
 # Manual fallback if the admin task is unavailable:
@@ -394,13 +400,13 @@ Run admin task migrate_eval_dataset_columns with param: project_id=all
 # (create_all on shared and every project schema; it only creates missing tables). REQUIRED on
 # upgrade: a run writes its scores and these rows in one transaction, so without the tables every
 # eval run ends errored ("Run completed but its results could not be saved") and loses its whole
-# scorecard. No params. Idempotent: safe to run multiple times.
-Run admin task create_tables
+# scorecard. An empty param only previews; dry_run=false applies. Idempotent: safe to run multiple times.
+Run admin task create_tables with param: project_id=all;dry_run=false
 
 # Issue #6716: eval_case_usage.cost widened from NUMERIC(18,8) to NUMERIC(18,9), so the
 # nano-USD ledger figure it is settled from is stored without losing its last digit. SKIP on
 # fresh environments (create_all already uses NUMERIC(18,9)); REQUIRED on environments whose
-# eval_case_usage was created by an earlier build. Run it after create_tables. Per-project loop.
+# eval_case_usage was created by an earlier build. Run it after create_tables (project_id=all;dry_run=false). Per-project loop.
 # Idempotent (alters only a column whose scale is not 9; projects without the table are skipped).
 Run admin task migrate_eval_case_usage_columns with param: project_id=all
 
@@ -408,7 +414,7 @@ Run admin task migrate_eval_case_usage_columns with param: project_id=all
 # .forbidden_tools, .tool_errors, .redundant_calls, .step_budget, .step_limit_hit,
 # .guardrail_events) added to the platform dimension registry centry.eval_platform_dimension.
 # Nothing seeds them at boot, so the platform catalog stays without them until this runs.
-# Projects get a copy only when someone attaches one from the catalog. Run after create_tables.
+# Projects get a copy only when someone attaches one from the catalog. Run after create_tables (project_id=all;dry_run=false).
 # No params. Idempotent: admin weight/target edits to existing entries are kept (since #7015 the
 # task also refreshes their descriptions, see below); a same-named non-built-in entry is reported
 # under "conflicts" and left alone.
@@ -587,3 +593,34 @@ Run admin task create_skill_file_tables with param: project_id=all
 # on-demand and dry runs:
 Run admin task sweep_skill_files with param: project_id=all;dry_run
 Run admin task sweep_skill_files with param: project_id=all
+
+# R-2.0.9 — eval_dataset agent_id index: migrate_eval_dataset_columns used to create eval_dataset_agent_id_idx, a second
+# copy of create_all's ix_tenant_eval_dataset_agent_id on every schema it ran on. It now creates only the
+# create_all name, and renames the old index (or drops it when both exist). Re-run once on upgrade.
+# A project_id that is not "all" or a number is now refused instead of scanning every project; the same holds for
+# migrate_eval_case_usage_columns, migrate_eval_suite_columns and migrate_eval_dimension_columns.
+# A schema that had agent_id without its FK can hold datasets whose agent was deleted, which the FK cannot be added
+# over (the project used to fail with ForeignKeyViolation). The task now deletes them first, as the FK's ON DELETE
+# CASCADE would have: their cases go with them and suites using them get no dataset. The dry run lists them per
+# project (orphaned_datasets) and changes nothing; run it first to see what would be deleted.
+# Idempotent: safe to run multiple times.
+Run admin task migrate_eval_dataset_columns with param: project_id=all;dry_run
+Run admin task migrate_eval_dataset_columns with param: project_id=all
+
+# Scheduled agent evaluation: the shared tables eval_auto_config, eval_auto_job, eval_auto_item, eval_platform_dataset
+# and eval_platform_dataset_case come from create_all at boot; no tenant migration. The platform health check
+# (probes, the two structure checks and the three health dimensions) is seeded at startup; the admin task re-seeds it
+# and is idempotent. It is off until Runtime config eval_auto_run_enabled is turned on.
+Run admin task seed_eval_health_check
+
+# EliteaAI/elitea_issues#7682 (PR elitea_core#766): the Run History status filter reads each conversation's last
+# message group. This index on chat_message_group (conversation_id, id) builds with CREATE INDEX CONCURRENTLY, so
+# writes are not locked. Run the dry run first (changes nothing); then the real run. Idempotent: a project that has
+# the index is left alone.
+Run admin task index_message_groups_by_conversation with param: project_id=all
+Run admin task index_message_groups_by_conversation with param: project_id=all;dry_run=false
+
+# History evaluation consent index (#7483): the shared table eval_history_consent_index comes from create_all at boot.
+# Saving a project's consent keeps it in step; consents saved before it existed are indexed by the admin task.
+# Idempotent: safe to run multiple times.
+Run admin task reindex_eval_history_consents

@@ -117,6 +117,7 @@ def _rights(prerun, monkeypatch, rpc, folder=None, entity=("agent", 55), **kwarg
     monkeypatch.setattr(prerun, "rpc_tools", SimpleNamespace(RpcMixin=lambda: SimpleNamespace(rpc=rpc)))
     access = ModuleType("plugins.elitea_core.utils.schedule_access")
     access.SCHEDULE_PERMISSIONS = {"run": RUN, "list": "models.applications.schedules.list"}
+    access.INDEX_EDIT_PERMISSION = "models.applications.index_meta.edit"
     folders = ModuleType("plugins.elitea_core.utils.folder_access")
 
     def entity_access_error(project_id, entity_type, entity_id, write=False, user_id=None):
@@ -125,6 +126,7 @@ def _rights(prerun, monkeypatch, rpc, folder=None, entity=("agent", 55), **kwarg
             raise folder
         return folder
     folders.entity_access_error = entity_access_error
+    folders.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     monkeypatch.setitem(sys.modules, access.__name__, access)
     monkeypatch.setitem(sys.modules, folders.__name__, folders)
     return prerun.check_owner_rights(34, 12, *entity, **kwargs)

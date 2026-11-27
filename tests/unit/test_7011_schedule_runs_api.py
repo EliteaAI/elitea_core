@@ -8,6 +8,7 @@ Run via:
 import datetime
 import pathlib
 import sys
+import types
 
 import pytest
 
@@ -28,7 +29,25 @@ harness = _crud_harness  # the CRUD harness fixture, shared
 FIELDS = {
     'id', 'trigger', 'status', 'reason', 'conversation_id', 'requested_by', 'started_at', 'finished_at',
     'version_id', 'duration_ms',  # owner CR 2026-10-21: the Version and Duration columns of the Runs table
+    'version_label', 'tokens', 'cost_usd',
 }
+
+
+@pytest.fixture(autouse=True)
+def reads(monkeypatch):
+    """The page lookups the handler imports late; their own test reads real tables (integration/test_7011_run_detail_read.py)."""
+    state = types.SimpleNamespace(usage={}, labels={10: 'v3', 11: 'v4'}, calls=[])
+    module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
+
+    def usage_summaries(project_id, runs):
+        state.calls.append(len(runs))
+        return {run.id: state.usage.get(run.id, (None, None)) for run in runs}
+
+    module.conversation_uuids = lambda session, ids: {i: f'uuid-{i}' for i in ids if i is not None}
+    module.version_labels = lambda session, version_ids: {i: state.labels[i] for i in version_ids if i in state.labels}
+    module.usage_summaries = usage_summaries
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return state
 
 
 def add_runs(harness, schedule_id, *specs):
@@ -143,3 +162,48 @@ def test_7011_r3_1_other_verbs_on_the_runs_url_are_refused(harness, verb):
     schedule_id = harness.seed()
     assert harness.call(verb, {'name': 'changed'}, schedule_id, suffix='/runs')[1] == 405
     assert harness.row(schedule_id).name == 'Nightly'
+
+
+def test_a_row_has_the_version_label_and_the_usage_of_its_run(harness, reads):
+    schedule_id = harness.seed()
+    add_runs(harness, schedule_id, {'version_id': 10}, {'version_id': 99})
+    gone, listed = get_runs(harness, schedule_id)[0]['rows']
+    reads.usage = {listed['id']: (2140, 0.03)}
+    listed = get_runs(harness, schedule_id)[0]['rows'][1]
+
+    assert (listed['version_label'], listed['tokens'], listed['cost_usd']) == ('v3', 2140, 0.03)
+    assert (gone['version_label'], gone['tokens'], gone['cost_usd']) == (None, None, None)
+
+
+def test_the_usage_of_a_page_is_read_once_for_all_its_rows(harness, reads):
+    schedule_id = harness.seed()
+    add_runs(harness, schedule_id, *([{'version_id': 10}] * 5))
+    get_runs(harness, schedule_id)
+    assert reads.calls == [5]
+
+
+def test_the_trigger_and_version_filters_combine_with_the_status(harness):
+    schedule_id = harness.seed()
+    add_runs(
+        harness, schedule_id,
+        {'trigger': 'test', 'version_id': 10}, {'trigger': 'manual', 'version_id': 10},
+        {'trigger': 'cron', 'version_id': 11}, {'trigger': 'cron', 'version_id': 10, 'status': 'failed'},
+    )
+    by_trigger, _ = get_runs(harness, schedule_id, trigger='test')
+    by_version, _ = get_runs(harness, schedule_id, version_id='11')
+    combined, _ = get_runs(harness, schedule_id, trigger='cron', version_id='10', status='failed')
+
+    assert [r['trigger'] for r in by_trigger['rows']] == ['test']
+    assert (by_version['total'], by_version['rows'][0]['version_id']) == (1, 11)
+    assert (combined['total'], combined['rows'][0]['status']) == (1, 'failed')
+
+
+@pytest.mark.parametrize(('query', 'field'), [
+    ({'trigger': 'scheduled'}, 'trigger'), ({'trigger': ''}, 'trigger'), ({'version_id': 'x'}, 'version_id'),
+    ({'version_id': '0'}, 'version_id'), ({'version_id': '4294967296'}, 'version_id'),
+])
+def test_an_unknown_trigger_or_version_id_is_400_not_ignored(harness, query, field):
+    schedule_id = harness.seed()
+    add_runs(harness, schedule_id, {})
+    body, status = get_runs(harness, schedule_id, **query)
+    assert (status, body['code'], body['field']) == (400, 'invalid_input', field)

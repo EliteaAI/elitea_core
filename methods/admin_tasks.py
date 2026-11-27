@@ -591,6 +591,276 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def ensure_webhook_trigger_columns(self, *args, **kwargs):
+        """Admin task: add the webhook-trigger columns to entity_schedules (R-2.0.9, #7398). Idempotent.
+
+        Param: "project_id=<all|N>[;dry_run]"; a dry run lists the projects still missing them.
+        """
+        from ..utils.webhook_trigger_schema import (  # pylint: disable=C0415
+            apply_webhook_trigger_columns, project_ids_pending,
+        )
+        task = "ensure_webhook_trigger_columns"
+        values, error = _parse_project_param(task, kwargs.get("param", "") or "", "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            pending = set(project_ids_pending())
+            if values["project_id"] == "all":
+                project_ids = [p["id"] for p in (
+                    self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                )]
+            else:
+                project_ids = [values["project_id"]]
+        except Exception:  # pylint: disable=W0703
+            log.exception("%s: failed to list projects", task)
+            return {"migrated": 0, "error": "failed to list projects"}
+        targets = sorted(pid for pid in project_ids if pid in pending)
+        migrated, failed = apply_webhook_trigger_columns(targets, dry_run=values["dry_run"])
+        log.info("%s%s: migrated=%s failed=%s", "[DRY RUN] " if values["dry_run"] else "", task, migrated, failed)
+        return {"migrated": len(migrated), "projects": migrated, "failed": len(failed),
+                "failed_projects": failed, "dry_run": values["dry_run"]}
+
+    @web.method()
+    def ensure_toolkit_index_schedule_columns(self, *args, **kwargs):
+        """Admin task: let entity_schedules hold toolkit index schedules (R-2.0.9). Idempotent.
+
+        Makes application_id nullable, adds toolkit_id and index_name, widens the entity_type check and adds the
+        target check and the one-schedule-per-index unique index. Run it before the release code reads schedules.
+
+        Param: "project_id=<all|N>[;dry_run]"; a dry run lists the projects still missing the shape.
+        """
+        from ..utils.toolkit_index_schedule_ddl import (  # pylint: disable=C0415
+            apply_toolkit_index_schedule_columns, toolkit_index_pending_project_ids,
+        )
+        task = "ensure_toolkit_index_schedule_columns"
+        values, error = _parse_project_param(task, kwargs.get("param", "") or "", "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            pending = set(toolkit_index_pending_project_ids())
+            project_ids = _target_project_ids(self.context.rpc_manager, f"project_id={values['project_id']}")
+        except Exception:  # pylint: disable=W0703
+            log.exception("%s: failed to list projects", task)
+            return {"migrated": 0, "error": "failed to list projects"}
+        targets = sorted(pid for pid in project_ids if pid in pending)
+        migrated, failed = apply_toolkit_index_schedule_columns(targets, dry_run=values["dry_run"])
+        log.info("%s%s: migrated=%s failed=%s", "[DRY RUN] " if values["dry_run"] else "", task, migrated, failed)
+        return {"migrated": len(migrated), "projects": migrated, "failed": len(failed),
+                "failed_projects": failed, "dry_run": values["dry_run"]}
+
+    @web.method()
+    def migrate_schedule_test_runs(self, *args, **kwargs):
+        """Admin task: add the Test Run columns and indexes to entity_schedule_runs in each project schema (R-2.0.8).
+
+        Adds ``form`` and ``application_id``, lets ``schedule_id`` be NULL, and creates the Test Run indexes. Idempotent;
+        new projects get them from ``create_all``. A project is one transaction.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"              - dry run across all projects (default; changes nothing)
+            "project_id=34;dry_run=false" - migrate project 34
+        """
+        from ..utils.schedule_test_run_schema import (  # pylint: disable=C0415
+            dry_run_flag, run_schedule_test_run_migration,
+        )
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_schedule_test_runs: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        return run_schedule_test_run_migration(project_ids, dry_run_flag(param))
+
+    @web.method()
+    def clear_paused_schedule_next_run(self, *args, **kwargs):
+        """Admin task: clear next_run of the schedules that were paused before a pause cleared it. Idempotent.
+
+        Schedules paused now have no next run; the list and the details read the column as it is, so a stale value
+        of an older pause shows and sorts wrong until this runs. A project is one transaction.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"              - dry run across all projects (default; changes nothing)
+            "project_id=34;dry_run=false" - clear project 34
+        """
+        from ..utils.schedule_lifecycle import CLEAR_PAUSED_NEXT_RUN  # pylint: disable=C0415
+        from ..utils.schedule_test_run_schema import dry_run_flag  # pylint: disable=C0415
+        from ..utils.skill_publish_schema import apply_project_statements  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("clear_paused_schedule_next_run: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        if dry_run_flag(param):
+            return {"migrated": len(project_ids), "failed": 0, "failed_projects": [], "dry_run": True}
+        migrated, failed = apply_project_statements(project_ids, (CLEAR_PAUSED_NEXT_RUN,))
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": False}
+
+    @web.method()
+    def index_message_groups_by_conversation(self, *args, **kwargs):
+        """Admin task: index chat_message_group by (conversation_id, id) for the Run History status. Idempotent.
+
+        The run outcome reads each conversation's last message group; without this index the Status filter is slow
+        on a project with many chats (PR elitea_core#766 review). Built with CREATE INDEX CONCURRENTLY, so writes to
+        the table are not locked. A project that has the index is left alone; a failing project is listed and the
+        run goes on.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"              - dry run across all projects (default; changes nothing)
+            "project_id=34;dry_run=false" - build the index in project 34
+            "project_id=all;dry_run=false" - build it in every project
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.message_group_index import run_message_group_index  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("index_message_groups_by_conversation: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        return run_message_group_index(project_ids, dry_run_flag(param))
+
+    @web.method()
+    def migrate_elitea_builder_keys(self, *args, **kwargs):
+        """Admin task: merge the three builder modules into Elitea Builder (R-2.0.9, #7383). Idempotent.
+
+        Rewrites internal_mcp, skill_builder and project_context_builder to elitea_builder in the meta of every
+        agent version and conversation (other keys and their order are kept), and fills the Elitea Builder module
+        defaults (OR of the old Chats / Agents defaults, legacy personalization as fallback). A project is one
+        transaction; a failing project is listed and the run goes on.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=false]"
+
+        Examples:
+            "project_id=all"                - dry run across all projects (default; changes nothing)
+            "project_id=all;dry_run=false"  - migrate everywhere
+        """
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from ..models.all import ApplicationVersion  # pylint: disable=C0415
+        from ..models.conversation import Conversation  # pylint: disable=C0415
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.builder_keys import migrate_rows, run_builder_keys_migration  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_elitea_builder_keys: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        def migrate_project(pid, dry_run):
+            with db.get_session(pid) as session:
+                versions = migrate_rows(session.query(ApplicationVersion).all(), dry_run, flag_modified)
+                conversations = migrate_rows(session.query(Conversation).all(), dry_run, flag_modified)
+                if not dry_run:
+                    session.commit()
+            return versions, conversations
+
+        def migrate_settings(pid, dry_run):
+            return self.context.rpc_manager.timeout(30).social_migrate_builder_module_settings(pid, dry_run)
+
+        result = run_builder_keys_migration(project_ids, migrate_project, migrate_settings, dry_run_flag(param))
+        for pid in result["failed_projects"]:
+            log.error("migrate_elitea_builder_keys: project %s failed", pid)
+        log.info("migrate_elitea_builder_keys: %s", result)
+        return result
+
+    @web.method()
+    def enable_builder_default_modules(self, *args, **kwargs):
+        """Admin task: Elitea Builder on, Ask User on for Chats and off for Agents, as default modules for every user
+        (R-2.0.9, #7383). Idempotent.
+
+        Turns the Elitea Builder Chats and Agents defaults on, the Chats Ask User default on and the Agents one off (an
+        agent with Ask User can't be scheduled or triggered by a webhook) in every stored per-project module settings
+        row, whatever the user had set, and in the legacy personalization where it holds them.
+        Existing agents and chats are not changed: the defaults apply to new ones. Run after
+        migrate_elitea_builder_keys.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run=true]"
+
+        Examples:
+            "project_id=all"                - enable everywhere (default)
+            "project_id=all;dry_run=true"   - dry run: report counts, change nothing
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.builder_keys import run_enable_default_modules  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("enable_builder_default_modules: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        rpc = self.context.rpc_manager.timeout(30)
+        result = run_enable_default_modules(
+            project_ids,
+            lambda pid, dry_run: rpc.social_enable_builder_default_modules(pid, dry_run),
+            lambda dry_run: rpc.social_enable_legacy_builder_default_modules(dry_run),
+            dry_run_flag(param, default=False),
+        )
+        for pid in result["failed_projects"]:
+            log.error("enable_builder_default_modules: project %s failed", pid)
+        if result["legacy_failed"]:
+            log.error("enable_builder_default_modules: the legacy personalization was not updated")
+        log.info("enable_builder_default_modules: %s", result)
+        return result
+
+    @web.method()
+    def close_stuck_chat_runs(self, *args, **kwargs):
+        """Admin task: end chat answers stuck "streaming" that nothing will end any more (R-2.0.9, EL-7385).
+
+        A send that broke before dispatch leaves a response row with is_streaming and no task id; a task that died
+        without a stream end (indexer crash, restart) leaves it with its task id. The chat list already ignores
+        both once they are old; this ends them in the database. Only rows older than ``older_than_hours``
+        (default 24, past the longest run allowed) are touched, with a task id or without, so a live run is
+        never ended.
+
+        Param format (optional):
+            "project_id=<all|N>[;older_than_hours=24][;dry_run=false]"
+
+        Examples:
+            "project_id=all"                                - dry run across all projects (default; changes nothing)
+            "project_id=all;dry_run=false"                  - end them everywhere
+            "project_id=34;older_than_hours=48;dry_run=false" - project 34, rows older than two days
+        """
+        from ..utils.admin_task_params import dry_run_flag  # pylint: disable=C0415
+        from ..utils.running_conversations import cleanup_hours, run_stuck_cleanup  # pylint: disable=C0415
+
+        param = kwargs.get("param")
+        hours = cleanup_hours(param)
+        if hours is None:
+            log.error("close_stuck_chat_runs: older_than_hours must be a positive integer")
+            return {"closed": 0, "error": "older_than_hours must be a positive integer"}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("close_stuck_chat_runs: failed to list projects")
+            return {"closed": 0, "error": "failed to list projects"}
+
+        result = run_stuck_cleanup(db.get_session, project_ids, hours, dry_run_flag(param))
+        for failed in result["failed_projects"]:
+            log.error("close_stuck_chat_runs: project %s failed", failed["project_id"])
+        log.info("close_stuck_chat_runs: %s", result)
+        return result
+
+    @web.method()
     def create_agent_identity_tables(self, *args, **kwargs):
         """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
 
@@ -891,38 +1161,30 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         ``eval_dataset_case``, on every project schema. Idempotent
         (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
 
+        Before adding the ``agent_id`` FK it deletes datasets whose agent no longer exists (left
+        behind on schemas that had the column but not the FK), as the FK's ``ON DELETE CASCADE``
+        would have. ``dry_run`` lists them per project and changes nothing.
+
         Param format (optional):
-            "project_id=<all|N>"
+            "project_id=<all|N>[;dry_run]"
         """
         from ..utils.eval_dataset_schema import apply_eval_dataset_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_dataset_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        values, error = _parse_project_param(
+            "migrate_eval_dataset_columns", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_dataset_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
 
-        migrated, failed = apply_eval_dataset_columns(project_ids)
-        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+        dry_run = values["dry_run"]
+        migrated, failed, orphans = apply_eval_dataset_columns(project_ids, dry_run=dry_run)
+        return {"dry_run": dry_run, "migrated": 0 if dry_run else len(migrated), "failed": len(failed),
+                "failed_projects": failed, "orphaned_datasets": orphans}
 
     @web.method()
     def migrate_eval_case_usage_columns(self, *args, **kwargs):
@@ -938,27 +1200,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         from ..utils.eval_case_usage_schema import apply_eval_case_usage_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_case_usage_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        _, error = _parse_project_param("migrate_eval_case_usage_columns", param, "project_id=<all|N>")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_case_usage_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
@@ -982,27 +1229,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         from ..utils.eval_suite_schema import apply_eval_suite_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_suite_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        _, error = _parse_project_param("migrate_eval_suite_columns", param, "project_id=<all|N>")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_suite_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
@@ -1026,27 +1258,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         from ..utils.eval_dimension_schema import apply_eval_dimension_columns
 
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_eval_dimension_columns: invalid project_id '%s', scanning all", value)
-
+        param = kwargs.get("param", "") or "project_id=all"
+        _, error = _parse_project_param("migrate_eval_dimension_columns", param, "project_id=<all|N>")
+        if error:
+            return {"migrated": 0, "error": error}
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_eval_dimension_columns: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
@@ -1139,7 +1356,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         Platform dimensions are scored by AI or Human exactly like project-tier ones, so the
         engine set belongs to the registry and is projected into every p_N.eval_dimension row.
         Only environments whose registry table was created by a pre-release build lack the
-        column; fresh ones get it from create_tables. Without it every registry read fails
+        column; fresh ones get it from create_tables (project_id=all;dry_run=false). Without it every registry read fails
         with UndefinedColumn.
 
         Shared-schema table, so there is no per-project loop. Idempotent
@@ -1175,7 +1392,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         Seven code-scored platform dimensions (trajectory.tool_match, .forbidden_tools,
         .tool_errors, .redundant_calls, .step_budget, .step_limit_hit, .guardrail_events; #6809
         item 5), plus the two latency dimensions performance.latency and .final_answer_time
-        (performance design §3.3). Their scripts ship with the plugin
+        (performance design §3.3), and the two structure checks of the scheduled evaluation's
+        health check. Their scripts ship with the plugin
         (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
         carry only the definition and meta.builtin_check.
 
@@ -1225,6 +1443,39 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         result = {"ok": True, "inserted": inserted, "updated": updated, "present": present,
                   "conflicts": conflicts, "resync_failures": resync_failures}
         log.info("seed_eval_trajectory_dimensions: %s", result)
+        return result
+
+    @web.method("seed_eval_health_check")
+    def seed_eval_health_check(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add the scheduled evaluation's platform probes and dimensions.
+
+        The probes an agent with no dataset of its own is run on, the two structure checks and
+        the three AI-judged health dimensions. Also run at startup; idempotent, so a re-run only
+        refreshes the plugin's own wording and resyncs the dimensions it refreshed.
+        """
+        from ..utils.eval_auto_service import seed_platform_health_check  # pylint: disable=C0415
+        try:
+            return seed_platform_health_check()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("seed_eval_health_check: failed")
+            return {"ok": False, "error": str(exc)}
+
+    @web.method("reindex_eval_history_consents")
+    def reindex_eval_history_consents(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: rebuild the shared index of projects that allow evaluation from chat history.
+
+        The admin listing reads the index; each project's own record is the source of truth. Run once
+        after deploying the index, or to repair it; idempotent.
+        """
+        from tools import rpc_tools  # pylint: disable=E0401,C0415
+        from ..utils.eval_history_consent import reindex_history_consents  # pylint: disable=C0415
+        try:
+            projects = rpc_tools.RpcMixin().rpc.timeout(120).project_list(filter_={"create_success": True}) or []
+            result = {"ok": True, **reindex_history_consents([int(project["id"]) for project in projects])}
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("reindex_eval_history_consents: failed")
+            return {"ok": False, "error": str(exc)}
+        log.info("reindex_eval_history_consents: %s", result)
         return result
 
     @web.method()
@@ -2413,6 +2664,49 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return report
 
     @web.method()
+    def migrate_legacy_index_schedules(self, *args, **kwargs):
+        """Admin task: move legacy index schedules (toolkit `indexes_meta`) to schedule rows.
+
+        A dry run by default: only dry_run=false writes. Idempotent: a moved key is gone from the toolkit JSON.
+        A project that fails is reported under errors and the next project runs.
+
+        Param format:
+            "project_id=<all|N>[;dry_run=false]"
+        """
+        # Imported here: the module needs the running plugin (database, owner checks)
+        from ..utils.legacy_index_schedule_migration import migrate_index_project
+        from ..utils.legacy_schedule_migration import parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            project_ids = resolve_target_project_ids(spec)
+        except ValueError as exc:
+            log.error("migrate_legacy_index_schedules: %s", exc)
+            return {"error": str(exc)}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("%sStarting migrate_legacy_index_schedules (projects=%s)", prefix, len(project_ids))
+        report = {"dry_run": dry_run, "projects": [], "errors": []}
+        for project_id in project_ids:
+            try:
+                report["projects"].append(migrate_index_project(project_id, dry_run))
+            except Exception:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("migrate_legacy_index_schedules: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": "the project could not be migrated; see the log"})
+        # Counts only: the full report goes back to the caller
+        counts = [
+            (p.get("project_id"), p.get("found", 0), p.get("migrated_enabled", 0),
+             len(p.get("migrated_paused", [])), len(p.get("held", [])), len(p.get("errors", [])))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting migrate_legacy_index_schedules — (project, found, enabled, paused, held, errors)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
+        return report
+
+    @web.method()
     def backfill_legacy_trace_steps(self, *args, **kwargs):
         """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
 
@@ -2471,6 +2765,49 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "totals": totals,
             "by_project": by_project,
         }
+
+    @web.method()
+    def migrate_legacy_pipeline_webhooks(self, *args, **kwargs):
+        """Admin task: move legacy pipeline webhook triggers to webhook rows, one way (#7402).
+
+        A dry run by default: only dry_run=false writes. Idempotent: a migrated version is skipped.
+        A version that cannot move keeps its legacy trigger and is logged; a failing project is reported.
+
+        Param format:
+            "project_id=<all|N>[;dry_run=false]"
+        """
+        # Imported here: the module needs the running plugin (database, vault, auth RPC)
+        from ..utils.legacy_webhook_migration import migrate_project, parse_task_params
+
+        try:
+            spec, dry_run = parse_task_params(kwargs.get("param", "") or "")
+            project_ids = resolve_target_project_ids(spec)
+        except ValueError as exc:
+            log.error("migrate_legacy_pipeline_webhooks: %s", exc)
+            return {"error": str(exc)}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("%sStarting migrate_legacy_pipeline_webhooks (projects=%s)", prefix, len(project_ids))
+        report = {"dry_run": dry_run, "projects": [], "errors": []}
+        for project_id in project_ids:
+            try:
+                project = migrate_project(project_id, dry_run)
+            except Exception as exc:  # noqa: BLE001 - one failing project must not stop the others
+                log.exception("migrate_legacy_pipeline_webhooks: error in project %s", project_id)
+                report["errors"].append({"project_id": project_id, "error": type(exc).__name__})
+                continue
+            if project["found"]:
+                report["projects"].append(project)
+        counts = [
+            (p["project_id"], p["found"], len(p["migrated"]), len(p["skipped"]), len(p["failed"]))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting migrate_legacy_pipeline_webhooks — (project, found, migrated, skipped, failed)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
+        return report
 
     @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
@@ -3105,6 +3442,58 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": total_migrated, "dry_run": dry_run}
 
     # pylint: disable=R,W0613
+    @web.method()
+    def migrate_sharepoint_site_url_to_toolkit(self, *args, **kwargs):
+        """Admin task: copy 'site_url' from the SharePoint credential to its toolkits (#7197).
+
+        The Site URL now belongs to the SharePoint toolkit, so one credential can serve many sites. For every
+        SharePoint toolkit without its own 'site_url' this copies the value from the credential it references.
+        The credential keeps its (now hidden, deprecated) 'site_url' on purpose: other toolkits, private
+        credentials and toolkits not migrated yet fall back to it at run time, so nothing stops working.
+
+        Idempotent: toolkits that already have a 'site_url' are skipped. Toolkits whose credential cannot be found
+        in the same project (private or shared credentials) are skipped and counted; they keep using the fallback.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+        """
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        try:
+            from plugins.configurations.models.configuration import Configuration  # pylint: disable=C0415
+        except ImportError:
+            log.error("migrate_sharepoint_site_url_to_toolkit: configurations plugin not available")
+            return {"migrated": 0, "error": "configurations plugin not available"}
+
+        usage = "project_id=<all|N>[;dry_run]"
+        values, error = _parse_project_param(
+            "migrate_sharepoint_site_url_to_toolkit", kwargs.get("param", "") or "", usage)
+        if error:
+            return {"migrated": 0, "error": error}
+        dry_run = values["dry_run"]
+        prefix = "[DRY RUN] " if dry_run else ""
+
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, kwargs.get("param", "") or "")
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_sharepoint_site_url_to_toolkit: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        total = {"toolkits_migrated": 0, "toolkits_skipped": 0, "failed_projects": 0, "errors": []}
+        for project_id in project_ids:
+            try:
+                result = _run_sharepoint_site_url_migration(
+                    project_id, dry_run, prefix, db, EliteATool, Configuration)
+                total["toolkits_migrated"] += result["toolkits_migrated"]
+                total["toolkits_skipped"] += result["toolkits_skipped"]
+            except Exception as e:  # pylint: disable=W0703
+                log.exception("%smigrate_sharepoint_site_url_to_toolkit: error in project %s", prefix, project_id)
+                total["failed_projects"] += 1
+                total["errors"].append({"project_id": project_id, "error": str(e)})
+        total["dry_run"] = dry_run
+        return total
+
     @web.method()
     def migrate_llm_model(self, *args, **kwargs):
         """Migrate stale LLM model_name references in ApplicationVersions and ParticipantMappings.
@@ -4420,6 +4809,51 @@ def _run_ado_project_migration(  # pylint: disable=R0913,R0914
         if not dry_run:
             session.commit()
 
+    return results
+
+
+def _sharepoint_site_url_from_credential(settings, credentials_by_title):
+    """The credential's site_url for a SharePoint toolkit that has none of its own, else ``None``."""
+    if (settings.get("site_url") or "").strip():
+        return None
+    reference = settings.get("sharepoint_configuration") or {}
+    credential = credentials_by_title.get(reference.get("elitea_title"))
+    site_url = ((credential or {}).get("site_url") or "").strip()
+    return site_url or None
+
+
+def _run_sharepoint_site_url_migration(  # pylint: disable=R0913
+    project_id, dry_run, prefix, db, EliteATool, Configuration,
+):
+    """Core of migrate_sharepoint_site_url_to_toolkit (#7197): one project, one transaction."""
+    from copy import deepcopy  # pylint: disable=C0415
+    from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+
+    results = {"toolkits_migrated": 0, "toolkits_skipped": 0}
+    with db.with_project_schema_session(project_id) as session:
+        toolkits = session.query(EliteATool).filter(EliteATool.type == "sharepoint").all()
+        if not toolkits:
+            return results
+        credentials_by_title = {
+            configuration.elitea_title: configuration.data or {}
+            for configuration in session.query(Configuration).filter(Configuration.type == "sharepoint").all()
+        }
+        for toolkit in toolkits:
+            settings = toolkit.settings or {}
+            site_url = _sharepoint_site_url_from_credential(settings, credentials_by_title)
+            if site_url is None:
+                results["toolkits_skipped"] += 1
+                continue
+            log.info("%sproject %s, toolkit id=%s: site_url='%s' from its credential",
+                     prefix, project_id, toolkit.id, site_url)
+            if not dry_run:
+                new_settings = deepcopy(settings)
+                new_settings["site_url"] = site_url
+                toolkit.settings = new_settings
+                flag_modified(toolkit, "settings")
+            results["toolkits_migrated"] += 1
+        if not dry_run:
+            session.commit()
     return results
 
 

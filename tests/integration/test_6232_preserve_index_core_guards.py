@@ -11,6 +11,7 @@ Run via:
 """
 
 import ast
+import enum
 import importlib.util
 import json
 import pathlib
@@ -368,6 +369,20 @@ class TestFailedStateWriterGuard:
         assert meta.cmetadata["error"] == "boom"
         assert session.committed
 
+    def test_the_replaced_entry_does_not_carry_the_previous_run_report(self, application_tools, monkeypatch):
+        """#7319: a run that failed before the SDK reset keeps no earlier breakdown in its entry."""
+        earlier_report = json.dumps({"status": "error", "errors": []})
+        earlier_skipped = json.dumps({"documents_already_indexed": {"count": 120}})
+        row = {**self._row(), "report": earlier_report, "skipped": earlier_skipped}
+        meta, _ = _arrange(application_tools, monkeypatch, row, run_rows=[])
+        application_tools.update_toolkit_index_meta_failed_state("postgresql://", "42", "docs", "boom")
+        history = json.loads(meta.cmetadata["history"])
+        assert [entry["state"] for entry in history] == ["failed"]
+        assert history[-1]["error"] == "boom"
+        assert "report" not in history[-1]
+        assert "skipped" not in history[-1]
+        assert meta.cmetadata["report"] == earlier_report
+
     def test_a_terminal_run_row_never_blocks_a_late_callback(self, application_tools, monkeypatch):
         meta, session = _arrange(application_tools, monkeypatch, self._row(),
                                  run_rows=[_run_row("r1", "discarded")])
@@ -439,6 +454,21 @@ class TestSchedulerFailedStateWriter:
         assert entry["created_on"] == entry["updated_on"] >= before > 100.0
         assert (entry["initiator"], entry["error"]) == ("schedule", "refused")
         assert meta.cmetadata["created_on"] == entry["created_on"]
+
+    def test_the_failure_entry_does_not_carry_the_previous_run_report(self, application_tools, monkeypatch):
+        """#7319: the entry carries no earlier run's breakdown; the meta row keeps the preserved one."""
+        earlier_report = json.dumps({"status": "error", "errors": ["the loader returned no content"]})
+        earlier_skipped = json.dumps({"documents_already_indexed": {"count": 120}})
+        row = {**self._row(), "state": "failed", "report": earlier_report, "skipped": earlier_skipped}
+        meta, _ = _arrange(application_tools, monkeypatch, row, run_rows=[])
+        application_tools.update_toolkit_index_meta_history_with_failed_state(
+            "postgresql://", 42, "docs", "refused", initiator="schedule")
+        entry = json.loads(meta.cmetadata["history"])[-1]
+        assert entry["error"] == "refused"
+        assert "report" not in entry
+        assert "skipped" not in entry
+        assert meta.cmetadata["report"] == earlier_report
+        assert meta.cmetadata["skipped"] == earlier_skipped
 
     def test_reindex_is_false_without_a_successful_history_entry(self, application_tools, monkeypatch):
         meta, _ = _arrange(application_tools, monkeypatch,
@@ -845,7 +875,7 @@ def index_scheduling(application_tools):
         PLUGIN_ROOT / "utils" / "index_scheduling.py",
     )
     enums_pkg = types.ModuleType("plugins.elitea_core.models.enums")
-    enums_pkg.InitiatorType = types.SimpleNamespace(schedule="schedule", user="user")
+    enums_pkg.InitiatorType = enum.StrEnum("InitiatorType", {"schedule": "schedule", "user": "user"})
     sys.modules["plugins.elitea_core.models.enums"] = enums_pkg
     tools_pkg = sys.modules["tools"]
     tools_pkg.rpc_tools = types.SimpleNamespace(
@@ -1445,7 +1475,9 @@ def notifications(application_tools):
             return str(self)
 
     enums = types.ModuleType("plugins.elitea_core.models.enums.all")
-    enums.NotificationEventTypes = types.SimpleNamespace(index_data_changed="index_data_changed")
+    enums.NotificationEventTypes = types.SimpleNamespace(
+        index_data_changed=types.SimpleNamespace(value="index_data_changed"),
+    )
     enums.IndexDataStatus = types.SimpleNamespace(
         completed=_State("completed"), failed=_State("failed"), created=_State("created"),
         scheduled_reindex=_State("scheduled_reindex"), partly_indexed=_State("partly_indexed"),

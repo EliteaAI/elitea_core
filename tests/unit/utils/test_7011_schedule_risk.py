@@ -106,6 +106,12 @@ def scan(isolated_sys_modules):
     app_tools.expand_toolkit_settings = expand_toolkit_settings
     sys.modules[app_tools.__name__] = app_tools
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_utils.py', f'{PKG}.utils.pipeline_utils')
+    # the package stubs have an empty __path__, so the two real modules the rule reads are loaded by hand
+    pd_package = types.ModuleType(f'{PKG}.models.pd')
+    pd_package.__path__ = []
+    sys.modules[pd_package.__name__] = pd_package
+    load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'mcp_oauth.py', f'{PKG}.models.pd.mcp_oauth')
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'stored_oauth_tokens.py', f'{PKG}.utils.stored_oauth_tokens')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_risk.py', f'{PKG}.utils.schedule_risk')
     state.review = lambda version_id=VERSION_ID: module.scan_schedule(12, version_id, 42)
     state.run = lambda version_id=VERSION_ID: _flat(state.review(version_id))
@@ -174,6 +180,75 @@ class TestEL7011R1HumanSteps:
         assert warnings[3]['toolkit'] == 'Jira'
 
 
+INTERRUPT_PIPELINE = """
+entry_point: LLM 1
+interrupt_{key}:
+  - {step}
+nodes:
+  - id: LLM 1
+    type: llm
+    transition: Code 1
+  - id: Code 1
+    name: Run code
+    type: code
+    transition: LLM 2
+  - id: LLM 2
+    type: llm
+    transition: END
+"""
+
+
+class TestEL7621InterruptNodes:
+    @pytest.mark.parametrize('key', ['before', 'after'])
+    def test_an_interrupt_on_a_node_that_ends_the_run_blocks(self, scan, key):
+        scan.version = _version('pipeline', instructions=INTERRUPT_PIPELINE.format(key=key, step='LLM 2'))
+        assert [w['step'] for w in scan.review()['blocking']] == ['LLM 2']
+
+    def test_a_malformed_interrupt_entry_keeps_the_other_findings(self, scan):
+        scan.version = _version('pipeline', instructions=PIPELINE + 'interrupt_before: [{a: 1}, [Think], Think]\n')
+        review = scan.review()
+        assert [w['step'] for w in review['blocking']] == ['Review', 'Show', 'Think']
+        assert review['notices'] == []
+
+    @pytest.mark.parametrize('key', ['interrupt_before', 'interrupt_after'])
+    def test_an_interrupt_written_as_text_blocks_as_one_entry(self, scan, key):
+        scan.version = _version('pipeline', instructions=f'nodes:\n  - id: AB\n    type: llm\n    transition: END\n{key}: AB\n')
+        assert [w['step'] for w in scan.review()['blocking']] == ['AB']
+
+    @pytest.mark.parametrize('interrupts', ['interrupt_before: {A}', 'interrupt_after: !!set {A}', 'interrupt_after: {A: x}'])
+    def test_an_interrupt_written_as_a_mapping_or_set_blocks_its_node_names(self, scan, interrupts):
+        scan.version = _version('pipeline', instructions=f'nodes:\n  - id: A\n    type: llm\n    transition: END\n{interrupts}\n')
+        assert [w['step'] for w in scan.review()['blocking']] == ['A']
+
+    def test_an_interrupt_mapping_without_text_names_gives_no_finding(self, scan):
+        scan.version = _version('pipeline', instructions='nodes:\n  - id: A\n    type: llm\ninterrupt_before: {1: a}\n')
+        assert scan.run() == []
+
+    def test_a_node_id_that_is_not_text_keeps_the_other_findings(self, scan):
+        scan.version = _version('pipeline', instructions=PIPELINE + '  - id: [odd]\n    type: llm\ninterrupt_before: [Think]\n')
+        review = scan.review()
+        assert [w['step'] for w in review['blocking']] == ['Review', 'Show', 'Think']
+        assert review['notices'] == []
+
+    @pytest.mark.parametrize('key', ['before', 'after'])
+    def test_a_node_the_run_pauses_at_blocks_the_save(self, scan, key):
+        scan.version = _version('pipeline', instructions=INTERRUPT_PIPELINE.format(key=key, step='Code 1'))
+        review = scan.review()
+        assert _codes(review['blocking']) == ['human_input_step']
+        assert review['blocking'][0]['step'] == 'Code 1'
+        assert review['blocking'][0]['step_label'] == 'Run code'
+        assert review['notices'] == []
+
+    def test_a_human_node_also_listed_as_an_interrupt_is_one_finding(self, scan):
+        scan.version = _version('pipeline', instructions=PIPELINE + 'interrupt_before: [Review, Think]\ninterrupt_after: [Think]\n')
+        assert [w['step'] for w in scan.review()['blocking']] == ['Review', 'Show', 'Think']
+
+    @pytest.mark.parametrize('interrupts', ['interrupt_before: []\ninterrupt_after: []\n', 'interrupt_before:\n'])
+    def test_an_empty_interrupt_list_does_not_block(self, scan, interrupts):
+        scan.version = _version('pipeline', instructions='nodes:\n  - id: A\n    type: llm\n' + interrupts)
+        assert scan.run() == []
+
+
 class TestEL7011R2Credentials:
     def test_r2_1_one_warning_per_toolkit_for_each_error_type(self, scan):
         scan.version = _version(tools=[_tool('jira', 'Jira'), _tool('confluence', 'Confluence'), _tool('git', 'Git')])
@@ -229,6 +304,28 @@ class TestEL7011R2PersonalToken:
         scan.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp', 'refresh_token': 'r'}}
         assert scan.run() == []
 
+    def test_7643_mcp_with_saved_login_does_not_block(self, scan):
+        scan.version = _version(tools=[_tool('mcp', 'Remote', settings={'mcp_login_configuration': {'elitea_title': 'bot'}})])
+        # Expansion replaces the refresh token with a saved_login flag (#7643: the token never leaves Main)
+        scan.expanded['mcp'] = {'url': 'https://mcp', 'mcp_login_configuration': {
+            'url': 'https://mcp', 'token_endpoint': 'https://auth/token', 'saved_login': True}}
+        assert scan.run() == []
+
+    def test_7643_mcp_login_reference_without_token_still_blocks(self, scan):
+        scan.version = _version(tools=[_tool('mcp', 'Remote', settings={'mcp_login_configuration': {'elitea_title': 'bot'}})])
+        scan.expanded['mcp'] = {'url': 'https://mcp', 'mcp_login_configuration': {
+            'url': 'https://mcp', 'token_endpoint': 'https://auth/token', 'saved_login': False}}
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('login', [
+        {'url': 'https://mcp', 'saved_login': True},  # no token endpoint: the login cannot be refreshed
+        {'url': 'https://other', 'token_endpoint': 'https://auth/token', 'saved_login': True},  # other server
+    ])
+    def test_7643_unusable_mcp_login_still_blocks(self, scan, login):
+        scan.version = _version(tools=[_tool('mcp', 'Remote', settings={'mcp_login_configuration': {'elitea_title': 'bot'}})])
+        scan.expanded['mcp'] = {'url': 'https://mcp', 'mcp_login_configuration': login}
+        assert _codes(scan.run()) == ['personal_signin_required']
+
     def test_7309_openapi_refresh_token_still_blocks(self, scan):
         # Only the Microsoft stored-login path injects tokens; OpenAPI still needs a live sign-in
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'openapi_configuration': {'elitea_title': 'c'}})])
@@ -243,6 +340,58 @@ class TestEL7011R2PersonalToken:
     def test_r2_2_warning_text_holds_no_secret(self, scan):
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'oauth_discovery_endpoint': 'https://idp', 'token': 's3cret'})])
         assert 's3cret' not in json.dumps(scan.review())
+
+
+ENTRA = 'https://login.microsoftonline.com/tenant-1/v2.0'
+DATAVERSE = {'tenant_id': 'tenant-1', 'url': 'https://org.crm4.dynamics.com'}
+DELEGATED = {
+    'dataverse': DATAVERSE,
+    'outlook': {'oauth_discovery_endpoint': ENTRA},
+    'teams': {'oauth_discovery_endpoint': ENTRA},
+    'ms_graph': {'oauth_discovery_endpoint': ENTRA},
+    'sharepoint': {'oauth_discovery_endpoint': ENTRA},
+}
+NEW_TYPES = ['dataverse', 'outlook', 'teams', 'ms_graph']
+
+
+def _stored_login_scan(scan, type_, credential, refresh_token='unset'):
+    """A toolkit that points at a credential; the owner expansion answers `credential` plus the token."""
+    scan.version = _version(tools=[_tool(type_, 'Toolkit', settings={f'{type_}_configuration': {'elitea_title': 'c'}})])
+    expanded = dict(credential)
+    if refresh_token != 'unset':
+        expanded['refresh_token'] = refresh_token
+    scan.expanded[type_] = {f'{type_}_configuration': expanded}
+
+
+class TestStoredLoginSignIn:
+    @pytest.mark.parametrize('type_', NEW_TYPES)
+    def test_a_delegated_credential_with_no_refresh_token_needs_a_sign_in(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_])
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('type_', NEW_TYPES)
+    def test_an_empty_refresh_token_needs_a_sign_in(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_], refresh_token='')
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('type_', list(DELEGATED))
+    def test_a_refresh_token_that_is_still_a_secret_reference_needs_a_sign_in(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_], refresh_token='{{secret.abc}}')
+        assert _codes(scan.run()) == ['personal_signin_required']
+
+    @pytest.mark.parametrize('type_', list(DELEGATED))
+    def test_a_resolved_refresh_token_is_a_saved_login(self, scan, type_):
+        _stored_login_scan(scan, type_, DELEGATED[type_], refresh_token='real-token')
+        assert scan.run() == []
+
+    @pytest.mark.parametrize('type_, credential', [
+        ('outlook', {'client_id': 'x'}), ('teams', {'client_id': 'x'}), ('ms_graph', {'client_id': 'x'}),
+        ('dataverse', {'url': 'https://org.crm4.dynamics.com'}),
+        ('dataverse', {'tenant_id': 'tenant-1', 'url': 'https://example.com'}),
+    ])
+    def test_a_credential_that_cannot_sign_in_from_the_browser_gets_no_finding(self, scan, type_, credential):
+        _stored_login_scan(scan, type_, credential)
+        assert scan.run() == []
 
 
 class TestEL7011R2SensitiveActions:
@@ -396,7 +545,8 @@ class TestEL7011CrPersonalCredential:
     """Owner decision 2026-10-21: a personal credential is "warn and confirm", not silent and not blocked."""
 
     @pytest.mark.parametrize('type_, name, label', [
-        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence')])
+        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence'),
+        ('ms_graph', 'Graph', 'MS Graph')])
     def test_el7011_cr_a_personal_credential_is_a_sensitive_item(self, scan, type_, name, label):
         scan.version = _version(tools=[_personal(type_, name)])
         review = scan.review()
@@ -406,6 +556,12 @@ class TestEL7011CrPersonalCredential:
             'toolkit': name, 'toolkit_type': type_, 'tool': None, 'risk_level': 'needs_approval',
             'badge': 'personal_credential', 'effect': f"Runs with the owner's personal {label} credential.",
         }]
+
+    def test_a_personal_ms_graph_credential_with_a_saved_login_is_named_ms_graph(self, scan):
+        scan.version = _version(tools=[_personal('ms_graph', 'Graph')])
+        scan.expanded['ms_graph'] = {'ms_graph_configuration': {'oauth_discovery_endpoint': ENTRA, 'refresh_token': 'r'}}
+        [item] = scan.review()['sensitive']
+        assert item['code'] == 'personal_credential' and 'MS Graph' in item['message']
 
     def test_el7011_cr_a_shared_credential_adds_nothing(self, scan):
         scan.version = _version(tools=[_personal(private=False)])
@@ -451,6 +607,20 @@ class TestWaitingForTheOwner:
         assert _codes(review['notices']) == ['personal_signin_required']
         assert review['notices'][0]['fix'] and review['notices'][0]['hint']
 
+    def test_a_dataverse_toolkit_with_no_login_is_a_notice_with_a_fix_and_a_hint_under_pause_and_ask(self, scan):
+        _stored_login_scan(scan, 'dataverse', DATAVERSE)
+        review = self._review(scan, 'pause_and_ask')
+        assert review['blocking'] == []
+        [notice] = review['notices']
+        assert notice['code'] == 'personal_signin_required' and notice['hint'] == scan.module.WAIT_HINT
+        assert notice['fix']
+
+    def test_a_dataverse_toolkit_with_no_login_blocks_under_run_without_asking(self, scan):
+        _stored_login_scan(scan, 'dataverse', DATAVERSE)
+        review = self._review(scan, 'run_without_asking')
+        assert _codes(review['blocking']) == ['personal_signin_required'] and review['notices'] == []
+        assert review['blocking'][0]['fix']
+
     def test_a_missing_credential_is_a_notice_under_pause_and_ask(self, scan):
         scan.version = _version(tools=[_personal('jira', 'Jira')])
         scan.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
@@ -468,3 +638,55 @@ class TestWaitingForTheOwner:
         scan.version = _version(agent_type='pipeline', instructions=PIPELINE)
         review = self._review(scan, 'pause_and_ask')
         assert set(_codes(review['blocking'])) == {'human_input_step'}
+
+
+class TestWebhookNeverWaits:
+    """#7401: a webhook fires too often to wait for a sign-in, so these findings block under both rules."""
+
+    @pytest.fixture
+    def delegated(self, scan):
+        # consent_scope is the governance read of the Entra-delegated credentials the version uses
+        scan.scope = []
+        identity = types.ModuleType(f'{PKG}.utils.mandate_identity')
+        identity.consent_scope = lambda project_id, version_id, owner_id: scan.scope
+        sys.modules[identity.__name__] = identity
+        return scan
+
+    def _review(self, scan, rule, kind='webhook'):
+        return scan.module.scan_schedule(12, VERSION_ID, 42, rule, kind)
+
+    @pytest.mark.parametrize('rule', ['pause_and_ask', 'run_without_asking'])
+    def test_7401_a_sign_in_blocks_a_webhook_under_both_rules(self, delegated, rule):
+        delegated.version = _version(tools=[_personal('sharepoint', 'Docs')])
+        delegated.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
+        review = self._review(delegated, rule)
+        assert _codes(review['blocking']) == ['personal_signin_required'] and review['notices'] == []
+        assert review['blocking'][0]['hint'] == delegated.module.WEBHOOK_SIGN_IN
+
+    @pytest.mark.parametrize('rule', ['pause_and_ask', 'run_without_asking'])
+    def test_7401_a_missing_credential_blocks_a_webhook_under_both_rules(self, delegated, rule):
+        delegated.version = _version(tools=[_personal('jira', 'Jira')])
+        delegated.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
+        assert _codes(self._review(delegated, rule)['blocking']) == ['missing_credential']
+
+    def test_7401_a_cron_schedule_under_pause_and_ask_still_waits(self, delegated):
+        delegated.version = _version(tools=[_personal('sharepoint', 'Docs')])
+        delegated.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
+        review = self._review(delegated, 'pause_and_ask', 'cron')
+        assert review['blocking'] == [] and _codes(review['notices']) == ['personal_signin_required']
+
+    def test_7401_an_entra_delegated_credential_blocks_a_webhook_only(self, delegated):
+        delegated.version = _version(tools=[_tool('sharepoint', 'Docs')])
+        delegated.scope = [{'credential_ref': 'r1', 'toolkits': ['Docs']}]
+        review = self._review(delegated, 'pause_and_ask')
+        assert _codes(review['blocking']) == ['delegated_credential']
+        assert review['blocking'][0]['reason'] == 'DENIED_MANDATE_DELEGATION_UNSUPPORTED'
+        assert 'delegated_credential' not in _codes(_flat(self._review(delegated, 'pause_and_ask', 'cron')))
+
+    def test_7401_an_unreadable_delegated_check_is_an_incomplete_notice(self, delegated):
+        def broken(*_args):
+            raise RuntimeError('facts down')
+        sys.modules[f'{PKG}.utils.mandate_identity'].consent_scope = broken
+        delegated.version = _version(tools=[_tool()])
+        review = self._review(delegated, 'pause_and_ask')
+        assert review['blocking'] == [] and _codes(review['notices']) == ['scan_incomplete']

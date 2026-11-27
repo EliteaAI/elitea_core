@@ -10,45 +10,56 @@ import types
 import pytest
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = TESTS_DIR.parent
 sys.path.insert(0, str(TESTS_DIR))
 
-from fixtures.helpers import load_utils_module
+from fixtures.helpers import load_module_with_stubs  # noqa: E402
 
 
 CONVERSATION_PROJECT = 2
 SUPPORT_PROJECT = 99
 VIEWED_PROJECT = 7
+PKG = "plugins_6404.elitea_core"
+
+
+class _Log:
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
 
 
 @pytest.fixture(scope='module')
 def internal_tools():
-    import tools
-
-    for attr, value in (
-        ('config', types.SimpleNamespace()),
-        ('VaultClient', object),
-        ('rpc_tools', types.SimpleNamespace(RpcMixin=object)),
-        ('this', types.SimpleNamespace()),
-        ('auth', types.SimpleNamespace()),
-    ):
-        if not hasattr(tools, attr):
-            setattr(tools, attr, value)
-    tools.config.APP_HOST = 'http://localhost'
-
-    mcp_config_mod = types.ModuleType('mcp_config')
-    mcp_config_mod.is_mcp_exposure_enabled = lambda: True
-
-    support_utils_mod = types.ModuleType('support_utils')
-    support_utils_mod.get_support_config = lambda: {'enabled': False, 'project_id': None}
-
-    return load_utils_module(
-        TESTS_DIR.parent / 'utils',
-        'internal_tools',
-        extra_stubs={
-            'plugins.elitea_core.utils.mcp_config': mcp_config_mod,
-            'plugins.elitea_core.utils.support_utils': support_utils_mod,
-        },
-    )
+    saved = dict(sys.modules)
+    tools = types.ModuleType("tools")
+    tools.auth = types.SimpleNamespace()
+    tools.this = types.SimpleNamespace()
+    tools.config = types.SimpleNamespace(APP_HOST="http://localhost")
+    tools.VaultClient = object
+    tools.rpc_tools = types.SimpleNamespace(RpcMixin=object)
+    pylon_tools = types.ModuleType("pylon.core.tools")
+    pylon_tools.log = _Log()
+    stubs = {"tools": tools, "pylon": types.ModuleType("pylon"), "pylon.core": types.ModuleType("pylon.core"),
+             "pylon.core.tools": pylon_tools}
+    for name in ("plugins_6404", PKG, f"{PKG}.utils"):
+        package = types.ModuleType(name)
+        package.__path__ = []
+        stubs[name] = package
+    mcp_config = types.ModuleType(f"{PKG}.utils.mcp_config")
+    mcp_config.is_mcp_exposure_enabled = lambda: True
+    support = types.ModuleType(f"{PKG}.utils.support_utils")
+    support.get_support_config = lambda: {'enabled': False, 'project_id': None}
+    stubs.update({mcp_config.__name__: mcp_config, support.__name__: support})
+    sys.modules.update(stubs)
+    for dep in ("governance", "internal_base_url", "platform_buckets", "builder_keys"):
+        load_module_with_stubs(PLUGIN_ROOT / "utils" / f"{dep}.py", f"{PKG}.utils.{dep}")
+    builder_pkg = types.ModuleType(f"{PKG}.utils.builder")
+    builder_pkg.__path__ = []
+    sys.modules[builder_pkg.__name__] = builder_pkg
+    load_module_with_stubs(PLUGIN_ROOT / "utils" / "builder" / "prompts.py", f"{PKG}.utils.builder.prompts")
+    module = load_module_with_stubs(PLUGIN_ROOT / "utils" / "internal_tools.py", f"{PKG}.utils.internal_tools")
+    yield module
+    sys.modules.clear()
+    sys.modules.update(saved)
 
 
 @pytest.fixture
@@ -203,6 +214,7 @@ class TestScopedSuffixes:
             'elitea_core/skills',
             'elitea_core/project_context',
             'elitea_core/applications',
+            'elitea_core/builder',
         }
 
 
@@ -238,35 +250,24 @@ def injected_urls(internal_tools, monkeypatch):
 
 class TestInjectedToolkitUrls:
 
-    def test_builder_groups_carry_the_scope(self, injected_urls):
-        urls = injected_urls(['internal_mcp', 'skill_builder', 'project_context_builder'], CONVERSATION_PROJECT)
-        for suffix in ('elitea_core/applications', 'elitea_core/skills', 'elitea_core/project_context'):
-            assert urls[suffix].endswith(f'?scope_project_id={CONVERSATION_PROJECT}'), suffix
+    def test_the_builder_toolkit_carries_the_scope(self, injected_urls):
+        urls = injected_urls(['elitea_builder'], CONVERSATION_PROJECT)
+        assert set(urls) == {'elitea_core/builder'}
+        assert urls['elitea_core/builder'].endswith(f'?scope_project_id={CONVERSATION_PROJECT}')
 
-    def test_other_groups_are_left_unconfined(self, injected_urls):
-        urls = injected_urls(['internal_mcp'], CONVERSATION_PROJECT)
-        for suffix in ('elitea_core/chat', 'elitea_core/toolkits', 'elitea_core/analytics',
-                       'secrets', 'configurations', 'artifacts'):
-            assert 'scope_project_id' not in urls[suffix], suffix
-
-    def test_no_scope_leaves_every_url_as_before(self, injected_urls):
-        urls = injected_urls(['internal_mcp', 'skill_builder'], None)
+    def test_no_scope_leaves_the_url_unconfined(self, injected_urls):
+        urls = injected_urls(['elitea_builder'], None)
         assert all('scope_project_id' not in url for url in urls.values())
 
     def test_a_scoped_url_still_resolves_to_its_bare_suffix(self, internal_tools, injected_urls):
-        urls = injected_urls(['skill_builder'], CONVERSATION_PROJECT)
-        assert set(urls) == {'elitea_core/skills'}
+        urls = injected_urls(['elitea_builder'], CONVERSATION_PROJECT)
         assert internal_tools._extract_internal_mcp_suffix(
-            urls['elitea_core/skills']
-        ) == 'elitea_core/skills'
+            urls['elitea_core/builder']
+        ) == 'elitea_core/builder'
 
-    def test_applications_stays_served_from_the_private_project(self, injected_urls):
-        urls = injected_urls(['internal_mcp'], CONVERSATION_PROJECT)
-        assert urls['elitea_core/applications'].startswith('http://localhost/app/1/mcp/')
-
-    def test_skills_stays_served_from_the_conversation_project(self, injected_urls):
-        urls = injected_urls(['skill_builder'], CONVERSATION_PROJECT)
-        assert urls['elitea_core/skills'].startswith(
+    def test_the_builder_is_served_from_the_conversation_project(self, injected_urls):
+        urls = injected_urls(['elitea_builder'], CONVERSATION_PROJECT)
+        assert urls['elitea_core/builder'].startswith(
             f'http://localhost/app/{CONVERSATION_PROJECT}/mcp/'
         )
 
@@ -274,6 +275,6 @@ class TestInjectedToolkitUrls:
 class TestPromptNoLongerInvitesCrossProject:
 
     def test_the_model_is_told_not_to_leave_the_project(self, internal_tools):
-        addon = internal_tools.get_mcp_entity_link_instructions(['skill_builder'])
-        assert 'Use a different project' not in addon
-        assert 'never pass a different `project_id`' in addon
+        prompt = internal_tools.get_builder_payload(['elitea_builder'])['core_prompt']
+        assert 'Use a different project' not in prompt
+        assert 'Work only in the current project' in prompt

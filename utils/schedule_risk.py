@@ -11,34 +11,59 @@ from pylon.core.tools import log
 from tools import db
 
 from ..models.all import ApplicationVersion
+from ..models.pd.mcp_oauth import VAULT_SECRET_PATTERN
 from .application_tools import ConfigurationExpandError, expand_toolkit_settings
 from .pipeline_utils import validate_yaml_from_str
+from .stored_oauth_tokens import LOGIN_RESOLVERS, MCP_LOGIN_KEY, mcp_login_fits_tool
 
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
-BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+DELEGATED_CODE = 'delegated_credential'
+BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential', DELEGATED_CODE}
 # The owner can fix these while the run waits, so "Pause and ask me" saves and starts with them
 WAIT_FOR_OWNER_CODES = {'personal_signin_required', 'missing_credential'}
 WAIT_HINT = 'Sign in or add the credentials before the run; otherwise the run waits for you.'
 SENSITIVE_CODE = 'sensitive_action'
 PERSONAL_CODE = 'personal_credential'
 SENSITIVE_CODES = {SENSITIVE_CODE, PERSONAL_CODE}
-TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint', 'openapi': 'OpenAPI'}
+TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint', 'openapi': 'OpenAPI',
+               'ms_graph': 'MS Graph'}
 INCOMPLETE_CODE = 'scan_incomplete'
+# Same wording as the Connections check (schedule_prerun BROWSER_ONLY_TEXT / DELEGATED_TEXT)
+WEBHOOK_SIGN_IN = ('Webhooks cannot wait for a sign-in; use a toolkit with a saved login '
+                   '(for MCP: a Team or Private MCP login instead of "Browser only").')
+DELEGATED_TEXT = "acts with the signed-in person's Microsoft account; unattended runs cannot use it"
 
 
 def _warning(code, message, **extra):
     return {'code': code, 'message': message, **extra}
 
 
+def _read_interrupt_node_ids(interrupts) -> list:
+    """The node ids of an `interrupt_before` / `interrupt_after` value; a text value counts as one entry."""
+    if isinstance(interrupts, str):
+        return [interrupts] if interrupts else []
+    if not isinstance(interrupts, (list, dict, set)):
+        return []
+    return [step for step in interrupts if isinstance(step, str)]
+
+
+def _flag_pipeline_human_steps(schema: dict) -> list:
+    """The human nodes, then the nodes the run pauses at (`interrupt_before` / `interrupt_after`), each once."""
+    nodes = [node for node in schema.get('nodes') or [] if isinstance(node, dict) and isinstance(node.get('id'), str)]
+    step_labels = {node.get('id'): node.get('name') or node.get('id') for node in nodes}
+    human_nodes = [node.get('id') for node in nodes if node.get('type') in HUMAN_NODE_TYPES]
+    interrupt_nodes = [step for key in ('interrupt_before', 'interrupt_after')
+                       for step in _read_interrupt_node_ids(schema.get(key))]
+    return [
+        _warning('human_input_step', f'Node "{step}" waits for a person', step=step, step_label=step_labels.get(step, step))
+        for step in dict.fromkeys(human_nodes + interrupt_nodes)
+    ]
+
+
 def _human_steps(version) -> list:
     if version.agent_type == 'pipeline':
-        nodes = validate_yaml_from_str(version.instructions).get('nodes') or []
-        return [
-            _warning('human_input_step', f'Node "{node.get("id")}" waits for a person',
-                     step=node.get('id'), step_label=node.get('name') or node.get('id'))
-            for node in nodes if isinstance(node, dict) and node.get('type') in HUMAN_NODE_TYPES
-        ]
+        return _flag_pipeline_human_steps(validate_yaml_from_str(version.instructions))
     if 'ask_user' in ((version.meta or {}).get('internal_tools') or []):
         return [_warning('human_input_step', 'The agent can ask the user a question')]
     return []
@@ -54,17 +79,32 @@ def _error_types(errors) -> set:
     return types
 
 
+def _has_saved_login(credential: dict) -> bool:
+    """A refresh token that is empty, or still a `{{secret.x}}` reference after expansion (its secret is gone), is no login."""
+    token = credential.get('refresh_token')
+    token = token.strip() if isinstance(token, str) else ''
+    return bool(token) and not VAULT_SECRET_PATTERN.match(token)
+
+
 def _uses_personal_token(tool, expanded: dict) -> bool:
-    # Same rule as the UI hook useDelegatedOauthToolkits: a referenced credential is authoritative
+    # A saved login lets the run sign in without a browser (inject_stored_logins), so only a delegated
+    # credential without one needs the owner. The referenced credential is authoritative.
     if tool.type == 'mcp' or (tool.meta or {}).get('mcp') or tool.type.startswith('mcp_'):
-        return True
-    if tool.type not in ('sharepoint', 'openapi'):
+        # A saved MCP login (#7643) runs as its bot account, so no person needs to be signed in
+        login = expanded.get(MCP_LOGIN_KEY) or {}
+        usable = (MCP_LOGIN_KEY in (tool.settings or {}) and login.get('saved_login') is True
+                  and bool(LOGIN_RESOLVERS[MCP_LOGIN_KEY](login))
+                  and mcp_login_fits_tool({'settings': expanded}, login.get('url')))
+        return not usable
+    settings_key = f'{tool.type}_configuration'
+    if tool.type != 'openapi' and settings_key not in LOGIN_RESOLVERS:
         return False
-    if (tool.settings or {}).get(f'{tool.type}_configuration'):
-        credential = expanded.get(f'{tool.type}_configuration') or {}
-        # a stored Microsoft login lets the run sign in without a browser (inject_stored_logins)
-        stored_login = tool.type == 'sharepoint' and bool(credential.get('refresh_token'))
-        return bool(credential.get('oauth_discovery_endpoint')) and not stored_login
+    if (tool.settings or {}).get(settings_key):
+        credential = expanded.get(settings_key) or {}
+        if tool.type == 'openapi':
+            return bool(credential.get('oauth_discovery_endpoint'))
+        delegated = bool(credential.get('oauth_discovery_endpoint')) or bool(LOGIN_RESOLVERS[settings_key](credential))
+        return delegated and not _has_saved_login(credential)
     return tool.type == 'openapi' and bool(expanded.get('oauth_discovery_endpoint'))
 
 
@@ -182,16 +222,38 @@ def _fingerprint(version_id: int | None, sensitive: list, digest: str | None) ->
     return hashlib.sha256(json.dumps([version_id, pairs, digest]).encode()).hexdigest()
 
 
-def scan_schedule(project_id: int, version_id: int | None, owner_id: int, approval_rule: str | None = None) -> dict:
+def _delegated_warnings(project_id: int, version_id: int | None, owner_id: int) -> list:
+    """One blocking item per toolkit using an Entra-delegated credential: governance refuses it unattended."""
+    if not version_id:
+        return []
+    from .mandate_identity import consent_scope  # pylint: disable=C0415 -- late: reads the credential facts
+    try:
+        scope = consent_scope(project_id, version_id, owner_id)
+    except Exception:  # noqa: BLE001 - the governed release refuses it anyway; the scan only says it early
+        log.exception('Schedule risk scan: delegated credentials of version %s could not be read', version_id)
+        return [_warning(INCOMPLETE_CODE, 'The credentials could not be checked for a person\'s sign-in')]
+    names = sorted({name for item in scope for name in item.get('toolkits') or []})
+    return [_warning(DELEGATED_CODE, f'Toolkit "{name}" {DELEGATED_TEXT}', toolkit=name,
+                     reason='DENIED_MANDATE_DELEGATION_UNSUPPORTED') for name in names]
+
+
+def scan_schedule(project_id: int, version_id: int | None, owner_id: int, approval_rule: str | None = None,
+                  trigger_kind: str = 'cron') -> dict:
     """The risk review of one version run by one owner: `blocking`, `sensitive`, `notices`, `fingerprint`.
 
     A blocking finding carries `fix`, the agent or pipeline version to open. With the rule `pause_and_ask`,
-    a missing credential or a personal sign-in is a notice with `fix` and a hint, not a block. `sensitive` holds the
+    a missing credential or a personal sign-in is a notice with `fix` and a hint, not a block; for a webhook
+    (`trigger_kind`) both always block, and so does an Entra-delegated credential. `sensitive` holds the
     `sensitive_action` tools and the `personal_credential` toolkits (`tool` null). Never raises: a
     failure is a `scan_incomplete` notice.
     """
     findings, fix, digest = _findings(project_id, version_id, owner_id)
-    waits = WAIT_FOR_OWNER_CODES if approval_rule == 'pause_and_ask' else set()
+    webhook = trigger_kind == 'webhook'
+    if webhook:  # a webhook never waits for a sign-in, under either rule
+        findings += _delegated_warnings(project_id, version_id, owner_id)
+        findings = [{**item, 'hint': WEBHOOK_SIGN_IN} if item['code'] == 'personal_signin_required' else item
+                    for item in findings]
+    waits = WAIT_FOR_OWNER_CODES if approval_rule == 'pause_and_ask' and not webhook else set()
     blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES - waits]
     sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES and not item.get('may_apply')]
     notices = [{**item, 'fix': fix, 'hint': WAIT_HINT} if item['code'] in waits else item

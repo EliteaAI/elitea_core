@@ -20,6 +20,7 @@ from .utils.binding_api import (
     registration as binding_registration,
 )
 from .models.skill import SKILL_FILE_TABLES
+from .models.builder_changeset import BUILDER_TABLES
 from .utils.agent_identity_schema import apply_tables, project_ids_missing_tables
 from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
@@ -27,6 +28,7 @@ from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
 from .utils.schedule_access import register_schedule_permissions
 from .utils.schedule_settings import register_schedule_settings_type
+from .utils.eval_history_consent import register_eval_history_settings_type
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
     CAPABILITIES_REQUEST_EVENT,
@@ -418,6 +420,14 @@ class Module(module.ModuleModel):
         self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
 
+        # The scheduled evaluation's probes and dimensions; a failure only leaves the platform
+        # tier without them until the admin task is run.
+        try:
+            from .utils.eval_auto_service import seed_platform_health_check
+            seed_platform_health_check()
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to seed the evaluation health check')
+
         # ORM create_all() creates missing tenant tables but never expands an
         # existing one. Apply the transactionally committed compatibility guard
         # before any chat callback can write the normalized step rows.
@@ -535,7 +545,7 @@ class Module(module.ModuleModel):
                 self.migrate_eval_platform_dimension_columns, group="R-2.0.6",
             )
             this.for_module("admin").module.register_admin_task(
-                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.6",
+                "migrate_eval_dataset_columns", self.migrate_eval_dataset_columns, group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_dimension_columns", self.migrate_eval_dimension_columns, group="R-2.0.6",
@@ -567,8 +577,24 @@ class Module(module.ModuleModel):
                 group="R-2.0.8",
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_legacy_pipeline_webhooks", self.migrate_legacy_pipeline_webhooks,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables,
                 group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "ensure_webhook_trigger_columns", self.ensure_webhook_trigger_columns,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "ensure_toolkit_index_schedule_columns", self.ensure_toolkit_index_schedule_columns,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_legacy_index_schedules", self.migrate_legacy_index_schedules,
+                group="R-2.0.9",
             )
             this.for_module("admin").module.register_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding,
@@ -602,12 +628,49 @@ class Module(module.ModuleModel):
                 "fix_platform_tick_row", self.fix_platform_tick_row,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_schedule_test_runs", self.migrate_schedule_test_runs,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "index_message_groups_by_conversation", self.index_message_groups_by_conversation,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_sharepoint_site_url_to_toolkit", self.migrate_sharepoint_site_url_to_toolkit,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "close_stuck_chat_runs", self.close_stuck_chat_runs,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_elitea_builder_keys", self.migrate_elitea_builder_keys,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "enable_builder_default_modules", self.enable_builder_default_modules,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "seed_eval_health_check", self.seed_eval_health_check,
+                group="R-2.0.9",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "reindex_eval_history_consents", self.reindex_eval_history_consents,
+                group="R-2.0.9",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
         self._ensure_skill_file_schema()
+        self._ensure_builder_schema()
         self._ensure_schedule_streak_column()
         self._ensure_agent_identity_schema()
         self._start_governance()
@@ -899,6 +962,21 @@ class Module(module.ModuleModel):
 
         Thread(target=_run, daemon=True).start()
 
+    def _ensure_builder_schema(self):
+        """Startup safety net: create the Elitea Builder changeset table in project schemas that predate it (#7383).
+        Off-thread; a catalog check keeps steady-state boots DDL-free. New projects are covered by create_all."""
+        def _run():
+            try:
+                pending = project_ids_missing_tables(BUILDER_TABLES)
+                if not pending:
+                    return
+                migrated, failed = apply_tables(pending, BUILDER_TABLES)
+                log.info("builder schema: migrated=%s failed=%s", len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("builder schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
     def _ensure_agent_identity_schema(self):
         """Startup safety net: create the agent identity and mandate tables in any project schema that predates
         them (#6756, #6947), and let ``execution_security_context.agent_binding_ref`` (development runs, #7213) and
@@ -972,6 +1050,7 @@ class Module(module.ModuleModel):
         # Register schedule permissions for schedules permission family (EL-7011)
         register_schedule_permissions()
         register_schedule_settings_type()
+        register_eval_history_settings_type()
         # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
         # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
         # (the operator tasks are the only writers).
@@ -1201,6 +1280,9 @@ class Module(module.ModuleModel):
             f"/api/v2/{this.module_name}/webhook/prompt_lib/[0-9]+/[0-9]+/(github|gitlab|custom)"
         log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
         auth.add_public_rule({"uri": self.webhook_api_url_re})
+        # Webhook trigger door (#7453): /api/v2/{module_name}/hooks/prompt_lib/{project_id}/{uuid}
+        self.hooks_api_url_re = f"/api/v2/{this.module_name}/hooks/prompt_lib/[0-9]+/[0-9a-fA-F-]{{36}}"
+        auth.add_public_rule({"uri": self.hooks_api_url_re})
 
         # Shared conversation view/unlock public URL registration (unauthenticated access)
         # URL pattern: /api/v2/{module_name}/shared_chat_view/prompt_lib/<token>
@@ -1227,7 +1309,7 @@ class Module(module.ModuleModel):
         self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget, feature_budget, user_feature_budget
-        from .models import evaluation, eval_platform_dimension
+        from .models import evaluation, eval_platform_dimension, eval_auto, builder_changeset
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
         from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
@@ -1454,6 +1536,9 @@ class Module(module.ModuleModel):
                 "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
             )
             this.for_module("admin").module.unregister_admin_task(
+                "migrate_sharepoint_site_url_to_toolkit", self.migrate_sharepoint_site_url_to_toolkit
+            )
+            this.for_module("admin").module.unregister_admin_task(
                 "migrate_llm_model", self.migrate_llm_model
             )
             this.for_module("admin").module.unregister_admin_task(
@@ -1490,7 +1575,19 @@ class Module(module.ModuleModel):
                 "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules
             )
             this.for_module("admin").module.unregister_admin_task(
+                "migrate_legacy_pipeline_webhooks", self.migrate_legacy_pipeline_webhooks
+            )
+            this.for_module("admin").module.unregister_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "ensure_webhook_trigger_columns", self.ensure_webhook_trigger_columns
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "ensure_toolkit_index_schedule_columns", self.ensure_toolkit_index_schedule_columns
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_legacy_index_schedules", self.migrate_legacy_index_schedules
             )
             this.for_module("admin").module.unregister_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding
@@ -1512,6 +1609,18 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_governance_settings_tables", self.create_governance_settings_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_schedule_test_runs", self.migrate_schedule_test_runs
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "clear_paused_schedule_next_run", self.clear_paused_schedule_next_run
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "index_message_groups_by_conversation", self.index_message_groups_by_conversation
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "close_stuck_chat_runs", self.close_stuck_chat_runs
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
@@ -1589,6 +1698,13 @@ class Module(module.ModuleModel):
                     'active': True,
                 },
                 {
+                    'rpc_func': 'applications_sweep_skill_scratch',
+                    'rpc_kwargs': {'idle_days': 30},
+                    'name': 'skill_scratch_sweep',
+                    'cron': '0 4 * * *',
+                    'active': True,
+                },
+                {
                     'rpc_func': 'elitea_core_check_pat_expiration',
                     'rpc_kwargs': {},
                     'name': 'pat_expiration_check',
@@ -1602,6 +1718,22 @@ class Module(module.ModuleModel):
                     'cron': managed['pipeline_scheduling']['cron'],
                     'active': managed['pipeline_scheduling']['active'],
                     'match_handler': True,
+                },
+                {
+                    'rpc_func': managed['eval_auto_run']['rpc_func'],
+                    'rpc_kwargs': {},
+                    'name': 'eval_auto_run',
+                    'cron': managed['eval_auto_run']['cron'],
+                    'active': managed['eval_auto_run']['active'],
+                    'match_handler': True,
+                },
+                {
+                    # Settles finished runs and starts queued ones; a no-op with no job open
+                    'rpc_func': 'elitea_core_eval_auto_drain',
+                    'rpc_kwargs': {},
+                    'name': 'eval_auto_drain',
+                    'cron': '* * * * *',
+                    'active': True,
                 },
             ]
         except Exception:  # pylint: disable=W0703
@@ -1902,10 +2034,22 @@ class Module(module.ModuleModel):
         #
         # Download UI if needed for first time
         #
-        idx_test_path = Path(self.bp.static_folder).joinpath(self.elitea_base_path, "index.html")
-        if not idx_test_path.exists():
+        from .rpc.ui_ci import ui_marker  # pylint: disable=C0415
+        #
+        ui_path = Path(self.bp.static_folder).joinpath(self.elitea_base_path)
+        marker_path = ui_path.joinpath(".installed_for")
+        installed_for = marker_path.read_text().strip() if marker_path.exists() else None
+        expected = ui_marker(self.descriptor.metadata)
+        if not ui_path.joinpath("index.html").exists():
             log.info("Downloading and installing initial release: %s", self.default_release)
             self.update_ui()
+        elif installed_for is not None and installed_for != expected:
+            # UI carried over during an update; no marker = locally built, keep
+            log.info("UI installed for '%s', plugin is '%s': refreshing UI", installed_for, expected)
+            try:
+                self.update_ui()
+            except:  # pylint: disable=W0702
+                log.exception("UI refresh failed, keeping current UI (retried on next boot)")
 
     # def init_db(self):
     #     log.info("DB init")

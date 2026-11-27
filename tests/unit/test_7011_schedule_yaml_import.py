@@ -92,7 +92,8 @@ def install_service_stubs(env):
                 'notices': list(env.risk_notices), 'fingerprint': 'fp-1'}
 
     stubs = {
-        'folder_access': {'entity_access_error': lambda *args, **kwargs: env.folder_error},
+        'folder_access': {'entity_access_error': lambda *args, **kwargs: env.folder_error,
+                          'APPLICATION_ENTITY_TYPES': ['agent', 'pipeline']},
         'schedule_settings': {'is_run_without_asking_allowed': lambda project_id: env.run_without_asking},
         'schedule_risk': {
             'scan_schedule': scan_schedule,
@@ -295,6 +296,14 @@ def test_7011_r2_4_an_item_without_a_required_key_fails(env):
     del broken['cron']
     report = env.import_items(broken)
     assert report['failed'][0]['reason'].startswith('cron')
+
+
+def test_el7607_a_hidden_agent_is_skipped_like_a_missing_one(env):
+    env.folder_error = ({'error': 'Not found'}, 404)
+    report = env.import_items(item())
+    assert report['failed'] == []
+    assert report['skipped'] == [{'name': 'Daily digest', 'reason': "Agent 'Entity' not found in this project"}]
+    assert env.rows() == []
 
 
 def test_7011_r2_4_a_folder_rights_denial_makes_the_item_failed(env):

@@ -40,6 +40,8 @@ CONSENT_EXPIRED = entra_obo.CONSENT_EXPIRED
 GRANT_RPC = "auth_oidc_obo_offline_grant"
 RELEASE_ACTOR = "elitea_core:release"
 SCHEDULE_TRIGGER = "schedule:entity:"
+# A webhook row has the same updated_by rule (#7454)
+OWNED_ROW_TRIGGERS = (SCHEDULE_TRIGGER, "webhook:entity:")
 
 
 class IdentityRefused(Exception):
@@ -153,10 +155,11 @@ def identity_reader(module, project_id, mandate_id, trigger_ref=None, owner_user
 def _schedule_confirmed(project_id, trigger_ref, owner_user_id) -> bool:
     """A schedule run acts with the owner's sign-in only when the owner made the schedule's last change (or nobody
     did). ``updated_by`` is written by edits, pauses, resumes and owner changes, never by the scheduler's own claims."""
-    if not isinstance(trigger_ref, str) or not trigger_ref.startswith(SCHEDULE_TRIGGER):
+    prefix = next((p for p in OWNED_ROW_TRIGGERS if isinstance(trigger_ref, str) and trigger_ref.startswith(p)), None)
+    if prefix is None:
         return True
     try:
-        schedule_id = int(trigger_ref[len(SCHEDULE_TRIGGER):])
+        schedule_id = int(trigger_ref[len(prefix):])
     except ValueError:
         return False
     from ..models.entity_schedule import EntitySchedule  # pylint: disable=C0415  # only this path reads a schedule

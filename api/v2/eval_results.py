@@ -25,6 +25,9 @@ from ...utils.evaluation_result_utils import (
 )
 from ...utils.evaluation_library_utils import EvalLibraryError
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.eval_history_redaction import (
+    redact_human_score, redact_result, redact_snapshot, viewer_hidden_case_ids,
+)
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -70,7 +73,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 limit=data['limit'],
                 offset=data['offset'],
             )
-            return payload.model_dump(mode='json'), 200
+            body = payload.model_dump(mode='json')
+            hidden = viewer_hidden_case_ids(project_id, body['run'].get('snapshot'), auth.current_user().get("id"))
+            if hidden:
+                body['run']['snapshot'] = redact_snapshot(body['run']['snapshot'], hidden)
+                body['results'] = [redact_result(r, hidden) for r in body['results']]
+                body['human_scores'] = [redact_human_score(h, hidden) for h in body['human_scores']]
+            return body, 200
 
 
 class API(api_tools.APIBase):

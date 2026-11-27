@@ -62,7 +62,6 @@ class RPC:
         instructions_already_saved: bool = False,
     ):
         try:
-            # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
             versions = ensure_base_version([
                 unpack_embedded_skill_frontmatter(version or {}) for version in model_data.get('versions') or []
             ])

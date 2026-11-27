@@ -15,8 +15,8 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.message_trace_step import MessageTraceStep
 from .schedule_claim import EVENT_LIMIT, TEXT_LIMIT
 
-# The owner and a schedules admin read the full tool result (owner decision 2026-10-21); only a huge
-# stored result is cut, at this many characters, and marked
+# The viewer reads the full tool result; for a manual or test run only the starter does (other viewers
+# get toolkit, tool and duration). Only a huge stored result is cut, at this many characters, and marked
 RESULT_LIMIT = 20_000
 TRUNCATED = ' (truncated)'
 PREVIEW_LIMIT = 120  # characters of a tool result in the one-line `text`
@@ -51,9 +51,12 @@ def _toolkit(attrs) -> str | None:
     return None
 
 
-def _tool_event(row) -> dict:
-    """One tool call line: toolkit, tool, the start of its result on one line, and its duration."""
-    output = (row.output or '').strip()
+def _tool_event(row, with_output: bool = True) -> dict:
+    """One tool call line: toolkit, tool, the start of its result on one line, and its duration.
+
+    Without `with_output` the line keeps the toolkit, the tool and the duration, and no part of the result.
+    """
+    output = (row.output or '').strip() if with_output else ''
     summary = (output[:RESULT_LIMIT] + TRUNCATED if len(output) > RESULT_LIMIT else output) or None
     preview = ' '.join(output[:PREVIEW_LIMIT * 2].split())[:PREVIEW_LIMIT]
     duration_ms = (round((row.finished_at - row.started_at).total_seconds() * 1000)
@@ -70,8 +73,11 @@ def _tool_event(row) -> dict:
     return {key: value for key, value in event.items() if value is not None or key == 'at'}
 
 
-def tool_call_events(session, conversation_id: int | None) -> list[dict]:
-    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`."""
+def tool_call_events(session, conversation_id: int | None, with_output: bool = True) -> list[dict]:
+    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`.
+
+    `with_output=False` drops the result of each call (`summary` and the preview in `text`).
+    """
     if conversation_id is None:
         return []
     rows = session.execute(
@@ -86,7 +92,7 @@ def tool_call_events(session, conversation_id: int | None) -> list[dict]:
         .order_by(MessageTraceStep.started_at, MessageTraceStep.id)
         .limit(EVENT_LIMIT)
     ).all()
-    return [_tool_event(row) for row in rows]
+    return [_tool_event(row, with_output) for row in rows]
 
 
 def usage_summary(session, project_id: int, run) -> tuple[int | None, float | None]:
@@ -122,3 +128,60 @@ def usage_summary(session, project_id: int, run) -> tuple[int | None, float | No
         return None, None
     # Postgres SUM over BIGINT gives Decimal, which the JSON answer cannot hold
     return int(tokens or 0), round(float(cost_nano_usd or 0) / NANO_USD, 6)
+
+
+def conversation_uuids(session, conversation_ids) -> dict[int, str]:
+    """The uuids of the chats of a page of runs in one query; the usage store names a chat by its uuid."""
+    ids = {chat_id for chat_id in conversation_ids if chat_id is not None}
+    if not ids:
+        return {}
+    return dict(session.execute(select(Conversation.id, Conversation.uuid).where(Conversation.id.in_(ids))).all())
+
+
+def version_labels(session, version_ids) -> dict[int, str]:
+    """The names of the versions of a page of runs in one query; a gone version has no key."""
+    ids = {version_id for version_id in version_ids if version_id is not None}
+    if not ids:
+        return {}
+    return dict(session.execute(
+        select(ApplicationVersion.id, ApplicationVersion.name).where(ApplicationVersion.id.in_(ids))
+    ).all())
+
+
+def usage_summaries(project_id: int, runs) -> dict[int, tuple[int | None, float | None]]:
+    """(tokens, cost in USD) for each run of a page, from two queries for the whole page.
+
+    A run with no chat or no usage row gets (None, None), as `usage_summary` answers for one run. The usage
+    rows are grouped by chat inside one time window around the page, so a chat shared by two runs of the page
+    shows its whole usage for both. Each run carries `conversation_uuid`, read in the project session, so this
+    call needs no session: it runs after the project session is closed and holds one pooled connection only.
+    """
+    # lean: one window for the page; narrow it per run when two runs of a page share one chat
+    empty = {run.id: (None, None) for run in runs}
+    linked = [run for run in runs if run.conversation_uuid is not None]
+    if not linked:
+        return empty
+    usage = USAGE_EVENT.c
+    ended = [run.finished_at for run in linked if run.finished_at]
+    where = [usage.project_id == project_id, usage.conversation_id.in_({str(run.conversation_uuid) for run in linked}),
+             usage.ts >= min(run.started_at for run in linked) - USAGE_MARGIN]
+    if len(ended) == len(linked):  # one run still active leaves the window open
+        where.append(usage.ts <= max(ended) + USAGE_MARGIN)
+    statement = select(
+        usage.conversation_id, func.count(),
+        func.sum(case((usage.event_type == 'llm', usage.input_tokens + usage.output_tokens), else_=0)),
+        func.sum(usage.cost_nano_usd),
+    ).where(*where).group_by(usage.conversation_id)
+    try:
+        # Late: the usage table is in the central schema, outside the project session
+        from tools import db
+        with db.engine.connect() as connection:
+            found = {str(chat): (count, tokens, cost) for chat, count, tokens, cost in connection.execute(statement)}
+    except Exception:  # noqa: BLE001 -- the list shows the runs without the usage figures
+        log.exception('Schedule runs: cannot read the usage of a page of runs')
+        return empty
+    for run in linked:
+        count, tokens, cost_nano_usd = found.get(str(run.conversation_uuid), (0, None, None))
+        if count:
+            empty[run.id] = (int(tokens or 0), round(float(cost_nano_usd or 0) / NANO_USD, 6))
+    return empty

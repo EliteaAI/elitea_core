@@ -79,9 +79,11 @@ def test_checkpoint_a_runs_before_an_injection_is_stored_or_forwarded():
 
 
 def test_webhook_history_preview_is_redacted_before_truncation():
-    source = _source('rpc/pipeline_webhook.py')
+    # The preview moved into the shared webhook helper (#7454); both webhook paths use it
+    source = _source('utils/webhook_input.py')
 
-    assert source.index('redacted_input(payload_str)') < source.index('[:500]')
+    assert source.index('redacted_input(body_json[:REDACT_WINDOW])') < source.index('[:PREVIEW_LIMIT]')
+    assert 'webhook_payload_preview(payload_str)' in _source('rpc/pipeline_webhook.py')
 
 
 def test_tracing_redactor_is_registered():

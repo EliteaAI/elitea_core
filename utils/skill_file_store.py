@@ -106,6 +106,29 @@ def get_content(project_id: int, sha256: str, client=None) -> bytes:
     return (client or project_client(project_id)).download_file(SKILL_FILES_BUCKET, sha256)
 
 
+def is_missing_content_error(exc: Exception) -> bool:
+    """Whether a read failed because the bucket or the object is absent, as each storage engine reports it."""
+    if isinstance(exc, FileNotFoundError):
+        return True
+    if type(exc).__name__ in ('ObjectDoesNotExistError', 'ContainerDoesNotExistError'):
+        return True
+    response = getattr(exc, 'response', None)
+    return isinstance(response, dict) and response.get('Error', {}).get('Code') in ('NoSuchKey', 'NoSuchBucket')
+
+
+def is_content_missing(project_id: int, exc: Exception, client=None) -> bool:
+    """Whether a failed read means the project does not hold the content: the error says it is absent and storage
+    lists buckets of the project. An unreachable storage raises on the listing, and an unmounted local root lists
+    nothing, since the local engines create an empty root; both are outages."""
+    if not is_missing_content_error(exc):
+        return False
+    try:
+        return bool((client or project_client(project_id)).list_bucket())
+    except Exception:  # pylint: disable=W0703
+        log.exception('skill files: storage of project %s does not answer', project_id)
+        return False
+
+
 def content_exists(project_id: int, sha256: str, client=None) -> bool:
     """Whether the project's bucket holds ``sha256``."""
     client = client or project_client(project_id)

@@ -8,17 +8,22 @@ from .sio_utils import SioEvents, get_event_room
 DEFAULT_APPROVAL_HOURS = 24
 
 # One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
-# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
+# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty.
+# {Noun}/{noun} is "Schedule" or "Webhook" by the row's trigger kind (#7454)
 MESSAGES = {
-    Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
-    Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
-    Types.schedule_approval_needed: 'Schedule "{link}" waits for your approval',
-    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in {hours} hours and the run stopped',
-    Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
-    Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
-    Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
-    Types.schedule_owner_changed: 'The owner of schedule "{link}" changed',
+    Types.schedule_run_failed: '{Noun} "{link}" failed{reason}',
+    Types.schedule_run_succeeded: '{Noun} "{link}" ran successfully',
+    Types.schedule_approval_needed: '{Noun} "{link}" waits for your approval',
+    Types.schedule_approval_expired: '{Noun} "{link}" was not approved in {hours} hours and the run stopped',
+    Types.schedule_expired: '{Noun} "{link}" reached its stop date and is switched off',
+    Types.schedule_disabled: '{Noun} "{link}" was switched off{reason}',
+    Types.schedule_edited_by_admin: 'An admin {action} your {noun} "{link}"',
+    Types.schedule_owner_changed: 'The owner of {noun} "{link}" changed{reason}',
+    Types.schedule_credential_expired: 'The saved login of "{credential}" stopped working: {noun} "{link}"{more} '
+                                       'switched off. {fix}, then re-enable it.',
 }
+# Who can sign the credential in again: its owner for a personal one, a project admin for a team one
+CREDENTIAL_FIX = {True: 'Sign in again on the credential', False: 'Ask a project admin to sign in again'}
 # The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
 # so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
 _NAME_BRACKETS = str.maketrans('[]', '［］')
@@ -53,31 +58,41 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
     """Send one schedule notice to the owner. Return True when it was fired, False when dropped or failed.
 
     `extra` may carry `reason` (when there is no run), `action` ("deleted" for schedule_edited_by_admin, default
-    "edited") and, for schedule_owner_changed, `old_owner_id` and `new_owner_id`.
+    "edited"), for schedule_owner_changed `old_owner_id` and `new_owner_id`, and for schedule_credential_expired
+    `credential`, `private`, `more` and `schedule_ids`.
     """
     extra = extra or {}
     if event_type == Types.schedule_run_succeeded and not _owner_wants_success(project_id, owner_id, schedule):
         return False
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
+        trigger_kind = getattr(schedule, 'trigger_kind', None) or 'cron'
+        noun = 'webhook' if trigger_kind == 'webhook' else 'schedule'
         # Only the expired notice names the window
         hours = _approval_hours(run) if event_type == Types.schedule_approval_expired else DEFAULT_APPROVAL_HOURS
         meta = {
             'message': MESSAGES[event_type].format(
+                Noun=noun.capitalize(), noun=noun,
                 link=_schedule_link(schedule),
                 reason=f': {reason}' if reason else '',
                 action=extra.get('action', 'edited'),
                 hours=hours,
+                credential=extra.get('credential') or 'a credential',
+                more=f' and {extra["more"]} more' if extra.get('more') else '',
+                fix=CREDENTIAL_FIX[bool(extra.get('private'))],
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
+            'trigger_kind': trigger_kind,  # the bell links a webhook to the Webhooks page (#7456)
             'run_id': run.id if run else None,
             'conversation_id': run.conversation_id if run else None,
         }
+        if event_type == Types.schedule_credential_expired:
+            meta.update(schedule_ids=extra.get('schedule_ids') or [schedule.id], credential=extra.get('credential'))
         if event_type == Types.schedule_owner_changed:
             meta.update(old_owner_id=extra.get('old_owner_id'), new_owner_id=extra.get('new_owner_id'))
         rpc_tools.EventManagerMixin().event_manager.fire_event('notifications_stream', {
-            'project_id': project_id, 'user_id': owner_id, 'meta': meta, 'event_type': event_type,
+            'project_id': project_id, 'user_id': owner_id, 'meta': meta, 'event_type': Types(event_type).value,
         })
         return True
     except Exception as e:  # noqa: BLE001 -- a notice must never break the caller (R1.4)

@@ -41,6 +41,7 @@ from .predict_utils import PredictPayloadError
 from .schedule_access import schedule_check_spec
 from .schedule_draft_utils import (  # pylint: disable=W0212
     build_schedule_draft_prompt,
+    index_roster_for,
     schedule_roster,
     validate_schedule_draft,
 )
@@ -127,8 +128,9 @@ class ScheduleDraftHandler:
 
         locked = req.locked_entity.model_dump() if req.locked_entity else None
         roster = schedule_roster(project_id, user_id)
+        index_roster = index_roster_for(project_id, user_id, template, locked)
         system_prompt = build_schedule_draft_prompt(
-            template, req.current.model_dump(exclude_unset=True), roster, req.timezone, locked,
+            template, req.current.model_dump(exclude_unset=True), roster, req.timezone, locked, index_roster,
         )
 
         try:
@@ -172,7 +174,7 @@ class ScheduleDraftHandler:
 
         try:
             draft, warnings = validate_schedule_draft(
-                project_id, parsed, locked, roster, owner_id=user_id)
+                project_id, parsed, locked, roster, owner_id=user_id, index_roster=index_roster)
         except Exception:  # noqa: BLE001 -- the model answer was paid for; answer a short reason, not a 500
             log.exception("generate_schedule_draft: the draft could not be checked")
             return _refusal("draft_check_failed", "The draft could not be checked", 502)

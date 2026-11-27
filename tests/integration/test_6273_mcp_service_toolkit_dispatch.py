@@ -86,6 +86,7 @@ def mcp_service_module(monkeypatch):
 
     exceptions = types.ModuleType("plugins.elitea_core.utils.exceptions")
     exceptions.PoolSaturationError = type("PoolSaturationError", (Exception,), {})
+    exceptions.AdmissionDenied = type("AdmissionDenied", (Exception,), {})
     exceptions.InputGuardrailBlockedError = type("InputGuardrailBlockedError", (Exception,), {})   # imported by utils/mcp_service.py (#6886)
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.exceptions", exceptions)
 
@@ -97,6 +98,10 @@ def mcp_service_module(monkeypatch):
         internal_tools.MCP_CURRENT_PROJECT_SUFFIXES | {'elitea_core/applications'}
     )
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.internal_tools", internal_tools)
+
+    pipeline_execution = types.ModuleType("plugins.elitea_core.utils.pipeline_execution")
+    pipeline_execution.TriggerType = types.SimpleNamespace(MCP="mcp")
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.pipeline_execution", pipeline_execution)
 
     mcp_session = types.ModuleType("plugins.elitea_core.utils.mcp_session")
     mcp_session.SseSession = type("SseSession", (), {})
@@ -146,7 +151,8 @@ class TestGetToolkitByNameCollisionSafety:
             _toolkit(2, "shared_name", ["get_file"]),
         ]
         service = _service(mcp_service_module, toolkits)
-        assert service._McpService__get_toolkit_by_name("shared_name_get_file") is None
+        found = service._McpService__get_toolkit_by_name("shared_name_get_file")
+        assert found is mcp_service_module.AMBIGUOUS_TOOLKIT_TOOL
 
     def test_non_colliding_names_still_resolve(self, mcp_service_module):
         toolkits = [

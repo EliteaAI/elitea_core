@@ -21,20 +21,25 @@ from flask import request
 from pydantic import ValidationError
 
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c, register_openapi, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...models.pd.generate_application_draft import (
     GenerateApplicationDraftRequest,
     GenerateApplicationDraftResponse,
 )
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_starters_utils import (
+    count_conversation_starters,
+    get_max_conversation_starters,
+)
 from ...utils.draft_llm_utils import (
+    DraftSettingsError,
     answer_was_cut_short,
-    caller_chose,
+    apply_offered_origins,
     describe_parse_failure,
     describe_predict_failure,
     extract_answer,
-    resolve_model,
+    resolve_draft_llm_settings,
     timeout_response,
 )
 from ...utils.predict_utils import PredictPayloadError
@@ -44,8 +49,10 @@ from ...utils.generate_application_utils import (
     build_system_prompt,
     fetch_application_for_edit,
     build_edit_system_prompt,
+    offer_attached_resources,
 )
 from ...utils.service_prompt_utils import get_service_prompt
+from ...utils.skill_utils import get_max_skills_per_agent
 from ...utils.utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY_CREATE = "generate_application_draft"
@@ -86,42 +93,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_id = auth.current_user().get("id")
 
-        caller_set_max_tokens = caller_chose(req.llm_settings, "max_tokens")
-        caller_set_temperature = caller_chose(req.llm_settings, "temperature")
-
-        # Resolve LLM settings — explicit override or project default
-        if req.llm_settings and req.llm_settings.model_name:
-            llm_settings = req.llm_settings.model_dump(exclude_none=True)
-            unavailable, owning_project_id = resolve_model(
-                project_id, llm_settings["model_name"], llm_settings.get("model_project_id")
+        try:
+            llm_settings = resolve_draft_llm_settings(
+                project_id,
+                req.llm_settings,
+                default_temperature=_DEFAULT_TEMPERATURE,
+                default_max_tokens=_DEFAULT_MAX_TOKENS,
+                log_prefix="generate_application_draft",
             )
-            if unavailable:
-                return {"error": unavailable}, 400
-            if owning_project_id is not None:
-                llm_settings["model_project_id"] = owning_project_id
-        else:
-            try:
-                llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(
-                    project_id, section="llm"
-                )
-                if not llm_settings or not llm_settings.get("model_name"):
-                    return {"error": "No default LLM model configured for this project"}, 400
-                if req.llm_settings:
-                    # model_project_id only qualifies a model_name; with none supplied there is
-                    # nothing for it to qualify, and the default model brings its own
-                    overrides = req.llm_settings.model_dump(
-                        exclude_none=True, exclude={"model_name", "model_project_id"}
-                    )
-                    llm_settings.update(overrides)
-            except Exception:
-                log.exception("generate_application_draft: failed to get default model")
-                return {"error": "Failed to resolve project default LLM model"}, 400
+        except DraftSettingsError as exc:
+            return exc.body, exc.status
 
-        if not caller_set_temperature:
-            llm_settings["temperature"] = _DEFAULT_TEMPERATURE
-        if not caller_set_max_tokens:
-            llm_settings["max_tokens"] = _DEFAULT_MAX_TOKENS
-
+        max_starters = get_max_conversation_starters()
+        max_skills = get_max_skills_per_agent()
         if req.is_edit_mode:
             # Edit mode: fetch existing application config, provide ALL available resources
             current_config = fetch_application_for_edit(
@@ -129,25 +113,40 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             if current_config is None:
                 return {"error": "Application or version not found"}, 404
+            # Same rule as saving: a version above the limit keeps its starters through an AI edit
+            max_starters = max(
+                max_starters, count_conversation_starters(current_config.get('conversation_starters')),
+            )
+            max_skills = max(max_skills, len(current_config.get('attached_skills') or []))
 
             log.debug("generate_application_draft: edit mode, current_config attached_toolkits=%s", current_config.get("attached_toolkits"))
 
             try:
-                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(project_id, req.user_description)
+                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(
+                    project_id, req.user_description, max_skills,
+                )
             except Exception:
                 log.warning("generate_application_draft: failed to fetch project resources")
                 toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
+            agents, pipelines, skills = offer_attached_resources(
+                current_config, agents, pipelines, skills, max_skills,
+            )
 
             # LLM gets ALL available resources to decide what to keep/add/remove
             template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
             if not template:
                 return {"error": "Service prompt 'edit_application_draft' is not configured"}, 500
-            system_prompt = build_edit_system_prompt(template, current_config, toolkits, mcp, agents, pipelines, skills)
+            system_prompt = build_edit_system_prompt(
+                template, project_id, current_config, toolkits, mcp, agents, pipelines, skills,
+                max_conversation_starters=max_starters, max_skills_per_agent=max_skills,
+            )
             log.debug("generate_application_draft: edit system_prompt length=%d", len(system_prompt))
         else:
             # Create mode: existing behavior
             try:
-                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(project_id, req.user_description)
+                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(
+                    project_id, req.user_description, max_skills,
+                )
             except Exception:
                 log.warning("generate_application_draft: failed to fetch project resources")
                 toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
@@ -155,7 +154,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             template = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
             if not template:
                 return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
-            system_prompt = build_system_prompt(template, toolkits, mcp, agents, pipelines, skills)
+            system_prompt = build_system_prompt(
+                template, project_id, toolkits, mcp, agents, pipelines, skills,
+                max_conversation_starters=max_starters, max_skills_per_agent=max_skills,
+            )
 
         try:
             result = self.module.predict_sio_llm(
@@ -211,8 +213,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 422
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
+        apply_offered_origins(
+            parsed, project_id, agents, pipelines, skills,
+            current_config=current_config if req.is_edit_mode else None,
+        )
+
         try:
-            draft = GenerateApplicationDraftResponse.model_validate(parsed)
+            draft = GenerateApplicationDraftResponse.model_validate(
+                parsed, context={'max_conversation_starters': max_starters, 'max_skills_per_agent': max_skills},
+            )
         except ValidationError as e:
             log.warning("generate_application_draft: validation failed: %s", e.errors())
             return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422

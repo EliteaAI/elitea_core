@@ -1,7 +1,7 @@
 """Due query, claim and cron run insert of the schedule tick, and the event list of a run (EL-7011)."""
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
@@ -12,6 +12,9 @@ LEGACY_LOCK_BASE = 7011 << 32
 EVENT_LIMIT = 200
 TEXT_LIMIT = 300
 FINISH_LEVELS = {'success': 'success', 'failed': 'error'}  # blocked and skipped are warnings
+# One lock per project: the project cap sums over all its webhooks, so a row lock would let two rows pass together
+WEBHOOK_RUNS_LOCK = "SELECT pg_advisory_xact_lock(hashtext('webhook-runs'), :project_id)"
+RUN_TRIGGERS = ('webhook', 'test')  # a sample run holds a worker as a delivery does
 
 
 def run_event(kind: str, text: str, level: str = 'info', **data) -> dict:
@@ -61,6 +64,7 @@ def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedu
         select(EntitySchedule)
         .where(
             EntitySchedule.enabled.is_(True),
+            EntitySchedule.trigger_kind == 'cron',
             EntitySchedule.entity_type.in_(entity_types),
             or_(EntitySchedule.next_run <= func.now(), EntitySchedule.expires_at <= func.now()),
         )
@@ -79,7 +83,25 @@ def claim_schedule(session, schedule_id: int, seen_next_run: datetime, new_next_
     return result.rowcount == 1
 
 
-def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None = None) -> int | None:
+def lock_project_runs(session, project_id: int) -> None:
+    """Order the webhook run counts of one project until the commit; SQLite tests have no advisory locks."""
+    if session.get_bind().dialect.name == 'postgresql':
+        session.execute(text(WEBHOOK_RUNS_LOCK), {'project_id': project_id})
+
+
+def running_webhook_runs(session, row_ids=None) -> dict[int, int]:
+    """Running runs by webhook row (deliveries and samples); `waiting_for_approval` holds no worker and is not counted."""
+    query = (select(EntityScheduleRun.schedule_id, func.count())
+             .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+             .where(EntitySchedule.trigger_kind == 'webhook', EntityScheduleRun.status == 'running',
+                    EntityScheduleRun.trigger.in_(RUN_TRIGGERS))
+             .group_by(EntityScheduleRun.schedule_id))
+    if row_ids is not None:
+        query = query.where(EntityScheduleRun.schedule_id.in_(row_ids))
+    return dict(session.execute(query).all())
+
+
+def insert_run(session, schedule_id: int | None, trigger: str, requested_by: int | None = None) -> int | None:
     """Insert a running run and copy `running` to its schedule; None when the active-run unique index already holds one.
 
     The copy is in the same transaction, so the list never shows the previous status for a running run (R1.5).
@@ -92,10 +114,11 @@ def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None
             session.add(run)
     except IntegrityError:
         return None
-    values = {'last_run_status': 'running'}
-    if trigger == 'manual':
-        values['last_run'] = func.now()
-    session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(**values))
+    if schedule_id is not None:
+        values = {'last_run_status': 'running'}
+        if trigger == 'manual':
+            values['last_run'] = func.now()
+        session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(**values))
     return run.id
 
 
@@ -107,17 +130,21 @@ def insert_cron_run(session, schedule_id: int) -> int | None:
 def fail_run(session, run_id: int, reason: str) -> int | None:
     """Close a running run as failed and copy the status to its schedule; the schedule id, None when not running.
 
-    A running run that never ends would make the active-run index block the schedule.
+    A running run that never ends would make the active-run index block the schedule. A Test Run has no schedule:
+    its finished event is still written and no schedule row is touched.
     """
-    schedule_id = session.scalar(
+    closed = session.execute(
         update(EntityScheduleRun)
         .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
         .values(status='failed', reason=reason, finished_at=func.now())
-        .returning(EntityScheduleRun.schedule_id)
-    )
+        .returning(EntityScheduleRun.id, EntityScheduleRun.schedule_id)
+    ).first()
+    if closed is None:
+        return None
+    schedule_id = closed.schedule_id
     if schedule_id is not None:
         session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='failed'))
-        append_run_events(session, run_id, finished_event('failed', reason))
+    append_run_events(session, run_id, finished_event('failed', reason))
     return schedule_id
 
 

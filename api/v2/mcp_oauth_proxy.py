@@ -24,25 +24,46 @@ from pylon.core.tools import log
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
-from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oauth_setting, refresh_token
+from ...utils.mcp_oauth import (
+    dataverse_token_endpoint,
+    exchange_token,
+    get_oauth_configurations,
+    is_same_endpoint,
+    pick_oauth_setting,
+    refresh_token,
+)
 from ....configurations.utils import expand_configuration
 
 
 def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str):
-    """Client ID, secret, token endpoint and scopes of an admin-managed app.
+    """Client ID, secret, token endpoint and sign-in scope of an admin-managed app.
 
     Both ids come from the browser: the app must serve this credential type in this project. The
     secret only ever goes to the app's own token endpoint, so the caller's endpoint is ignored.
     """
     from ....configurations.oauth_apps import resolve_app_client  # pylint: disable=C0415
     app = resolve_app_client(oauth_app_id, project_id, credential_type)
-    return app['client_id'], app['client_secret'], app['token_endpoint'], app.get('scopes') or []
+    scopes = [s for s in app.get('scopes') or [] if s != 'offline_access']
+    # offline_access (a refresh token) only while the app's Auto refresh token is on (#7415)
+    if app.get('auto_refresh_token', True):
+        scopes = ['offline_access', *scopes]
+    return app['client_id'], app['client_secret'], app['token_endpoint'], ' '.join(scopes)
 
 
-def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list) -> bool:
+def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list,
+                            dataverse_own_endpoint: bool = True) -> bool:
     """token_endpoint is caller-supplied: only send a stored secret to the endpoint the toolkit
-    declares, or for callers who can edit toolkits anyway."""
+    declares, or for callers who can edit toolkits anyway.
+
+    dataverse_own_endpoint: a Dataverse credential saves no endpoint, so its tenant endpoint counts as
+    the declared one. A schedule owner may lack the edit right but must still sign in, and the stored
+    secret goes only to the tenant of its own credential. A vault reference sent by the caller is not
+    that stored secret: it keeps the edit-right rule, so pass False there.
+    """
     stored_endpoint = pick_oauth_setting(credential_sources, 'token_endpoint', 'token_url')
+    if not stored_endpoint and dataverse_own_endpoint and credential_sources:
+        # the first source is the toolkit settings
+        stored_endpoint = dataverse_token_endpoint(credential_sources[0])
     if stored_endpoint and stored_endpoint.rstrip('/') == (token_endpoint or '').rstrip('/'):
         return True
     user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
@@ -86,6 +107,30 @@ class ProjectAPI(api_tools.APIModeHandler):
         client_id = data.client_id
         client_secret = data.client_secret
         scope = data.scope
+        saved_login = None
+        if data.save_login:
+            from ...utils.mcp_saved_login import (  # pylint: disable=C0415
+                SavedLoginRefused, check_login_target, load_login_credential,
+            )
+            if (data.grant_type or 'authorization_code') != 'authorization_code':
+                return {"error": "invalid_request", "error_description": "save_login needs an authorization code"}, 400
+            try:
+                saved_login = load_login_credential(project_id, data.configuration_uuid, auth.current_user().get('id'))
+                # Checked before any secret is loaded or sent: the browser chooses token_endpoint
+                login_url = (saved_login.get('data') or {}).get('url')
+                check_login_target(login_url, data.token_endpoint, data.resource or login_url)
+            except SavedLoginRefused as e:
+                return {"error": e.code, "error_description": str(e)}, e.status
+            # A non-DCR client configured on the credential is used as is; the browser cannot swap it
+            login_data = saved_login.get('data') or {}
+            # A client registered by DCR for an earlier login is not a configured one; only typed-in clients pin
+            if not data.used_dcr and login_data.get('client_id') and not login_data.get('used_dcr'):
+                client_id, client_secret = login_data['client_id'], login_data.get('client_secret')
+            scope = scope or login_data.get('scopes')
+            # The client comes only from the credential (or DCR): no toolkit or vault-reference secrets here
+            data.toolkit_id, data.oauth_app_id = None, None
+            if client_secret and client_secret != login_data.get('client_secret') and not data.used_dcr:
+                client_secret = None
 
 
         # Helper function to detect masked secrets (e.g., "*****", "****6afP")
@@ -105,11 +150,10 @@ class ProjectAPI(api_tools.APIModeHandler):
         # Default app mode: the browser knows only the app reference, never its secret
         if data.oauth_app_id and not data.used_dcr:
             try:
-                client_id, client_secret, app_token_endpoint, app_scopes = _resolve_oauth_app_client(
+                # The platform's client is used only for the admin's scopes, never the caller's
+                client_id, client_secret, app_token_endpoint, scope = _resolve_oauth_app_client(
                     data.oauth_app_id, project_id, data.credential_type)
                 data.token_endpoint = app_token_endpoint
-                # The platform's client is used only for the admin's scopes, never the caller's
-                scope = ' '.join(['offline_access', *[s for s in app_scopes if s != 'offline_access']])
             except LookupError as e:  # OAuthAppUnavailable
                 return {"error": "app_unavailable", "error_description": str(e)}, 400
 
@@ -161,6 +205,14 @@ class ProjectAPI(api_tools.APIModeHandler):
 
                     credential_sources = [settings, *oauth_configs]
 
+                    # A Dataverse credential can be shared with every toolkit editor, so its secret never
+                    # leaves for a caller-chosen host: only the Entra endpoint of its own tenant is served.
+                    dataverse_endpoint = dataverse_token_endpoint(settings)
+                    if dataverse_endpoint is not None and not is_same_endpoint(dataverse_endpoint, data.token_endpoint):
+                        log.warning(f"MCP OAuth proxy: token_endpoint refused for Dataverse toolkit {data.toolkit_id}")
+                        return {"error": "access_denied",
+                                "error_description": "token_endpoint does not match the Dataverse credential"}, 403
+
                     # FE always sends the DCR client_id in the same request, so the guard below
                     # is not hit in practice, but is included for symmetry with the secret guard
                     # to prevent a stale DB client_id from overwriting a DCR-registered one.
@@ -196,7 +248,7 @@ class ProjectAPI(api_tools.APIModeHandler):
         if client_secret and data.client_secret and client_secret == data.client_secret and not data.oauth_app_id:
             resolved_secret = vault_client.unsecret(client_secret)
             if resolved_secret != client_secret and not _may_send_stored_secret(
-                    project_id, data.token_endpoint, credential_sources):
+                    project_id, data.token_endpoint, credential_sources, dataverse_own_endpoint=False):
                 return {"error": "access_denied",
                         "error_description": "Vault secret references require toolkit edit permission"}, 403
             client_secret = resolved_secret
@@ -265,6 +317,13 @@ class ProjectAPI(api_tools.APIModeHandler):
                      f"expires_in={token_data.get('expires_in')}, "
                      f"token_type={token_data.get('token_type')}, "
                      f"scope={token_data.get('scope')}")
+            if saved_login is not None:
+                from ...utils.mcp_saved_login import SavedLoginRefused, save_exchanged_login  # pylint: disable=C0415
+                try:
+                    return save_exchanged_login(project_id, saved_login, token_data, data,
+                                                client_id=client_id, client_secret=client_secret, scope=scope), 200
+                except SavedLoginRefused as e:
+                    return {"error": e.code, "error_description": str(e)}, e.status
             return token_data, 200
 
         except ValueError as e:
@@ -273,6 +332,36 @@ class ProjectAPI(api_tools.APIModeHandler):
         except Exception as e:
             log.error(f"MCP OAuth proxy: unexpected error - {e}")
             return {"error": "internal_error", "error_description": str(e)}, 500
+
+
+    @register_openapi(
+        name="Log out MCP saved login",
+        description="Remove the saved MCP login of an mcp_login credential and its cached access tokens.",
+        parameters=[
+            {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "configuration_uuid", "in": "query", "schema": {"type": "string"}},
+        ],
+    )
+    @auth.decorators.check_api({
+        "permissions": ["models.applications.mcp_auth.post"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": True},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
+        }})
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, **kwargs):
+        from ...utils.mcp_saved_login import (  # pylint: disable=C0415
+            MCP_LOGIN_TYPE, SavedLoginRefused, forget_cached_tokens, load_login_credential,
+        )
+        configuration_uuid = request.args.get('configuration_uuid')
+        try:
+            load_login_credential(project_id, configuration_uuid, auth.current_user().get('id'))
+        except SavedLoginRefused as e:
+            return {"error": e.code, "error_description": str(e)}, e.status
+        self.module.context.rpc_manager.timeout(10).configurations_clear_stored_login(
+            project_id=project_id, configuration_uuid=configuration_uuid, expected_type=MCP_LOGIN_TYPE)
+        forget_cached_tokens(configuration_uuid)
+        return {"ok": True}, 200
 
 
 class API(api_tools.APIBase):

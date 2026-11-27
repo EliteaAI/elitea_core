@@ -11,22 +11,24 @@ CANNOT_USE_SCHEDULES = 'the new owner cannot use schedules'
 
 
 def validate_new_owner(project_id: int, owner_id: int, entity_type: str | None = None,
-                       application_id: int | None = None) -> str | None:
+                       entity_id: int | None = None) -> str | None:
     """None when the new owner is an active member who may list and run schedules and open the entity.
+
+    `entity_id` is the application id, or the toolkit id for a Toolkit Index schedule.
 
     ACCESS_CHECK_UNAVAILABLE means the auth check itself failed: the caller answers 503, never 400.
     """
     access = check_owner_access(project_id, owner_id)
     if access is not None:
         return NOT_ACTIVE_MEMBER if access == OWNER_LOST_ACCESS else ACCESS_CHECK_UNAVAILABLE
-    rights = check_owner_rights(project_id, owner_id, entity_type, application_id, verbs=('list', 'run'))
+    rights = check_owner_rights(project_id, owner_id, entity_type, entity_id, verbs=('list', 'run'))
     if rights is None:
         return None
     return CANNOT_USE_SCHEDULES if rights == OWNER_LOST_ACCESS else ACCESS_CHECK_UNAVAILABLE
 
 
 def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | None:
-    """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); enabled stays (R1.4).
+    """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); a cron row stays enabled (R1.4).
 
     The approval rule goes back to "Pause and ask me" and the confirmation is cleared.
 
@@ -44,6 +46,9 @@ def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | 
     # The consent belongs to the old owner: the new owner confirms again before a run approves by itself
     row.approval_rule = 'pause_and_ask'
     row.approval_fingerprint = row.approval_confirmed_by = row.approval_confirmed_at = None
+    if row.trigger_kind == 'webhook':
+        # The new owner checks the connections with their own credentials, then switches it on again
+        row.enabled, row.disabled_reason, row.credential_refs = False, 'owner_changed', None
     session.commit()
     return {'old_owner_id': old_owner_id, 'new_owner_id': owner_id}
 

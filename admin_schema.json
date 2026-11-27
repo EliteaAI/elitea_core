@@ -168,6 +168,27 @@
       "enum_source": "projects",
       "visible_when": { "field": "is_midturn_injection_blocked", "value": true }
     },
+    "is_code_mode_enabled": {
+      "type": "boolean",
+      "title": "Enable Code Mode (beta)",
+      "description": "When enabled, agent authors see the Code Mode (beta) switch: the agent writes one program against its tools instead of calling them one by one.",
+      "path": "code_mode_experimental.enabled",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "code_mode_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Code Mode Projects",
+      "description": "Projects where Code Mode is available. If empty, it is available in every project.",
+      "path": "code_mode_experimental.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_code_mode_enabled", "value": true }
+    },
     "is_publish_blocked": {
       "type": "boolean",
       "title": "Block Agent Publishing",
@@ -333,7 +354,7 @@
     "input_guardrail_personal_data_action": {
       "type": "string",
       "title": "Personal Data",
-      "description": "Action for e-mail addresses, phone numbers, payment cards and IBANs.",
+      "description": "Action for e-mail addresses, phone numbers, payment cards, IBANs, US Social Security numbers and UK National Insurance numbers.",
       "path": "input_guardrail.categories.personal_data",
       "section": "guardrails",
       "default": "off",
@@ -548,6 +569,22 @@
       "requires_restart": false,
       "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
     },
+    "max_conversation_starters": {
+      "type": "integer",
+      "title": "Max Chat Starters per Version",
+      "description": "Maximum number of chat starters an agent or pipeline version can have. Starters are shown to users as one-click prompts in chat. Lowering the limit never removes existing starters: versions above the new limit keep them but can't add more. Allowed range: 1–10.",
+      "path": "conversation_starters_guardrail.max_per_version",
+      "section": "guardrails",
+      "default": 4,
+      "minimum": 1,
+      "maximum": 10,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+      }
+    },
     "enhance_agent_fixes_enabled": {
       "type": "boolean",
       "title": "Allow Agent Instruction Fixes",
@@ -652,6 +689,31 @@
       "value_schema": {
         "type": "number",
         "minimum": 1
+      }
+    },
+    "history_tool_stubs_enabled": {
+      "type": "boolean",
+      "title": "Replay Tool Calls in Chat History",
+      "description": "Replay the tool calls of the last N assistant turns in chat history as short tool call and result records (arguments and results truncated). Stops models from claiming an action succeeded without calling the tool. When off, only the final reply text is replayed.",
+      "path": "chat_history.tool_call_stubs.enabled",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
+    "history_tool_stubs_last_n": {
+      "type": "integer",
+      "title": "Replayed Tool Calls: Last N Turns",
+      "description": "How many of the most recent assistant turns get their tool calls replayed. Allowed range: 1–20.",
+      "path": "chat_history.tool_call_stubs.last_n",
+      "section": "runtime",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 20,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20
       }
     },
     "cancel_on_timeout": {
@@ -774,7 +836,7 @@
       "title": "Pipeline Scheduling Enabled",
       "description": "Master switch for the per-tick check that triggers scheduled pipeline runs. Disable to pause all pipeline schedules platform-wide without losing their configuration.",
       "path": "scheduler.pipeline_scheduling.enabled",
-      "section": "runtime",
+      "section": "schedules",
       "strict_type": true,
       "default": true
     },
@@ -783,17 +845,36 @@
       "title": "Pipeline Scheduling Cron",
       "description": "How often the pipeline scheduling tick fires. Standard 5-field cron expression (e.g. '* * * * *' = every minute, '*/15 * * * *' = every 15 minutes). Slowing this down reduces baseline platform load but delays scheduled pipeline starts by up to that interval.",
       "path": "scheduler.pipeline_scheduling.cron",
-      "section": "runtime",
+      "section": "schedules",
       "format": "cron",
       "default": "* * * * *",
       "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
+    },
+    "eval_auto_run_enabled": {
+      "type": "boolean",
+      "title": "Scheduled Agent Evaluation Enabled",
+      "description": "Starts the environment-wide agent evaluation on the cron below. Which projects and agents it covers, and its limits, are set on the Agent Evaluation admin page (or the elitea_core_eval_auto_set_config RPC).",
+      "path": "scheduler.eval_auto_run.enabled",
+      "section": "schedules",
+      "strict_type": true,
+      "default": false
+    },
+    "eval_auto_run_cron": {
+      "type": "string",
+      "title": "Scheduled Agent Evaluation Cron",
+      "description": "When the environment-wide agent evaluation starts. Standard 5-field cron expression (e.g. '17 2 * * 0' = Sundays at 02:17). Agents unchanged since their last result are not re-run.",
+      "path": "scheduler.eval_auto_run.cron",
+      "section": "schedules",
+      "format": "cron",
+      "default": "17 2 * * 0",
+      "visible_when": { "field": "eval_auto_run_enabled", "value": true }
     },
     "schedules_min_interval_minutes": {
       "type": "integer",
       "title": "Schedules Minimum Interval (minutes)",
       "description": "Smallest allowed gap in minutes between two runs of one schedule. A schedule that fires more often is rejected when it is saved. Allowed range: 1–1440.",
       "path": "scheduler.schedules.min_interval_minutes",
-      "section": "runtime",
+      "section": "schedules",
       "default": 5,
       "minimum": 1,
       "maximum": 1440,
@@ -809,7 +890,7 @@
       "title": "Schedules Max Enabled Per Project",
       "description": "Maximum number of enabled schedules in one project. Disabled schedules do not count. Allowed range: 1–1000.",
       "path": "scheduler.schedules.max_enabled_per_project",
-      "section": "runtime",
+      "section": "schedules",
       "default": 50,
       "minimum": 1,
       "maximum": 1000,
@@ -825,16 +906,50 @@
       "title": "Agent Scheduling Enabled",
       "description": "When disabled, agent schedules are skipped and their next_run is unchanged. Pipeline schedules still run. Enable to include agent schedules in the tick.",
       "path": "scheduler.schedules.agent_scheduling_enabled",
-      "section": "runtime",
+      "section": "schedules",
       "strict_type": true,
       "default": true
+    },
+    "toolkit_index_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Toolkit Index Scheduling Enabled",
+      "description": "When disabled, toolkit index schedules are skipped and their next_run is unchanged. Agent and pipeline schedules still run.",
+      "path": "scheduler.schedules.toolkit_index_scheduling_enabled",
+      "section": "schedules",
+      "strict_type": true,
+      "default": true
+    },
+    "toolkit_index_min_interval_minutes": {
+      "type": "integer",
+      "title": "Toolkit Index Schedules Minimum Interval (minutes)",
+      "description": "Smallest allowed gap in minutes between two runs of one toolkit index schedule. Allowed range: 1–1440.",
+      "path": "scheduler.schedules.toolkit_index_min_interval_minutes",
+      "section": "schedules",
+      "default": 1440,
+      "minimum": 1,
+      "maximum": 1440,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1440
+      }
+    },
+    "legacy_index_step_enabled": {
+      "type": "boolean",
+      "title": "Legacy Index Schedule Migration Enabled",
+      "description": "When enabled, the scheduler tick moves per-index schedules of the toolkit settings to the Schedules page. Off by default: run the admin task migrate_legacy_index_schedules for each project first (dry run, then live), then switch this on. Disable it before restoring legacy index schedules.",
+      "path": "scheduler.schedules.legacy_index_step_enabled",
+      "section": "schedules",
+      "strict_type": true,
+      "default": false
     },
     "schedules_dispatch_cap": {
       "type": "integer",
       "title": "Schedules Dispatch Cap",
       "description": "Maximum number of due schedules dispatched per tick, across all projects. Rows left over keep their next_run and go in the next tick. Allowed range: 1–10000.",
       "path": "scheduler.schedules.dispatch_cap",
-      "section": "runtime",
+      "section": "schedules",
       "default": 100,
       "minimum": 1,
       "maximum": 10000,
@@ -850,7 +965,7 @@
       "title": "Schedules Stale Run Minutes",
       "description": "Minutes a scheduled run may stay in running state before the tick fails it with the reason 'the run did not finish in time'. Allowed range: 1–10080.",
       "path": "scheduler.schedules.stale_run_minutes",
-      "section": "runtime",
+      "section": "schedules",
       "default": 120,
       "minimum": 1,
       "maximum": 10080,
@@ -866,7 +981,7 @@
       "title": "Schedules Max Parallel Runs",
       "description": "Maximum number of scheduled runs this process starts at the same time. Keep this value at least the dispatch cap: a due run without a free slot fails at once and the schedule tries again at its next due time. Allowed range: 1–1000.",
       "path": "scheduler.schedules.max_parallel_runs",
-      "section": "runtime",
+      "section": "schedules",
       "default": 100,
       "minimum": 1,
       "maximum": 1000,
@@ -882,7 +997,7 @@
       "title": "Schedules Approval Wait Hours",
       "description": "Hours a scheduled run waits for the owner to approve a sensitive tool before it fails. Allowed range: 1–720.",
       "path": "scheduler.schedules.approval_wait_hours",
-      "section": "runtime",
+      "section": "schedules",
       "default": 24,
       "minimum": 1,
       "maximum": 720,
@@ -893,12 +1008,76 @@
         "maximum": 720
       }
     },
+    "schedules_webhook_max_concurrent_runs": {
+      "type": "integer",
+      "title": "Webhook Max Running Runs",
+      "description": "Running runs one webhook may have at the same time; a delivery over it gets 429 with Retry-After. A project admin may set a lower value. Kept at most the limit below. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_concurrent_runs",
+      "section": "webhooks",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_max_concurrent_runs_limit": {
+      "type": "integer",
+      "title": "Webhook Max Running Runs Limit",
+      "description": "Highest per-webhook running-run cap a project admin may set in the project settings. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_concurrent_runs_limit",
+      "section": "webhooks",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_project_max_concurrent_runs": {
+      "type": "integer",
+      "title": "Webhook Project Max Running Runs",
+      "description": "Running webhook runs one project may have at the same time, over all its webhooks. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_project_max_concurrent_runs",
+      "section": "webhooks",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_webhook_max_waiting_runs": {
+      "type": "integer",
+      "title": "Webhook Max Waiting Runs",
+      "description": "Runs of one webhook that may wait for approval of a sensitive tool at the same time; the first pause of a run over this number fails the run. A run the owner already approved once is not counted again on its later pauses. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.webhook_max_waiting_runs",
+      "section": "webhooks",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
     "schedules_legacy_step_enabled": {
       "type": "boolean",
       "title": "Schedules Legacy Step Enabled",
       "description": "When enabled, the tick moves legacy pipeline schedule triggers into schedules and still fires the ones it could not move. Disable after every project is migrated. Set it to false before a revert with the RPC schedules_restore_legacy_triggers(project_id); rows migrated before the original trigger was stored cannot be restored.",
       "path": "scheduler.schedules.legacy_step_enabled",
-      "section": "runtime",
+      "section": "schedules",
       "strict_type": true,
       "default": true
     },
@@ -907,7 +1086,7 @@
       "title": "Index Scheduling Enabled",
       "description": "Master switch for the per-tick check that triggers scheduled toolkit index re-builds. Disable to pause all index schedules platform-wide without losing their configuration.",
       "path": "scheduler.index_scheduling.enabled",
-      "section": "runtime",
+      "section": "schedules",
       "strict_type": true,
       "default": true
     },
@@ -916,7 +1095,7 @@
       "title": "Index Scheduling Cron",
       "description": "How often the index scheduling tick fires. Standard 5-field cron expression (e.g. '* * * * *' = every minute, '*/15 * * * *' = every 15 minutes). Slowing this down reduces baseline platform load but delays scheduled re-indexing by up to that interval.",
       "path": "scheduler.index_scheduling.cron",
-      "section": "runtime",
+      "section": "schedules",
       "format": "cron",
       "default": "* * * * *",
       "visible_when": { "field": "index_scheduling_enabled", "value": true }
@@ -1368,6 +1547,24 @@
         ],
         "minimum": 0
       }
+    },
+    "project_membership_on_added": {
+      "type": "boolean",
+      "title": "Notify users when added to a team project",
+      "description": "Send an in-app notification when a user is added through Project Settings → Users.",
+      "path": "notifications.project_membership.on_added",
+      "section": "notifications",
+      "default": true,
+      "requires_restart": false
+    },
+    "project_membership_on_removed": {
+      "type": "boolean",
+      "title": "Notify users when removed from a team project",
+      "description": "Send an in-app notification when a user is removed through Project Settings → Users.",
+      "path": "notifications.project_membership.on_removed",
+      "section": "notifications",
+      "default": false,
+      "requires_restart": false
     }
 }
 }

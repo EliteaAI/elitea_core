@@ -18,10 +18,12 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = "schedulespkg_7011_list"
 PREFIX = "models.applications.schedules."
 ROW_KEYS = {
-    "id", "name", "description", "entity_type", "run_mode", "application_id", "entity_name",
+    "id", "name", "description", "entity_type", "run_mode", "application_id", "toolkit_id", "index_name", "entity_name",
     "version_id", "version_name", "cron", "timezone", "enabled", "disabled_reason", "next_run",
     "last_run", "last_run_status", "last_run_reason", "last_conversation_id", "expires_at",
-    "owner", "allowed_actions",
+    "owner", "allowed_actions", "trigger_kind", "webhook_type", "webhook_url",
+    "previous_secret_until", "gitlab_auth_method", "last_delivery_at", "last_delivery_outcome",
+    "running_runs", "run_cap",  # #7400: null on cron rows
 }
 
 
@@ -280,13 +282,21 @@ def test_r3_4_el7011_wrong_filter_type_gives_400_with_name(env, name, value):
     assert env.query_calls == []
 
 
+# The Running status filter reaches the query as typed
+def test_status_running_reaches_the_query_filters(env):
+    env.grant(9, "list", "admin")
+    env.rows = [make_row(1, 5)]
+    ok(env, status="running")
+    assert env.query_calls[0]["filters"].status == "running"
+
+
 # R4.1 (TC-US05-14)
-def test_r4_1_el7011_admin_gets_run_only_on_own_row_and_change_owner(env):
+def test_admin_gets_run_and_change_owner_on_any_row(env):
     env.grant(9, "list", "admin", "run")
     env.rows = [make_row(1, 9), make_row(2, 5)]
     own, other = ok(env)["rows"]
     assert "run" in own["allowed_actions"]
-    assert "run" not in other["allowed_actions"] and "change_owner" in other["allowed_actions"]
+    assert "run" in other["allowed_actions"] and "change_owner" in other["allowed_actions"]
 
 
 # R4.1 (TC-US05-15)
@@ -372,3 +382,36 @@ def test_a_last_run_reason_stored_with_an_engineer_text_is_listed_as_the_generic
 
     assert rows[0]["last_run_reason"] == "The run failed. Open the run log or ask an administrator for details."
     assert rows[1]["last_run_reason"] == "The run failed: The step 'a' of b could not be completed."
+
+
+# #7534: an upgraded project whose release schema tasks did not run gets a 503 that names them, not a bare 500
+def test_7534_missing_release_column_answers_503_with_the_tasks(env, monkeypatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    class Orig(Exception):
+        pgcode = "42703"
+
+    def missing_column(*args, **kwargs):
+        raise ProgrammingError("SELECT", {}, Orig("column entity_schedules.toolkit_id does not exist"))
+
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_project_handlers"], "list_schedules", missing_column)
+    env.grant(9, "list")
+    body, status = call(env)
+    assert status == 503
+    assert body["code"] == "schedules_unavailable"
+    assert "ensure_toolkit_index_schedule_columns" in body["error"]
+
+
+def test_7534_other_database_errors_still_raise(env, monkeypatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    class Orig(Exception):
+        pgcode = "42601"
+
+    def syntax_error(*args, **kwargs):
+        raise ProgrammingError("SELECT", {}, Orig("syntax error"))
+
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_project_handlers"], "list_schedules", syntax_error)
+    env.grant(9, "list")
+    with pytest.raises(ProgrammingError):
+        call(env)

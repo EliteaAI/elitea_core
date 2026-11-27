@@ -163,6 +163,17 @@ ENDPOINT_OPERATIONS = {
     ("PUT", "social/folder/{mode}/{project_id}/{folder_id}"): "build",
     ("PUT", "social/move_to_folder/{mode}/{project_id}"): "build",
     ("PUT", "notifications/notification/{mode}/{project_id}/{notification_id}"): "build",
+    # Elitea Builder (#7383) dispatches agent / skill deletes and agent renames to these, in-process
+    ("DELETE", "elitea_core/application/{mode}/{project_id}/{application_id}"): "build",
+    ("PUT", "elitea_core/application/{mode}/{project_id}/{application_id}"): "build",
+    ("DELETE", "elitea_core/skill/{mode}/{project_id}/{skill_id}"): "build",
+    # Elitea Builder (#7383): find/read/propose/reference write nothing; apply writes through the endpoints above,
+    # whose own classification and permissions apply to each call it makes
+    ("POST", "elitea_core/builder_find/{mode}/{project_id}"): "read",
+    ("POST", "elitea_core/builder_read/{mode}/{project_id}"): "read",
+    ("POST", "elitea_core/builder_propose/{mode}/{project_id}"): "read",
+    ("POST", "elitea_core/builder_ref/{mode}/{project_id}"): "read",
+    ("POST", "elitea_core/builder_apply/{mode}/{project_id}"): "build",
 }
 # Credential material on the model path (#7228, C9-SEC-21). Every MCP-exposed route is ``material_in`` (its request
 # carries a secret value), ``material_out`` (its answer returns one) or ``none``. Derived from the OpenAPI registry: a

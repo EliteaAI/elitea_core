@@ -9,6 +9,7 @@ import sys
 import types
 
 import pytest
+from fixtures.bus_frame import assert_bus_safe
 from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -344,3 +345,66 @@ class TestEL7011R4SocketEvent:
         assert notifications.emit_schedule_run_finished(**FINISHED) is None
 
         assert any('sio down' in line for line in recorder.logged)
+
+
+# --- #7454: webhook rows say "Webhook" and carry their trigger kind -----------------------------------
+
+WEBHOOK = types.SimpleNamespace(id=8, name='On push', trigger_kind='webhook')
+
+
+def test_7454_every_message_names_the_row_by_its_noun_placeholder(notifications):
+    # A template that hard-codes "schedule" would show it on a webhook row; each must use {Noun} or {noun}
+    for event_type, text in notifications.MESSAGES.items():
+        assert 'chedule' not in text and ('{Noun}' in text or '{noun}' in text), event_type
+
+
+@pytest.mark.parametrize('event_type', ALWAYS_SENT)
+def test_7454_a_webhook_row_gets_the_webhook_text_of_every_notice(notifications, recorder, event_type):
+    notifications.notify_schedule_event(12, 42, event_type, WEBHOOK, run=RUN)
+
+    message = recorder.fired[0][1]['meta']['message']
+    assert 'chedule' not in message and 'ebhook "[On push]()"' in message
+
+
+def test_7454_the_meta_names_the_trigger_kind(notifications, recorder):
+    notifications.notify_schedule_event(12, 42, 'schedule_run_failed', WEBHOOK, run=RUN)
+    _send(notifications, 'schedule_run_failed', run=RUN)   # a row without the attribute is a cron schedule
+
+    assert [fired[1]['meta']['trigger_kind'] for fired in recorder.fired] == ['webhook', 'cron']
+    assert recorder.fired[0][1]['meta']['message'] == 'Webhook "[On push]()" failed: credential not found'
+
+
+class Test7401CredentialExpired:
+    """One notice names the credential and who can fix it: its owner, or a project admin for a team one."""
+
+    WEBHOOK = types.SimpleNamespace(id=7, name='On push', trigger_kind='webhook')
+
+    @pytest.mark.parametrize('private, fix', [
+        (True, 'Sign in again on the credential'), (False, 'Ask a project admin to sign in again')])
+    def test_7401_the_notice_names_the_credential_and_who_fixes_it(self, notifications, recorder, private, fix):
+        notifications.notify_schedule_event(12, 42, 'schedule_credential_expired', self.WEBHOOK,
+                                            extra={'credential': 'team_outlook', 'private': private, 'more': 0, 'schedule_ids': [7]})
+
+        meta = recorder.fired[0][1]['meta']
+        assert meta['message'] == (f'The saved login of "team_outlook" stopped working: webhook "[On push]()" '
+                                   f'switched off. {fix}, then re-enable it.')
+        assert (meta['schedule_ids'], meta['credential'], meta['trigger_kind']) == ([7], 'team_outlook', 'webhook')
+
+    def test_7401_more_triggers_are_counted_in_the_one_notice(self, notifications, recorder):
+        notifications.notify_schedule_event(12, 42, 'schedule_credential_expired', self.WEBHOOK,
+                                            extra={'credential': 'crm', 'private': True, 'more': 2, 'schedule_ids': [7, 8, 9]})
+
+        assert '"[On push]()" and 2 more switched off' in recorder.fired[0][1]['meta']['message']
+
+
+@pytest.mark.parametrize('event_type', ALWAYS_SENT)
+@pytest.mark.parametrize('as_member', [False, True], ids=['string', 'member'])
+def test_every_notice_is_a_frame_every_pylon_can_load(notifications, recorder, event_type, as_member):
+    """#7499: callers pass members and strings alike, and pylon_auth cannot unpickle a member."""
+    sent_type = notifications.Types(event_type) if as_member else event_type
+
+    assert _send(notifications, sent_type, run=RUN) is True
+
+    name, payload = recorder.fired[0]
+    assert payload['event_type'] == event_type
+    assert_bus_safe(name, payload)

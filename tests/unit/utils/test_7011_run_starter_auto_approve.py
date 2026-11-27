@@ -49,7 +49,7 @@ def run(monkeypatch):
         allowed.value = setting
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
-                id=SCHEDULE_ID, entity_type=entity_type, run_mode="prompt", approval_rule=rule,
+                id=SCHEDULE_ID, entity_type=entity_type, run_mode="prompt", approval_rule=rule, trigger_kind="cron",
                 approval_fingerprint=confirmed, created_by=OWNER, approval_confirmed_by=confirmed_by),
             version=types.SimpleNamespace(id=9, name="v3"), entity_name="Flow", prompt="Go", variables=[])
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
@@ -90,7 +90,7 @@ def test_el_7011_r1_1_pause_and_ask_pauses_and_never_reads_the_setting(run):
 def test_el7011_cr_the_run_scans_its_version_as_the_owner(run):
     run("pause_and_ask", False)
 
-    assert run.scans == [(PROJECT_ID, 9, OWNER, 'pause_and_ask')]
+    assert run.scans == [(PROJECT_ID, 9, OWNER, 'pause_and_ask', 'cron')]
 
 
 # Owner CR 2026-10-21: the confirmed fingerprint keeps "Run without asking"
@@ -244,3 +244,14 @@ def test_a_personal_credential_alone_does_not_give_needs_approval(run):
     run("pause_and_ask", True)
 
     assert run.outcomes == ["ok"]
+
+
+def test_pause_and_ask_starts_the_run_without_a_pause_before_the_first_call(run):
+    sensitive = [{"code": "sensitive_action", "toolkit": "GitHub", "tool": "create_pull_request"},
+                 {"code": "sensitive_action", "toolkit": "GitHub", "tool": "delete_file"}]
+    run.state.review = {**clean_review(), "sensitive": sensitive, "fingerprint": "fp-1"}
+
+    kwargs, _ = run("pause_and_ask", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
+    assert run.finishes == [] and run.outcomes == ["needs_approval"]

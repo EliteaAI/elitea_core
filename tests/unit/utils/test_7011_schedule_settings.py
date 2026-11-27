@@ -217,3 +217,28 @@ def test_a_register_error_does_not_stop_the_plugin(store):
 def test_the_model_takes_one_strict_boolean(store, body):
     with pytest.raises(ValidationError):
         store.module.ScheduleProjectSettings.model_validate(body)
+
+
+# --- #7400: the per-project webhook cap
+
+def test_a_saved_webhook_cap_is_stored_and_read_back(store):
+    settings = store.module.ScheduleProjectSettings(allow_run_without_asking=False, webhook_max_concurrent_runs=2)
+    assert store.module.save_schedule_settings(PROJECT_ID, settings) == {
+        'allow_run_without_asking': False, 'webhook_max_concurrent_runs': 2}
+    assert store.module.saved_webhook_cap(PROJECT_ID) == 2
+
+
+@pytest.mark.parametrize('saved, expected', [(None, 3), (2, 2), (50, 20)],
+                         ids=['unset uses the default', 'a lower value', 'never over the maximum'])
+def test_the_effective_cap_is_the_project_value_bounded_by_the_maximum(store, saved, expected):
+    store.module.save_schedule_settings(PROJECT_ID, store.module.ScheduleProjectSettings.model_construct(
+        allow_run_without_asking=False, webhook_max_concurrent_runs=saved))
+    limits = types.SimpleNamespace(per_webhook=3, per_webhook_limit=20)
+    assert store.module.project_webhook_cap(PROJECT_ID, limits) == expected
+
+
+def test_the_effective_cap_is_the_platform_default_when_the_store_fails(store, monkeypatch):
+    monkeypatch.setattr(store.module, '_read_settings', lambda project_id: (_ for _ in ()).throw(RuntimeError('down')))
+    limits = types.SimpleNamespace(per_webhook=3, per_webhook_limit=20)
+    assert store.module.project_webhook_cap(PROJECT_ID, limits) == 3
+    assert store.module.saved_webhook_cap(PROJECT_ID) is None

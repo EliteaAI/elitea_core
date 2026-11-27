@@ -3,7 +3,6 @@ from typing import List, Optional, Literal
 import uuid
 
 from .tool import (
-    ToolUpdateModel,
     ToolDetails,
     ToolValidatedDetails,
     ToolBase,
@@ -17,6 +16,8 @@ from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel, validate_m
 from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
+from ...utils.trigger_write_rule import strip_trigger_secrets
+from ...utils.conversation_starters_utils import ABSOLUTE_MAX_CONVERSATION_STARTERS
 
 # todo: switch to rpc call
 from ...utils.authors import get_authors_data
@@ -39,18 +40,17 @@ def agent_root_pipeline_validator(values: dict):
     return values
 
 
-MAX_CONVERSATION_STARTERS = 4
-
-
 def conversation_starters_validator(value):
+    # Structural checks and the absolute cap only. The admin limit depends on what the version
+    # already holds, so authoring writes enforce it where the saved row is known.
     if value is None:
         return None
     if not isinstance(value, list):
         raise ValueError('conversation_starters must be a list')
 
-    if len(value) > MAX_CONVERSATION_STARTERS:
+    if len(value) > ABSOLUTE_MAX_CONVERSATION_STARTERS:
         raise ValueError(
-            f'conversation_starters cannot exceed {MAX_CONVERSATION_STARTERS} items, got {len(value)}'
+            f'conversation_starters cannot exceed {ABSOLUTE_MAX_CONVERSATION_STARTERS} items, got {len(value)}'
         )
 
     validated = []
@@ -356,6 +356,12 @@ class ApplicationExportVersionDetailModel(ApplicationVersionDetailModel, Applica
         return self
 
     @model_validator(mode='after')
+    def exclude_trigger_secrets(self):
+        if self.pipeline_settings:
+            self.pipeline_settings = strip_trigger_secrets(self.pipeline_settings)
+        return self
+
+    @model_validator(mode='after')
     def validate_repeatable_uuid(self):
         hash_ = hash((self.__class__.__name__, self.id, self.author_id, self.name))
         self.import_version_uuid = str(uuid.UUID(int=abs(hash_)))
@@ -385,7 +391,11 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     application_id: int
     name: Optional[str] = None
     author_id: int
-    tools: Optional[List[ToolUpdateModel]] = None
+    # The version PUT never writes `tools` (applications_update_version excludes them; toolkits are
+    # changed through the toolkit endpoints). They are not validated here either: ToolUpdateModel
+    # expands every credential as the signed-in user, so a user without access to the owner's private
+    # credential (an editor of a shared chat) got a 400 that also named the credential (#7663).
+    tools: Optional[List[ToolBase]] = None
     variables: Optional[List[ApplicationVariableDetailedModel]] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
     meta: Optional[dict] = Field(default_factory=dict)

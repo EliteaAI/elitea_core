@@ -20,10 +20,12 @@ from pylon.core.tools import log
 from .export_import_utils import slugify
 from .skill_export_import import build_embedded_skill_frontmatter
 from .skill_files import (
-    SkillFileContentUnavailableError, SkillVersionExportUnavailableError, list_version_manifest,
+    SkillFileContentMissingError, SkillFileContentUnavailableError, SkillVersionExportMissingError,
+    SkillVersionExportUnavailableError, list_version_manifest,
     read_version_contents,
 )
 from .toolkit_meta import drop_index_schedules
+from .trigger_write_rule import strip_trigger_secrets
 from .utils import get_public_project_id
 
 from ..models.pd.application import (
@@ -42,7 +44,6 @@ def _export_compound_application_tools(
     forked: bool = False,
     data_done: dict = None,
     follow_version_ids: set = None,
-    with_file_bytes: bool = True,
 ):
     tool_ids = defaultdict(set)
     toolkit_ref_app_version_ids = set()
@@ -82,7 +83,6 @@ def _export_compound_application_tools(
                            forked=forked,
                            data_done=data_done,
                            follow_version_ids=child_follow_version_ids,
-                           with_file_bytes=with_file_bytes,
                        )
 
         if not tools_result['ok']:
@@ -128,6 +128,7 @@ def export_version_toolkit(
     details = result_model.model_validate(tool, context=validation_context)
     if forked:
         details.owner_id = project_id
+        details.set_agent_type(project_id)
     details.fix_name(project_id)
     toolkit_dict = details.model_dump()
     if 'settings' in toolkit_dict and toolkit_dict['settings'].get('selected_tools'):
@@ -159,8 +160,120 @@ def _attach_toolkits(version: dict, published_toolkits: list, toolkits: list) ->
     version['tools'] = version_tools
 
 
-def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None,
-                             with_file_bytes: bool = True):
+PUBLISHED_PIPELINES_META_KEY = 'fork_pipelines'
+_FORK_PIPELINE_APPLICATIONS = 'fork_pipeline_applications'
+_FORK_PIPELINE_TOOLKITS = 'fork_pipeline_toolkits'
+_FORK_NODE_VERSION_FIELDS = (
+    'instructions', 'agent_type', 'llm_settings', 'variables', 'tags',
+    'welcome_message', 'conversation_starters', 'pipeline_settings',
+)
+
+
+def _pop_published_pipelines(version: dict) -> dict:
+    pipelines = (version.get('meta') or {}).pop(PUBLISHED_PIPELINES_META_KEY, None)
+    return pipelines if isinstance(pipelines, dict) else {}
+
+
+def _fork_uuid(*parts) -> str:
+    """Stable per-published-version id, so a fork payload links the same way on every export."""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, ':'.join(str(part) for part in parts)))
+
+
+def _fork_pipeline_application(node: dict, app_uuid: str, version_uuid: str, tool_refs: list) -> dict:
+    version = {key: deepcopy(node['version'][key]) for key in _FORK_NODE_VERSION_FIELDS if key in node['version']}
+    meta = deepcopy(node['version'].get('meta') or {})
+    meta['icon_meta'] = {}
+    return {
+        'name': node['name'],
+        'description': node.get('description') or '',
+        'import_uuid': app_uuid,
+        'original_exported': False,
+        'versions': [{
+            **version,
+            'name': 'base',
+            'import_version_uuid': version_uuid,
+            'meta': meta,
+            'tools': tool_refs,
+        }],
+    }
+
+
+def _attach_pipelines(version: dict, pipelines: dict, data_done: dict) -> None:
+    """Add a published version's pipeline graph to a fork export, linked to the forked agent as sub-agents.
+
+    The graph lives in the version meta as flat nodes (a pipeline or an agent each) that name their
+    toolkits and the nodes they call, so a node reached twice is created once. The ids it carries are
+    local to the snapshot; the ones the payload needs are derived from the published version id.
+    """
+    attached = pipelines.get('attached') or []
+    nodes = {
+        node['key']: node for node in pipelines.get('nodes') or []
+        if isinstance(node, dict) and node.get('key') and isinstance(node.get('version'), dict) and node.get('name')
+    }
+    if not attached or not nodes:
+        return
+    scope = version.get('id')
+    applications = data_done[_FORK_PIPELINE_APPLICATIONS]
+    toolkits = data_done[_FORK_PIPELINE_TOOLKITS]
+    in_progress = set()
+
+    def add_application(key: str) -> None:
+        app_uuid = _fork_uuid('app', scope, key)
+        if app_uuid in applications or key in in_progress:
+            return
+        in_progress.add(key)
+        node = nodes[key]
+        tool_refs = []
+        for toolkit in node.get('toolkits') or []:
+            toolkits.setdefault(toolkit['import_uuid'], deepcopy(toolkit))
+            tool_refs.append({'import_uuid': toolkit['import_uuid']})
+        for link in node.get('links') or []:
+            if link.get('key') in nodes:
+                tool_refs.append({'import_uuid': add_link(key, link)})
+        applications[app_uuid] = _fork_pipeline_application(
+            node, app_uuid, _fork_uuid('version', scope, key), tool_refs,
+        )
+        in_progress.discard(key)
+
+    def add_link(parent_key: str, link: dict) -> str:
+        add_application(link['key'])
+        tool_uuid = _fork_uuid('link', scope, parent_key, link['key'])
+        toolkits.setdefault(tool_uuid, {
+            'type': 'application',
+            'name': nodes[link['key']]['name'],
+            'agent_type': nodes[link['key']].get('agent_type') or nodes[link['key']]['version'].get('agent_type'),
+            'import_uuid': tool_uuid,
+            'original_exported': False,
+            'settings': {
+                'import_uuid': _fork_uuid('app', scope, link['key']),
+                'import_version_uuid': _fork_uuid('version', scope, link['key']),
+                'variables': deepcopy(link.get('variables') or []),
+            },
+            'selected_tools': [],
+            'meta': {},
+        })
+        return tool_uuid
+
+    version_tools = version.get('tools') or []
+    for link in attached:
+        if link.get('key') in nodes:
+            version_tools.append({'import_uuid': add_link('root', link)})
+    version['tools'] = version_tools
+
+
+def _add_fork_pipelines(result: dict, data_done: dict) -> dict:
+    """Append the pipeline entities collected during a fork export; skipped when the export failed."""
+    if not result.get('ok'):
+        return result
+    result['applications'].extend(data_done.get(_FORK_PIPELINE_APPLICATIONS, {}).values())
+    # _post_export already removed duplicates, so one the agent and a pipeline share is kept once here too.
+    result['toolkits'] = _deduplicate_by_import_uuid(
+        result['toolkits'] + list(data_done.get(_FORK_PIPELINE_TOOLKITS, {}).values())
+    )
+    return result
+
+
+def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None):
     with db.get_session(project_id) as session:
         applications = session.query(
             Application
@@ -224,8 +337,10 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
     for app in result:
         for version in app['versions']:
             published_toolkits = _pop_published_toolkits(version)
+            published_pipelines = _pop_published_pipelines(version)
             if forked and _holds_publish_snapshot(project_id, version_statuses.get(version.get('id'))):
                 _attach_toolkits(version, published_toolkits, toolkits)
+                _attach_pipelines(version, published_pipelines, data_done)
 
     for app in result:
         data_done['application_id'][app['id']] = app['import_uuid']
@@ -245,7 +360,6 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             applications_serialized=applications_serialized,
             result=result,
             forked=forked,
-            with_file_bytes=with_file_bytes,
         )
     except SkillVersionExportUnavailableError:
         raise
@@ -270,7 +384,6 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             forked=forked,
             data_done=data_done,
             follow_version_ids=follow_version_ids,
-            with_file_bytes=with_file_bytes,
         )
     except SkillVersionExportUnavailableError:
         raise
@@ -286,13 +399,12 @@ def _export_skills_main(
     applications_serialized: list,
     result: list,
     forked: bool = False,
-    with_file_bytes: bool = True,
 ) -> list:
     """Export skills attached to the given application versions.
 
     A fork payload lists each version's files by hash, which the import copies from this project; an export file
-    carries each file's bytes, so it imports anywhere, unless ``with_file_bytes`` is off (the Markdown export). A
-    file whose bytes cannot be read fails the whole export, naming the skill, version and path."""
+    carries each file's bytes, so it imports anywhere. A file whose bytes cannot be read fails the whole export,
+    naming the skill, version and path."""
 
     version_skill_refs = {}
     skill_ids = set()
@@ -378,9 +490,7 @@ def _export_skills_main(
             for version, version_export in zip(versions, export_dict['versions']):
                 version_export['id'] = version.id
                 version_export['author_id'] = version.author_id
-                files = _version_files_for_export(
-                    session, project_id, skill, version, with_file_bytes=with_file_bytes and not forked,
-                )
+                files = _version_files_for_export(session, project_id, skill, version, with_file_bytes=not forked)
                 if files:
                     version_export['files'] = files
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
@@ -410,6 +520,19 @@ def _export_skills_main(
     return skills_serialized
 
 
+def _merge_skills_by_import_uuid(skills: list) -> list:
+    """One entry per skill, holding every version the exported agents use, so a nested agent that uses another
+    version of a skill its parent also uses keeps that version."""
+    merged = {}
+    for skill in skills:
+        kept = merged.setdefault(skill['import_uuid'], skill)
+        if kept is skill:
+            continue
+        kept_names = {version.get('name') for version in kept['versions']}
+        kept['versions'].extend(version for version in skill['versions'] if version.get('name') not in kept_names)
+    return list(merged.values())
+
+
 def _deduplicate_by_import_uuid(toolkits):
     res = []
     import_uuids = set()
@@ -427,6 +550,8 @@ def _version_files_for_export(session, project_id: int, skill, version, with_fil
         return list_version_manifest(session, version.id)
     try:
         contents = read_version_contents(project_id, version.id, session=session)
+    except SkillFileContentMissingError as exc:
+        raise SkillVersionExportMissingError(skill.name, version.name, exc.path) from exc
     except SkillFileContentUnavailableError as exc:
         raise SkillVersionExportUnavailableError(skill.name, version.name, exc.path) from exc
     return [
@@ -435,17 +560,14 @@ def _version_files_for_export(session, project_id: int, skill, version, with_fil
     ]
 
 
-def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None,
-                       with_file_bytes: bool = True):
+def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None):
     # maps id/version ids to import uuid/import version uuids of already processed entities
     data_done = defaultdict(dict)
     if follow_version_ids is not None:
         follow_version_ids = set(follow_version_ids)
     else:
         follow_version_ids = None
-    result = _export_application_main(
-        project_id, user_id, application_ids, forked, data_done, follow_version_ids, with_file_bytes,
-    )
+    result = _export_application_main(project_id, user_id, application_ids, forked, data_done, follow_version_ids)
 
     if not result.get('ok'):
         return result
@@ -456,12 +578,12 @@ def export_application(project_id: int, user_id: int, application_ids: List[int]
         else:
             app['original_exported'] = False
 
-    return _post_export(
+    return _add_fork_pipelines(_post_export(
         project_id-project_id,
         result=result,
         data_done=data_done,
         forked=forked
-    )
+    ), data_done)
 
 
 def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = False):
@@ -492,7 +614,7 @@ def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = 
                 }
 
     if result.get('skills'):
-        result['skills'] = _deduplicate_by_import_uuid(result['skills'])
+        result['skills'] = _merge_skills_by_import_uuid(result['skills'])
 
     result['_metadata'] = {'version': 2}
     if warnings := result.pop('warnings', None):
@@ -1011,6 +1133,12 @@ def _extract_skills_for_md(version: dict, skills: list) -> list:
         frontmatter = build_embedded_skill_frontmatter(skill_version)
         if frontmatter:
             block['frontmatter'] = frontmatter
+        if skill_version.get('files'):
+            block['files_folder'] = skill_version['files_folder']
+            block['files'] = [
+                {key: value for key, value in entry.items() if key != 'content_base64'}
+                for entry in skill_version['files']
+            ]
         out.append(block)
 
     return out
@@ -1138,7 +1266,7 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
         # Export pipeline_settings (visual flow graph: node positions, edges, orientation)
         pipeline_settings = version.get('pipeline_settings')
         if pipeline_settings:
-            frontmatter['pipeline_settings'] = pipeline_settings
+            frontmatter['pipeline_settings'] = strip_trigger_secrets(pipeline_settings)
 
         # Pipeline has no body - all config is in frontmatter
         body = ''
@@ -1182,6 +1310,30 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
     )
 
     return f"---\n{yaml_str}---\n\n{body}"
+
+
+def assign_skill_file_folders(skills: list) -> list:
+    """Give each exported skill version with files its own ``skills/<name>`` folder and return the ZIP members that
+    hold the bytes; a non-base version gets ``skills/<name>.<version>``, a name clash a suffix from the skill uuid."""
+    members, taken = [], set()
+    for skill in skills:
+        name_slug = slugify(skill.get('name', '')) or 'skill'
+        for version in skill.get('versions') or []:
+            if not version.get('files'):
+                continue
+            version_name = version.get('name') or 'base'
+            folder = f'skills/{name_slug}'
+            if version_name != 'base':
+                folder = f"{folder}.{slugify(version_name) or 'version'}"
+            if folder in taken:
+                folder = f"{folder}-{(skill.get('import_uuid') or '')[:8]}"
+            taken.add(folder)
+            version['files_folder'] = folder
+            members.extend(
+                {'filename': f"{folder}/{entry['path']}", 'content': base64.b64decode(entry['content_base64'])}
+                for entry in version['files']
+            )
+    return members
 
 
 def create_zip_archive(files: List[Dict[str, str]]) -> BytesIO:
@@ -1230,7 +1382,6 @@ def export_application_md(
         application_ids=application_ids,
         forked=False,
         follow_version_ids=follow_version_ids,
-        with_file_bytes=False,
     )
 
     if not json_export.get('ok', True):
@@ -1242,6 +1393,7 @@ def export_application_md(
     all_applications = json_export.get('applications', [])
     all_toolkits = json_export.get('toolkits', [])
     all_skills = json_export.get('skills', [])
+    skill_file_members = assign_skill_file_folders(all_skills)
 
     # Convert each application version to MD (one file per version)
     for app in all_applications:
@@ -1284,8 +1436,8 @@ def export_application_md(
 
     return {
         'ok': True,
-        'files': md_files,
-        'has_dependencies': has_dependencies
+        'files': md_files + skill_file_members,
+        'has_dependencies': has_dependencies or bool(skill_file_members),
     }
 
 

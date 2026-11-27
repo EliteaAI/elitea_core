@@ -117,7 +117,7 @@ def test_el_7011_r2_2_a_reject_fails_the_run_and_copies_the_status_without_a_not
 
     session.refresh(run)
     session.refresh(schedule)
-    assert (run.status, run.reason) == ("failed", "rejected by the owner")
+    assert (run.status, run.reason) == ("failed", "rejected")
     assert run.finished_at is not None
     assert schedule.last_run_status == "failed"
     assert (sent.notices, sent.emitted) == ([], [])

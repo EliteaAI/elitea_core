@@ -18,6 +18,9 @@ PROJECT_ID = 7
 LIST_PERMISSION = 'models.applications.schedules.list'
 ADMIN_PERMISSION = 'models.applications.schedules.admin'
 INVALID = {'code': 'invalid_input', 'error': 'allow_run_without_asking must be true or false', 'field': 'allow_run_without_asking'}
+# #7400: the GET also answers the per-webhook cap, its platform default and maximum
+CAPS = {'webhook_max_concurrent_runs': None, 'webhook_max_concurrent_runs_default': 3,
+        'webhook_max_concurrent_runs_limit': 20}
 
 
 class Harness:
@@ -28,6 +31,7 @@ class Harness:
         self.specs = {}
         self.read_error = False
         self.save_error = None
+        self.caps = {}
 
     def check_api(self, spec):
         required = set(spec['permissions'])
@@ -51,7 +55,21 @@ class Harness:
         if self.save_error:
             raise self.save_error
         self.saved[project_id] = settings.allow_run_without_asking
-        return settings.model_dump()
+        self.caps[project_id] = settings.webhook_max_concurrent_runs
+        return settings.model_dump(exclude_none=True)
+
+    def saved_cap(self, project_id):
+        return self.caps.get(project_id)
+
+    def read_saved(self, project_id):
+        if self.read_error:
+            raise RuntimeError('configurations down')
+        stored = {}
+        if project_id in self.saved:
+            stored['allow_run_without_asking'] = self.saved[project_id]
+        if self.caps.get(project_id) is not None:
+            stored['webhook_max_concurrent_runs'] = self.caps[project_id]
+        return stored
 
 
 def _package(name):
@@ -96,7 +114,12 @@ def harness(isolated_sys_modules):
     settings.ScheduleProjectSettings = real_settings.ScheduleProjectSettings
     settings.is_run_without_asking_allowed = harness.is_allowed
     settings.save_schedule_settings = harness.save
+    settings.saved_webhook_cap = harness.saved_cap
+    settings.read_saved_settings = harness.read_saved
     sys.modules[settings.__name__] = settings
+    timing = types.ModuleType(f'{PACKAGE}.utils.schedule_timing')
+    timing.webhook_limits = lambda: types.SimpleNamespace(per_webhook=3, per_webhook_limit=20, per_project=10, waiting=10)
+    sys.modules[timing.__name__] = timing
 
     for name in ('models.entity_schedule', 'models.pd', 'models.pd.schedule_list', 'utils.authors',
                  'utils.schedule_queries'):
@@ -116,20 +139,20 @@ def _call(harness, verb, body=None):
 
 
 def test_el7011_cr_get_is_false_when_never_saved(harness):
-    assert _call(harness, 'get') == ({'allow_run_without_asking': False}, 200)
+    assert _call(harness, 'get') == ({'allow_run_without_asking': False, **CAPS}, 200)
 
 
 @pytest.mark.parametrize('value', [True, False])
 def test_el7011_cr_put_saves_and_get_reads_the_value(harness, value):
     assert _call(harness, 'put', {'allow_run_without_asking': value}) == ({'allow_run_without_asking': value}, 200)
     assert harness.saved == {PROJECT_ID: value}
-    assert _call(harness, 'get') == ({'allow_run_without_asking': value}, 200)
+    assert _call(harness, 'get') == ({'allow_run_without_asking': value, **CAPS}, 200)
 
 
 def test_el7011_r3_2_get_is_false_when_the_store_fails(harness):
     harness.saved[PROJECT_ID] = True
     harness.read_error = True
-    assert _call(harness, 'get') == ({'allow_run_without_asking': False}, 200)
+    assert _call(harness, 'get') == ({'allow_run_without_asking': False, **CAPS}, 200)
 
 
 @pytest.mark.parametrize('body, field', [
@@ -178,3 +201,62 @@ def test_el7011_cr_a_member_reads_but_cannot_save(harness):
 def test_el7011_cr_without_schedules_list_get_is_403(harness):
     harness.permissions = set()
     assert _call(harness, 'get')[1] == 403
+
+
+# --- #7400: the per-project lower value of the running-run cap
+
+def test_put_saves_a_lower_webhook_cap_and_get_reads_it(harness):
+    body = {'allow_run_without_asking': False, 'webhook_max_concurrent_runs': 2}
+    assert _call(harness, 'put', body) == (body, 200)
+    assert _call(harness, 'get')[0]['webhook_max_concurrent_runs'] == 2
+
+
+def test_put_above_the_platform_maximum_is_400_naming_the_limit(harness):
+    response, status = _call(harness, 'put', {'allow_run_without_asking': False, 'webhook_max_concurrent_runs': 25})
+    assert status == 400
+    assert response == {'code': 'invalid_input', 'error': 'Running runs per webhook can be at most 20',
+                        'field': 'webhook_max_concurrent_runs', 'limit': 20}
+    assert harness.saved == {}
+
+
+@pytest.mark.parametrize('value', [0, -1, 2.5, '3', True])
+def test_put_with_a_cap_that_is_not_a_whole_number_of_at_least_one_is_400(harness, value):
+    response, status = _call(harness, 'put', {'allow_run_without_asking': False, 'webhook_max_concurrent_runs': value})
+    assert (status, response['field']) == (400, 'webhook_max_concurrent_runs')
+    assert harness.saved == {}
+
+
+def test_put_without_the_cap_key_keeps_the_saved_cap(harness):
+    harness.caps[PROJECT_ID] = 2  # an older client sends only the approval switch
+    assert _call(harness, 'put', {'allow_run_without_asking': True})[0]['webhook_max_concurrent_runs'] == 2
+
+
+def test_put_with_a_null_cap_clears_it(harness):
+    harness.caps[PROJECT_ID] = 2
+    assert _call(harness, 'put', {'allow_run_without_asking': True, 'webhook_max_concurrent_runs': None}) == (
+        {'allow_run_without_asking': True}, 200)
+    assert harness.caps[PROJECT_ID] is None
+
+
+def test_put_with_only_the_cap_keeps_the_saved_approval_switch(harness):
+    harness.saved[PROJECT_ID] = True  # the checkbox was saved a moment before the cap field
+    assert _call(harness, 'put', {'webhook_max_concurrent_runs': 2}) == (
+        {'allow_run_without_asking': True, 'webhook_max_concurrent_runs': 2}, 200)
+    assert harness.saved == {PROJECT_ID: True}
+
+
+# --- review: a key left out comes from one read; a failed read writes nothing
+
+@pytest.mark.parametrize('body', [{'webhook_max_concurrent_runs': 2}, {'allow_run_without_asking': True}])
+def test_a_partial_save_after_a_failed_read_is_503_and_writes_nothing(harness, body):
+    harness.saved[PROJECT_ID], harness.caps[PROJECT_ID] = False, 4
+    harness.read_error = True
+    response, status = _call(harness, 'put', body)
+    assert status == 503 and response['code'] == 'settings_unavailable'
+    assert (harness.saved[PROJECT_ID], harness.caps[PROJECT_ID]) == (False, 4)  # neither key was reset
+
+
+def test_a_save_with_both_keys_needs_no_read(harness):
+    harness.read_error = True  # the whole record is in the body
+    body = {'allow_run_without_asking': True, 'webhook_max_concurrent_runs': 3}
+    assert _call(harness, 'put', body) == (body, 200)

@@ -128,6 +128,18 @@ def test_graph_credential_gets_token_under_the_key_the_toolkit_reads(svc):
     assert call["scope"] == "offline_access Mail.Read"
 
 
+def test_ms_graph_credential_stored_login_uses_its_free_scopes(svc):
+    config = {**outlook_tool()["settings"]["outlook_configuration"], "configuration_uuid": "uuid-g",
+              "scopes": ["Files.Read.All", "Sites.Read.All"]}
+    payload = {"tools": [{"type": "ms_graph", "settings": {"ms_graph_configuration": config}}], "mcp_tokens": {}}
+    refresh = Refresh()
+
+    assert inject(svc, payload, FakeRedis(), refresh) == 1
+
+    assert payload["mcp_tokens"] == {f"uuid-g:{AUTHORITY}": {"access_token": "at-1"}}
+    assert refresh.calls[0]["scope"] == "offline_access Files.Read.All Sites.Read.All"
+
+
 def test_dataverse_credential_uses_its_tenant_and_org_scope(svc):
     payload, refresh = {"tools": [dataverse_tool()]}, Refresh()
 
@@ -371,3 +383,59 @@ def test_a_new_login_never_reads_the_previous_logins_token(svc):
     assert len(second.calls) == 1
     assert payload["mcp_tokens"][f"uuid-o:{AUTHORITY}"] == {"access_token": "at-2"}
     assert len(keys_for(svc, redis, svc.CACHE_PREFIX)) == 2
+
+
+# --- #7401: an expired saved login is told apart from a transient refresh error ---
+
+class RefusedRefresh(ValueError):
+    """What mcp_oauth.refresh_token raises (TokenRefreshError): the OAuth `error` code rides on the exception."""
+
+    def __init__(self, error, status=400):
+        super().__init__(f"Token refresh failed: {error}")
+        self.error, self.status = error, status
+
+
+@pytest.mark.parametrize("error", ["invalid_grant", "invalid_client", "unauthorized_client"])
+def test_7401_refused_login_raises_stored_login_expired(svc, error):
+    # invalid_client covers a credential moved to another admin-managed app (#7149): it can never refresh again
+    redis, tool = FakeRedis(), outlook_tool()
+    config = tool["settings"]["outlook_configuration"]
+
+    with pytest.raises(svc.StoredLoginExpired) as raised:
+        svc.get_access_token(redis, config, svc._graph_login(config), Refresh(error=RefusedRefresh(error)))
+
+    assert (raised.value.configuration_uuid, raised.value.error) == ("uuid-o", error)
+    assert keys_for(svc, redis, svc.LOCK_PREFIX) == [] and keys_for(svc, redis, svc.CACHE_PREFIX) == []
+
+
+@pytest.mark.parametrize("error", [
+    RefusedRefresh("temporarily_unavailable", 503), RefusedRefresh(None, 502), TimeoutError("read timed out"),
+    ConnectionError("reset"), ValueError("Token refresh failed: <html>"),
+])
+def test_7401_transient_refresh_error_is_none_not_expired(svc, error):
+    redis, tool = FakeRedis(), outlook_tool()
+    config = tool["settings"]["outlook_configuration"]
+
+    assert svc.get_access_token(redis, config, svc._graph_login(config), Refresh(error=error)) is None
+    assert keys_for(svc, redis, svc.LOCK_PREFIX) == []
+
+
+def test_7401_expired_login_never_breaks_injection_for_other_toolkits(svc):
+    # Interactive chats and runs keep today's behaviour: the expired toolkit gets no token, the others do
+    calls = []
+
+    def refresh(**kwargs):
+        calls.append(kwargs["refresh_token_value"])
+        if kwargs["refresh_token_value"] == "refresh-o":
+            raise RefusedRefresh("invalid_grant")
+        return {"access_token": "at-d", "expires_in": 3600}
+
+    payload = {"tools": [outlook_tool(), dataverse_tool()]}
+    assert inject(svc, payload, FakeRedis(), refresh) == 1
+    assert list(payload["mcp_tokens"]) == [f"uuid-d:{svc._dataverse_login(dataverse_tool()['settings']['dataverse_configuration'])['token_key']}"]
+
+
+def test_7401_unattended_login_types_are_the_login_resolvers(svc):
+    assert svc.UNATTENDED_LOGIN_TYPES == frozenset(svc.LOGIN_RESOLVERS)
+    assert {"sharepoint_configuration", "outlook_configuration", "teams_configuration",
+            "dataverse_configuration"} <= svc.UNATTENDED_LOGIN_TYPES

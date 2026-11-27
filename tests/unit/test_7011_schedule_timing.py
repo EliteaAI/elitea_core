@@ -66,7 +66,7 @@ def schedule_table(monkeypatch):
     class Base(DeclarativeBase):
         pass
 
-    for parent in ("applications", "application_versions"):
+    for parent in ("applications", "application_versions", "elitea_tools"):
         Table(parent, Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
     stubs = {
         "db": types.SimpleNamespace(Base=Base),
@@ -323,3 +323,12 @@ def test_el_7011_r4_3_stop_date_after_next_run_is_accepted(timing, frozen_now):
 
 def test_el_7011_r4_3_no_stop_date_is_accepted(timing):
     assert timing.model.ScheduleTiming(cron=YEARLY, timezone="UTC").expires_at is None
+
+
+def test_toolkit_index_floor_is_its_own_setting_and_defaults_to_a_day(timing, config):
+    assert timing.min_interval_minutes_for("toolkit_index") == 1440
+    assert timing.min_interval_minutes_for("agent") == 5
+    config.setdefault("scheduler", {}).setdefault("schedules", {})["toolkit_index_min_interval_minutes"] = 60
+    assert timing.min_interval_minutes_for("toolkit_index") == 60
+    assert timing.min_interval_minutes_for("pipeline") == 5
+    assert tuple(timing.schedule_limits()) == (5, 50)

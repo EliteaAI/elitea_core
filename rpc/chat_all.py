@@ -11,7 +11,8 @@ from tools import db, auth, serialize, this, VaultClient, rpc_tools, config as c
 import redis
 from pydantic import ValidationError
 from pydantic.utils import deep_update
-from sqlalchemy import asc, desc, String, func
+from sqlalchemy import asc, desc, Integer, String, func
+from sqlalchemy.exc import IntegrityError
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
@@ -29,15 +30,17 @@ from ..models.pd.llm import merge_llm_selection_override
 from ..models.pd.predict import SioPredictModel, SioContinuePredictModel, ToolkitToolCallPayload
 from ..utils.chat_history import (
     generate_chat_history,
+    generate_payload_chat_history,
     generate_user_input
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..utils.run_status import RunStatus, build_notice, send_notice
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError, emit_refusal
-from ..utils.conversation_access import check_post_access
+from ..utils.conversation_access import check_mentions, check_post_access
 from ..utils.application_utils import build_skill_mappings_list
 from ..utils.skill_utils import validate_agent_skills, SkillInvocationLimitError, SkillVersionDeletedError
 from ..utils.project_skills import UnknownSkillMentionError
@@ -64,14 +67,16 @@ from ..utils.toolkit_authorization import (
 from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.schedule_runs import (
-    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting,
-    apply_schedule_decision, check_schedule_decision,
+    DECISION_REFUSED, ScheduleApproveAllForbidden, ScheduleApproveAllOff, ScheduleApproveAllWebhook,
+    ScheduleDecisionForbidden, ScheduleDecisionInvalid, ScheduleRunNotWaiting, apply_schedule_decision,
+    approves_all, check_schedule_decision, schedule_run_actor_id,
 )
+from ..utils.schedule_settings import is_run_without_asking_allowed
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
     inject_mcp_toolkits, should_inject_runtime_context,
-    get_mcp_entity_link_instructions, resolve_builder_scope_project_id,
+    get_builder_payload, resolve_builder_scope_project_id,
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context
@@ -112,6 +117,25 @@ def _chat_trigger_kwargs(rpc_func: str) -> dict:
     return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
 
 
+def _approve_all_kwargs(session, conversation, rpc_func: str, project_id: int) -> dict:
+    """``auto_approve_sensitive_actions=True`` on a resume of a scheduled run whose owner chose "approve all".
+
+    Only while the project still allows "Run without asking": an admin may switch it off after the choice, and the
+    next resume then asks again.
+
+    The server-side keyword is the only way in: ``predict_sio`` builds the worker payload again and ignores a payload key.
+    The other predict RPCs take no such argument; a chat that is not a scheduled run gets nothing.
+    lean: a supervised fan-out answered in this process gets no flag; a scheduled run fails a child pause before then.
+    """
+    if rpc_func != 'applications_predict_sio':
+        return {}
+    run_id = (getattr(conversation, 'meta', None) or {}).get('schedule_run_id')
+    if run_id is None or not approves_all(session, run_id) or not is_run_without_asking_allowed(project_id):
+        return {}
+    log.debug('Schedule run %s resumes with all sensitive tools approved by its owner', run_id)
+    return {'auto_approve_sensitive_actions': True}
+
+
 def _get_agent_type(
     session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
 ) -> str | None:
@@ -136,12 +160,24 @@ def _get_agent_type(
 
 # The answer of each refused schedule decision (EL-7011)
 _SCHEDULE_REFUSALS = {
-    ScheduleDecisionForbidden: {"error": "Only the schedule owner can approve or reject this run", "status": 403},
+    ScheduleDecisionForbidden: {"error": DECISION_REFUSED, "status": 403},
     ScheduleDecisionInvalid: {
         "error": "hitl_action must be approve, edit, answer, block_with_comment or reject",
         "field": "hitl_action", "status": 400,
     },
     ScheduleRunNotWaiting: {"error": "This schedule run is not waiting for approval", "status": 409},
+    ScheduleApproveAllForbidden: {
+        "error": "Only the person who started this run can approve all its tools", "field": "approve_all",
+        "status": 403,
+    },
+    ScheduleApproveAllWebhook: {
+        "error": "A run started by a webhook cannot approve all its tools", "field": "approve_all",
+        "code": "approve_all_webhook", "status": 403,
+    },
+    ScheduleApproveAllOff: {
+        "error": 'This project does not allow "Run without asking", so all tools cannot be approved',
+        "field": "approve_all", "code": "approve_all_off", "status": 409,
+    },
 }
 _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field": "mcp_auth_action", "status": 400}
 
@@ -149,13 +185,18 @@ _SIGN_IN_REFUSAL = {"error": "mcp_auth_action must be authorize or skip", "field
 def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | None]:
     """Check a HITL decision on the schedule run of the conversation (EL-7011); the run stays as it is.
 
-    The (run id, decision) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    The (run id, decision, approve all) that `_apply_schedule_decision` writes later, or the error dict that refuses it.
+    The decision is None for a fan-out child of a pause that was resumed already: the caller passed the check, nothing
+    is written. Only the decider of the run decides it (`run_decider_id`), and the run must be linked to this chat.
+    "Approve all" also needs the caller to be the actor of the run (`run_actor_id`).
     """
     sign_in = bool(getattr(parsed, 'mcp_auth_resume', False))
     if not (parsed.hitl_resume or sign_in):
         return None, None
     with db.get_session(parsed.project_id) as session:
-        meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
+        chat = session.query(Conversation.id, Conversation.meta).where(
+            Conversation.uuid == parsed.conversation_uuid).first()
+    conversation_id, meta = (chat.id, chat.meta) if chat else (None, None)
     run_id = (meta or {}).get('schedule_run_id')
     if run_id is None:
         return None, None
@@ -170,19 +211,115 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
         answers = getattr(parsed, 'mcp_auth_decisions', None)
         actions = ([item.get('action') if isinstance(item, dict) else None for item in answers]
                    if answers else [parsed.mcp_auth_action])
-    try:
+    # A sign-in answer never carries it; the checks refuse a request that may not choose it
+    approve_all = bool(getattr(parsed, 'approve_all', False)) and not sign_in
+    try:  # the run id in the meta is client-written: the run must be linked to this chat
         decision = check_schedule_decision(
-            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in)
+            parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id), sign_in=sign_in,
+            conversation_id=conversation_id, approve_all=approve_all)
     except ScheduleDecisionInvalid:
         return None, (_SIGN_IN_REFUSAL if sign_in else _SCHEDULE_REFUSALS[ScheduleDecisionInvalid])
     except tuple(_SCHEDULE_REFUSALS) as e:
         return None, _SCHEDULE_REFUSALS[type(e)]
-    return ((run_id, decision) if decision else None), None
+    return (run_id, decision, approve_all and decision == 'approve'), None
+
+
+def _resume_user_id(project_id, pending, caller_id) -> int:
+    """The user a chat resume runs as: the user a decided schedule run acts as, else the caller.
+
+    The schedule owner decides, but the tools of the run use the identity and credentials of the user it started as.
+    """
+    if pending is None:
+        return caller_id
+    return schedule_run_actor_id(project_id, pending[0]) or caller_id
+
+
+# When the schedule owner decides a run another user started, only a plain answer passes (see `_bare_decision_refusal`)
+_BARE_HITL_ACTIONS = ('approve', 'reject')
+_BARE_SIGN_IN_ACTIONS = ('authorize', 'skip')
+# What a decision item may carry: the action and the identity of the card it answers; `value` only when empty
+_BARE_ITEM_KEYS = frozenset({
+    'action', 'value', 'interrupt_id', 'decision_id', 'tool_call_id', 'thread_id', 'child_thread_id',
+    'root_thread_id', 'authorization_request_id',
+})
+# The continue fields a plain answer may carry. The caller's own tokens, server lists, model settings and attachments are
+# cleared by `_drop_caller_inputs`; any other field that is set and truthy changes what runs as the actor, so it is refused
+_BARE_PAYLOAD_FIELDS = frozenset({
+    'project_id', 'conversation_uuid', 'message_id', 'thread_id', 'should_continue', 'hitl_resume', 'hitl_action',
+    'hitl_value', 'hitl_decisions', 'mcp_auth_resume', 'mcp_auth_action', 'mcp_auth_decisions',
+    'authorization_request_id', 'interaction_uuid', 'question_id', 'user_input', 'mcp_tokens', 'ignored_mcp_servers',
+    'user_declined_mcp_servers', 'llm_settings', 'attachments_info',
+})
+_BARE_REFUSAL = {
+    "error": "This run acts as another user: only a plain approve or reject (authorize or skip for a sign-in) is accepted",
+    "field": "hitl_action", "status": 400,
+}
+
+
+def _confirm_builder_changesets(pending, decisions, parsed, decider_id, resume_user_id) -> bool:
+    """Mark every Elitea Builder changeset the user applied as confirmed (#7383), in the project it was stored in.
+    False when one can't be confirmed (expired, already applied, or decided by someone the run doesn't act for)."""
+    from ..utils.builder.runtime import confirm_changeset  # pylint: disable=C0415
+    by_identity = {interrupt_identity(item): item for item in pending or []}
+    if decisions:
+        chosen = [(by_identity.get(str(d.get('interrupt_id') or '')), d.get('action')) for d in decisions]
+    else:
+        chosen = [(pending[0], parsed.hitl_action)] if len(pending or []) == 1 else []
+    for interrupt, action in chosen:
+        if not interrupt or interrupt.get('guardrail_type') != 'builder_changeset' or action != 'apply':
+            continue
+        if decider_id != resume_user_id:
+            return False
+        project_id = interrupt.get('builder_project_id') or parsed.project_id
+        if not interrupt.get('changeset_id') or not confirm_changeset(
+            project_id, resume_user_id, interrupt['changeset_id'],
+        ):
+            return False
+    return True
+
+
+def _bare_decision_refusal(parsed) -> dict | None:
+    """The 400 dict unless the answer is a plain approve or reject (authorize or skip for a sign-in), else None.
+
+    The schedule owner may decide a run an admin started, but the run resumes as the admin: an edit, a typed answer,
+    a note, a filled item value, a typed message or any other field of the payload (such as an approve-all switch)
+    would be run with the admin's rights, so none of them passes.
+    """
+    def plain(action, allowed) -> bool:  # an action of another type is no action, never a TypeError
+        return action is None or (isinstance(action, str) and action in allowed)
+
+    def plain_items(items, allowed) -> bool:
+        return all(
+            isinstance(item, dict) and set(item) <= _BARE_ITEM_KEYS and item.get('value') in (None, '')
+            and isinstance(item.get('action'), str) and item['action'] in allowed
+            for item in items or []
+        )
+
+    if not (
+        plain(parsed.hitl_action, _BARE_HITL_ACTIONS) and plain(parsed.mcp_auth_action, _BARE_SIGN_IN_ACTIONS)
+        and plain_items(parsed.hitl_decisions, _BARE_HITL_ACTIONS)
+        and plain_items(parsed.mcp_auth_decisions, _BARE_SIGN_IN_ACTIONS)
+        and parsed.hitl_value in (None, '') and not parsed.user_input
+        and not any(getattr(parsed, name, None) for name in parsed.model_fields_set - _BARE_PAYLOAD_FIELDS)
+    ):
+        return _BARE_REFUSAL
+    return None
+
+
+def _drop_caller_inputs(parsed) -> None:
+    """Clear what the deciding user sent along: their tokens, server choices, model settings and attachments belong to
+    them, not to the run that resumes as another user."""
+    parsed.llm_settings = None
+    parsed.attachments_info = None
+    parsed.mcp_tokens = {}
+    parsed.ignored_mcp_servers = []
+    parsed.user_declined_mcp_servers = None
+    parsed.user_input = None
 
 
 def _apply_schedule_decision(project_id, pending) -> dict | None:
     """Write a checked schedule decision right before the resume (EL-7011); the 409 dict when it came too late."""
-    if pending is None:
+    if pending is None or pending[1] is None:
         return None
     try:
         apply_schedule_decision(project_id, *pending)
@@ -642,6 +779,7 @@ def generate_toolkit_participant_payload(
         'type': toolkit_type,
         'toolkit_name': toolkit_name,
         'toolkit_id': toolkit_id,
+        'project_id': toolkit_project_id,
         'settings': toolkit_settings
     }
     
@@ -769,7 +907,7 @@ def generate_application_version_payload(
     agent_internal_tools = app_version_details.get('meta', {}).get('internal_tools', [])
 
     # Also get internal_tools from conversation meta and merge with agent's
-    # This allows conversation-level settings (like 'internal_mcp' from support assistant)
+    # This allows conversation-level settings (like 'elitea_builder' from support assistant)
     # to be applied even when chatting with agents
     conversation_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
     merged_internal_tools = list(set(agent_internal_tools + conversation_internal_tools))
@@ -948,13 +1086,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                     combined_tools.append(tool)
             result['internal_tools'] = combined_tools
 
-            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
-            # Skip for pipelines: their instructions are YAML, not a text prompt
-            mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
-            if mcp_link_addon and not _is_pipeline:
-                _vd = result.get('version_details') or {}
-                _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
-                result['version_details'] = _vd
+            # Elitea Builder: the SDK BuilderMiddleware places its prompt; pipelines get none
+            if builder_block := get_builder_payload(combined_tools, _is_pipeline):
+                result['builder'] = builder_block
         # case ParticipantTypes.pipeline:
         #     # TODO: handle as simplified application, but should not ?
         #     entity_settings = EntitySettingsApplication.parse_obj(participant_chat_settings.entity_settings)
@@ -999,7 +1133,10 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             # Get instructions: conversation instructions + user's default instructions from profile
             base_instructions = str(msg_group.conversation.instructions or '')
             user_default_instructions = msg_group.conversation.meta.get('default_instructions', '')
-            if user_default_instructions and base_instructions:
+            # New chats are seeded with the persona prompt in conversation.instructions; don't append it twice (#7468)
+            if user_default_instructions and user_default_instructions.strip() in base_instructions:
+                result['instructions'] = base_instructions
+            elif user_default_instructions and base_instructions:
                 result['instructions'] = f"{base_instructions}\n\n{user_default_instructions}"
             elif user_default_instructions:
                 result['instructions'] = user_default_instructions
@@ -1018,10 +1155,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             else:
                 result['_routing_projection']['instructions'] = result['instructions']
 
-            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
-            mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)
-            if mcp_link_addon:
-                result['instructions'] = (result.get('instructions') or '') + mcp_link_addon
+            if builder_block := get_builder_payload(llm_chat_internal_tools):
+                result['builder'] = builder_block
 
             if predict_payload.llm_settings:
                 result['llm_settings'] = merge_llm_selection_override(
@@ -1037,7 +1172,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                     session, msg_group, predict_payload, participant_chat_settings.entity_settings,
                 )
             except SkillParticipantError as e:
-                raise PayloadGenerationError(str(e)) from e
+                raise PayloadGenerationError(str(e), code=e.code) from e
             result.update(skill_payload)
         case ParticipantTypes.toolkit:
             # Toolkit participant: generate payload for toolkit tool call
@@ -1052,7 +1187,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
 
     # Continue flow can provide explicit user_input (e.g., a custom continue note).
     # Fall back to the original message-group content when absent.
-    if getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None:
+    continues_with_own_text = getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None
+    if continues_with_own_text:
         result['user_input'] = predict_payload.user_input
     else:
         result['user_input'] = generate_user_input(msg_group)
@@ -1069,6 +1205,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     try:
         apply_participant_skill_mentions(
             session, msg_group, result, predict_payload.project_id, strict_mentions=strict_skill_mentions,
+            mention_source=generate_user_input(msg_group) if continues_with_own_text else None,
         )
     except SkillInvocationLimitError as e:
         raise PayloadGenerationError(str(e), code=e.code) from e
@@ -1258,11 +1395,27 @@ class RPC:
                     )
                 return {"error": denied_error}
 
+            mentioned_user_ids, mention_refusal = check_mentions(
+                parsed.project_id, conversation, current_user['id'], parsed.mentioned_user_ids,
+            )
+            if mention_refusal:
+                if sid:
+                    raise SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error=mention_refusal['error'],
+                        stream_id=parsed.conversation_uuid,
+                        message_id=parsed.question_id,
+                        details={'rejected_user_ids': mention_refusal['rejected_user_ids']},
+                    )
+                return mention_refusal
+
             context_management_enabled = get_context_manager_feature_flag(
                 parsed.project_id,
             )
 
-            if parsed.participant_id is None and not parsed.user_ids:
+            if parsed.participant_id is None and not parsed.user_ids and not mentioned_user_ids:
                 dummy_participant, _ = get_or_create_one(
                     session=session,
                     entity_name=ParticipantTypes.dummy,
@@ -1589,6 +1742,7 @@ class RPC:
                     to=sid,
                 )
 
+            notified_user_ids = set()
             if parsed.user_ids:
                 mentioned_participants = session.query(Participant).filter(
                     Participant.id.in_(parsed.user_ids),
@@ -1598,6 +1752,7 @@ class RPC:
                     auth_user_id = participant.entity_meta.get('id')
                     if not auth_user_id:
                         continue
+                    notified_user_ids.add(str(auth_user_id))
                     try:
                         notify_user_mentioned_in_conversation(
                             project_id=parsed.project_id,
@@ -1608,6 +1763,24 @@ class RPC:
                         )
                     except Exception as e:
                         log.warning(f'Failed to notify mentioned user (participant {participant.id}): {e}')
+
+            if mentioned_user_ids:
+                # Another message may add one of these people first; the retry skips them, a second miss only delays their participant entry
+                if not self.add_mentioned_users_as_participants(session, conversation, mentioned_user_ids, room):
+                    self.add_mentioned_users_as_participants(session, conversation, mentioned_user_ids, room)
+                for user_id in mentioned_user_ids:
+                    if str(user_id) in notified_user_ids:
+                        continue
+                    try:
+                        notify_user_mentioned_in_conversation(
+                            project_id=parsed.project_id,
+                            user_id=user_id,
+                            conversation=conversation,
+                            initiator_id=current_user['id'],
+                            message_id=parsed.question_id
+                        )
+                    except Exception as e:
+                        log.warning(f'Failed to notify mentioned user {user_id}: {e}')
 
             if msg_group.sent_to_id:
                 # here we need to generate payload
@@ -1649,10 +1822,9 @@ class RPC:
                     if not preserve_instructions:
                         payload['instructions'] = None
 
-                    payload['chat_history'] = generate_chat_history(
-                        message_groups=chat_history_groups, summaries=summaries,
-                        include_context=not is_pipeline,
-                        routing_projection=payload.get('_routing_projection'),
+                    payload['chat_history'], history_group_ids = generate_payload_chat_history(
+                        session, payload, chat_history_groups, summaries,
+                        is_pipeline=is_pipeline, config=this.descriptor.config,
                     )
                     payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                     log.debug('chat payload["chat_history"] has %d messages', len(payload["chat_history"]))
@@ -1667,7 +1839,7 @@ class RPC:
                         }
                     }
                     if context_management_enabled:
-                        context_meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
+                        context_meta['chat_history_group_ids'] = history_group_ids
                     execution_generation = str(uuid4())
                     context_meta = begin_execution_generation(
                         context_meta if context_management_enabled else {},
@@ -1708,7 +1880,7 @@ class RPC:
                         raise
 
                     self.finalize_timed_out_response(
-                        session, response_msg, result, await_task_timeout
+                        session, response_msg, result, await_task_timeout, project_id=parsed.project_id,
                     )
 
                     if return_message_ids:
@@ -1719,6 +1891,55 @@ class RPC:
                             "response_message_group_id": response_msg.id,
                         }
                     return result
+
+    @web.method()
+    def add_mentioned_users_as_participants(self, session, conversation, user_ids, room) -> bool:
+        """Add the mentioned people missing from the chat in one commit; False when a duplicate participant mapping rolled it back."""
+        present_user_ids = {
+            str((p.entity_meta or {}).get('id'))
+            for p in conversation.participants
+            if p.entity_name == ParticipantTypes.user.value
+        }
+        missing_user_ids = [uid for uid in user_ids if str(uid) not in present_user_ids]
+        if not missing_user_ids:
+            return True
+        known_participants = {
+            str(participant.entity_meta.get('id')): participant
+            for participant in session.query(Participant).filter(
+                Participant.entity_name == ParticipantTypes.user.value,
+                Participant.entity_meta['id'].astext.cast(Integer).in_(missing_user_ids),
+            ).all()
+        }
+        authors = {author['id']: author for author in get_authors_data(missing_user_ids)}
+        new_participants = []
+        for user_id in missing_user_ids:
+            author = authors.get(user_id) or {}
+            user_meta = {'user_name': author.get('name'), 'user_avatar': author.get('avatar')}
+            participant = known_participants.get(str(user_id))
+            if participant is None:
+                participant = Participant(
+                    entity_name=ParticipantTypes.user.value,
+                    entity_meta=ParticipantEntityUser(id=user_id).dict(),
+                    meta=user_meta,
+                )
+                session.add(participant)
+            elif not participant.meta:
+                participant.meta = user_meta
+            new_participants.append(participant)
+        conversation.participants.extend(new_participants)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            log.warning("Mentioned users %s were added to conversation %s concurrently", missing_user_ids, conversation.id)
+            return False
+        for participant in new_participants:
+            self.context.sio.emit(
+                event=SioEvents.chat_participant_update,
+                data=ParticipantBase.from_orm(participant).dict(),
+                room=room,
+            )
+        return True
 
     @web.method()
     def _store_blocked_turn(self, session, conversation, author_participant, parsed, blocked, room, sid):
@@ -2139,12 +2360,19 @@ class RPC:
         else:
             current_user = auth.current_user()
 
-        # Owner check of a scheduled run before any resume (EL-7011); an internal replay was checked already
+        # Owner check of a scheduled run before any resume; an internal replay was checked already
         schedule_decision = None
         if _internal_token is not INTERNAL_CONTINUE_TOKEN:
             schedule_decision, denied = _check_schedule_decision(parsed, current_user['id'])
             if denied:
                 return self._refuse_schedule_decision(sid, parsed, denied)
+        # The owner decides, but the run resumes as the user it started as; the run log keeps who decided
+        resume_user_id = _resume_user_id(parsed.project_id, schedule_decision, current_user['id'])
+        if resume_user_id != current_user['id']:
+            denied = _bare_decision_refusal(parsed)
+            if denied:
+                return self._refuse_schedule_decision(sid, parsed, denied)
+            _drop_caller_inputs(parsed)
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
@@ -2212,7 +2440,7 @@ class RPC:
         # the approval belongs to the child's own agent identity + checkpoint.
         # The child resumes on its own thread; on completion it fires `stopped`
         # and the reconcile gate wakes the parent.
-        child_resume = self._continue_child_resume(sid, parsed, current_user)
+        child_resume = self._continue_child_resume(sid, parsed, current_user, decided=schedule_decision is not None)
         if child_resume is not None:
             # lean: the write follows the child start, so a decision that came too late is only logged;
             # move it into _continue_child_resume when a schedule run must refuse a parked child
@@ -2434,6 +2662,17 @@ class RPC:
                             parsed.hitl_action,
                             parsed.hitl_value,
                         )
+                # Elitea Builder (#7383): an Apply click is the only thing that confirms a destructive changeset
+                if not _confirm_builder_changesets(
+                    pending, decisions, parsed, current_user['id'], resume_user_id,
+                ):
+                    raise SioValidationError(
+                        sio=self.context.sio, sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error='This change can no longer be applied; ask for it again.',
+                        stream_id=str(parsed.conversation_uuid),
+                        message_id=parsed.message_id,
+                    )
                 response_msg.meta = retire_interrupts(
                     response_msg.meta, resolved_ids,
                 )
@@ -2659,10 +2898,9 @@ class RPC:
                 continues_pipeline = (
                     (payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
                 )
-                payload['chat_history'] = generate_chat_history(
-                    message_groups=chat_history_groups, summaries=summaries,
-                    include_context=not continues_pipeline,
-                    routing_projection=payload.get('_routing_projection'),
+                payload['chat_history'], history_group_ids = generate_payload_chat_history(
+                    session, payload, chat_history_groups, summaries,
+                    is_pipeline=continues_pipeline, config=this.descriptor.config,
                 )
                 payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                 if is_token_limit_continuation_request:
@@ -2672,7 +2910,7 @@ class RPC:
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:
-                    response_msg.meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
+                    response_msg.meta['chat_history_group_ids'] = history_group_ids
                     flag_modified(response_msg, 'meta')
                     session.add(response_msg)
                     session.commit()
@@ -2682,21 +2920,23 @@ class RPC:
                     'question_id': str(msg_group.uuid),
                 })
                 record_skill_run(session, response_msg, start_event_content)
+                # With a socket the predict RPC takes the user and the stream room of that socket, over `user_id`: a run
+                # that resumes as another user gets neither the decider's socket nor the decider as its user
                 result = getattr(self.context.rpc_manager.call, rpc_func)(
-                    sid, payload, SioEvents.chat_predict.value,
+                    sid if resume_user_id == current_user['id'] else None, payload, SioEvents.chat_predict.value,
                     start_event_content=start_event_content,
                     chat_project_id=parsed.project_id,
                     await_task_timeout=await_task_timeout,
-                    user_id=current_user['id'],
+                    user_id=resume_user_id,
                     routing_projection=payload.pop('_routing_projection', None),
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
                     **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
                     **_chat_trigger_kwargs(rpc_func),
-
+                    **_approve_all_kwargs(session, conversation, rpc_func, parsed.project_id),
                 )
                 self.finalize_timed_out_response(
-                    session, response_msg, result, await_task_timeout
+                    session, response_msg, result, await_task_timeout, project_id=parsed.project_id,
                 )
                 return result
             except Exception as e:
@@ -2714,7 +2954,7 @@ class RPC:
                 )
 
     @web.method()
-    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout):
+    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout, project_id=None):
         """Close out a response message group whose task was cancelled on blocking timeout.
 
         Mirrors the stop button (api/v2/task.py) minus the salvage/delete branches: the
@@ -2752,6 +2992,12 @@ class RPC:
             data=serialize(MessageGroupDetail.model_validate(response_msg)),
             room=get_chat_room(response_msg.conversation.uuid),
         )
+        self._end_chat_run(session, project_id, response_msg, RunStatus.stopped)
+
+    @web.method()
+    def _end_chat_run(self, session, project_id, msg_group, status) -> None:
+        """Tell its users' lists a run ended outside the stream-end path (EL-7385)."""
+        send_notice(self.context.sio, build_notice(session, project_id, msg_group, status))
 
     @web.method()
     def _refuse_schedule_decision(self, sid, parsed, denied: dict) -> dict:
@@ -2764,7 +3010,7 @@ class RPC:
         return denied
 
     @web.method()
-    def _continue_child_resume(self, sid, parsed, current_user):
+    def _continue_child_resume(self, sid, parsed, current_user, decided=False):
         """Resume a parked-fan-out child on its own thread, or None if N/A.
 
         A parallel sub-agent child pauses for HITL on its OWN thread_id and emits
@@ -2774,6 +3020,9 @@ class RPC:
         linkage meta so the child's eventual completion wakes the parent gate.
         Returns the start_task result dict, or None when thread_id is not a known
         child (caller then falls through to the normal parent continue flow).
+
+        `decided`: the schedule decision check passed for this caller, so the schedule owner may answer the card of
+        a run an admin started, though the owner is neither the author nor a participant of that chat.
         """
         thread_id = getattr(parsed, 'thread_id', None)
         if not thread_id:
@@ -2821,6 +3070,7 @@ class RPC:
                 or (
                     conversation.author_id != current_user['id']
                     and not user_is_participant
+                    and not decided
                 )
             ):
                 raise SioValidationError(
@@ -3172,6 +3422,8 @@ class RPC:
 
             msg_group_deleted = False
             room = get_chat_room(msg_group.conversation.uuid)
+            # Read now: the delete branch below removes the row (EL-7385)
+            run_notice = build_notice(session, project_id, msg_group, RunStatus.stopped)
 
             # Handle empty message case: salvage thinking text or delete
             if not msg_group.message_items:
@@ -3236,4 +3488,5 @@ class RPC:
                     room=room,
                 )
 
-            return {"success": True}
+        send_notice(self.context.sio, run_notice)
+        return {"success": True}

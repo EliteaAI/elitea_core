@@ -41,6 +41,7 @@ def load_draft_utils(monkeypatch, setting=None):
         setting.access.append((project_id, entity_type, entity_id, user_id))
         return ({'ok': False, 'error': 'Not found'}, 404) if entity_id in setting.blocked else None
     folders.entity_access_error = entity_access_error
+    folders.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     monkeypatch.setitem(sys.modules, folders.__name__, folders)
     risk = types.ModuleType('plugins.elitea_core.utils.schedule_risk')
     risk.scan_schedule = lambda *args: setting.scans.append(args) or {

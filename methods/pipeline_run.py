@@ -8,6 +8,7 @@ from ..utils.pipeline_utils import validate_yaml_from_str
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, user_input_preview
 from ..utils.application_utils import validate_and_resolve_llm_settings
 from ..utils.input_guardrail import inspect_and_unsecret
+from ..utils.vectorstore import get_pgvector_connection_string
 
 
 YAML_MAX_SIZE = 512 * 1024  # 512KB
@@ -101,6 +102,11 @@ class Method:
 
         # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
         payload = inspect_and_unsecret(payload, VaultClient(project_id), project_id, user_id)
+        # Pre-fork, as predict does: without it the worker looks the connstr up itself while it forks (#7660)
+        try:
+            payload['pgvector_connstr'] = get_pgvector_connection_string(project_id)
+        except Exception as e:  # pylint: disable=W0703
+            log.warning("Failed to prefetch pgvector_connstr for project_id=%s: %s", project_id, e)
 
         user_context = {
             "user_id": user_id,

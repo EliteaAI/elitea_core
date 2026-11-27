@@ -45,6 +45,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter toolkits that reference a specific artifact."},
             {"name": "ids", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Comma-separated list of toolkit IDs to filter by (max 100). Used for folder contents."},
+            {"name": "has_indexes", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
+             "description": "Return only toolkits that have at least one index. Used by the schedule picker."},
         ],
         available_to_users=True,
     )
@@ -70,6 +72,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         author_id = request.args.get('author_id', type=int)
         search_artifact = request.args.get('search_artifact')
         ids_param = request.args.get('ids')
+        has_indexes = request.args.get('has_indexes', 'false').lower() == 'true'
 
         try:
             result = toolkits_listing(
@@ -85,6 +88,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 author_id=author_id,
                 search_artifact=search_artifact,
                 ids=ids_param,
+                has_indexes=has_indexes,
             )
 
             # Enrich with folder info (bulk query) - non-blocking

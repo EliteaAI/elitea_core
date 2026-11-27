@@ -165,7 +165,8 @@ class InputGuardrailBlockedError(Exception):
                 f"Your message appears to contain {' and '.join(labels)}. It was not sent to the model. "
                 "Remove it, or store it as a project secret and reference it instead."
             )
-            self.message_key = f"input_guardrail.blocked.{self.categories[0]}"
+            # A key per category set, not the first category: a mixed block names both (#7346)
+            self.message_key = f"input_guardrail.blocked.{'_and_'.join(sorted(self.categories))}"
         else:
             # fail_closed on a detector error: nothing was detected, the check could not run
             self.message = "Your message could not be checked by the input guardrail, so it was not sent to the model."
@@ -180,6 +181,8 @@ class InputGuardrailBlockedError(Exception):
             "rules": self.rules,
             "segments": self.segments,
             "message_key": self.message_key,
+            # Fixed text, no value: the card falls back to it for a key the UI does not know
+            "message": self.message,
         }
 
     def body(self):

@@ -99,10 +99,10 @@ class TestEL7011CreateVersionTrigger:
         stored = _stored(create_version, pipeline_settings={"trigger": SCHEDULE, "x": 1})
         assert stored["pipeline_settings"] == {"trigger": CHAT, "x": 1}
 
-    def test_r2_1_create_with_other_trigger_is_unchanged(self, create_version):
-        # TC-US23-06
+    def test_r2_1_create_with_webhook_trigger_stores_chat_message(self, create_version):
+        # TC-US23-06, changed by #7402: a new version never gets a legacy webhook
         stored = _stored(create_version, pipeline_settings={"trigger": WEBHOOK})
-        assert stored["pipeline_settings"] == {"trigger": WEBHOOK}
+        assert stored["pipeline_settings"] == {"trigger": CHAT}
 
     def test_r2_1_create_without_pipeline_settings_adds_none(self, create_version):
         assert "pipeline_settings" not in _stored(create_version, name="v1")

@@ -47,6 +47,11 @@ def ends(world, monkeypatch):  # noqa: F811 -- the fixture extends the imported 
         with session() as s:
             return claim.insert_cron_run(s, 1)
 
+    def set_schedule_status(status):
+        with session() as s:
+            s.get(schedules.EntitySchedule, 1).last_run_status = status
+            s.commit()
+
     def resume_at(moment):
         with session() as s:
             s.get(schedules.EntityScheduleRun, 1).resumed_at = moment
@@ -55,7 +60,8 @@ def ends(world, monkeypatch):  # noqa: F811 -- the fixture extends the imported 
     return type("Ends", (), {
         "world": world, "runs": runs, "starter": starter, "emitted": emitted, "schedule": staticmethod(schedule),
         "runs_of_schedule": staticmethod(runs_of_schedule), "skip": staticmethod(skip),
-        "insert_cron_run": staticmethod(insert_cron_run), "resume_at": staticmethod(resume_at)})
+        "insert_cron_run": staticmethod(insert_cron_run), "resume_at": staticmethod(resume_at),
+        "set_schedule_status": staticmethod(set_schedule_status)})
 
 
 # TC-US13-01 / R1.2, R1.5
@@ -88,6 +94,7 @@ def test_7011_r1_2_a_finished_run_is_not_changed_by_a_second_end(ends):
 # TC-US13-07 / R2.1: the overlap is recorded as skipped and the active run stays running
 def test_7011_r2_1_an_overlap_records_a_skipped_run_and_keeps_the_active_run(ends):
     assert ends.insert_cron_run() is None  # the active-run index holds run 1
+    ends.set_schedule_status("running")  # a started run copies its status to the schedule
 
     skipped_id = ends.skip("the previous run is still running")
 
@@ -95,7 +102,7 @@ def test_7011_r2_1_an_overlap_records_a_skipped_run_and_keeps_the_active_run(end
     assert (active.status, active.finished_at) == ("running", None)
     assert (skipped.id, skipped.status, skipped.reason) == (skipped_id, "skipped", "the previous run is still running")
     assert skipped.conversation_id is None
-    assert ends.schedule().last_run_status == "skipped"
+    assert ends.schedule().last_run_status == "running"  # the active run owns the schedule status
 
 
 # R2.2: a closed budget scope blocks the run before any predict

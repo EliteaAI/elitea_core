@@ -7,7 +7,7 @@ from typing import Dict, Optional, List
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import asc, create_engine, desc, func, inspect, or_, String, text, Integer, Boolean
+from sqlalchemy import asc, cast, create_engine, delete, desc, func, inspect, or_, String, text, Integer, Boolean
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, selectinload
 from tools import auth, db, this, serialize, context, VaultClient
@@ -567,6 +567,37 @@ def toolkit_kind(tool_type: str, meta: Optional[dict]) -> Optional[str]:
     return 'toolkit'
 
 
+def _delete_index_test_runs(session, toolkit_id: int, index_name: str | None = None) -> None:
+    """Delete the Test runs of one index, or of every index of the toolkit when `index_name` is None.
+
+    An index Test run has no schedule and no application: only its form names the toolkit and the index, so no
+    foreign key removes it. It runs in a savepoint, so a schema without the Test run columns costs a log line and
+    the delete of the index or toolkit still goes through. The caller commits.
+    """
+    # Late: the schedule models need the running plugin, and most callers of this module never touch them
+    from ..models.entity_schedule import RUN_APPLICATION_ID, RUN_FORM, EntityScheduleRun
+
+    conditions = [
+        EntityScheduleRun.schedule_id.is_(None),
+        EntityScheduleRun.trigger == 'test',
+        RUN_APPLICATION_ID.is_(None),
+        # Cast on both dialects: SQLite returns the number itself, Postgres the text
+        cast(RUN_FORM['toolkit_id'].as_string(), String) == str(toolkit_id),
+    ]
+    if index_name is not None:
+        conditions.append(RUN_FORM['index_name'].as_string() == index_name)
+    try:
+        with session.begin_nested():
+            session.execute(delete(EntityScheduleRun.__table__).where(*conditions))
+    except (ProgrammingError, OperationalError) as error:
+        # Only a missing column or a missing NOT NULL column is an old schema. Any other error (a lock timeout)
+        # must stop the delete, or the toolkit goes and its Test runs stay behind.
+        if error_sqlstate(error) not in ('23502', '42703'):
+            raise
+        # Not the helpers of schedule_test_runs: importing them from here starts an import cycle
+        log.warning("Test runs of toolkit %s not deleted: the schema has no Test run columns yet", toolkit_id)
+
+
 def delete_toolkit(session, project_id: int, tool: EliteATool) -> dict:
     """Delete a toolkit and commit; returns the ``toolkit_deleted`` payload for the caller to fire.
 
@@ -578,6 +609,8 @@ def delete_toolkit(session, project_id: int, tool: EliteATool) -> dict:
         from .web_search import invalidate_web_search_cache
         invalidate_web_search_cache()
     tool_id = tool.id
+    # The Test runs of the toolkit's indexes name it only in their form, so the cascade does not reach them
+    _delete_index_test_runs(session, tool_id)
     session.delete(tool)
     session.query(ApplicationVersion).filter(
         ApplicationVersion.meta['attachment_toolkit_id'].astext == str(tool_id)
@@ -594,6 +627,32 @@ def delete_toolkit(session, project_id: int, tool: EliteATool) -> dict:
     return toolkit_data
 
 
+def _toolkit_ids_with_indexes(project_id: int, toolkit_query) -> list[int]:
+    """Ids of the toolkits of `toolkit_query` whose vector store holds at least one index.
+
+    One batch count for the whole query, as the unfiltered list runs it. Without a vector store connection
+    or on a failed count no toolkit counts, so the picker shows none rather than a toolkit it cannot use.
+    """
+    schema_ids = []
+    for row_id, row_settings in toolkit_query.with_entities(EliteATool.id, EliteATool.settings).all():
+        pgvector = row_settings.get('pgvector_configuration') if isinstance(row_settings, dict) else None
+        if isinstance(pgvector, dict) and pgvector:
+            schema_ids.append(str(int(row_id)))
+    if not schema_ids:
+        return []
+    try:
+        from .vectorstore import get_pgvector_connection_string
+        connection_string = get_pgvector_connection_string(project_id)
+        if not connection_string:
+            log.warning("No pgvector connection string in vault for project_id=%s; has_indexes finds no toolkit", project_id)
+            return []
+        counts = batch_count_toolkit_indexes({schema: connection_string for schema in schema_ids})
+    except Exception:
+        log.exception("Failed to count indexes for has_indexes")
+        return []
+    return [int(schema) for schema, count in counts.items() if count]
+
+
 def toolkits_listing(
     project_id: int,
     query: str,
@@ -607,6 +666,7 @@ def toolkits_listing(
     author_id: Optional[int] = None,
     search_artifact: Optional[str] = None,
     ids: Optional[str] = None,
+    has_indexes: bool = False,
 ):
     from ..models.all import EliteATool
     from ..models.pd.tool import ToolDetails, sanitization_pattern
@@ -704,6 +764,11 @@ def toolkits_listing(
         if folder_filter is not None:
             q = q.filter(folder_filter)
 
+        # After the folder filter, so a hidden toolkit never shows; before the pins and the count, so the total
+        # and the page slice both hold only toolkits with an index
+        if has_indexes:
+            q = q.filter(EliteATool.id.in_(_toolkit_ids_with_indexes(project_id, q)))
+
         # Add pin status (project-wide) - always included
         q, new_columns = add_pins_with_priority(
             original_query=q,
@@ -746,6 +811,7 @@ def toolkits_listing(
             or author_id
             or filter_mcp
             or filter_application is True
+            or has_indexes
         )
 
         # Snapshot the pgvector-capable ids/schemas across the FULL filtered set (pre-pagination)
@@ -1175,6 +1241,41 @@ def application_toolkit_change_relation(
                     )
                 else:
                     # Different version - update the existing toolkit's version
+                    parent_mapping = session.query(EntityToolMapping).where(
+                        EntityToolMapping.tool_id == existing_relation.id,
+                        EntityToolMapping.entity_id == parent_application_version.application_id,
+                        EntityToolMapping.entity_version_id == parent_application_version.id,
+                        EntityToolMapping.entity_type == ToolEntityTypes.agent,
+                    ).first()
+                    is_shared = session.query(EntityToolMapping).where(
+                        EntityToolMapping.tool_id == existing_relation.id,
+                        EntityToolMapping.id != parent_mapping.id,
+                    ).first() is not None
+                    if is_shared:
+                        # The toolkit is linked to other parent versions too (e.g. copied by
+                        # Save As Version): repoint only this parent's mapping (issue #7396)
+                        target_toolkit = session.query(EliteATool).where(
+                            EliteATool.type == 'application',
+                            EliteATool.settings['application_id'].astext.cast(Integer) == application_id,
+                            EliteATool.settings['application_version_id'].astext.cast(Integer) == version_id
+                        ).first()
+                        if not target_toolkit:
+                            target_toolkit = EliteATool(
+                                name=child_application_version.name,
+                                type='application',
+                                author_id=user_id,
+                                settings={
+                                    'application_id': application_id,
+                                    'application_version_id': version_id
+                                },
+                            )
+                            session.add(target_toolkit)
+                            session.flush()
+                        log.info(f"Repointing relation of version {parent_application_version.id} "
+                                 f"from toolkit {existing_relation.id} to {target_toolkit.id}")
+                        parent_mapping.tool_id = target_toolkit.id
+                        session.flush()
+                        return {'has_relation': True, 'tool_id': target_toolkit.id, 'updated_version': True}
                     log.info(f"Updating existing relation toolkit {existing_relation.id} "
                              f"from version {existing_version_id} to {version_id}")
                     new_settings = dict(existing_relation.settings)
@@ -1328,6 +1429,7 @@ INDEX_META_LOCK_TIMEOUT = "5s"
 INDEX_META_RETRY_LOCK_TIMEOUT = "15s"
 
 INDEX_META_PRESERVED_KEYS = ("indexed", "updated", "total", "report", "indexed_chunks")
+PREVIOUS_RUN_OUTCOME_KEYS = ("report", "skipped")
 
 
 def lock_toolkit_index_meta(session: Session, index_name: str, lock_timeout: str = INDEX_META_LOCK_TIMEOUT):
@@ -1697,8 +1799,9 @@ def update_toolkit_index_meta_history_with_failed_state(connection_string: str, 
         # groups it under that run in Toolkit History, hiding its error.
         current_metadata['task_id'] = None
         current_metadata['conversation_id'] = None
-        # Update current meta with new data and put the same item to history
-        history.append(current_metadata)# add item with no history
+        history.append({
+            key: value for key, value in current_metadata.items() if key not in PREVIOUS_RUN_OUTCOME_KEYS
+        })
         current_metadata['history'] = json.dumps(history)
         meta.cmetadata = current_metadata
         session.commit()
@@ -1767,8 +1870,10 @@ def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_
                     last_entry.get('created_on') == current_metadata.get('created_on')):
                     # Remove the last in_progress entry and append current failed state instead
                     history.pop()
-                    meta_copy = current_metadata.copy()
-                    meta_copy.pop('history', None)
+                    meta_copy = {
+                        key: value for key, value in current_metadata.items()
+                        if key != 'history' and key not in PREVIOUS_RUN_OUTCOME_KEYS
+                    }
                     history.append(meta_copy)
                     current_metadata['history'] = json.dumps(history)
                     log.debug(
@@ -2389,6 +2494,19 @@ def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, inde
         )
 
 
+def load_toolkit_for_index(project_id: int, user_id: Optional[int], toolkit_id: int):
+    """(schema, connection_string, error) of an index endpoint's toolkit; a credential the caller cannot use is a 400."""
+    from ..utils.predict_utils import get_toolkit_config
+    try:
+        toolkit_config = get_toolkit_config(project_id, user_id, toolkit_id)
+    except ConfigurationExpandError as e:
+        log.warning(f"Toolkit {toolkit_id} credentials cannot be resolved for user {user_id}: {e.errors}")
+        return None, None, (
+            {"ok": False, "error": "This toolkit's credentials can't be used — check its configuration"}, 400
+        )
+    return load_and_validate_toolkit_for_index(toolkit_config)
+
+
 def resolve_toolkit_index_connection(project_id: int, toolkit_id: int, user_id: Optional[int] = None):
     """Resolve (connection_string, toolkit_name_id) from ids for flows whose event lacks
     toolkit_config (the agent/chat path). Called only at Stop time, never per event.
@@ -2410,6 +2528,18 @@ def resolve_toolkit_index_connection(project_id: int, toolkit_id: int, user_id: 
     return connection_string, toolkit_name_id
 
 
+def _delete_index_schedule_row(session, toolkit_id: int, index_name: str) -> None:
+    """Delete the `toolkit_index` schedule row of the index; its runs go with it by foreign key. The caller commits."""
+    # Late, as in `_delete_index_test_runs`
+    from ..models.entity_schedule import EntitySchedule
+
+    session.execute(delete(EntitySchedule).where(
+        EntitySchedule.entity_type == 'toolkit_index',
+        EntitySchedule.toolkit_id == toolkit_id,
+        EntitySchedule.index_name == index_name,
+    ))
+
+
 def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: str):
     if not index_name:
         return {
@@ -2429,6 +2559,11 @@ def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: s
             meta = toolkit.meta or {}
             indexes_meta = meta.get("indexes_meta", {})
 
+            # The schedule row and the Test runs go first and with the same commit as the JSON entry. After the
+            # migration the entry can be gone while the row is not, so this does not depend on the entry.
+            _delete_index_schedule_row(project_session, toolkit_id, index_name)
+            _delete_index_test_runs(project_session, toolkit_id, index_name)
+
             # Remove the entire index_meta_id entry (all users)
             if index_name in indexes_meta:
                 from sqlalchemy.orm.attributes import flag_modified
@@ -2436,10 +2571,10 @@ def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: s
                 indexes_meta.pop(index_name)
                 toolkit.meta["indexes_meta"] = indexes_meta
                 flag_modified(toolkit, "meta")
-                project_session.commit()
-                log.debug(f"Index '{index_name}' successfully removed and committed for toolkit {toolkit_id} (project_id={project_id})")
             else:
                 log.debug(f"Index '{index_name}' not found in toolkit {toolkit_id} (project_id={project_id})")
+            project_session.commit()
+            log.debug(f"Index '{index_name}' cleaned up for toolkit {toolkit_id} (project_id={project_id})")
             return {"ok": True}, 200
     except Exception as e:
         log.error(f"Error during index deletion {e}")

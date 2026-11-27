@@ -28,7 +28,7 @@ ADMIN_ID = 99
 PERMISSION_PREFIX = 'models.applications.schedules.'
 EDITOR = {PERMISSION_PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 ADMIN = EDITOR | {PERMISSION_PREFIX + 'admin'}
-NOT_FOUND = {'code': 'not_found', 'error': 'Schedule not found'}
+NOT_FOUND = {'code': 'not_found', 'error': 'The requested item could not be found'}
 
 
 class FakeSpan:
@@ -60,6 +60,8 @@ class Harness:
         self.fingerprint = 'fp-1'
         self.run_without_asking_allowed = False
         self.scans = []
+        # #7401 Connections check: `connections` maps version id -> rows; unknown versions are all ok
+        self.connections, self.connection_calls, self.switched_off = {}, [], []
         self.path = ''
         self.query = {}
 
@@ -115,6 +117,23 @@ class Harness:
 
 BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
 SENSITIVE_CODES = {'sensitive_action', 'personal_credential'}
+
+
+def fake_connections(state, prerun=None):
+    """The #7401 Connections check of `utils/schedule_prerun` (its own tests), over `state.connections`."""
+    prerun = prerun or types.ModuleType(f'{PACKAGE}.utils.schedule_prerun')
+
+    def check_connections(project_id, application_id, version_id, owner_id, refresh=True):
+        state.connection_calls.append((version_id, owner_id, refresh))
+        rows = state.connections.get(version_id, [])
+        return {'rows': rows, 'credential_refs': sorted({r['credential_uuid'] for r in rows if r.get('credential_uuid')})}
+
+    prerun.check_connections = check_connections
+    prerun.connections_ready = lambda result: all(row['status'] == 'ok' for row in result['rows'])
+    prerun.lost_logins = lambda result: [row for row in result['rows'] if row.get('login') in ('expired', 'gone')]
+    prerun.switch_off_for_login = lambda project_id, owner_id, row: state.switched_off.append(
+        (owner_id, row['credential_uuid']))
+    return prerun
 
 
 def fake_risk_module(state):
@@ -192,10 +211,12 @@ def harness(isolated_sys_modules, monkeypatch):
 
     folder_access = types.ModuleType(f'{PACKAGE}.utils.folder_access')
     folder_access.entity_access_error = lambda *args, **kwargs: harness.access_error
+    folder_access.APPLICATION_ENTITY_TYPES = ['agent', 'pipeline']
     notifications = types.ModuleType(f'{PACKAGE}.utils.schedule_notifications')
     notifications.notify_schedule_event = lambda *args, **kwargs: harness.notify(*args, **kwargs)
     sys.modules[folder_access.__name__] = folder_access
     sys.modules[f'{PACKAGE}.utils.schedule_risk'] = fake_risk_module(harness)  # the scan has its own tests (US-17)
+    sys.modules[f'{PACKAGE}.utils.schedule_prerun'] = fake_connections(harness)  # the check has its own tests
     settings = types.ModuleType(f'{PACKAGE}.utils.schedule_settings')
     settings.is_run_without_asking_allowed = lambda project_id: harness.run_without_asking_allowed
     sys.modules[settings.__name__] = settings
@@ -214,13 +235,18 @@ def harness(isolated_sys_modules, monkeypatch):
     sys.modules[governance.__name__] = governance
     mandates = types.ModuleType(f'{PACKAGE}.utils.mandate_admission')
 
-    def owner_run_request(module, **kwargs):
+    # The real signature, so a keyword the real function does not take fails here as it does in production
+    def owner_run_request(module, *, project_id, application_id, version_id, trigger_ref):
+        kwargs = dict(project_id=project_id, application_id=application_id, version_id=version_id,
+                      trigger_ref=trigger_ref)
         harness.owner_requests.append((harness.user_id, kwargs))
         if harness.owner_request_error:
             raise harness.owner_request_error
         return harness.owner_request
 
     mandates.owner_run_request = owner_run_request
+    mandates.schedule_trigger_ref = lambda schedule_id: f'schedule:entity:{schedule_id}'
+    mandates.test_run_trigger_ref = lambda run_id: f'schedule:test:{run_id}'
     sys.modules[mandates.__name__] = mandates
     sys.modules[notifications.__name__] = notifications
 
@@ -228,6 +254,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/constants.py', 'utils.constants')
     load('utils/schedule_timing.py', 'utils.schedule_timing')
     load('utils/schedule_access.py', 'utils.schedule_access')
+    load('utils/schedule_rights.py', 'utils.schedule_rights')
     load('models/pd/index.py', 'models.pd.index')
     load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
     load('models/pd/schedule_run.py', 'models.pd.schedule_run')
@@ -235,6 +262,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/schedule_claim.py', 'utils.schedule_claim')
     load('utils/schedule_dispatch.py', 'utils.schedule_dispatch')
     load('utils/schedule_service.py', 'utils.schedule_service')
+    load('utils/schedule_test_runs.py', 'utils.schedule_test_runs')
     harness.config = tools.this.module.descriptor.config
     harness.module = load('utils/schedule_item_handlers.py', 'utils.schedule_item_handlers')
     sys.modules.update(sqlite_db.handler_stubs(PACKAGE, real='schedule_item_handlers'))
@@ -280,8 +308,12 @@ def assert_400_names(response, field):
 
 # --- R1.3, R1.4, R1.5, R1.6: entity, folder rights, permission, type
 
-def test_7011_r1_3_entity_outside_the_project_is_400_on_application_id(harness):
-    assert_400_names(harness.call('post', agent_body(application_id=99, version_id=10)), 'application_id')
+@pytest.mark.parametrize('body', [agent_body(), agent_body(version_id=11), agent_body(entity_type='pipeline')])
+def test_el7607_a_hidden_agent_answers_like_a_missing_one_whatever_the_version_and_type(harness, body):
+    missing = harness.call('post', {**body, 'application_id': 99})
+    harness.access_error = ({'ok': False, 'error': 'Not found'}, 404)
+    assert harness.call('post', body) == missing == ({'code': 'not_found', 'error': 'The requested item could not be found'}, 404)
+    assert harness.row(1) is None
 
 
 def test_7011_r1_3_version_of_another_entity_is_400_on_version_id(harness):
@@ -290,7 +322,7 @@ def test_7011_r1_3_version_of_another_entity_is_400_on_version_id(harness):
 
 def test_7011_r1_4_folder_rights_denial_is_returned_and_nothing_is_saved(harness):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert_refusal(harness.call('post', agent_body()), 404, 'No access')
+    assert_refusal(harness.call('post', agent_body()), 404, 'The requested item could not be found')
     assert harness.row(1) is None
 
 
@@ -677,3 +709,27 @@ def test_7011_us32_r2_2_a_failed_name_lookup_keeps_the_details(harness, monkeypa
     schedule_id = harness.seed()
     body, status = harness.call('get', schedule_id=schedule_id)
     assert (status, body['owner']) == (200, {'id': OWNER_ID, 'name': None})
+
+
+# --- one required-field check for Save and for the draft test run
+
+def test_check_schedule_body_is_the_check_a_create_runs(harness):
+    service = sys.modules[f'{PACKAGE}.utils.schedule_service']
+    models = sys.modules[f'{PACKAGE}.models.pd.entity_schedule']
+    bad = models.ScheduleCreate.model_validate(agent_body(prompt='  ', variables=[]))
+    good = models.ScheduleCreate.model_validate(agent_body())
+
+    with harness.session_factory() as session:
+        service.check_schedule_body(session, PROJECT_ID, good)
+        with pytest.raises(service.ScheduleError) as refused:
+            service.check_schedule_body(session, PROJECT_ID, bad)
+
+    assert refused.value.response[0]['field'] == 'prompt'
+    assert_400_names(harness.call('post', agent_body(prompt='  ', variables=[])), 'prompt')
+
+
+@pytest.mark.parametrize('field', ['name', 'application_id', 'version_id', 'cron', 'timezone'])
+def test_schedule_body_without_a_required_field_is_400_on_that_field(harness, field):
+    body = agent_body()
+    del body[field]
+    assert_400_names(harness.call('post', body), field)

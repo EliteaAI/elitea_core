@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 SPEC_MAX_COMPATIBILITY_LENGTH = 500
 SPEC_OPTIONAL_KEYS = ('license', 'compatibility', 'allowed-tools')
@@ -9,7 +9,12 @@ ELITEA_METADATA_PREFIX = 'elitea-'
 LEGACY_RUN_SETTINGS_KEY = 'elitea_run_settings'
 LEGACY_VERSION_KEY = 'elitea_version'
 ELITEA_OWNED_KEYS = frozenset({'name', 'description', 'tags', LEGACY_VERSION_KEY, LEGACY_RUN_SETTINGS_KEY})
-KEYS_SHOWN_BY_ELITEA = frozenset({'license'})
+MODEL_INVOCATION_KEY = 'disable-model-invocation'
+USER_INVOCATION_KEY = 'user-invocable'
+INVOCATION_KEYS = (MODEL_INVOCATION_KEY, USER_INVOCATION_KEY)
+ARGUMENT_HINT_KEY = 'argument-hint'
+KEYS_SHOWN_BY_ELITEA = frozenset({'license', ARGUMENT_HINT_KEY, *INVOCATION_KEYS})
+INVOCATION_FLAG_KEYS = ('disable_model_invocation', 'user_invocable')
 
 
 def _drop_elitea_metadata(metadata: dict) -> dict:
@@ -36,6 +41,50 @@ def _validate_spec_fields(frontmatter: dict) -> None:
     metadata = frontmatter.get('metadata')
     if metadata is not None and not isinstance(metadata, dict):
         raise ValueError('Field "metadata" must be a mapping')
+
+    for key in INVOCATION_KEYS:
+        value = frontmatter.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f'Field "{key}" must be true or false')
+
+
+def invocation_flags(version_meta: Optional[dict]) -> Dict[str, bool]:
+    """The two Claude invocation keys of a version, as payload keys, only when set."""
+    frontmatter = (version_meta or {}).get(FRONTMATTER_META_KEY) or {}
+    flags = {}
+    if frontmatter.get(MODEL_INVOCATION_KEY) is True:
+        flags['disable_model_invocation'] = True
+    if frontmatter.get(USER_INVOCATION_KEY) is False:
+        flags['user_invocable'] = False
+    return flags
+
+
+def _hint_as_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, list):
+        items = [item for item in (_hint_as_text(item) for item in value) if item]
+        return '[' + ', '.join(items) + ']' if items else ''
+    if isinstance(value, dict):
+        pairs = ((key, _hint_as_text(item)) for key, item in value.items())
+        return ', '.join(f'{key}: {item}' for key, item in pairs if item)
+    return str(value).strip()
+
+
+def argument_hint_text(version_meta: Optional[dict]) -> Optional[str]:
+    """The version's argument-hint as one line, with the brackets the author typed restored around a YAML list."""
+    return _hint_as_text(((version_meta or {}).get(FRONTMATTER_META_KEY) or {}).get(ARGUMENT_HINT_KEY)) or None
+
+
+def argument_hint_payload(version_meta: Optional[dict]) -> Dict[str, str]:
+    """The hint as a payload key for the ~ menu, only when the version has one."""
+    text = argument_hint_text(version_meta)
+    return {'argument_hint': text} if text else {}
+
+
+def carried_invocation_flags(entry: dict) -> Dict[str, bool]:
+    """The invocation payload keys already present on a skill entry, so a rebuilt entry keeps them."""
+    return {key: entry[key] for key in INVOCATION_FLAG_KEYS if key in entry}
 
 
 def _to_jsonb_safe(value: Any) -> Any:

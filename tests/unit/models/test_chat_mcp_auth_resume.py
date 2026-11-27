@@ -52,6 +52,8 @@ _module(
     Environment=object,
     DebugUndefined=object,
 )
+_module('jinja2.sandbox', SandboxedEnvironment=object)
+_module('jinja2.exceptions', SecurityError=Exception)
 
 chat = importlib.import_module('models.pd.chat')
 ApplicationChatRequest = chat.ApplicationChatRequest
@@ -88,6 +90,7 @@ _module(
 _module('utils.next_input_suggestion_utils', next_input_suggestion_config=lambda _project_id: {'enabled': False})
 _module(
     'utils.skill_utils',
+    merge_invoked_skills=lambda message, resumed: [*message, *(resumed or [])],
     SkillInvocationLimitError=type('SkillInvocationLimitError', (Exception,), {}),
     consume_message_skills=lambda message, _skills: (message, []),
     resolve_runtime_skills=lambda _details: [],
@@ -99,6 +102,7 @@ _module(
     strip_skill_bodies=lambda skills: [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []],
 )
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
+_module('utils.skill_scratch', skill_scratch_for_run=lambda _project_id, _conversation_uuid, _user_id: {})
 _module(
     'utils.internal_tools',
     resolve_internal_mcp_tools=lambda *_args: None,
@@ -113,7 +117,7 @@ for short_name in (
     'models.pd', 'models.pd.chat', 'models.pd.tool', 'models.pd.utils',
     'models.pd.version', 'utils', 'utils.application_tools',
     'utils.internal_tools', 'utils.llm_settings',
-    'utils.next_input_suggestion_utils', 'utils.skill_utils', 'utils.skill_mentions',
+    'utils.next_input_suggestion_utils', 'utils.skill_utils', 'utils.skill_mentions', 'utils.skill_scratch',
 ):
     sys.modules[f'plugins.elitea_core.{short_name}'] = sys.modules[short_name]
 predict_utils = importlib.import_module('plugins.elitea_core.utils.predict_utils')

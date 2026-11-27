@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from pylon.core.tools import web, log
 from sqlalchemy import Integer, and_
 from sqlalchemy.orm import joinedload, selectinload
-from tools import db, serialize, auth, store_secrets, VaultClient, this, rpc_tools
+from tools import db, serialize, auth, store_secrets, VaultClient, this, rpc_tools, config as c
 
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
@@ -54,19 +54,24 @@ from ..utils.exceptions import (
 )
 from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
+from ..utils.webhook_secrets import application_webhook_uuids, drop_secrets_of
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
+from ..utils.conversation_starters_utils import import_starters_errors
 from ..utils.skill_utils import (
     detach_skills_for_entity_versions, delete_skill, SkillNotFoundError, SkillPublishedError,
 )
 from ..models.skill import Skill, SkillVersion
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
     get_public_base_url, get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
-    load_context_settings_from_conversation, user_input_preview
+    load_context_settings_from_conversation, user_input_preview, inject_stored_logins
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
 from ..utils.sio_guards import ensure_sio_user_in_project
+from ..utils.error_text import NOT_FOUND_TEXT
+from ..utils.schedule_access import INDEX_WRITE_TOOLS, ScheduleScope
+from ..utils.schedule_service import ScheduleError, check_index_rights
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
 from ..utils.internal_tools import (
     require_internal_mcp_pat,
@@ -258,17 +263,27 @@ def _delete_application(module, session, project_id: int, application: Applicati
             'version_details': None,
         }
     else:
-        application_data = ApplicationDetailModel.from_orm(application).model_dump()
+        application_data = ApplicationDetailModel.from_orm(application).model_dump(
+            mode='json', exclude={'webhook_secret'},
+        )
     application_data['project_id'] = project_id
     if application_data.get('version_details') is None and agent_type:
         application_data['version_details'] = {'agent_type': agent_type}
+
+    webhook_uuids = application_webhook_uuids(session, application.id)  # the cascade removes the rows
 
     session.delete(application)
     session.commit()
 
     try:
+        drop_secrets_of(session, project_id, webhook_uuids)
+    except Exception as e:  # pylint: disable=W0703 -- the application is deleted; an orphan key is only logged
+        session.rollback()
+        log.error("Application %s: cannot remove its webhook secrets: %s", application_data['id'], type(e).__name__)
+
+    try:
         module.context.event_manager.fire_event(
-            ApplicationEvents.application_deleted, application_data
+            ApplicationEvents.application_deleted.value, application_data
         )
     except Exception:
         log.exception("application_deleted handlers failed for application %s of project %s",
@@ -313,6 +328,40 @@ def _toolkit_run_refused(module, sid, sio_event, data, message_id, denied):
             message_id=message_id,
         )
     return {"code": denied.reason_code, "error": denied.message}
+
+
+def _stored_index_toolkit(project_id: int, toolkit_config: dict) -> Optional[dict]:
+    """The saved toolkit of this project an index write runs, as the dispatch payload carries it; else None."""
+    toolkit_id = toolkit_config.get('toolkit_id')
+    if toolkit_id is None or toolkit_config.get('project_id', project_id) != project_id:
+        return None
+    with db.get_session(project_id) as session:
+        toolkit = session.query(EliteATool).where(EliteATool.id == toolkit_id).first()
+        if toolkit is None:
+            return None
+        details = serialize(ToolDetails.from_orm(toolkit))
+    return {
+        'type': details.get('type'),
+        'toolkit_name': details.get('name') or details.get('toolkit_name'),
+        'toolkit_id': toolkit_id,
+        'settings': details.get('settings') or {},
+    }
+
+
+def _index_write_refusal(project_id: int, sid, user_id, toolkit: Optional[dict],
+                         permission: str) -> Optional[AdmissionDenied]:
+    """Why the caller may not make this index write, or None: the index editor's rule, on the toolkit that runs."""
+    if toolkit is None:
+        return AdmissionDenied("INDEX_NOT_FOUND", NOT_FOUND_TEXT)
+    auth_data = {'auth_data': auth.sio_users[sid]} if sid else {}
+    permissions = frozenset(auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id, **auth_data))
+    try:
+        check_index_rights(project_id, toolkit['toolkit_id'],
+                           ScheduleScope(user_id=user_id, is_admin=False, permissions=permissions), permission)
+    except ScheduleError as refused:
+        body, _ = refused.response
+        return AdmissionDenied(f"INDEX_{body['code'].upper()}", body['error'])
+    return None
 
 
 class RPC:
@@ -382,6 +431,7 @@ class RPC:
                     invoked_skills: Optional[list] = None,
                     project_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
+                    skill_argument: Optional[str] = None,
                     sid_project_id: Optional[int] = None,
                     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
                     mandate_ticket: Optional[str] = None,
@@ -543,6 +593,7 @@ class RPC:
                 chat_skills=chat_skills,
                 invoked_skills=invoked_skills,
                 project_skills=project_skills,
+                skill_argument=skill_argument,
                 auto_approve_sensitive_actions=auto_approve_sensitive_actions,
             )
             if routing_projection is not None:
@@ -982,14 +1033,16 @@ class RPC:
             )
             raise PoolSaturationError(pool="agents", retry_after=5)
 
+        # The row's task id, whoever started the run: Stop needs it, and a streaming row without one
+        # past a short grace is a run that never started (EL-7385), same as predict_sio
+        if sio_event == SioEvents.chat_predict.value:
+            self.context.event_manager.fire_event('applications_predict_task_id', {
+                "task_id": task_id,
+                "project_id": parsed.project_id,
+                "message_group_id": parsed.message_id,
+            })
         # Send SIO events only for SIO calls
         if sid:
-            if sio_event == SioEvents.chat_predict.value:
-                self.context.event_manager.fire_event('applications_predict_task_id', {
-                    "task_id": task_id,
-                    "project_id": parsed.project_id,
-                    "message_group_id": parsed.message_id,
-                })
             self.stream_response(sio_event, {
                 "type": "start_task",
                 "stream_id": parsed.stream_id,
@@ -1215,6 +1268,11 @@ class RPC:
 
                 payload['project_id'] = project_id
                 payload['user_id'] = author_id
+
+                starters_errors = import_starters_errors(payload.get('name', ''), versions)
+                if starters_errors:
+                    errors.extend(starters_errors)
+                    return '', errors
 
                 application_data = ApplicationImportModel.model_validate(payload)
             except ValidationError as e:
@@ -1447,7 +1505,7 @@ class RPC:
                     continue
                 # The toolkit is gone already: a failing handler is logged, it does not stop the rest
                 try:
-                    self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted, toolkit_data)
+                    self.context.event_manager.fire_event(ApplicationEvents.toolkit_deleted.value, toolkit_data)
                 except Exception:
                     log.exception(
                         "toolkits_delete_by_kind: toolkit_deleted handlers failed for toolkit %s of project %s",
@@ -1861,6 +1919,17 @@ class RPC:
         # expansion below rewrites toolkit_config
         toolkit_id = (data.get('toolkit_config') or {}).get('toolkit_id')
 
+        index_permission = INDEX_WRITE_TOOLS.get(tool_name)
+        if index_permission:
+            stored_toolkit = _stored_index_toolkit(project_id, data.get('toolkit_config') or {})
+            denied = _index_write_refusal(project_id, sid, user_id, stored_toolkit, index_permission)
+            if denied:
+                log.info("Index write %s refused for user %s in project %s: %s",
+                         tool_name, user_id, project_id, denied.reason_code)
+                placeholder_id = (start_event_content or {}).get('question_id') or data.get('message_id')
+                return _toolkit_run_refused(self, sid, sio_event, data, placeholder_id, denied)
+            data['toolkit_config'] = stored_toolkit
+
         try:
             if not (run_identity_applies(sid) and not platform_read):   # an admitted run uses the run token (#7229)
                 require_internal_mcp_pat(data.get('toolkit_config', {}), user_id)
@@ -2233,6 +2302,16 @@ class RPC:
             resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id, admitted_run=False)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
+        # A saved MCP login (#7643) answers the test like a browser token; its secrets never go to the runtime
+        login_payload = {'tools': [data['toolkit_config']], 'mcp_tokens': dict(data.get('mcp_tokens') or {})}
+        # A (re-)login check must reach the sign-in, so the current saved login does not answer it
+        if not data.pop('skip_stored_logins', False):
+            inject_stored_logins(login_payload, project_id, user_id)
+        else:
+            from ..utils.stored_oauth_tokens import strip_mcp_login_secrets  # pylint: disable=C0415
+            strip_mcp_login_secrets(login_payload['tools'])
+        data['mcp_tokens'] = login_payload['mcp_tokens']
 
         # Get project-specific auth_token from secrets
         try:
@@ -2703,7 +2782,7 @@ class RPC:
             _notify_version_schedules_disabled(project_id, disabled_schedules)
 
             self.context.event_manager.fire_event(
-                ApplicationEvents.application_version_deleted, version_data
+                ApplicationEvents.application_version_deleted.value, version_data
             )
 
             return {

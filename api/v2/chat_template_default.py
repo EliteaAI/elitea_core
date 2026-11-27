@@ -3,6 +3,7 @@ from tools import api_tools, auth, config as c, db
 from ...models.chat_template import ChatTemplate
 from ...models.pd.chat_template import ChatTemplateRead
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.project_settings_access import require_project_settings_admin
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -13,6 +14,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         },
     })
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def post(self, project_id: int, template_id: int, **kwargs):
         with db.get_session(project_id) as session:
             target = session.query(ChatTemplate).filter(ChatTemplate.id == template_id).first()
@@ -39,6 +41,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         },
     })
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def delete(self, project_id: int, template_id: int, **kwargs):
         # Unset default — a project may have no default template
         with db.get_session(project_id) as session:

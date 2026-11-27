@@ -141,6 +141,7 @@ def ns(tmp_path_factory):  # pylint: disable=R0914,R0915
 
     ns.execution = load("utils", "pipeline_execution", "utils")
     ns.scheduling = load("rpc", "pipeline_scheduling", "rpc")
+    load("utils", "webhook_input", "utils")   # the shared webhook preview (#7454), on the stubbed guardrail
     ns.webhook_rpc = load("rpc", "pipeline_webhook", "rpc")
     for module in (ns.execution, ns.scheduling, ns.webhook_rpc):
         setattr(module, "create_trigger_run_conversation", lambda **kwargs: (
@@ -530,8 +531,7 @@ def webhook(ns, env, monkeypatch):
     monkeypatch.setattr(ns.tools, "register_openapi", lambda **kwargs: (lambda func: func), raising=False)
     for name, attrs in {
         f"{PKG}.utils.constants": {"PROMPT_LIB_MODE": "prompt_lib"},
-        f"{PKG}.utils.folder_access": {"require_folder_access": lambda *a, **k: (lambda func: func),
-                                       "APPLICATION_ENTITY_TYPES": ()},
+        f"{PKG}.utils.folder_access": {"version_refusal": lambda *a, **k: None},
         f"{PKG}.utils.pipeline_trigger": {
             "WEBHOOK_TYPE_CONFIG": {"github": {"signature_header": "X-Hub-Signature-256", "signing_id_header": "x"}},
             "normalize_secret_value": lambda s: s, "validate_webhook_secret": None,
@@ -578,6 +578,63 @@ def test_a_bad_signature_mints_nothing_and_runs_nothing(ns, env, agent, webhook)
     result, status = post(webhook)
     assert status == 400 and ns.state.predicts == [] and ns.state.conversations == []
     assert len(module._mandate_tickets) == 0   # pylint: disable=W0212
+
+
+GENERIC_404 = {"code": "not_found", "error": "The requested item could not be found"}, 404
+
+
+def _validate_with(webhook, monkeypatch, version, headers, secret="secret", signature_ok=False):
+    """The real signature check over a fake session holding `version` (None: no such version)."""
+    session = mock.MagicMock()
+    session.query.return_value.options.return_value.get.return_value = version
+    monkeypatch.setattr(webhook, "db", types.SimpleNamespace(get_session=lambda project_id: mock.MagicMock(
+        __enter__=lambda self: session, __exit__=lambda *a: False)))
+    monkeypatch.setattr(sys.modules["sqlalchemy.orm"], "joinedload", lambda attribute: attribute)
+    monkeypatch.setattr(webhook.ApplicationVersion, "application", None, raising=False)
+    monkeypatch.setattr(webhook, "VaultClient", lambda project_id: types.SimpleNamespace(unsecret=lambda ref: secret))
+    monkeypatch.setattr(webhook, "validate_webhook_secret", lambda **kwargs: (signature_ok, "X-Hub-Signature-256 mismatch"))
+    monkeypatch.setattr(webhook, "request", types.SimpleNamespace(data=b"{}", headers=headers))
+    validate = webhook.WebHookAPI._validate_webhook_signature   # pylint: disable=W0212
+    return validate(webhook.handler, 1, 999, "github", b"{}")
+
+
+SIGNED = {"X-Hub-Signature-256": "sha256=abc"}
+
+
+@pytest.mark.parametrize("trigger, headers, secret", [
+    ({"type": "webhook", "webhook_secret": "ref"}, {}, "secret"),
+    ({"type": "chat_message"}, SIGNED, "secret"),
+    ({"type": "webhook", "webhook_secret": "ref"}, SIGNED, ""),
+    ({"type": "webhook", "webhook_secret": "ref"}, SIGNED, "secret"),
+], ids=["no_signature_header", "no_webhook_trigger", "secret_gone_from_vault", "bad_signature"])
+def test_el7607_an_unproven_delivery_answers_like_an_unknown_version(webhook, monkeypatch, trigger, headers, secret):
+    unknown = _validate_with(webhook, monkeypatch, None, SIGNED)
+    version = FakeVersion()
+    version.pipeline_settings = {"trigger": trigger}
+    assert _validate_with(webhook, monkeypatch, version, headers, secret) == unknown == (False, GENERIC_404)
+
+
+def test_el7607_a_genuine_delivery_still_passes_the_check(webhook, monkeypatch):
+    version = FakeVersion()
+    version.pipeline_settings = {"trigger": {"type": "webhook", "webhook_secret": "ref"}}
+    version.application = "the pipeline"
+    assert _validate_with(webhook, monkeypatch, version, SIGNED, signature_ok=True) == (True, (version, "the pipeline"))
+
+
+@pytest.mark.parametrize("refusal", [None, GENERIC_404], ids=["visible", "missing_or_hidden"])
+def test_el7607_an_unknown_webhook_type_is_400_whatever_the_version(webhook, monkeypatch, refusal):
+    monkeypatch.setattr(webhook, "version_refusal", lambda *args, **kwargs: refusal)
+    answer = webhook.handler.post(project_id=1, version_id=70, webhook_type="nosuch")
+    assert answer == ({"error": "Bad signature type"}, 400)
+    assert webhook.state.signature_checks == 0
+
+
+def test_el7607_a_hidden_or_missing_version_is_refused_before_the_signature_is_read(webhook, monkeypatch):
+    calls = []
+    monkeypatch.setattr(webhook, "version_refusal",
+                        lambda project_id, version_id, not_found, write=False: calls.append(not_found) or not_found)
+    assert post(webhook) == GENERIC_404
+    assert calls == [GENERIC_404] and webhook.state.signature_checks == 0
 
 
 @pytest.mark.parametrize("name, change, code", [
@@ -684,6 +741,8 @@ def do_predict(ns, env, monkeypatch):
     monkeypatch.setitem(sys.modules, f"{PKG}.utils.input_guardrail", stub(
         f"{PKG}.utils.input_guardrail", inspect_and_unsecret=lambda payload, vault, *a: vault.unsecret(payload)))
     monkeypatch.setitem(sys.modules, f"{PKG}.utils.sio_utils", stub(f"{PKG}.utils.sio_utils", SioEvents=mock.MagicMock()))
+    monkeypatch.setitem(sys.modules, f"{PKG}.utils.api_run_history", stub(
+        f"{PKG}.utils.api_run_history", should_record_api_run=lambda *a, **k: False, open_api_run_conversation=None))
     monkeypatch.setattr(sys.modules[f"{PKG}.models.all"].ApplicationVersion, "application", mock.MagicMock(), raising=False)
     monkeypatch.setattr(ns.tools, "serialize", lambda value: value, raising=False)
     monkeypatch.setattr(ns.tools, "VaultClient", lambda *a, **k: mock.MagicMock(), raising=False)
@@ -698,6 +757,7 @@ def run_do_predict(ns, env, do_predict, governed=True, signature="sig", version=
     module = arm(ns, env, governed=governed)
     module.task_node = mock.MagicMock()
     module.task_node.start_task.return_value = "task-1"
+    module.descriptor = types.SimpleNamespace(config={})
     version = version or types.SimpleNamespace(
         id=70, application_id=7, llm_settings={"model_name": "m"}, agent_type="agent", instructions="x",
         application=types.SimpleNamespace(name="agent", webhook_secret="secret"))
@@ -934,8 +994,11 @@ def index_tick(ns, env, monkeypatch):
     ns.tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
         timeout=lambda seconds: types.SimpleNamespace(project_list=lambda filter_=None: [{"id": 1}]))))
     monkeypatch.setattr(module, "rpc_tools", ns.tools.rpc_tools)
+    scheduled = types.SimpleNamespace(keys=set())   # the (toolkit id, index name) pairs that hold a schedule row
+    read_keys = module._scheduled_index_keys
+    monkeypatch.setattr(module, "_scheduled_index_keys", lambda project_id: scheduled.keys)
     return types.SimpleNamespace(module=module, helpers=helpers, tools_module=tools_module, predict_utils=predict_utils,
-                                 toolkit=toolkit, session=session)
+                                 toolkit=toolkit, session=session, scheduled=scheduled, read_keys=read_keys)
 
 
 def run_index_tick(ns, env, index_tick, schedules, governed=True):
@@ -983,6 +1046,42 @@ def test_flag_off_the_index_tick_goes_on_to_resolve_credentials_as_today(ns, env
     run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}}, governed=False)
     assert index_tick.helpers.resolve_credentials.call_count == 1   # the old path (its sentinel failure is the tick's own catch)
     assert index_tick.helpers.handle_failed_index_schedule.call_count == 0 and env.denied == []
+
+
+def test_an_index_with_a_schedule_row_is_left_to_that_row_by_the_old_tick(ns, env, index_tick):
+    index_tick.scheduled.keys = {(12, "idx")}
+    run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0
+    assert index_tick.helpers.stamp_schedule_last_run.call_count == 0
+    assert index_tick.tools_module.start_index_task.call_count == 0 and env.denied == []
+
+
+def test_an_index_of_another_toolkit_with_a_row_does_not_stop_this_one(ns, env, index_tick):
+    index_tick.scheduled.keys = {(13, "idx"), (12, "other")}
+    run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 1
+
+
+def test_a_project_whose_schedule_rows_cannot_be_read_is_skipped_by_the_old_tick(ns, env, index_tick, monkeypatch):
+    monkeypatch.setattr(index_tick.module, "_scheduled_index_keys", lambda project_id: index_tick.module._UNREADABLE)
+    run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
+    assert index_tick.helpers.handle_failed_index_schedule.call_count == 0
+    assert index_tick.tools_module.start_index_task.call_count == 0
+
+
+def test_the_scheduled_index_read_returns_the_pairs_of_the_rows_and_fails_closed(ns, env, index_tick, monkeypatch):
+    import sqlalchemy as sa
+    monkeypatch.setitem(sys.modules, f"{PKG}.models.entity_schedule", stub(
+        f"{PKG}.models.entity_schedule", EntitySchedule=types.SimpleNamespace(
+            toolkit_id=sa.column("toolkit_id"), index_name=sa.column("index_name"))))
+    session = mock.MagicMock()
+    session.execute.return_value.all.return_value = [(12, "idx"), (13, "docs")]
+    scope = mock.MagicMock()
+    scope.__enter__.return_value = session
+    ns.tools.db.get_session = lambda project_id: scope
+    assert index_tick.read_keys(5) == {(12, "idx"), (13, "docs")}
+    session.execute.side_effect = RuntimeError("column toolkit_id does not exist")
+    assert index_tick.read_keys(5) is index_tick.module._UNREADABLE
 
 
 def test_the_governed_branch_sits_right_after_the_due_count_and_before_any_resolution():

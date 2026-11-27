@@ -12,6 +12,8 @@ from tools import api_tools, config as c, db, auth, register_openapi
 from ...utils.evaluation_result_utils import get_case_executions
 from ...utils.evaluation_library_utils import EvalLibraryError
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.eval_history_redaction import redact_execution, viewer_hidden_case_ids
+from ...utils.evaluation_run_utils import get_run
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -59,6 +61,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status
+            snapshot = get_run(project_id, run_id, session=session).snapshot
+        hidden = viewer_hidden_case_ids(project_id, snapshot, auth.current_user().get("id"))
+        if hidden:
+            data["executions"] = [redact_execution(row, hidden) for row in data["executions"]]
         return data, 200
 
 

@@ -4,6 +4,7 @@ from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 
 from ...models.pd.project_context import ProjectContextDetail, ProjectContextUpdate
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.project_settings_access import require_project_settings_admin
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -43,6 +44,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def put(self, project_id: int, **kwargs):
         try:
             parsed = ProjectContextUpdate.model_validate(dict(request.json))
@@ -95,6 +97,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_project_settings_admin
     def delete(self, project_id: int, **kwargs):
         config = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_first_filtered_project(
             project_id=project_id,

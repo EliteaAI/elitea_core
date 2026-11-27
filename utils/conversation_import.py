@@ -14,17 +14,21 @@ import time
 import uuid
 import zipfile
 from base64 import b64encode
+from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 from pylon.core.tools import log
-from tools import MinioClient, VaultClient, auth, rpc_tools
+from sqlalchemy.orm import selectinload
+from tools import MinioClient, VaultClient, auth, db, rpc_tools
 
 from ..models.all import Application
+from ..models.elitea_tools import EliteATool
 from ..models.conversation import Conversation
-from ..models.enums.all import CanvasTypes, ParticipantTypes
+from ..models.enums.all import CanvasTypes, ImportParticipantStatus, ParticipantTypes, PublishStatus
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..models.message_items.canvas import CanvasMessageItem, CanvasVersionItem
@@ -38,6 +42,7 @@ from ..models.pd.conversation_import import (
     ImportTextItem,
 )
 from ..models.pd.participant import ParticipantCreate
+from ..models.pd.tool import ToolDetails
 from ..models.skill import Skill
 from .authors import get_authors_data
 from .attachments import FileToAIProcessorCollector, NotSupportableProcessorExtension, parse_filepath
@@ -52,8 +57,17 @@ from .chat_crypto import (
 from .chat_constants import CONVERSATION_NAME_MAX_LENGTH
 from .conversation_utils import create_conversation
 from .file_utils import sanitize_filename
+from .folder_access import (
+    APPLICATION_ENTITY_TYPES,
+    TOOLKIT_ENTITY_TYPES,
+    build_folder_ids_exclusion_clause,
+    get_restricted_folder_ids,
+)
 from .internal_tools import get_default_attachment_bucket
 from .participant_utils import add_participant_to_conversation
+from .skill_run_utils import SkillRunError, build_skill_run_target
+from .utils import get_public_project_id_or_none
+from .zip_safety import is_compression_bomb, is_encrypted_zip_member, is_unsafe_zip_member
 
 IMPORT_STAGING_DIR = os.path.join(tempfile.gettempdir(), 'elitea_chat_imports')
 STAGING_TTL_SECONDS = 3600
@@ -61,7 +75,6 @@ SUPPORTED_FORMAT_MAJOR = 1
 MAX_MESSAGES = 10000
 MAX_JSON_BYTES = 100 * 1024 * 1024
 MAX_ZIP_ENTRIES = 1000
-MAX_COMPRESSION_RATIO = 200
 DEFAULT_IMPORTED_NAME = 'Imported chat'
 CONVERSATION_NAME_MIN_LENGTH = 3
 
@@ -179,16 +192,6 @@ def parse_chat_export(data: dict) -> tuple[ChatExportEnvelope, list[ImportMessag
 
 # ---------- zip safety ----------
 
-def _is_unsafe_member(info: zipfile.ZipInfo) -> bool:
-    name = info.filename
-    if not name or name.startswith('/') or '\\' in name or '\x00' in name:
-        return True
-    if '..' in PurePosixPath(name).parts or ':' in name.split('/', 1)[0]:
-        return True
-    is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
-    return is_symlink
-
-
 def open_safe_zip(path: Path, max_total_bytes: int) -> tuple[zipfile.ZipFile, zipfile.ZipInfo]:
     """Open a decrypted archive after checking entry count, paths, sizes and compression ratio."""
     try:
@@ -201,12 +204,12 @@ def open_safe_zip(path: Path, max_total_bytes: int) -> tuple[zipfile.ZipFile, zi
             raise ChatImportError(f'Invalid file: the ZIP archive contains more than {MAX_ZIP_ENTRIES} files.')
         total = 0
         for info in infos:
-            if _is_unsafe_member(info):
+            if is_unsafe_zip_member(info):
                 raise ChatImportError(MSG_UNSAFE_ZIP)
-            if info.flag_bits & 0x1:
+            if is_encrypted_zip_member(info):
                 raise ChatImportError(MSG_BAD_ZIP)
             total += info.file_size
-            if info.file_size > 1024 * 1024 and info.file_size > max(info.compress_size, 1) * MAX_COMPRESSION_RATIO:
+            if is_compression_bomb(info):
                 raise ChatImportError(MSG_UNSAFE_ZIP)
         if total > max_total_bytes:
             raise ChatImportError(MSG_TOO_LARGE.format(max_total_bytes // (1024 * 1024)))
@@ -387,6 +390,7 @@ def prepare_import(project_id: int, user_id: int, encrypted_path: Path, file_nam
         finally:
             if zf is not None:
                 zf.close()
+        meta['participants'] = resolve_import_participants(project_id, user_id, envelope)
         (staging / 'meta.json').write_text(json.dumps(meta), 'utf-8')
     except Exception:
         discard_staging(import_id)
@@ -400,65 +404,298 @@ def prepare_import(project_id: int, user_id: int, encrypted_path: Path, file_nam
         'include_attachments': kind == 'zip',
         'attachments_referenced': envelope.export_info.include_attachments,
         'attachments': attachments,
+        'participants': [build_participant_preview(row) for row in meta['participants']],
     }
 
 
-# ---------- commit ----------
+# ---------- participants ----------
 
 _LINKABLE_AI_MODELS = {
     ParticipantTypes.application.value: Application,
     ParticipantTypes.skill.value: Skill,
+    ParticipantTypes.toolkit.value: EliteATool,
 }
+_PUBLIC_LINKABLE_AI = {ParticipantTypes.application.value, ParticipantTypes.skill.value}
+_FOLDER_ENTITY_TYPES = {
+    ParticipantTypes.application.value: APPLICATION_ENTITY_TYPES,
+    ParticipantTypes.skill.value: ['skill'],
+    ParticipantTypes.toolkit.value: TOOLKIT_ENTITY_TYPES,
+}
+_ALL_FOLDER_ENTITY_TYPES = [t for types in _FOLDER_ENTITY_TYPES.values() for t in types]
+_UNUSABLE_APPLICATION_STATUSES = {PublishStatus.unpublished, PublishStatus.embedded}
 
 
-def _find_entity_id_by_name(session, model, name: str) -> int | None:
-    row = session.query(model.id).filter(model.name == name).order_by(model.id.asc()).first()
-    return row[0] if row else None
+@dataclass(frozen=True)
+class LookupSource:
+    project_id: int
+    session: object
+    is_public: bool
+    restricted_folder_ids: list
 
+
+def _toolkit_display_name(toolkit) -> str | None:
+    """Name the export wrote for a toolkit whose name column is empty."""
+    try:
+        return ToolDetails.model_validate(toolkit, context={'authors_map': {}}).toolkit_name
+    except Exception:  # pylint: disable=W0703
+        return None
+
+
+def _get_entity_display_name(entity_name: str, entity) -> str | None:
+    if entity_name == ParticipantTypes.toolkit.value:
+        return entity.name or _toolkit_display_name(entity)
+    return entity.name
+
+
+def _query_visible_entities(source: LookupSource, entity_name: str):
+    """Entities of one type the importing user may see in this source, as listings show them."""
+    model = _LINKABLE_AI_MODELS[entity_name]
+    query = source.session.query(model)
+    if entity_name != ParticipantTypes.toolkit.value:
+        query = query.options(selectinload(model.versions))
+    hidden = build_folder_ids_exclusion_clause(
+        _FOLDER_ENTITY_TYPES[entity_name], model.id, source.restricted_folder_ids,
+    )
+    return query if hidden is None else query.filter(hidden)
+
+
+def _find_entities_by_ref(source: LookupSource, participant) -> list:
+    """The exact entity the chat used; ids are per project, so only a ref into this source counts."""
+    ref = participant.ref
+    if ref is None or ref.entity_id is None or ref.project_id != source.project_id:
+        return []
+    model = _LINKABLE_AI_MODELS[participant.entity_name]
+    return _query_visible_entities(source, participant.entity_name).filter(model.id == ref.entity_id).all()
+
+
+def _find_entities_by_name(source: LookupSource, participant) -> list:
+    """Same-name entities, lowest id first; unnamed toolkits match by their derived name."""
+    if not participant.name:
+        return []
+    model = _LINKABLE_AI_MODELS[participant.entity_name]
+    query = _query_visible_entities(source, participant.entity_name).order_by(model.id)
+    entities = query.filter(model.name == participant.name).all()
+    if participant.entity_name != ParticipantTypes.toolkit.value:
+        return entities
+    if not entities:
+        entities = [t for t in query.filter(model.name.is_(None)).all() if _toolkit_display_name(t) == participant.name]
+    if participant.toolkit_type:
+        entities.sort(key=lambda t: t.type != participant.toolkit_type)
+    return entities
+
+
+def _is_usable_application_version(version, is_public: bool) -> bool:
+    if is_public:
+        return version.status == PublishStatus.published
+    return version.status not in _UNUSABLE_APPLICATION_STATUSES
+
+
+def _choose_application_version(application, exported_version: str | None, is_public: bool):
+    """The chat's pinned version when usable, else the published (public) or default (project) one."""
+    pinned = next(
+        (v for v in application.versions
+         if v.name == exported_version and _is_usable_application_version(v, is_public)),
+        None,
+    )
+    if pinned is not None:
+        return pinned
+    if is_public:
+        published = [v for v in application.versions if v.status == PublishStatus.published]
+        return max(published, key=lambda v: v.created_at, default=None)
+    return application.get_default_version() or min(application.versions, key=lambda v: v.id, default=None)
+
+
+def _build_application_link_settings(application, exported_version: str | None, is_public: bool) -> dict | None:
+    """Settings of the chosen version, in the shape a manual add sends, so its variables come along."""
+    version = _choose_application_version(application, exported_version, is_public)
+    if version is None:
+        return None
+    return {
+        'version_id': version.id,
+        'agent_type': version.agent_type,
+        'variables': [{'id': v.id, 'name': v.name, 'value': v.value} for v in version.variables],
+        'icon_meta': (version.meta or {}).get('icon_meta') or {},
+    }
+
+
+def _build_skill_link_settings(skill, exported_version: str | None, is_public: bool) -> dict | None:
+    """The pinned skill version when runnable here, else the one a manual add would pin."""
+    pinned = next((v for v in skill.versions if v.name == exported_version), None)
+    for version_id in ([pinned.id] if pinned is not None else []) + [None]:
+        try:
+            return {'version_id': build_skill_run_target(skill, version_id, is_public).version_id}
+        except SkillRunError:
+            continue
+    return None
+
+
+def _build_toolkit_link_settings(toolkit) -> dict:
+    settings = {'toolkit_type': toolkit.type}
+    url = (toolkit.settings or {}).get('url')
+    if url:
+        settings['mcp_server_url'] = url
+    return settings
+
+
+def _build_link_settings(entity_name: str, entity, exported_version: str | None, is_public: bool) -> dict | None:
+    """entity_settings to link with, or None when nothing about this entity is usable."""
+    if entity_name == ParticipantTypes.application.value:
+        return _build_application_link_settings(entity, exported_version, is_public)
+    if entity_name == ParticipantTypes.skill.value:
+        return _build_skill_link_settings(entity, exported_version, is_public)
+    return _build_toolkit_link_settings(entity)
+
+
+def _order_sources(sources: list[LookupSource], participant) -> list[LookupSource]:
+    """Target project first; the public project first for catalog participants, never for toolkits."""
+    own = [s for s in sources if not s.is_public]
+    if participant.entity_name not in _PUBLIC_LINKABLE_AI:
+        return own
+    public = [s for s in sources if s.is_public]
+    return public + own if participant.public else own + public
+
+
+def _resolve_participant(sources: list[LookupSource], participant) -> dict:
+    row = {
+        'id': participant.id,
+        'entity_name': participant.entity_name,
+        'name': participant.name,
+        'status': ImportParticipantStatus.not_found,
+        'target': None,
+    }
+    lookups = (
+        (ImportParticipantStatus.same, _find_entities_by_ref),
+        (ImportParticipantStatus.name_only, _find_entities_by_name),
+    )
+    for status, find in lookups:
+        for source in _order_sources(sources, participant):
+            try:
+                entities = find(source, participant)
+            except Exception as exc:  # pylint: disable=W0703
+                log.warning(
+                    "Chat import: lookup of %s %r in project %s failed: %s",
+                    participant.entity_name, participant.name, source.project_id, exc,
+                )
+                continue
+            for entity in entities:
+                settings = _build_link_settings(participant.entity_name, entity, participant.version, source.is_public)
+                if settings is not None:
+                    row['status'] = status
+                    row['target'] = {
+                        'project_id': source.project_id,
+                        'entity_id': entity.id,
+                        'name': _get_entity_display_name(participant.entity_name, entity),
+                        'entity_settings': settings,
+                    }
+                    return row
+    return row
+
+
+def _open_lookup_source(stack: ExitStack, project_id: int, is_public: bool, user_id: int) -> LookupSource | None:
+    """A session plus the user's restricted folders; a failure hides the whole source rather than exposing it."""
+    try:
+        session = stack.enter_context(db.get_session(project_id))
+        restricted = get_restricted_folder_ids(project_id, _ALL_FOLDER_ENTITY_TYPES, user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning("Chat import: could not open project %s for participant lookup: %s", project_id, exc)
+        return None
+    return LookupSource(project_id, session, is_public, restricted)
+
+
+def _mark_shared_targets(rows: list[dict]) -> list[dict]:
+    first_by_target = {}
+    for row in rows:
+        target = row['target']
+        if target is None:
+            continue
+        key = (row['entity_name'], target['project_id'], target['entity_id'])
+        if key in first_by_target:
+            row['same_as'] = first_by_target[key]
+        else:
+            first_by_target[key] = row['id']
+    return rows
+
+
+def resolve_import_participants(project_id: int, user_id: int, envelope) -> list[dict]:
+    """Decide once, at preview time, which entity each exported AI participant will be linked to."""
+    participants = [
+        p for p in envelope.conversation.participants
+        if p.entity_name in _LINKABLE_AI_MODELS and p.id is not None and (p.name or p.ref)
+    ]
+    if not participants:
+        return []
+    public_project_id = get_public_project_id_or_none()
+    with ExitStack() as stack:
+        sources = [_open_lookup_source(stack, project_id, False, user_id)]
+        if public_project_id is not None and public_project_id != project_id:
+            sources.append(_open_lookup_source(stack, public_project_id, True, user_id))
+        sources = [s for s in sources if s is not None]
+        return _mark_shared_targets([_resolve_participant(sources, p) for p in participants])
+
+
+def build_participant_preview(row: dict) -> dict:
+    preview = {key: row[key] for key in ('id', 'entity_name', 'name', 'status')}
+    if row['target'] is not None:
+        preview['target_name'] = row['target']['name']
+    if row.get('same_as') is not None:
+        preview['same_as'] = row['same_as']
+    return preview
+
+
+# ---------- commit ----------
 
 def _participant_key(participant) -> tuple:
     entity_meta = participant.entity_meta or {}
-    return participant.entity_name, entity_meta.get('id')
+    return participant.entity_name, entity_meta.get('project_id'), entity_meta.get('id')
 
 
-def _link_ai_participants(session, project_id: int, user_id: int, conversation, envelope) -> dict[int, int]:
-    """Re-add agents and skills that exist in this project by exact name.
+def _add_linked_participant(session, project_id: int, user_id: int, conversation, entity_name: str, target) -> bool:
+    try:
+        add_participant_to_conversation(
+            project_id=project_id,
+            session=session,
+            participant=ParticipantCreate(
+                entity_name=entity_name,
+                entity_meta={'id': target['entity_id'], 'project_id': target['project_id']},
+                entity_settings=target['entity_settings'],
+            ),
+            conversation=conversation,
+            initiator_id=user_id,
+        )
+        session.flush()
+        return True
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning(
+            "Chat import: could not add %s %s from project %s to conversation %s: %s",
+            entity_name, target['entity_id'], target['project_id'], conversation.id, exc,
+        )
+        return False
+
+
+def _link_ai_participants(session, project_id: int, user_id: int, conversation, staged: list[dict],
+                          skipped: set[int]) -> dict[int, int]:
+    """Link exactly what the preview staged, minus what the user unticked; never another candidate.
 
     Returns {original participant id: new participant id}.
     """
-    wanted = {}
-    for participant in envelope.conversation.participants:
-        model = _LINKABLE_AI_MODELS.get(participant.entity_name)
-        if model is None or not participant.name or participant.id is None:
+    linked, failed = {}, set()
+    for row in staged:
+        target = row.get('target')
+        if target is None or row['id'] in skipped:
             continue
-        entity_id = _find_entity_id_by_name(session, model, participant.name)
-        if entity_id is None:
+        key = (row['entity_name'], target['project_id'], target['entity_id'])
+        if key in failed:
             continue
-        wanted.setdefault((participant.entity_name, entity_id), []).append(participant.id)
-
-    for entity_name, entity_id in wanted:
-        try:
-            add_participant_to_conversation(
-                project_id=project_id,
-                session=session,
-                participant=ParticipantCreate(
-                    entity_name=entity_name,
-                    entity_meta={'id': entity_id, 'project_id': project_id},
-                ),
-                conversation=conversation,
-                initiator_id=user_id,
-            )
-            session.flush()
-        except Exception as exc:  # pylint: disable=W0703
-            log.warning(
-                "Chat import: could not add %s %s to conversation %s: %s",
-                entity_name, entity_id, conversation.id, exc,
-            )
+        if key in linked or _add_linked_participant(
+                session, project_id, user_id, conversation, row['entity_name'], target):
+            linked.setdefault(key, []).append(row['id'])
+        else:
+            failed.add(key)
 
     session.refresh(conversation)
     by_key = {_participant_key(p): p.id for p in conversation.participants}
     mapping = {}
-    for key, original_ids in wanted.items():
+    for key, original_ids in linked.items():
         new_id = by_key.get(key)
         if new_id:
             for original_id in original_ids:
@@ -706,7 +943,6 @@ def _import_messages(session, conversation, messages, participants: dict, upload
 
 
 def _delete_conversation(project_id: int, conversation_id: int | None) -> None:
-    from tools import db  # pylint: disable=C0415
     if conversation_id is None:
         return
     try:
@@ -719,7 +955,8 @@ def _delete_conversation(project_id: int, conversation_id: int | None) -> None:
         log.exception("Chat import: failed to remove partially imported conversation %s", conversation_id)
 
 
-def commit_import(session, project_id: int, user_id: int, import_id: str, selected_attachments: list[str]):
+def commit_import(session, project_id: int, user_id: int, import_id: str, selected_attachments: list[str],
+                  skip_participants: list[int]):
     """Create the conversation from a staging. Returns (conversation_id, context_strategy, failed_names)."""
     staging, meta = _load_staging_meta(import_id, project_id, user_id)
     limits = get_import_limits(project_id)
@@ -754,7 +991,9 @@ def commit_import(session, project_id: int, user_id: int, import_id: str, select
                 by_type['user'] = participant.id
             elif participant.entity_name == ParticipantTypes.dummy.value:
                 by_type['dummy'] = participant.id
-        by_type['ai'] = _link_ai_participants(session, project_id, user_id, conversation, envelope)
+        by_type['ai'] = _link_ai_participants(
+            session, project_id, user_id, conversation, meta.get('participants') or [], set(skip_participants or []),
+        )
 
         uploader = _AttachmentUploader(project_id, conversation.uuid, zf, set(selected_attachments or []), limits)
         messages_count = _import_messages(session, conversation, messages, by_type, uploader)

@@ -1,21 +1,32 @@
 import time
+from typing import get_args
 
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, and_, or_, func, select
+from sqlalchemy import desc, asc, Integer, String, and_, or_, cast, func, select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
 from ..models.folder import ConversationFolder
-from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from ..models.entity_schedule import RUN_FORM, EntitySchedule, EntityScheduleRun
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
+from ..models.pd.schedule_list import ExecutionType
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
+from ..utils.running_conversations import running_conversation_ids
+from ..utils.run_outcome import (
+    outcome_condition,
+    run_outcomes,
+    tool_name_condition,
+    tool_names_by_conversation,
+)
+from ..utils.schedule_test_runs import UNDEFINED_COLUMN, error_code
 from ..utils.conversation_utils import (
     get_conversation_details,
     calculate_conversation_durations_batch,
@@ -27,6 +38,8 @@ from ..utils.skill_run_history import chat_skill_runs, openable_skill_chat_ids, 
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import merge_meta_expression, set_context_strategy
 from ..utils.chat_usage import strip_server_owned_meta
+from ..utils.internal_tools import get_default_attachment_bucket
+from ..utils.skill_scratch import index_conversation_scratch, remove_conversation_scratch, remove_indexed_scratch
 from ..utils.context_window import new_chat_window_mode
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.model_defaults import creation_llm_settings, chat_request_default
@@ -38,12 +51,51 @@ from ..utils.model_defaults import creation_llm_settings, chat_request_default
 LIST_CONVERSATIONS_MAX_LIMIT = 100
 
 
+def _as_values(value) -> list:
+    """A filter value as a list: a single value is one item, a list is kept (OR within the filter)."""
+    return list(value) if isinstance(value, (list, tuple, set)) else [value]
+
+
+def _any_of(column, value):
+    """The column equals one of the values: a single value keeps today's `=` (AC-48)."""
+    values = _as_values(value)
+    if len(values) == 1:
+        return column == values[0]
+    return column.in_(values)
+
+
+def _execution_type_condition(execution_type: str):
+    """The rows whose list execution_type is this value: the same rule as ConversationListExtended reads it.
+
+    A stored known type is kept, `schedule_test` included (it reads as schedule_manual); a row without one
+    is scheduled when meta.scheduled_run is JSON true, and a plain chat otherwise. Only the types without a
+    run record (ExecutionType) are accepted: the others are run options.
+    """
+    # Late import: that module loads the DB models
+    from ..utils.pipeline_execution import TriggerType
+    if execution_type not in get_args(ExecutionType):
+        raise ValueError(f'Unknown execution type: {execution_type!r}')
+    stored = Conversation.meta['execution_type'].astext
+    if execution_type != TriggerType.CHAT:
+        return stored == execution_type
+    scheduled_run = Conversation.meta['scheduled_run']
+    return or_(
+        stored == TriggerType.CHAT,
+        and_(
+            or_(stored.is_(None), stored.notin_((*TriggerType.VALUES, 'schedule_test'))),
+            # Null-safe "not JSON true": a missing key, a string "true" or any other value is not a scheduled run
+            or_(func.jsonb_typeof(scheduled_run).is_distinct_from('boolean'),
+                scheduled_run.astext.is_distinct_from('true')),
+        ),
+    )
+
+
 def _schedule_runs(session, conversations) -> dict[int, dict]:
     """The run record of each run row, keyed by conversation id (CR-22, US-38 D6).
 
     One query bounded by the page's run ids (at most LIST_CONVERSATIONS_MAX_LIMIT); the schedule name is read live,
-    so a rename shows at once. A row whose meta has no integer run id, whose run is gone, or whose run belongs
-    to another conversation, gets no entry.
+    so a rename shows at once. A second bounded query reads the form name of the runs without a schedule. A row
+    whose meta has no integer run id, whose run is gone, or whose run belongs to another conversation, gets no entry.
     """
     run_of = {}
     for conv in conversations:
@@ -53,18 +105,40 @@ def _schedule_runs(session, conversations) -> dict[int, dict]:
     if not run_of:
         return {}
     # Meta is user-writable: a run counts only when its own conversation_id names this conversation
+    run_rows = (
+        session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
+                      EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
+        .outerjoin(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+        .filter(EntityScheduleRun.id.in_(set(run_of.values())),
+                EntityScheduleRun.conversation_id.in_(list(run_of)))
+        .all()
+    )
+    # A Test Run has no schedule row: its name comes from the saved form. The form column exists only after
+    # the admin task ran, so it is read in its own query, and only when a run without a schedule is on the page.
+    form_names = {}
+    test_run_ids = [row[0] for row in run_rows if row[2] is None]
+    if test_run_ids:
+        try:
+            # A failed SELECT aborts the PostgreSQL transaction and every later read of the request would fail
+            # with it: the savepoint rolls back only this query.
+            with session.begin_nested():
+                form_names = dict(
+                    session.query(EntityScheduleRun.id, RUN_FORM['name'].astext)
+                    .filter(EntityScheduleRun.id.in_(test_run_ids))
+                    .all()
+                )
+        except ProgrammingError as e:
+            if error_code(e) != UNDEFINED_COLUMN:
+                raise
+            log.warning('Run History: the form column of entity_schedule_runs is missing, '
+                        'Test Runs are listed without a name')
     runs = {
         (run_id, conversation_id): ScheduleRunRef(
-            id=run_id, schedule_id=schedule_id, schedule_name=name, status=status, trigger=trigger,
+            id=run_id, schedule_id=schedule_id,
+            schedule_name=name if schedule_id is not None else form_names.get(run_id),
+            status=status, trigger=trigger,
         ).model_dump()
-        for run_id, conversation_id, schedule_id, name, status, trigger in (
-            session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
-                          EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
-            .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
-            .filter(EntityScheduleRun.id.in_(set(run_of.values())),
-                    EntityScheduleRun.conversation_id.in_(list(run_of)))
-            .all()
-        )
+        for run_id, conversation_id, schedule_id, name, status, trigger in run_rows
     }
     return {conv_id: runs[(run_id, conv_id)] for conv_id, run_id in run_of.items() if (run_id, conv_id) in runs}
 
@@ -425,6 +499,12 @@ class RPC:
         entity_name: str = None,
         entity_project_id: int = None,
         schedule_id: int | None = None,
+        run_status: str | list[str] | None = None,
+        run_trigger: str | list[str] | None = None,
+        run_version_id: int | list[int] | None = None,
+        execution_type: str | list[str] | None = None,
+        run_outcome: list[str] | None = None,
+        tool_name: list[str] | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -437,6 +517,10 @@ class RPC:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
             schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
+            run_status, run_trigger, run_version_id: Optional run options (`run_trigger` is a stored trigger: cron, manual, test);
+                they combine with `schedule_id` and each other on the same run row
+            execution_type: Optional list execution type of the conversation (chat, api, mcp): the runs that
+                have no run record
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -489,7 +573,9 @@ class RPC:
             if participant_id is not None:
                 filters = [
                     Conversation.meta.has_key('single_participant'),
-                    Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
+                    # Meta is user-writable: a text compare never raises on a stored id that is not an integer
+                    cast(Conversation.meta['single_participant']['entity_meta']['id'].astext, String)
+                    == str(participant_id),
                 ]
                 if entity_name:
                     filters.append(
@@ -497,8 +583,8 @@ class RPC:
                     )
                 if is_skill_history and entity_project_id is not None:
                     filters.append(
-                        Conversation.meta['single_participant']['entity_meta']['project_id'].astext.cast(Integer)
-                        == entity_project_id,
+                        cast(Conversation.meta['single_participant']['entity_meta']['project_id'].astext, String)
+                        == str(entity_project_id),
                     )
                 run_filters.extend(filters)
 
@@ -513,13 +599,31 @@ class RPC:
             if is_skill_history and sorting_by is Conversation.created_at:
                 sorting_by = skill_run_started_at(session, participant_id, entity_project_id)
 
+            run_conditions = []
             if schedule_id is not None:
-                # The run row owns the link, so the filter uses its indexed column, not user-writable meta
+                run_conditions.append(EntityScheduleRun.schedule_id == schedule_id)
+            if run_status is not None:
+                run_conditions.append(_any_of(EntityScheduleRun.status, run_status))
+            if run_trigger is not None:
+                run_conditions.append(_any_of(EntityScheduleRun.trigger, run_trigger))
+            if run_version_id is not None:
+                run_conditions.append(_any_of(EntityScheduleRun.version_id, run_version_id))
+            if run_conditions:
+                # One semi-join on the run row, which owns the link: the chat id column is indexed, and every
+                # option must hold for the same run. User-writable meta is never read for it.
                 base_query = base_query.filter(
-                    Conversation.id.in_(
-                        select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.schedule_id == schedule_id)
-                    ),
+                    Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions)),
                 )
+
+            if execution_type is not None:
+                types = _as_values(execution_type)
+                base_query = base_query.filter(or_(*(_execution_type_condition(t) for t in types)))
+
+            if run_outcome:  # AC-24, AC-26: the derived status of each row, OR within the filter
+                base_query = base_query.filter(or_(*(outcome_condition(o) for o in _as_values(run_outcome))))
+
+            if tool_name:  # AC-45: a run matches when any of its tool calls matches (MCP Run History)
+                base_query = base_query.filter(tool_name_condition(_as_values(tool_name)))
 
             base_query = base_query.order_by(sorting(sorting_by))
 
@@ -574,6 +678,15 @@ class RPC:
             )
 
             schedule_runs = _schedule_runs(session, conversations)
+            running_ids = running_conversation_ids(session, conv_ids)
+            # AC-24: a status on every row. A record's own status; a plain chat's status from stored data.
+            # Only the Run History of an entity (participant_id) draws these columns, so the sidebar and the skill
+            # chat lists skip the extra reads (review: the shared list paid for them on every load).
+            run_columns = participant_id is not None
+            record_statuses = {conv_id: run['status'] for conv_id, run in schedule_runs.items()}
+            outcomes = run_outcomes(session, conv_ids, record_statuses) if run_columns else {}
+            # AC-44: the tool names of each row, for the MCP Event column (one batched read over the page)
+            tools_of = tool_names_by_conversation(session, conv_ids) if run_columns else {}
             chat_runs = chat_skill_runs(
                 session,
                 [c.id for c in conversations if 'single_participant' not in (c.meta or {})],
@@ -590,11 +703,52 @@ class RPC:
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
                     "schedule_run": schedule_runs.get(conv.id),
+                    "has_running_task": conv.id in running_ids,
+                    "run_status": outcomes.get(conv.id),
+                    "tool_names": tools_of.get(conv.id, []),
                     **chat_runs.get(conv.id, {}),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 
             return {'total': total, 'rows': rows}
+
+    @web.rpc("chat_run_history_facets_rpc", "run_history_facets_rpc")
+    def run_history_facets_rpc(
+        self,
+        project_id: int,
+        user_id: int,
+        entity_id: int,
+        is_admin: bool = False,
+    ) -> dict:
+        """The filter options of one agent's or pipeline's Run History (AC-9, AC-47a).
+
+        The conversations are limited by the same visibility as the run list: public conversations, and those
+        where the caller is a user participant (any user, for an admin). So a filter never names a run the caller
+        cannot list.
+        """
+        # Late import: the facets read depends on the schedule run tables only
+        from ..utils.run_facets import run_facets
+        with db.get_session(project_id) as session:
+            participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
+            if not is_admin:
+                participant_subquery_filters.append(
+                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
+                )
+            participant_subquery = session.query(Participant.id).filter(
+                *participant_subquery_filters
+            ).subquery()
+            visible = session.query(Conversation.id).distinct().join(
+                ParticipantMapping, Conversation.id == ParticipantMapping.conversation_id,
+            ).join(
+                Participant, Participant.id == ParticipantMapping.participant_id,
+            ).filter(
+                or_(
+                    Conversation.is_private == False,
+                    Participant.id.in_(participant_subquery),
+                )
+            ).subquery()
+            visible_ids = select(visible.c.id)
+            return run_facets(session, entity_id, visible_ids)
 
     @web.rpc("chat_get_conversation_by_uuid_rpc", "get_conversation_by_uuid_rpc")
     def get_conversation_by_uuid_rpc(
@@ -690,6 +844,10 @@ class RPC:
                 mc.remove_bucket(bucket_name)
             except Exception:
                 pass
+            try:
+                remove_conversation_scratch(project_id, str(conversation.uuid))
+            except Exception:  # noqa: BLE001 -- a storage hiccup must not keep the conversation
+                log.warning('delete_conversation_rpc: scratch of %s not removed', conversation.uuid, exc_info=True)
 
             session.delete(conversation)
             session.commit()
@@ -716,10 +874,18 @@ class RPC:
         deleted, failed, remaining = 0, 0, 0
         folder_ids = set()
         mc = None
+        scratch_index = None
+        scratch_bucket = None
         try:
             mc = MinioClient.from_project_id(project_id)
         except Exception:
             log.exception("delete_conversations_rpc: no storage client for project %s", project_id)
+        if mc is not None:
+            try:
+                scratch_bucket = get_default_attachment_bucket(project_id)
+                scratch_index = index_conversation_scratch(mc, scratch_bucket)
+            except Exception:  # noqa: BLE001 -- the nightly sweep removes what a failed listing leaves behind
+                log.warning("delete_conversations_rpc: scratch of project %s not listed", project_id, exc_info=True)
 
         with db.get_session(project_id) as session:
             for index, conversation_id in enumerate(conversation_ids):
@@ -739,6 +905,11 @@ class RPC:
                             mc.remove_bucket(f'conversation_{conversation.uuid}')
                         except Exception:
                             pass
+                    if scratch_index is not None:
+                        try:
+                            remove_indexed_scratch(mc, scratch_bucket, scratch_index, str(conversation.uuid))
+                        except Exception:  # noqa: BLE001 -- a storage hiccup must not keep the conversation
+                            log.warning('delete_conversations_rpc: scratch of %s not removed', conversation.uuid, exc_info=True)
                     session.delete(conversation)
                     session.commit()
                     deleted += 1
@@ -935,7 +1106,7 @@ class RPC:
                 try:
                     from ..utils.vectorstore import get_pgvector_connection_string
                     from tools import this
-                    pgvector_connstr = get_pgvector_connection_string(project_id)
+                    pgvector_connstr = get_pgvector_connection_string(project_id, default_on_hidden_failure=True)
                     this.module.event_node.emit('indexer_delete_checkpoint', {
                         'thread_ids': list(thread_ids),
                         'pgvector_connstr': pgvector_connstr,

@@ -9,13 +9,26 @@ from tools import this
 
 DEFAULT_MIN_INTERVAL_MINUTES = 5
 DEFAULT_MAX_ENABLED_PER_PROJECT = 50
+DEFAULT_TOOLKIT_INDEX_MIN_INTERVAL_MINUTES = 1440
 MAX_MIN_INTERVAL_MINUTES = 1440
 MAX_ENABLED_PER_PROJECT_LIMIT = 1000
+DEFAULT_WEBHOOK_MAX_RUNS = 3
+DEFAULT_WEBHOOK_MAX_RUNS_LIMIT = 20
+DEFAULT_WEBHOOK_PROJECT_MAX_RUNS = 10
+DEFAULT_WEBHOOK_MAX_WAITING = 10
+WEBHOOK_LIMIT_CEILING = 1000
 
 
 class ScheduleLimits(NamedTuple):
     min_interval_minutes: int
     max_enabled_per_project: int
+
+
+class WebhookLimits(NamedTuple):
+    per_webhook: int  # platform default, already at most `per_webhook_limit`
+    per_webhook_limit: int
+    per_project: int
+    waiting: int
 
 
 class ScheduleLimitError(Exception):
@@ -43,6 +56,29 @@ def schedule_limits() -> ScheduleLimits:
     )
 
 
+def webhook_limits() -> WebhookLimits:
+    """The webhook run caps of #7400, read at each call so an admin change applies to the next delivery."""
+    section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
+    limit = at_least_one(section, 'webhook_max_concurrent_runs_limit', DEFAULT_WEBHOOK_MAX_RUNS_LIMIT,
+                         WEBHOOK_LIMIT_CEILING)
+    return WebhookLimits(
+        min(at_least_one(section, 'webhook_max_concurrent_runs', DEFAULT_WEBHOOK_MAX_RUNS, WEBHOOK_LIMIT_CEILING), limit),
+        limit,
+        at_least_one(section, 'webhook_project_max_concurrent_runs', DEFAULT_WEBHOOK_PROJECT_MAX_RUNS,
+                     WEBHOOK_LIMIT_CEILING),
+        at_least_one(section, 'webhook_max_waiting_runs', DEFAULT_WEBHOOK_MAX_WAITING, WEBHOOK_LIMIT_CEILING),
+    )
+
+
+def min_interval_minutes_for(entity_type: str | None) -> int:
+    """The smallest gap between two runs of this kind of schedule; toolkit indexes have their own floor."""
+    section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
+    if entity_type == 'toolkit_index':
+        return at_least_one(section, 'toolkit_index_min_interval_minutes',
+                            DEFAULT_TOOLKIT_INDEX_MIN_INTERVAL_MINUTES, MAX_MIN_INTERVAL_MINUTES)
+    return schedule_limits().min_interval_minutes
+
+
 def compute_next_run(cron: str, timezone_name: str, after: datetime) -> datetime:
     """The next firing after `after` in the schedule timezone, as UTC."""
     # `after` must be timezone-aware (comparing it with an aware firing raises on a naive value)
@@ -65,7 +101,7 @@ def end_of_day(day: date, timezone_name: str) -> datetime:
 
 
 def check_enabled_cap(session, adding: int = 1) -> None:
-    """Raise when `adding` more enabled schedules would pass the project cap.
+    """Raise when `adding` more enabled cron schedules would pass the project cap; webhooks do not count.
 
     Callers pass adding=0 for a row that is already enabled.
     """
@@ -75,7 +111,8 @@ def check_enabled_cap(session, adding: int = 1) -> None:
     cap = schedule_limits().max_enabled_per_project
     # lean: soft cap, no lock (US-07 checks and writes in one transaction); lock when parallel enables pass it
     enabled = session.execute(
-        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True))
+        select(func.count()).select_from(EntitySchedule).where(
+            EntitySchedule.enabled.is_(True), EntitySchedule.trigger_kind == 'cron')
     ).scalar()
     if enabled + adding > cap:
         raise ScheduleLimitError(cap)

@@ -150,7 +150,7 @@ def test_cr_el7011_a_rejected_run_logs_the_decision_and_the_failed_end(log):
     log.runs.apply_schedule_decision(PROJECT_ID, 1, log.runs.check_schedule_decision(PROJECT_ID, 1, OWNER, ["reject"]))
 
     assert log.kinds()[-2:] == ["decision", "finished"]
-    assert log.events()[-1]["text"] == "Run finished: failed (rejected by the owner)"
+    assert log.events()[-1]["text"] == "Run finished: failed (rejected)"
 
 
 def test_cr_el7011_a_failed_prerun_logs_the_start_and_the_reason(log):

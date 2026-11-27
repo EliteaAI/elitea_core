@@ -115,6 +115,13 @@
    "get_usage_analytics_tools",
    "get_usage_analytics_user_detail",
    "get_usage_analytics_users"
+  ],
+  "elitea_core/builder": [
+   "post_elitea_core_builder_find",
+   "post_elitea_core_builder_read",
+   "post_elitea_core_builder_propose",
+   "post_elitea_core_builder_apply",
+   "post_elitea_core_builder_ref"
   ]
  },
  "write_tools": {
@@ -243,6 +250,26 @@
   ],
   "put_social_move_to_folder": [
    "PUT social/move_to_folder/{mode}/{project_id}"
+  ],
+  "post_elitea_core_builder_find": [
+   "POST elitea_core/builder_find/{mode}/{project_id}"
+  ],
+  "post_elitea_core_builder_read": [
+   "POST elitea_core/builder_read/{mode}/{project_id}"
+  ],
+  "post_elitea_core_builder_propose": [
+   "POST elitea_core/builder_propose/{mode}/{project_id}"
+  ],
+  "post_elitea_core_builder_apply": [
+   "POST elitea_core/builder_apply/{mode}/{project_id}"
+  ],
+  "post_elitea_core_builder_ref": [
+   "POST elitea_core/builder_ref/{mode}/{project_id}"
   ]
- }
+ },
+ "builder_dispatched_writes": [
+  "DELETE elitea_core/application/{mode}/{project_id}/{application_id}",
+  "PUT elitea_core/application/{mode}/{project_id}/{application_id}",
+  "DELETE elitea_core/skill/{mode}/{project_id}/{skill_id}"
+ ]
 }

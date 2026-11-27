@@ -11,6 +11,7 @@ the value already replaced. Nothing in this module logs input text.
 """
 
 import base64
+import bisect
 import hashlib
 import json
 import math
@@ -19,7 +20,7 @@ import time
 from re import _constants as sre_constants
 from re import _parser as sre_parser
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Pattern, Tuple
 
 ACTIONS = ('off', 'record', 'warn', 'redact', 'block')
 # 'none' is the result action when nothing matched; it is not a configurable action
@@ -205,11 +206,79 @@ _CODE_LIKE_VALUE = re.compile(
 )
 
 
+# A key name that holds a password a person chose, not a generated token
+_PASSWORD_KEY = re.compile(r'pass|pwd', re.IGNORECASE)
+_PATH_VALUE = re.compile(r'^(?:(?:~|\.{1,2})?/[\w./-]*|[A-Za-z]:[\\/].*|\\\\.*)$')
+# A variable or type name (user_input, SecretStr): letters only, so myPass123 still counts
+_IDENTIFIER_VALUE = re.compile(r'^(?:[a-z]+(?:_[a-z]+)+|[A-Za-z][a-z]+(?:[A-Z][a-z]+)+)$')
+
+
+def _looks_chosen(value: str) -> bool:
+    # A word that follows "password" in prose or code ("forgotten", "Confirmation") has
+    # no digit, symbol or capital past the first letter; a password a person picks does
+    return (
+        any(c.isdigit() for c in value)
+        or any(not c.isalnum() and c not in "-'" for c in value)
+        or any(c.isupper() for c in value[1:])
+    )
+
+
 def _password_value_ok(match: re.Match) -> bool:
     value = match.group('value').strip('"\'')
-    if len(value) < 8 or _PLACEHOLDER_VALUE.match(value) or _CODE_LIKE_VALUE.search(value):
+    if _PLACEHOLDER_VALUE.match(value) or _CODE_LIKE_VALUE.search(value) or _IDENTIFIER_VALUE.match(value):
         return False
-    return _shannon_entropy(value) >= 3.0
+    if _PASSWORD_KEY.match(match.group('key')):
+        # People pick low-entropy passwords (Passw0rd); a run of one char is filler
+        return (
+            len(value) >= 6 and len(set(value)) >= 3 and _looks_chosen(value)
+            and not _PATH_VALUE.match(value)
+        )
+    return len(value) >= 8 and _shannon_entropy(value) >= 3.0
+
+
+def _password_phrase_ok(match: re.Match) -> bool:
+    value = match.group('value')
+    if _PLACEHOLDER_VALUE.match(value) or _CODE_LIKE_VALUE.search(value) or len(set(value)) < 3:
+        return False
+    # Prose follows "password is" too ("is required", "is user-defined")
+    return _looks_chosen(value)
+
+
+def _url_secret_ok(match: re.Match) -> bool:
+    value = match.group('value')
+    # host:port@ is a port, not a password (http://localhost:8080@x)
+    if value.isdigit() and len(value) <= 5:
+        return False
+    return not (_PLACEHOLDER_VALUE.match(value) or _CODE_LIKE_VALUE.search(value) or value.startswith('$'))
+
+
+# Run only on a candidate the phone rule already cut to <= 26 chars, so the grouping
+# ambiguity here stays bounded
+_PHONE_SHAPE = re.compile(r'(?:\+|00)[1-9]\d{0,3}(?:[ .-]?(?:\(\d{1,4}\)|\d{1,4})){1,7}')
+# 00 is also how zero-padded ids start (Ref 0012345678): take it only when the country
+# code is set off by a separator, as a dialled number is written
+_PHONE_00_PREFIX = re.compile(r'00[1-9]\d{0,2}[ .(-]')
+_PHONE_CONTINUES = re.compile(r'[.-]?\d')
+
+
+def _phone_span(match: re.Match) -> Optional[Tuple[int, int]]:
+    """The longest prefix of the candidate that is a phone number. The candidate's char
+    class also takes what follows the number ("+1 415 555 0132 2026-11-24"), so ending
+    the number at an earlier digit group is how that is told apart."""
+    text = match.group(0)
+    if text.startswith('00') and not _PHONE_00_PREFIX.match(text):
+        return None
+    for end in range(len(text), 0, -1):
+        # A number does not stop inside a digit run or before "-1"/".1" (a date's year)
+        if not text[end - 1].isdigit() or _PHONE_CONTINUES.match(text, end):
+            continue
+        candidate = text[:end]
+        digits = sum(c.isdigit() for c in candidate) - (2 if candidate.startswith('00') else 0)
+        if digits < 8:
+            return None
+        if digits <= 15 and _PHONE_SHAPE.fullmatch(candidate):
+            return match.start(), match.start() + end
+    return None
 
 
 def _jwt_ok(match: re.Match) -> bool:
@@ -235,9 +304,26 @@ def _luhn_ok(match: re.Match) -> bool:
     return total % 10 == 0
 
 
+# IBAN length per country (SWIFT IBAN registry). Mod 97 alone passes 1 in 97 random
+# strings, and any-case matching sees far more of them (hex hashes, ids).
+_IBAN_LENGTHS = {
+    'AD': 24, 'AE': 23, 'AL': 28, 'AT': 20, 'AZ': 28, 'BA': 20, 'BE': 16, 'BG': 22, 'BH': 22,
+    'BR': 29, 'BY': 28, 'CH': 21, 'CR': 22, 'CY': 28, 'CZ': 24, 'DE': 22, 'DK': 18, 'DO': 28,
+    'EE': 20, 'EG': 29, 'ES': 24, 'FI': 18, 'FO': 18, 'FR': 27, 'GB': 22, 'GE': 22, 'GI': 23,
+    'GL': 18, 'GR': 27, 'GT': 28, 'HR': 21, 'HU': 28, 'IE': 22, 'IL': 23, 'IQ': 23, 'IS': 26,
+    'IT': 27, 'JO': 30, 'KW': 30, 'KZ': 20, 'LB': 28, 'LC': 32, 'LI': 21, 'LT': 20, 'LU': 20,
+    'LV': 21, 'MC': 27, 'MD': 24, 'ME': 22, 'MK': 19, 'MR': 27, 'MT': 31, 'MU': 30, 'NL': 18,
+    'NO': 15, 'PK': 24, 'PL': 28, 'PS': 29, 'PT': 25, 'QA': 29, 'RO': 24, 'RS': 22, 'SA': 24,
+    'SC': 31, 'SE': 24, 'SI': 19, 'SK': 24, 'SM': 27, 'ST': 25, 'SV': 28, 'TL': 23, 'TN': 24,
+    'TR': 26, 'UA': 29, 'VA': 22, 'VG': 24, 'XK': 20,
+    'BI': 27, 'DJ': 27, 'FK': 18, 'LY': 25, 'MN': 20, 'NI': 28, 'OM': 23, 'RU': 33, 'SD': 18,
+    'SO': 23, 'YE': 30,
+}
+
+
 def _iban_ok(match: re.Match) -> bool:
     iban = re.sub(r'\s', '', match.group(0)).upper()
-    if not 15 <= len(iban) <= 34:
+    if _IBAN_LENGTHS.get(iban[:2]) != len(iban):
         return False
     rearranged = iban[4:] + iban[:4]
     try:
@@ -255,6 +341,9 @@ class Rule:
     # Named group whose span is replaced; None replaces the whole match. Keeps a key
     # name like "password=" readable after redaction.
     span_group: Optional[str] = None
+    # Narrows the match to the (start, stop) it reports, or drops it with None. For a
+    # rule whose pattern over-matches on purpose to keep the scan linear.
+    trim: Optional[Callable[[re.Match], Optional[Tuple[int, int]]]] = None
 
 
 RULES: Tuple[Rule, ...] = (
@@ -270,10 +359,27 @@ RULES: Tuple[Rule, ...] = (
         re.IGNORECASE), span_group='value'),
     Rule('github_token', 'credentials', re.compile(
         r'\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b')),
+    # Newer tokens carry dotted parts (glpat-<base>.01.<suffix>); a dot that ends a
+    # sentence is not part of the token
+    Rule('gitlab_token', 'credentials', re.compile(
+        r'\bglpat-[A-Za-z0-9_.-]{19,254}[A-Za-z0-9_-](?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])')),
+    # The 84-char format carries a fixed signature at offset 52. The older 52-char base32
+    # PAT has no marker and is only caught after a key name (password_assignment).
+    Rule('azure_devops_pat', 'credentials', re.compile(
+        r'(?<![A-Za-z0-9])[A-Za-z0-9]{52}JQQJ99[A-Za-z0-9]{26}(?![A-Za-z0-9])')),
+    Rule('atlassian_token', 'credentials', re.compile(
+        r'\bATATT3xFfGF0[A-Za-z0-9_=-]{100,300}(?![A-Za-z0-9_=-])')),
     Rule('anthropic_key', 'credentials', re.compile(r'\bsk-ant-[A-Za-z0-9_-]{32,1024}')),
     Rule('openai_key', 'credentials', re.compile(r'\bsk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{20,1024}')),
+    Rule('stripe_key', 'credentials', re.compile(r'\b[sr]k_live_[A-Za-z0-9]{24,99}\b')),
     Rule('slack_token', 'credentials', re.compile(r'\bxox[abprs]-[A-Za-z0-9-]{10,1024}')),
+    Rule('sendgrid_key', 'credentials', re.compile(
+        r'\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])')),
     Rule('google_api_key', 'credentials', re.compile(r'\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])')),
+    Rule('huggingface_token', 'credentials', re.compile(r'\bhf_[A-Za-z0-9]{34}\b')),
+    Rule('npm_token', 'credentials', re.compile(r'\bnpm_[A-Za-z0-9]{36}\b')),
+    Rule('azure_ad_client_secret', 'credentials', re.compile(
+        r'(?<![A-Za-z0-9_~.-])[A-Za-z0-9_~.-]{3}8Q~[A-Za-z0-9_~.-]{31,34}(?![A-Za-z0-9_~.-])')),
     Rule('azure_storage_conn', 'credentials', re.compile(
         r'AccountKey=(?P<value>[A-Za-z0-9+/=]{60,1024})'), span_group='value'),
     Rule('jwt', 'credentials', re.compile(
@@ -282,17 +388,46 @@ RULES: Tuple[Rule, ...] = (
     Rule('auth_header', 'credentials', re.compile(
         r'Authorization\s{0,8}:\s{0,8}(?:Bearer|Basic|Token)\s{1,8}(?P<value>[A-Za-z0-9._~+/=-]{16,4096})',
         re.IGNORECASE), span_group='value'),
+    # scheme://user:secret@host. Ahead of email, which would otherwise take secret@host.
+    # The secret runs to the last @, so an unescaped @ in it (user:pa@ss@host) is kept.
+    Rule('url_credentials', 'credentials', re.compile(
+        r'\b[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s:/?#@]{1,256}:(?P<value>[^\s/?#]{1,1024})@[A-Za-z0-9.\[-]'),
+        validator=_url_secret_ok, span_group='value'),
+    # The lookbehind, unlike \b, lets the key end a longer name: GITHUB_TOKEN, DB_PASSWORD
     Rule('password_assignment', 'credentials', re.compile(
-        r'\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|token)'
-        r'["\']?\s{0,8}[:=]\s{0,8}(?P<value>"[^"\s]{8,2048}"|\'[^\'\s]{8,2048}\'|[^\s"\',;]{8,2048})',
+        r'(?<![A-Za-z0-9])(?P<key>password|passwd|pwd|passcode|secret(?:[_-]?key)?|api[_-]?key|'
+        r'access[_-]?(?:token|key)|auth[_-]?token|private[_-]?key|token|pat)'
+        r'["\']?[ \t]{0,8}[:=][ \t]{0,8}(?P<value>"[^"\s]{6,2048}"|\'[^\'\s]{6,2048}\'|[^\s"\',;]{6,2048})',
         re.IGNORECASE), validator=_password_value_ok, span_group='value'),
+    # "my password is X": the value may not end in sentence punctuation
+    Rule('password_phrase', 'credentials', re.compile(
+        r'(?<![A-Za-z0-9])(?:password|passwd|pwd|passcode)\s{1,8}(?:is|was)\s{1,8}["\'`]?'
+        r'(?P<value>[^\s"\'`]{5,127}[^\s"\'`.,;:!?)])',
+        re.IGNORECASE), validator=_password_phrase_ok, span_group='value'),
     # Local part <= 64, each domain label <= 63, whole domain <= 253 (RFC 5321/1035)
     Rule('email', 'personal_data', re.compile(
         r'\b[A-Za-z0-9._%+-]{1,64}@(?=[A-Za-z0-9.-]{3,253}(?![A-Za-z0-9.-]))'
         r'[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,126}\.[A-Za-z]{2,24}\b')),
-    Rule('phone_e164', 'personal_data', re.compile(r'(?<![\w+])\+[1-9]\d{7,14}\b')),
+    # International: + or 00, then digit groups split by spaces, dashes, dots or
+    # brackets. A single char class keeps the scan linear; _phone_span checks the grouping
+    Rule('phone_e164', 'personal_data', re.compile(
+        r'(?<![\w+])(?:\+|00)[1-9][\d .()-]{6,24}\d(?!\w)'), trim=_phone_span),
+    Rule('phone_nanp', 'personal_data', re.compile(r'(?<![\w(])\([2-9]\d{2}\)[ .-]?\d{3}[.-]\d{4}(?!\w)')),
     Rule('payment_card', 'personal_data', re.compile(r'\b(?:\d[ -]?){12,18}\d\b'), validator=_luhn_ok),
-    Rule('iban', 'personal_data', re.compile(r'\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b'), validator=_iban_ok),
+    # Compact, or printed in groups of four. Any case: the mod-97 check keeps it precise.
+    Rule('iban', 'personal_data', re.compile(
+        r'(?<![A-Za-z0-9])[A-Za-z]{2}\d{2}'
+        r'(?:[A-Za-z0-9]{11,30}|(?: [A-Za-z0-9]{4}){2,7}(?: [A-Za-z0-9]{1,4})?)(?![A-Za-z0-9])'),
+        validator=_iban_ok),
+    # Dashed form only, without the never-issued area 000/666/9xx, group 00, serial 0000.
+    # Part and ticket numbers share the shape, so it needs the keyword shortly before.
+    Rule('us_ssn', 'personal_data', re.compile(
+        r'\b(?:ssns?|social[ -]security)\b[^\d\n]{0,24}?'
+        r'(?<![\w-])(?P<value>(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4})(?![\w-])',
+        re.IGNORECASE), span_group='value'),
+    Rule('uk_nino', 'personal_data', re.compile(
+        r'(?<![A-Za-z0-9])(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-TW-Z][A-CEGHJ-NP-TW-Z]'
+        r' ?\d{2} ?\d{2} ?\d{2} ?[A-D](?![A-Za-z0-9])')),
 )
 
 
@@ -348,6 +483,7 @@ def _find(segment: Segment, policy: Policy, deadline: float, found: List[Detecti
     match, so an owned match is never cut by the window end and is found only once.
     """
     text = segment.text
+    # Disjoint spans kept sorted, so an overlap check looks only at the neighbours
     taken: List[Tuple[int, int]] = []
     for lo in range(0, limit, WINDOW_STEP):
         end = min(limit, lo + WINDOW_CHARS)
@@ -364,14 +500,21 @@ def _find(segment: Segment, policy: Policy, deadline: float, found: List[Detecti
                     break
                 if rule.validator is not None and not rule.validator(match):
                     continue
-                start, stop = match.span(rule.span_group) if rule.span_group else match.span()
+                if rule.trim is not None:
+                    span = rule.trim(match)
+                    if span is None:
+                        continue
+                    start, stop = span
+                else:
+                    start, stop = match.span(rule.span_group) if rule.span_group else match.span()
                 # Earlier rules are more specific (a private key contains base64 that
                 # could look like a token); an overlapping later hit is the same value
-                if any(start < t_end and t_start < stop for t_start, t_end in taken):
+                at = bisect.bisect_left(taken, (start, stop))
+                if (at and taken[at - 1][1] > start) or (at < len(taken) and taken[at][0] < stop):
                     continue
                 if any(p.search(text[start:stop]) for p in policy.allow_patterns):
                     continue
-                taken.append((start, stop))
+                taken.insert(at, (start, stop))
                 found.append(Detection(rule.category, rule.rule_id, segment.kind, segment.index, start, stop))
         if end == limit:
             break

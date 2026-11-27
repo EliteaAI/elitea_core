@@ -109,6 +109,10 @@ def verify(ns, env, token, endpoint=MCP_ENDPOINT, environ=None, now=None, view_a
                                   args=MCP_ARGS if args is None else args)
 
 
+def forged_signature(token):
+    return token[:-2] + ("BB" if token.endswith("AA") else "AA")   # always differs from the real MAC
+
+
 def mint(ns, **over):
     values = dict(sub="idp:t:o", uid=42, act=str(uuid.uuid4()), scope=["read"], ctx=str(uuid.uuid4()), prj=1,
                   tgt=[1, 5], run=RUN, tsk="indexer_agent", exp=int(time.time()) + 600)
@@ -411,7 +415,7 @@ def test_an_expired_token_whose_first_audit_failed_is_audited_by_the_next_refusa
 def test_a_bad_signature_is_counted_not_audited(ns, env):
     obo(ns)._UNVERIFIED_LOG.update(at=0.0, suppressed=0)   # pylint: disable=W0212
     token, _ = mint(ns)
-    assert verify(ns, env, token[:-2] + "AA")["code"] == "INTERNAL_TOKEN_INVALID"
+    assert verify(ns, env, forged_signature(token))["code"] == "INTERNAL_TOKEN_INVALID"
     assert env.denied == []   # its claims are not Main's: nothing of them is written
     assert "security_metric name=internal_token_verification_total result=deny reason_code=INTERNAL_TOKEN_INVALID " \
            "suppressed=0" in env.log.lines
@@ -580,6 +584,14 @@ EXPOSED_WRITES = [
     ("PUT", "social/folder/{mode}/{project_id}/{folder_id}", "build"),
     ("PUT", "social/move_to_folder/{mode}/{project_id}", "build"),
     ("PUT", "notifications/notification/{mode}/{project_id}/{notification_id}", "build"),
+    ("DELETE", "elitea_core/application/{mode}/{project_id}/{application_id}", "build"),
+    ("PUT", "elitea_core/application/{mode}/{project_id}/{application_id}", "build"),
+    ("DELETE", "elitea_core/skill/{mode}/{project_id}/{skill_id}", "build"),
+    ("POST", "elitea_core/builder_find/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_read/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_propose/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_ref/{mode}/{project_id}", "read"),
+    ("POST", "elitea_core/builder_apply/{mode}/{project_id}", "build"),
 ]
 
 
@@ -898,7 +910,8 @@ def test_every_write_the_live_registry_exposes_is_in_the_map(ns):
             unmapped.append(name)
     assert unmapped == []
     stale = set(obo(ns).ENDPOINT_OPERATIONS) - {
-        tuple(entry.split(" ", 1)) for entries in REGISTRY["write_tools"].values() for entry in entries}
+        tuple(entry.split(" ", 1)) for entries in REGISTRY["write_tools"].values() for entry in entries} - {
+        tuple(entry.split(" ", 1)) for entry in REGISTRY.get("builder_dispatched_writes", [])}
     assert stale == set()
 
 
@@ -915,7 +928,7 @@ def test_forged_tokens_are_counted_but_logged_at_most_once_per_window(ns, env):
     obo(ns)._UNVERIFIED_LOG.update(at=0.0, suppressed=0)   # pylint: disable=W0212
     token, _ = mint(ns)
     for _ in range(50):
-        verify(ns, env, token[:-2] + "AA")
+        verify(ns, env, forged_signature(token))
     lines = [line for line in env.log.lines if "internal_token_verification_total" in line]
     assert len(lines) == 1
     assert obo(ns)._COUNTER[("deny", "INTERNAL_TOKEN_INVALID")] >= 50   # pylint: disable=W0212

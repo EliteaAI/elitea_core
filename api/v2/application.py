@@ -10,6 +10,7 @@ from ...utils.application_utils import (
     VersionNotUpdatableError
 )
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_starters_utils import ConversationStartersLimitError, limit_error_response
 
 from tools import api_tools, auth, config as c, db, register_openapi
 
@@ -172,7 +173,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 include_input=False,
             ), 400
 
-        if update_data.version.application_id != application_id:
+        if update_data.version and update_data.version.application_id != application_id:
             return {'error': f"{application_id=} mismatch with version payload value"}, 400
 
         if update_data.version and not update_data.version.author_id:
@@ -182,6 +183,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 result = application_update(project_id, application_id, update_data, session=session)
             except (ApplicationVersionNonFoundError, VersionMismatchError, VersionNotUpdatableError) as ex:
                 return {'error': str(ex)}, 400
+            except ConversationStartersLimitError as ex:
+                return limit_error_response(ex), 400
             except Exception as e:
                 log.exception(str(e))
                 return {'error': f"Can not update {application_id=}"}, 400

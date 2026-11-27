@@ -55,6 +55,20 @@ def test_el_7011_bug12_r1_1_both_chat_predict_calls_pass_the_chat_source(method_
         assert any(getattr(value.func, "id", None) == HELPER for value in spread if isinstance(value, ast.Call))
 
 
+@pytest.mark.parametrize("relative_path", ["api/v2/regenerate.py", "utils/continue_message.py"])
+def test_el_7473_regenerate_and_continue_pass_the_chat_source(relative_path):
+    tree = ast.parse((PLUGIN_ROOT / relative_path).read_text())
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Call)
+             and getattr(node.func.func, "id", None) == "getattr"
+             and getattr(node.func.args[1], "id", None) == "rpc_func"]
+
+    assert calls
+    for call in calls:
+        spread = [kw.value for kw in call.keywords if kw.arg is None]
+        assert any(getattr(value.func, "id", None) == HELPER for value in spread if isinstance(value, ast.Call))
+
+
 class _Session:
     def __init__(self, version):
         self.version = version
@@ -99,6 +113,8 @@ def do_predict(monkeypatch, world):  # noqa: F811 -- the fixture imported above
         "utils.budget_door": {"schema_may_use_llm": lambda *_: True},
         "utils.utils": {"verify_signature": None},
         "utils.exceptions": {"VerifySignatureError": Exception, "PoolSaturationError": Exception},
+        "utils.api_run_history": {"should_record_api_run": lambda *a, **k: False,
+                                  "open_api_run_conversation": None},
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace()},
         "utils.input_guardrail": {"inspect_and_unsecret": lambda payload, *a, **k: payload},
         "utils.vectorstore": {"get_pgvector_connection_string": lambda _pid: "connstr"},
@@ -122,7 +138,7 @@ def do_predict(monkeypatch, world):  # noqa: F811 -- the fixture imported above
     spec.loader.exec_module(loaded)
 
     started = []
-    owner = types.SimpleNamespace(task_node=types.SimpleNamespace(
+    owner = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={}), task_node=types.SimpleNamespace(
         start_task=lambda *a, **k: started.append(k["kwargs"]) or "task-1"))
 
     def run(**kwargs):

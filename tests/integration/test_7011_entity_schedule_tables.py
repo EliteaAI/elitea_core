@@ -70,7 +70,7 @@ def tables(monkeypatch):
 
     parents = {
         name: Table(name, Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
-        for name in ("applications", "application_versions")
+        for name in ("applications", "application_versions", "elitea_tools")
     }
 
     package = types.ModuleType("elitea_core_7011_tables")

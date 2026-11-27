@@ -10,6 +10,7 @@ from pylon.core.tools import log
 
 from .context_analytics import extract_token_breakdown
 from .trace_step_writer import sync_trace_steps
+from .history_tool_stubs import summarized_group_ids_from_messages
 
 
 def safe_decode_bytes_in_dict(obj):
@@ -206,7 +207,7 @@ def update_message_group_meta(
                 # Determine which message groups were summarized using stored IDs
                 chat_history_group_ids = new_meta.pop('chat_history_group_ids', [])
                 summarized_count = context_info.get('summarized_count', 0)
-                summarized_group_ids = chat_history_group_ids[:summarized_count]
+                summarized_group_ids = summarized_group_ids_from_messages(chat_history_group_ids, summarized_count)
                 last_summarized_group_id = summarized_group_ids[-1] if summarized_group_ids else None
 
                 analytics['last_summarization'] = {

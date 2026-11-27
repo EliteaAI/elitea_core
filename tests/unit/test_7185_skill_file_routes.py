@@ -272,9 +272,16 @@ class TestRead:
         harness.user_permissions = {READ, WRITE}
         harness.raises = Refusal("File 'x' not found in skill version 10")
 
-        for method in ('get', 'put', 'patch', 'delete'):
+        for method in ('put', 'patch', 'delete'):
             harness.json = BODIES.get(method)
             assert _call(harness, method) == ({'error': "File 'x' not found in skill version 10"}, 404)
+
+    def test_a_read_refusal_is_never_cached_so_a_file_uploaded_later_is_fetched_again(self, harness):
+        harness.user_permissions = {READ}
+        harness.raises = Refusal("The stored content of 'forms.md' is missing")
+
+        assert _call(harness, 'get') == (
+            {'error': "The stored content of 'forms.md' is missing"}, 404, {'Cache-Control': 'no-store'})
 
 
 class TestWrite:
@@ -424,3 +431,128 @@ class TestRegistration:
     def test_the_url_params_route_the_file_path_as_a_path_converter(self, harness):
         assert harness.file.API.url_params == ['<int:project_id>/<int:skill_id>/<int:version_id>/<path:path>']
         assert harness.files_api.API.url_params == ['<int:project_id>/<int:skill_id>/<int:version_id>']
+
+
+class NamedUpload(FakeUpload):
+    def __init__(self, filename, data):
+        super().__init__(data)
+        self.filename = filename
+
+
+class SentResponse:
+    def __init__(self, content, mimetype=None, headers=None):
+        self.content, self.mimetype, self.headers = content, mimetype, headers
+
+
+@pytest.fixture
+def package_routes(harness):
+    calls = types.SimpleNamespace(imported=[], unzipped=[], zip_error=None, export={}, export_error=None,
+                                  plugin=None, plugin_imports=[])
+
+    def read_plugin_zip(data):
+        if calls.zip_error:
+            raise calls.zip_error
+        return calls.plugin
+
+    def import_plugin_skills(project_id, packages, author_id):
+        calls.plugin_imports.append((project_id, packages, author_id))
+        return [{'id': 3}, {'id': 4}]
+
+    def read_skill_zip(data):
+        calls.unzipped.append(data)
+        if calls.zip_error:
+            raise calls.zip_error
+        return '---\nname: forms\n---\nbody', ['entry']
+
+    def import_skill_md(**kwargs):
+        calls.imported.append(kwargs)
+        return {'id': 3}
+
+    def export_skill_md(**kwargs):
+        if calls.export_error:
+            raise calls.export_error
+        return calls.export
+
+    def validate_skill_import_filename(filename):
+        if not filename.lower().endswith(('.md', '.zip', '.skill')):
+            raise ValueError('Skill import only accepts .md, .zip or .skill files.')
+
+    module = types.ModuleType(f'{PACKAGE}.utils.skill_export_import')
+    module.__dict__.update(
+        read_skill_zip=read_skill_zip, import_skill_md=import_skill_md,
+        read_plugin_zip=read_plugin_zip, import_plugin_skills=import_plugin_skills,
+        is_skill_package=lambda filename: filename.lower().endswith(('.zip', '.skill')),
+        validate_skill_import_filename=validate_skill_import_filename,
+        export_skill_md=export_skill_md,
+    )
+    sys.modules[module.__name__] = module
+    sys.modules['tools'].auth.current_user = lambda: {'id': 1}
+    sys.modules['flask'].request.is_json = False
+    sys.modules['flask'].Response = SentResponse
+    sys.modules['pylon'] = types.ModuleType('pylon')
+    sys.modules['pylon.core'] = types.ModuleType('pylon.core')
+    pylon_tools = types.ModuleType('pylon.core.tools')
+    pylon_tools.log = types.SimpleNamespace(error=lambda *a, **k: None)
+    sys.modules['pylon.core.tools'] = pylon_tools
+    skill_api = types.ModuleType(f'{PACKAGE}.api.v2.skill')
+    skill_api.SKILL_PATH, skill_api.resolve_version_id = 'path', lambda version_id: (version_id, None)
+    sys.modules[skill_api.__name__] = skill_api
+    export_utils = types.ModuleType(f'{PACKAGE}.utils.export_import_utils')
+    export_utils.content_disposition_attachment = lambda filename: f'attachment; filename={filename}'
+    sys.modules[export_utils.__name__] = export_utils
+    calls.importer = _load('api/v2/skill_import.py', f'{PACKAGE}.api.v2.skill_import').PromptLibAPI()
+    calls.exporter = _load('api/v2/skill_export.py', f'{PACKAGE}.api.v2.skill_export').PromptLibAPI()
+    return calls
+
+
+class TestSkillPackageRoutes:
+    @pytest.mark.parametrize('filename', ['forms.ZIP', 'forms.skill'])
+    def test_a_zip_upload_is_unpacked_and_its_files_go_to_the_import(self, harness, package_routes, filename):
+        harness.user_permissions = {'models.applications.skills.create'}
+        harness.files['file'] = NamedUpload(filename, b'PK\x03\x04zip')
+
+        assert package_routes.importer.post(project_id=7) == ({'id': 3}, 201)
+        assert package_routes.unzipped == [b'PK\x03\x04zip']
+        assert package_routes.imported == [{'project_id': 7, 'content': '---\nname: forms\n---\nbody', 'author_id': 1,
+                                            'files': ['entry']}]
+
+    def test_a_plugin_zip_imports_every_skill_it_holds_and_answers_with_all_of_them(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.create'}
+        harness.files['file'] = NamedUpload('engineering.zip', b'PK\x03\x04zip')
+        package_routes.plugin = [('skills/a/SKILL.md', 'a', []), ('commands/b.md', 'b', [])]
+
+        assert package_routes.importer.post(project_id=7) == ({'skills': [{'id': 3}, {'id': 4}]}, 201)
+        assert package_routes.plugin_imports == [(7, package_routes.plugin, 1)]
+        assert package_routes.unzipped == [] and package_routes.imported == []
+
+    def test_a_markdown_upload_imports_without_files(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.create'}
+        harness.files['file'] = NamedUpload('forms.md', b'---\nname: forms\n---\nbody')
+
+        package_routes.importer.post(project_id=7)
+
+        assert package_routes.unzipped == [] and package_routes.imported[0]['files'] == ()
+
+    def test_a_refused_zip_keeps_its_status_and_imports_nothing(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.create'}
+        harness.files['file'] = NamedUpload('forms.zip', b'PK')
+        package_routes.zip_error = SkillError("'../x' cannot be unpacked safely")
+
+        assert package_routes.importer.post(project_id=7) == ({'error': "'../x' cannot be unpacked safely"}, 400)
+        assert package_routes.imported == []
+
+    def test_the_export_answers_with_the_type_the_package_has(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.export'}
+        package_routes.export.update(ok=True, content=b'PK', filename='forms.zip', mimetype='application/zip')
+
+        response = package_routes.exporter.get(project_id=7, skill_id=3)
+
+        assert (response.content, response.mimetype) == (b'PK', 'application/zip')
+        assert response.headers['Content-Disposition'] == 'attachment; filename=forms.zip'
+
+    def test_a_refused_export_is_never_cached_so_a_file_uploaded_later_is_exported(self, harness, package_routes):
+        harness.user_permissions = {'models.applications.skills.export'}
+        package_routes.export_error = Refusal("The stored content of 'forms.md' is missing")
+
+        assert package_routes.exporter.get(project_id=7, skill_id=3) == (
+            {'error': "The stored content of 'forms.md' is missing"}, 404, {'Cache-Control': 'no-store'})

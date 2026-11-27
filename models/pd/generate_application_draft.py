@@ -1,9 +1,12 @@
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator, ValidationInfo
 
 from .predict_llm import LLMSettingsRequest
 
-MAX_SUGGESTED_SKILLS = 5
+# Mirror utils.conversation_starters_utils and utils.skill_utils; kept local so this model imports
+# without the runtime. The API always passes the live limits through the validation context.
+DEFAULT_MAX_CONVERSATION_STARTERS = 4
+DEFAULT_MAX_SKILLS_PER_AGENT = 50
 
 
 class GenerateApplicationDraftRequest(BaseModel):
@@ -74,6 +77,7 @@ class ApplicationSuggestion(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     type: Optional[str] = None
+    project_id: Optional[int] = None  # None = current project; set for catalog agents
 
     def model_post_init(self, __context):
         if self.id is None:
@@ -84,6 +88,7 @@ class SkillSuggestion(BaseModel):
     id: int = Field(description="Skill ID from skills table")
     name: str = Field(description="Skill name")
     description: Optional[str] = Field(default=None, description="Skill description")
+    project_id: Optional[int] = None  # None = current project; set for catalog skills
 
 
 class GenerateApplicationDraftResponse(BaseModel):
@@ -108,16 +113,13 @@ class GenerateApplicationDraftResponse(BaseModel):
 
     @field_validator("conversation_starters", mode="before")
     @classmethod
-    def limit_conversation_starters(cls, v):
+    def limit_conversation_starters(cls, v, info: ValidationInfo):
         if v is None:
             return v
         v = [s.strip() for s in v if s and s.strip()]
-        if len(v) > 4:
-            raise ValueError(
-                f'conversation_starters cannot exceed 4 items, got {len(v)}'
-            )
-        v = [s[:768] for s in v]
-        return v
+        # The caller passes the admin limit; extra suggestions are dropped rather than failing the draft.
+        limit = (info.context or {}).get('max_conversation_starters', DEFAULT_MAX_CONVERSATION_STARTERS)
+        return [s[:768] for s in v[:limit]]
 
     suggested_toolkits: List[ToolkitSuggestion] = Field(
         default_factory=list,
@@ -135,17 +137,15 @@ class GenerateApplicationDraftResponse(BaseModel):
     )
     suggested_skills: List[SkillSuggestion] = Field(
         default_factory=list,
-        description=f"Skills the agent may want to use (max {MAX_SUGGESTED_SKILLS})",
+        description="Skills the agent may want to use (at most the agent skill limit)",
     )
 
     @field_validator("suggested_skills", mode="before")
     @classmethod
-    def limit_suggested_skills(cls, v):
+    def limit_suggested_skills(cls, v, info: ValidationInfo):
         if v is None:
             return []
-        if len(v) > MAX_SUGGESTED_SKILLS:
-            v = v[:MAX_SUGGESTED_SKILLS]
-        return v
+        return v[:(info.context or {}).get('max_skills_per_agent', DEFAULT_MAX_SKILLS_PER_AGENT)]
 
     @field_validator("suggested_toolkits", mode="before")
     @classmethod

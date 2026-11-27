@@ -2,7 +2,9 @@ import re
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
-from typing import List, Optional, Tuple, Literal
+from typing import Annotated, List, Optional, Tuple, Literal
+
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from sqlalchemy import func, or_, asc, desc, text
 from sqlalchemy.orm import selectinload
@@ -18,7 +20,10 @@ from .skill_run_settings import portable_run_settings
 from .skill_file_store import delete_contents
 from .skill_frontmatter import (
     FRONTMATTER_META_KEY,
+    argument_hint_payload,
+    carried_invocation_flags,
     extract_non_elitea_frontmatter,
+    invocation_flags,
 )
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping, SkillVersionFile
 from ..models.all import Tag, ApplicationVersion, Application
@@ -1415,6 +1420,87 @@ def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skil
     )
 
 
+def _query_forked_versions(session, project_id: int, source: tuple, parent_version_ids: list) -> list:
+    """(skill_id, version_id, parent_version_id) of this project's versions forked from these source versions."""
+    src_project, src_entity = source
+    parent_version_id = SkillVersion.meta['parent_version_id'].astext
+    return (
+        session.query(SkillVersion.skill_id, SkillVersion.id, parent_version_id)
+        .join(Skill, Skill.id == SkillVersion.skill_id)
+        .filter(
+            Skill.owner_id == project_id,
+            SkillVersion.meta['parent_project_id'].astext == str(src_project),
+            SkillVersion.meta['parent_entity_id'].astext == str(src_entity),
+            parent_version_id.in_(set(parent_version_ids)),
+        )
+        .order_by(SkillVersion.skill_id, SkillVersion.id)
+        .all()
+    )
+
+
+def _find_fork_holding_every_version(
+    rows: list, versions: list, parent_version_ids: list,
+) -> Optional[SkillImportResultModel]:
+    """The first fork holding a copy of every source version, keyed by the imported versions' names.
+
+    Only those names: the agent's reference to a name the fork lacks then falls back to the 'base' copy of the same
+    source version, never to a version of the fork's own that the fork happens to share a name with.
+    """
+    held = {}
+    for skill_id, version_id, parent_version_id in rows:
+        held.setdefault(skill_id, {}).setdefault(parent_version_id, version_id)
+    for skill_id, by_parent in held.items():
+        if all(parent in by_parent for parent in parent_version_ids):
+            return SkillImportResultModel(
+                id=skill_id,
+                versions={
+                    v.get('name', 'base'): by_parent[parent] for v, parent in zip(versions, parent_version_ids)
+                },
+                reused=True,
+            )
+    return None
+
+
+def _find_reusable_fork(session, project_id: int, source: tuple, versions: list) -> Optional[SkillImportResultModel]:
+    """An existing fork of the same source to attach instead of a new copy (#7636).
+
+    A fork lacking one of the source versions is not reused: the attach would fall back to another version's
+    instructions and files without telling anyone. Versions carrying no source version id predate that stamp, so
+    their fork is matched on lineage alone, as before.
+    """
+    parent_version_ids = [(v.get('meta') or {}).get('parent_version_id') for v in versions]
+    if None in parent_version_ids:
+        existing = _find_forked_skill(session, project_id, source)
+        if existing is None:
+            return None
+        return SkillImportResultModel(
+            id=existing.id, versions={v.name: v.id for v in existing.versions}, reused=True,
+        )
+    parent_version_ids = [str(parent) for parent in parent_version_ids]
+    rows = _query_forked_versions(session, project_id, source, parent_version_ids)
+    return _find_fork_holding_every_version(rows, versions, parent_version_ids)
+
+
+def _field_error_message(field: str, error: dict) -> str:
+    """The skill editor's wording for one pydantic error of a skill field."""
+    if error['type'] == 'string_too_long':
+        return f"{field.capitalize()} must be at most {error['ctx']['max_length']} characters"
+    if error['type'] == 'value_error':
+        return error['msg'].removeprefix('Value error, ')
+    return f"{field.capitalize()}: {error['msg']}"
+
+
+def validate_new_skill_fields(name, description) -> None:
+    """Raise the error creating a skill would raise for this name or description, before anything is stored."""
+    for field, value in (('name', name), ('description', description)):
+        info = SkillCreateModel.model_fields[field]
+        adapter = TypeAdapter(Annotated[info.annotation, *info.metadata], config=ConfigDict(title=field))
+        try:
+            adapter.validate_python(value)
+        except ValidationError as exc:
+            raise ValueError(_field_error_message(field, exc.errors()[0])) from exc
+
+
 def import_skill(
     project_id: int,
     name: str,
@@ -1438,13 +1524,9 @@ def import_skill(
     source = None if force_new else _source_lineage(versions)
     if source:
         with _skill_session(session, project_id) as s:
-            existing = _find_forked_skill(s, project_id, source)
-            if existing:
-                return SkillImportResultModel(
-                    id=existing.id,
-                    versions={v.name: v.id for v in existing.versions},
-                    reused=True,
-                )
+            reused = _find_reusable_fork(s, project_id, source, versions)
+            if reused:
+                return reused
 
     payloads = [
         {
@@ -1762,12 +1844,103 @@ def get_available_skills_for_agent(
                     'version_name': version.name if version else 'unknown',
                     'version_missing': version is None,
                     'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
+                    **(invocation_flags(version.meta) if version else {}),
+                    **(argument_hint_payload(version.meta) if version else {}),
                 })
 
         return skills
 
 
 _NAME_BOUNDARY_CHARS = re.compile(r'[0-9A-Za-z\-]')
+ARGUMENTS_PLACEHOLDER = re.compile(r'(?<!\\)\$ARGUMENTS(?![\[\w])')
+ARGUMENTS_LINE = 'ARGUMENTS: '
+_TAG_OPENING = re.compile(r'<(?=[/A-Za-z!?])')
+_SHELL_LINE_MARKERS = re.compile(r'^([ \t]*)(```!|!`)', re.MULTILINE)
+
+
+def escape_skill_argument(text: str) -> str:
+    """User text made inert inside the skill block: it can neither open a tag nor start a shell line."""
+    text = _TAG_OPENING.sub('&lt;', text)
+    return _SHELL_LINE_MARKERS.sub(lambda match: f'{match.group(1)}{match.group(2)[:-1]} {match.group(2)[-1]}', text)
+
+
+def fill_skill_arguments(instructions: str, argument: str) -> str:
+    """The body with the escaped argument in place of every $ARGUMENTS, or on a final ARGUMENTS: line when it has none."""
+    if ARGUMENTS_PLACEHOLDER.search(instructions):
+        return ARGUMENTS_PLACEHOLDER.sub(lambda _match: argument, instructions)
+    if not argument:
+        return instructions
+    return f'{instructions.rstrip()}\n\n{ARGUMENTS_LINE}{argument}'
+
+
+JINJA_RAW_OPEN = '{% raw %}'
+JINJA_RAW_CLOSE = '{% endraw %}'
+
+
+def consume_recipient_skill_argument(message_content, name: str, other_names: List[str]) -> Tuple[object, Optional[str]]:
+    """The message with a leading ``~name`` of the answering skill de-sigiled, and the escaped text after it, or None."""
+    if isinstance(message_content, str):
+        return _consume_leading_own_mention(message_content, name, other_names)
+    if not isinstance(message_content, list):
+        return message_content, None
+    for index, block in enumerate(message_content):
+        if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
+            cleaned, argument = _consume_leading_own_mention(block['text'], name, other_names)
+            if argument is None:
+                return message_content, None
+            rebuilt = list(message_content)
+            rebuilt[index] = {**block, 'text': cleaned}
+            return rebuilt, argument
+    return message_content, None
+
+
+def _consume_leading_own_mention(text: str, name: str, other_names: List[str]) -> Tuple[str, Optional[str]]:
+    if not text or not name or '~' not in text:
+        return text, None
+    spans = _find_skill_mention_spans(text, [name, *other_names])
+    if not spans or spans[0][2].lower() != name.lower():
+        return text, None
+    argument = _leading_argument(text, spans)
+    if argument is None:
+        return text, None
+    start, end, canonical = spans[0]
+    return f'{text[:start]}{canonical}{text[end:]}', escape_skill_argument(argument)
+
+
+def fill_recipient_instructions(instructions: str, argument: str) -> Tuple[str, str]:
+    """The answering skill's body with the argument filled, and the exact text placed in it, inert for the SDK's Jinja2 pass."""
+    filled = fill_skill_arguments(instructions, argument)
+    if not argument or '{{' not in filled:
+        return filled, argument
+    inert = f"{JINJA_RAW_OPEN}{argument.replace('{%', '{ %')}{JINJA_RAW_CLOSE}"
+    return fill_skill_arguments(instructions, inert), inert
+
+
+SKILL_ARGUMENT_KEY = 'skill_argument'
+
+
+def apply_recipient_skill_argument(result: dict, mention_source, other_names: list) -> None:
+    """Fill the answering skill's own $ARGUMENTS from a leading ~name in the message, or in the message being resumed."""
+    source = mention_source if mention_source is not None else result.get('user_input')
+    cleaned, argument = consume_recipient_skill_argument(source, result.get('entity_name') or '', other_names)
+    if argument is None:
+        return
+    if mention_source is None:
+        result['user_input'] = cleaned
+    version_details = result.get('version_details') or {}
+    version_details['instructions'], placed = fill_recipient_instructions(version_details.get('instructions') or '', argument)
+    result['version_details'] = version_details
+    if placed:
+        result[SKILL_ARGUMENT_KEY] = placed
+
+
+def _leading_argument(text: str, spans: List[Tuple[int, int, str]]) -> Optional[str]:
+    """The text after a message-leading mention up to the next mention, or None when the message does not start with one."""
+    start, end, _name = spans[0]
+    if text[:start].strip():
+        return None
+    next_start = spans[1][0] if len(spans) > 1 else len(text)
+    return text[end:next_start].strip()
 
 
 def _find_skill_mention_spans(
@@ -1843,8 +2016,9 @@ def _find_skill_mention_spans(
 def consume_invoked_skills(
     text: Optional[str],
     attached_skills: List[dict],
+    with_arguments: bool = False,
 ) -> Tuple[Optional[str], List[dict]]:
-    """Resolve ``~skill`` control tokens AND consume them from ``text``."""
+    """Resolve ``~skill`` control tokens AND consume them from ``text``; with_arguments fills the leading skill's body."""
     # Fast path: the overwhelming majority of turns/instructions contain no
     # ``~`` token, so return the original text object unchanged (identity).
     if not text or not attached_skills or '~' not in text:
@@ -1867,6 +2041,8 @@ def consume_invoked_skills(
         cursor = end
     pieces.append(text[cursor:])
     cleaned_text = ''.join(pieces)
+    argument = _leading_argument(text, spans) if with_arguments else None
+    leading_key = spans[0][2].lower()
 
     # Resolve: dedup by name (document order), skip blank bodies.
     by_name: dict = {}
@@ -1901,11 +2077,44 @@ def consume_invoked_skills(
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         }
+        if key == leading_key and argument is not None:
+            escaped = escape_skill_argument(argument)
+            entry['instructions'] = fill_skill_arguments(instructions, escaped)
+            if escaped:
+                entry['argument'] = escaped
         if skill.get('files'):
             entry['files'] = skill['files']
         invoked.append(entry)
 
     return cleaned_text, invoked
+
+
+def model_only_names(candidates: List[dict]) -> set:
+    """Lower-cased names whose winning candidate (first in precedence order) is not user-invocable."""
+    winners: dict = {}
+    for skill in candidates:
+        key = (skill.get('name') or '').strip().lower()
+        if key and key not in winners:
+            winners[key] = skill
+    return {key for key, skill in winners.items() if skill.get('user_invocable') is False}
+
+
+def drop_model_only_candidates(candidates: List[dict]) -> List[dict]:
+    hidden = model_only_names(candidates)
+    return [skill for skill in candidates if (skill.get('name') or '').strip().lower() not in hidden]
+
+
+def merge_invoked_skills(message_skills: List[dict], resumed_skills: Optional[List[dict]]) -> List[dict]:
+    """The message's own skills first, then the resumed ones it does not repeat, within the per-turn cap."""
+    seen = {(s.get('skill_project_id'), s.get('skill_id')) for s in message_skills}
+    merged = list(message_skills)
+    for skill in resumed_skills or []:
+        key = (skill.get('skill_project_id'), skill.get('skill_id'))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(skill)
+    return _validate_invocation_limit(merged)
 
 
 def _validate_invocation_limit(message_skills: List[dict]) -> List[dict]:
@@ -1915,18 +2124,23 @@ def _validate_invocation_limit(message_skills: List[dict]) -> List[dict]:
     return message_skills
 
 
-def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
+def consume_message_skills(
+    message_content, candidates: List[dict], with_arguments: bool = True,
+) -> Tuple[object, List[dict]]:
+    candidates = drop_model_only_candidates(candidates)
     if isinstance(message_content, str):
-        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates)
+        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates, with_arguments)
         return cleaned_message or 'continue', _validate_invocation_limit(message_skills)
     if not isinstance(message_content, list):
         return message_content, []
 
     message_skills: List[dict] = []
     rebuilt_blocks: list = []
+    first_text_block = True
     for block in message_content:
         if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
-            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates)
+            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates, with_arguments and first_text_block)
+            first_text_block = False
             for skill in block_skills:
                 if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
                     message_skills.append(skill)
@@ -1943,7 +2157,7 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
 
 
 def validate_message_skill_limit(message_content, candidates: List[dict]) -> None:
-    consume_message_skills(message_content, candidates)
+    consume_message_skills(message_content, candidates, with_arguments=False)
 
 
 def apply_runtime_skills(version_details: dict) -> None:
@@ -2004,6 +2218,7 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             'instruction_referenced': s.get('skill_id') in referenced_ids,
             'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
+            **carried_invocation_flags(s),
         }
         if s.get('skill_project_id') is not None:
             entry['skill_project_id'] = s['skill_project_id']

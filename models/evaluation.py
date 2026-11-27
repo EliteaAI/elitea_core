@@ -76,6 +76,10 @@ class EvalCaseSource:
 class EvalRunTrigger:
     offline_batch = 'offline_batch'
     on_demand = 'on_demand'
+    # Launched by the environment-wide scheduled evaluation; the snapshot is an offline batch.
+    scheduled = 'scheduled'
+    # Launched by the scheduled evaluation in history mode: scores stored chat turns, never runs the agent.
+    history = 'history'
 
 
 class EvalRunStatus:

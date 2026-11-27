@@ -49,9 +49,16 @@ def test_el_7011_bug12_r1_1_trigger_type_holds_the_shared_enum(world):  # noqa: 
     assert set(trigger_type.VALUES) == {"chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "manual"}
 
 
-@pytest.mark.parametrize("trigger", ["manual", "test"])
-def test_el_7011_bug12_r1_1_run_now_and_test_run_send_schedule_manual(run, trigger):
-    calls = run(trigger)
+def test_run_now_is_stored_as_schedule_manual(run):
+    calls = run("manual")
+
+    assert calls.conversation[0]["trigger_type"] == "schedule_manual"
+    assert calls.conversation[0]["extra_meta"]["execution_type"] == "schedule_manual"
+    assert calls.predict[0]["trigger_source"] == "schedule_manual"
+
+
+def test_test_run_is_stored_and_sent_as_schedule_manual(run):
+    calls = run("test")
 
     assert calls.conversation[0]["trigger_type"] == "schedule_manual"
     assert calls.conversation[0]["extra_meta"]["execution_type"] == "schedule_manual"

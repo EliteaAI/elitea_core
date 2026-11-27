@@ -9,7 +9,9 @@ import types
 import pytest
 from unit.test_7011_schedule_crud_api import (
     ADMIN,
+    EDITOR,
     ADMIN_ID,
+    OTHER_ID,
     OWNER_ID,
     PACKAGE,
     PROJECT_ID,
@@ -25,12 +27,15 @@ class Decisions:
     def __init__(self, runs):
         self.checks, self.applied = [], []
         self.check_error = None
+        self.decider = None  # when set, a caller other than this user is refused as the real check does
         self.runs = runs
 
-    def check(self, project_id, run_id, caller_id, actions):
+    def check(self, project_id, run_id, caller_id, actions, fan_out=False, sign_in=False, conversation_id=None):
         self.checks.append((run_id, caller_id, actions))
         if self.check_error:
             raise self.check_error
+        if self.decider is not None and caller_id != self.decider:
+            raise self.runs.ScheduleDecisionForbidden()
         return 'reject' if 'reject' in actions else 'approve'
 
     def apply(self, project_id, run_id, decision):
@@ -48,7 +53,12 @@ def decisions(harness, monkeypatch):
         pass
 
     state = Decisions(runs)
+    runs.run_actor_id = lambda session, run: (
+        run.requested_by if run.trigger in ('manual', 'test') and run.requested_by is not None
+        else harness.row(run.schedule_id).created_by if run.schedule_id else run.requested_by)
     runs.ScheduleDecisionForbidden, runs.ScheduleRunNotWaiting = ScheduleDecisionForbidden, ScheduleRunNotWaiting
+    runs.run_decider_id = lambda session, run: state.decider
+    runs.DECISION_REFUSED = 'Only the owner of this schedule can approve or reject this run'
     runs.check_schedule_decision, runs.apply_schedule_decision = state.check, state.apply
     monkeypatch.setitem(sys.modules, runs.__name__, runs)
     state.started = []
@@ -68,7 +78,7 @@ def decisions(harness, monkeypatch):
 def add_run(harness, schedule_id, status='waiting_for_approval', **columns):
     run_model = sys.modules[f'{PACKAGE}.models.entity_schedule'].EntityScheduleRun
     with harness.session_factory() as session:
-        run = run_model(schedule_id=schedule_id, trigger='cron', status=status, **columns)
+        run = run_model(schedule_id=schedule_id, status=status, **{'trigger': 'cron', **columns})
         session.add(run)
         session.commit()
         return run.id
@@ -169,16 +179,74 @@ def test_the_owner_rejects_and_the_run_does_not_start(harness, decisions):
     assert decisions.started == []
 
 
-def test_an_admin_who_is_not_the_owner_gets_403_not_owner(harness, decisions):
+@pytest.mark.parametrize('action', ['approve', 'reject'])
+def test_an_admin_who_is_not_the_schedule_owner_gets_403_not_owner(harness, decisions, action):
     harness.request_as(ADMIN_ID, ADMIN)
     schedule_id = harness.seed()
     run_id = add_run(harness, schedule_id)
     decisions.check_error = sys.modules[f'{PACKAGE}.utils.schedule_runs'].ScheduleDecisionForbidden()
 
-    body, status = decide(harness, schedule_id, run_id)
+    body, status = decide(harness, schedule_id, run_id, action)
+
+    assert (status, body['code']) == (403, 'not_owner')
+    assert body['error'] == 'Only the owner of this schedule can approve or reject this run'
+    assert decisions.checks == [(run_id, ADMIN_ID, [action])]  # the admin is checked as any other caller
+    assert decisions.applied == [] and decisions.started == []
+
+
+NEW_OWNER_ID, MEMBER_ID = OTHER_ID, 77
+
+
+def after_change_owner(harness, decisions):
+    """A waiting run that started under OWNER_ID, on a schedule that belongs to NEW_OWNER_ID now."""
+    schedule_id = harness.seed(created_by=NEW_OWNER_ID)
+    decisions.decider = OWNER_ID
+    return schedule_id, add_run(harness, schedule_id)
+
+
+def test_after_a_change_of_owner_the_old_owner_still_decides_the_waiting_run(harness, decisions):
+    schedule_id, run_id = after_change_owner(harness, decisions)
+
+    assert decide(harness, schedule_id, run_id) == ({'run_id': run_id, 'status': 'running'}, 200)
+    assert decisions.checks == [(run_id, OWNER_ID, ['approve'])]
+    assert decisions.applied == [(run_id, 'approve')]
+
+
+@pytest.mark.parametrize('action', ['approve', 'reject'])
+def test_after_a_change_of_owner_the_new_owner_gets_403_for_the_waiting_run(harness, decisions, action):
+    schedule_id, run_id = after_change_owner(harness, decisions)
+    harness.request_as(NEW_OWNER_ID, EDITOR)
+
+    body, status = decide(harness, schedule_id, run_id, action)
 
     assert (status, body['code']) == (403, 'not_owner')
     assert decisions.applied == [] and decisions.started == []
+
+
+def test_after_a_change_of_owner_another_member_gets_404(harness, decisions):
+    schedule_id, run_id = after_change_owner(harness, decisions)
+    harness.request_as(MEMBER_ID, EDITOR)
+
+    assert decide(harness, schedule_id, run_id)[1] == 404
+    assert decisions.checks == [] and decisions.applied == []
+
+
+def test_the_old_owner_gets_404_for_a_run_that_belongs_to_a_later_owner(harness, decisions):
+    schedule_id = harness.seed(created_by=NEW_OWNER_ID)
+    decisions.decider = NEW_OWNER_ID
+    run_id = add_run(harness, schedule_id)
+
+    assert decide(harness, schedule_id, run_id)[1] == 404
+    assert decisions.checks == [] and decisions.applied == []
+
+
+def test_the_old_owner_gets_404_for_a_run_of_another_schedule(harness, decisions):
+    schedule_id = harness.seed(created_by=NEW_OWNER_ID)
+    other_schedule_id = harness.seed(created_by=NEW_OWNER_ID)
+    decisions.decider = OWNER_ID
+    run_id = add_run(harness, other_schedule_id)
+
+    assert decide(harness, schedule_id, run_id)[1] == 404
 
 
 def test_a_run_with_a_chat_is_409_run_has_chat(harness, decisions):
@@ -222,7 +290,7 @@ def test_a_missing_run_is_404(harness, decisions):
 
     body, status = decide(harness, schedule_id, 999)
 
-    assert (status, body['code']) == (404, 'run_not_found')
+    assert (status, body['code']) == (404, 'not_found')
 
 
 def test_a_run_of_another_schedule_is_404(harness, decisions):
@@ -231,7 +299,7 @@ def test_a_run_of_another_schedule_is_404(harness, decisions):
 
     body, status = decide(harness, schedule_id, run_id)
 
-    assert (status, body['code']) == (404, 'run_not_found')
+    assert (status, body['code']) == (404, 'not_found')
     assert decisions.checks == []
 
 
@@ -289,3 +357,99 @@ def test_the_tail_of_a_run_path_is_the_decision_only_when_it_ends_in_decision(ha
     assert harness.routes._tail(5, 6).endswith('/decision')
     harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/5/runs/6'
     assert not harness.routes._tail(5, 6).endswith('/decision')
+
+
+def add_test_run(harness, requested_by=OWNER_ID, status='waiting_for_approval', application_id=1, **columns):
+    """A Test Run: no schedule, the form and the agent in the unmapped columns."""
+    models = sys.modules[f'{PACKAGE}.models.entity_schedule']
+    form = {'entity_type': 'agent', 'application_id': application_id, 'version_id': 10, 'approval_rule': 'pause_and_ask'}
+    with harness.session_factory() as session:
+        run_id = session.execute(models.EntityScheduleRun.__table__.insert().values(
+            schedule_id=None, trigger='test', status=status, requested_by=requested_by,
+            **{models.RUN_FORM.key: form, models.RUN_APPLICATION_ID.key: application_id}, **columns,
+        )).inserted_primary_key[0]
+        session.commit()
+    return run_id
+
+
+def decide_test_run(harness, run_id, action='approve'):
+    harness.body, harness.query = {'action': action}, {}
+    harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/{run_id}/decision'
+    handler = harness.routes.PromptLibAPI()
+    handler.module = object()
+    return handler.post(project_id=PROJECT_ID, run_id=run_id)
+
+
+def test_the_owner_approves_a_waiting_test_run_and_the_run_starts(harness, decisions):
+    run_id = add_test_run(harness)
+
+    assert decide_test_run(harness, run_id) == ({'run_id': run_id, 'status': 'running'}, 200)
+    assert decisions.applied == [(run_id, 'approve')]
+    assert decisions.started == [('agent', PROJECT_ID, None, run_id)]
+    assert decisions.checks == [(run_id, OWNER_ID, ['approve'])]
+
+
+def test_approving_a_test_run_checks_the_credential_of_the_form_first(harness, decisions):
+    run_id = add_test_run(harness)
+    decisions.missing = 'credential qa_missing not found'
+    seen = []
+    prerun = sys.modules[f'{PACKAGE}.utils.schedule_prerun']
+    prerun.check_owner_credentials = lambda project_id, owner: seen.append(owner) or decisions.missing
+
+    body, status = decide_test_run(harness, run_id)
+
+    assert (status, body['code']) == (409, 'credential_missing')
+    assert (seen[0].created_by, seen[0].application_id, seen[0].version_id) == (OWNER_ID, 1, 10)
+    assert decisions.applied == [] and decisions.started == []
+
+
+def test_rejecting_a_test_run_does_not_start_it(harness, decisions):
+    run_id = add_test_run(harness)
+
+    assert decide_test_run(harness, run_id, 'reject') == ({'run_id': run_id, 'status': 'failed'}, 200)
+    assert decisions.started == []
+
+
+def test_a_test_run_with_a_chat_is_decided_in_that_chat(harness, decisions):
+    run_id = add_test_run(harness, conversation_id=5)
+
+    body, status = decide_test_run(harness, run_id)
+
+    assert (status, body['code']) == (409, 'run_has_chat')
+
+
+def test_another_owners_test_run_answers_404(harness, decisions):
+    run_id = add_test_run(harness, requested_by=OTHER_ID)
+
+    assert decide_test_run(harness, run_id)[1] == 404
+    assert decisions.applied == []
+
+
+def test_an_admin_gets_404_for_a_test_run_of_another_user(harness, decisions):
+    harness.request_as(ADMIN_ID, ADMIN)
+    run_id = add_test_run(harness)
+
+    assert decide_test_run(harness, run_id)[1] == 404
+
+
+def test_a_saved_run_answers_404_on_the_test_run_decision_route(harness, decisions):
+    run_id = add_run(harness, harness.seed())
+
+    assert decide_test_run(harness, run_id)[1] == 404
+    assert decisions.applied == []
+
+
+def test_a_test_run_that_cannot_restart_fails_with_the_reason(harness, decisions):
+    run_id = add_test_run(harness, status='running')
+    decisions.start_ok = False
+
+    body, status = decide_test_run(harness, run_id)
+
+    assert (status, body['code']) == (500, 'run_start_failed')
+    assert run_status(harness, run_id) == ('failed', 'the run could not start')
+
+
+def test_the_decision_tail_of_a_test_run_has_no_schedule_id(harness):
+    harness.path = f'/schedules/prompt_lib/{PROJECT_ID}/test_run/6/decision'
+    assert harness.routes._tail(None, 6) == 'test_run/<int:run_id>/decision'
+    assert harness.routes.ROUTES[('post', harness.routes._tail(None, 6))] == '_decide_test_run'

@@ -136,6 +136,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     application_ids=application_ids,
                     follow_version_ids=follow_version_ids
                 )
+            except SkillVersionExportUnavailableError as exc:
+                return {'error': str(exc)}, exc.http_status, {'Cache-Control': 'no-store'}
             except Exception as e:
                 log.error(f"MD export failed: {e}")
                 return {'errors': {'applications': str(e)}}, 400
@@ -182,7 +184,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(), 400
         except SkillVersionExportUnavailableError as exc:
-            return {'error': str(exc)}, exc.http_status
+            return {'error': str(exc)}, exc.http_status, {'Cache-Control': 'no-store'}
 
         if not result['ok']:
             return {'errors': {'applications': result['msg']}}, 400

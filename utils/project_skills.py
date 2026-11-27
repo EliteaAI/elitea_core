@@ -7,6 +7,7 @@ from tools import context, db, rpc_tools, this
 
 from .folder_access import build_folder_ids_exclusion_clause
 from .skill_files import list_runtime_manifests
+from .skill_frontmatter import invocation_flags
 from .skill_utils import SkillInvocationLimitError, get_max_invoked_skills_per_turn
 from .support_utils import get_support_config
 from ..models.enums.all import ParticipantTypes
@@ -109,6 +110,7 @@ def build_project_skill_catalog(project_id: int, sender_id, conversation) -> lis
             'version_name': version['name'],
             'icon_meta': (version['meta'] or {}).get('icon_meta'),
             'origin': SKILL_ORIGIN_PROJECT,
+            **invocation_flags(version['meta']),
         })
     if not catalog:
         return catalog
@@ -125,19 +127,20 @@ def build_project_skill_catalog(project_id: int, sender_id, conversation) -> lis
 
 
 def resolve_mentioned_project_skills(user_input, known_names: set, catalog: list, project_id: int,
-                                     strict: bool = False) -> list:
+                                     strict: bool = False, hidden_names: set = frozenset()) -> list:
     if isinstance(user_input, str):
         texts = [user_input]
     elif isinstance(user_input, list):
         texts = [block.get('text') or '' for block in user_input if isinstance(block, dict) and block.get('type') == 'text']
     else:
         texts = []
-    known = {name.lower() for name in known_names if name}
+    hidden = {name.lower() for name in hidden_names if name}
+    known = {name.lower() for name in known_names if name} - hidden
     mention_tokens = dict.fromkeys(match.group(1).lower() for text in texts for match in MENTION_TOKEN_PATTERN.finditer(text))
-    tokens = [token for token in mention_tokens if token not in known]
+    tokens = [token for token in mention_tokens if token not in known and token not in hidden]
     if not tokens:
         return []
-    by_name = {entry['name'].lower(): entry for entry in catalog}
+    by_name = {entry['name'].lower(): entry for entry in catalog if entry['name'].lower() not in hidden}
     if strict:
         suggestable_names = sorted(known | set(by_name))
         suggestions = []

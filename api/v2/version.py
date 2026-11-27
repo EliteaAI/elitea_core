@@ -21,6 +21,7 @@ from ...utils.application_utils import (
     VersionNotUpdatableError
 )
 from ...utils.create_utils import clone_persisted_application_version
+from ...utils.conversation_starters_utils import ConversationStartersLimitError, limit_error_response
 from ...utils.mcp_versioning import (
     INTERNAL_MCP_ENVIRON_KEY,
     InstructionsPatchConflictError,
@@ -221,6 +222,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     session.rollback()
                     return res['msg'], 400
                 session.commit()
+                # #7401: triggers on this version re-check their connections; a webhook that broke switches off
+                from ...utils.schedule_prerun import recheck_version_triggers_later
+                recheck_version_triggers_later(project_id, version_id)
                 if backup_version is not None:
                     res['data']['mcp_backup_version'] = {
                         'id': backup_version.id,
@@ -230,6 +234,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {'error': str(e)}, 400
         except InstructionsPatchConflictError as e:
             return {'error': str(e)}, 409
+        except ConversationStartersLimitError as e:
+            return limit_error_response(e), 400
         except ValidationError as e:
             return e.errors(
                 include_url=False,

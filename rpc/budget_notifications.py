@@ -146,7 +146,7 @@ class RPC:
                     {
                         'project_id': project_id,
                         'user_id': recipient,
-                        'event_type': event_type,
+                        'event_type': event_type.value,
                         'meta': {
                             'project_name': project_name,
                             'budget_period': BUDGET_PERIOD,

@@ -16,6 +16,7 @@ from .internal_base_url import internal_base_url
 from .mcp_config import is_mcp_exposure_enabled
 from .platform_buckets import is_platform_managed_bucket
 from .support_utils import get_support_config
+from .builder_keys import BUILDER_KEY, is_builder_enabled
 
 
 # ImageGen Constants
@@ -38,30 +39,19 @@ ATTACHMENT_DEFAULT_SELECTED_TOOLS = [
 ]
 
 # MCP Internal Tool Constants
-MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
-MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY = 'skill_builder'
-MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY = 'project_context_builder'
+MCP_INTERNAL_TOOL_KEY = BUILDER_KEY
 MCP_PROJECT_ID_MARKER = '{project_id}'
 ASK_USER_INTERNAL_TOOL_KEY = 'ask_user'
 
+# Elitea Builder (#7383): one internal toolkit with the five Builder tools. The old per-endpoint groups stay
+# reachable through its operation catalog (utils/builder/catalog.py), never as tools of their own.
 MCP_ENDPOINT_CONFIGS = [
-    {"suffix": "elitea_core/applications", "name": "Elitea Applications"},
-    {"suffix": "elitea_core/chat", "name": "Elitea Chat"},
-    {"suffix": "elitea_core/toolkits", "name": "Elitea Toolkits"},
-    {"suffix": "elitea_core/analytics", "name": "Elitea Analytics"},
-    {"suffix": "secrets", "name": "Secrets"},
-    {"suffix": "configurations", "name": "Configurations"},
-    {"suffix": "artifacts", "name": "Artifacts"},
-]
-MCP_SKILL_BUILDER_ENDPOINT_CONFIGS = [
-    {"suffix": "elitea_core/skills", "name": "Elitea Skills"},
-]
-MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS = [
-    {"suffix": "elitea_core/project_context", "name": "Elitea Project Context"},
+    {"suffix": "elitea_core/builder", "name": "Elitea Builder"},
 ]
 MCP_CURRENT_PROJECT_SUFFIXES = {
     "elitea_core/project_context",
     "elitea_core/skills",
+    "elitea_core/builder",
 }
 # The builder entity groups a conversation may act on: agents/pipelines, skills, project context.
 # Their `project_id` tool argument is clamped to the scope project carried on the MCP session.
@@ -69,38 +59,20 @@ MCP_PROJECT_SCOPED_SUFFIXES = MCP_CURRENT_PROJECT_SUFFIXES | {
     "elitea_core/applications",
 }
 MCP_SCOPE_PROJECT_QUERY_ARG = 'scope_project_id'
-MCP_BUILDER_TOOL_KEYS = {
-    MCP_INTERNAL_TOOL_KEY,
-    MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
-    MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY,
-}
-SKILL_SCOPE_INSTRUCTION = (
-    " Disambiguate 'skill' from the full conversation context: treat it as an ELITEA platform "
-    "Skill entity only when the user request is clearly about ELITEA entities/workflows "
-    "(e.g., create/update/list/publish/import/export/link/version/category in ELITEA via "
-    "elitea_core/skills). If the user means a general human capability, handle it as a regular "
-    "concept and do not invoke ELITEA skills MCP tools unless explicitly requested."
-)
-SKILL_BUILDER_NOT_ENABLED_INSTRUCTION = (
-    " ELITEA Skills are a separate entity from agents and pipelines, and the Skill Builder tool "
-    "that manages them is not enabled in this conversation. If the user asks to create, edit, "
-    "delete, list, publish, import, export, attach or detach an ELITEA skill, do not create or "
-    "change an agent, a pipeline or any other entity in its place. Tell the user that managing "
-    "skills needs the Skill Builder tool, which they can enable in this conversation's internal "
-    "tools, and stop there. This does not restrict using skills or other agent work: skills "
-    "listed in <available_skills> are loaded and applied as usual, and creating or editing agent "
-    "and pipeline versions works normally. Creating a version with these tools does not carry "
-    "over skills attached to another version, so do not tell the user a new version has the same "
-    "skills; say that its skills must be attached with the Skill Builder tool or in the agent's "
-    "editor, and still create the version if asked. A skill the user names that is not listed "
-    "there is not attached to this agent, and attaching it is managing skills."
-)
+def get_builder_payload(internal_tools: list[str], is_pipeline: bool = False) -> Optional[dict]:
+    """Elitea Builder (#7383): the block the SDK turns into BuilderMiddleware (core prompt + HITL cards)."""
+    if is_pipeline or not is_mcp_exposure_enabled():
+        return None
+    if not is_builder_enabled(internal_tools):
+        return None
+    from .builder.prompts import BUILDER_CORE_PROMPT  # pylint: disable=C0415
+    return {'core_prompt': BUILDER_CORE_PROMPT}
 
 
 def should_inject_runtime_context(internal_tools: list[str], is_pipeline: bool) -> bool:
     if is_pipeline:
         return False
-    return bool(set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS))
+    return is_builder_enabled(internal_tools)
 
 
 def resolve_builder_scope_project_id(
@@ -714,30 +686,15 @@ def inject_mcp_toolkits(
     Returns:
         List of MCP toolkit payloads with id=None, or empty list if not enabled
     """
-    enabled_tools = set(internal_tools or [])
-    log.info(
-        f"[MCP Injection] Checking internal_tools={internal_tools}, "
-        f"looking for keys={sorted(MCP_BUILDER_TOOL_KEYS)}"
-    )
+    log.info(f"[MCP Injection] Checking internal_tools={internal_tools}, looking for key={BUILDER_KEY}")
     if not is_mcp_exposure_enabled():
         log.debug("MCP exposure is disabled, skipping MCP injection")
         return []
-    if not enabled_tools.intersection(MCP_BUILDER_TOOL_KEYS):
-        log.debug("MCP internal tool not enabled, skipping auto-injection")
+    if not is_builder_enabled(internal_tools):
+        log.debug("Elitea Builder not enabled, skipping auto-injection")
         return []
 
-    endpoint_configs = list(MCP_ENDPOINT_CONFIGS) if MCP_INTERNAL_TOOL_KEY in enabled_tools else []
-    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
-        endpoint_configs.extend(MCP_SKILL_BUILDER_ENDPOINT_CONFIGS)
-    if MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
-        endpoint_configs.extend(MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS)
-
-    # Keep insertion stable while avoiding duplicate endpoint registrations.
-    seen_suffixes = set()
-    endpoint_configs = [
-        ep for ep in endpoint_configs
-        if not (ep['suffix'] in seen_suffixes or seen_suffixes.add(ep['suffix']))
-    ]
+    endpoint_configs = list(MCP_ENDPOINT_CONFIGS)
 
     user_project = rpc_tools.RpcMixin().rpc.timeout(5).admin_get_user_private_project(user_id)
     if not user_project:
@@ -936,78 +893,3 @@ def require_internal_mcp_pat(toolkit_config: dict, user_id: int) -> None:
     state, _ = resolve_user_token_state(user_id)
     if state != 'VALID':
         raise InternalMcpPatError(state)
-
-
-def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
-    """
-    Return a system-prompt addon that instructs the model to return entity links
-    after creating entities via Elitea MCP Tools.
-
-    Returns empty string when MCP internal tool is not active.
-    """
-    if not is_mcp_exposure_enabled():
-        return ''
-    if not set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS):
-        return ''
-    enabled_tools = set(internal_tools or [])
-    app_host = c.APP_HOST.rstrip('/')
-    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
-        skill_scope_instruction = SKILL_SCOPE_INSTRUCTION
-    elif MCP_INTERNAL_TOOL_KEY in enabled_tools:
-        skill_scope_instruction = SKILL_BUILDER_NOT_ENABLED_INSTRUCTION
-    else:
-        skill_scope_instruction = ""
-    few_shot_blocks = []
-    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
-        few_shot_blocks.append(
-            "Skills versioning rule:\n"
-            "- Never rename an existing skill version.\n"
-            "- If content should change in an existing version: update that version.\n"
-            "- If a distinct revision is needed: create a new version.\n"
-            "- Treat 'base' as immutable for renaming.\n\n"
-            "Skills few-shot disambiguation examples:\n"
-            "- User: \"How can I improve my communication skills?\" -> Treat as general human capability. "
-            "Do NOT use ELITEA Skills MCP tools.\n"
-            "- User: \"Create a skill named incident-triage\" -> Use elitea_core/skills MCP tools.\n"
-            "- User: \"List skills in this project and open the base version\" -> Use elitea_core/skills MCP tools."
-        )
-    if MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
-        few_shot_blocks.append(
-            "Project Context few-shot disambiguation examples:\n"
-            "- User: \"What context window does this model have?\" -> General LLM question. "
-            "Do NOT use project-context MCP tools.\n"
-            "- User: \"Update this project's background with release constraints\" -> "
-            "Use elitea_core/project_context MCP tools.\n"
-            "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
-        )
-        if ASK_USER_INTERNAL_TOOL_KEY in enabled_tools:
-            few_shot_blocks.append(
-                "Project Context clarification rule (the `ask_user` tool is available):\n"
-                "- If the user asks to create or update project context but has not given enough information "
-                "(e.g. what the project is about, its architecture, workflows or constraints), you MUST call the "
-                "`ask_user` tool to collect the missing details. Do NOT ask for them in a plain-text reply, and "
-                "do NOT invent placeholder content.\n"
-                "- Ask 1-4 focused questions, each with a short header and 2-4 concrete options; leave "
-                "`allow_other` enabled so the user can type a free-form answer.\n"
-                "- After the user answers, use the elitea_core/project_context MCP tools to create or update "
-                "the project context from those answers."
-            )
-    if few_shot_blocks:
-        few_shot_joined = "\n\n".join(few_shot_blocks)
-        few_shot_instruction = f"\n\n{few_shot_joined}\n\n"
-    else:
-        few_shot_instruction = ""
-    return (
-        f"\n\nYou have access to Elitea MCP tools and may have project context available. "
-        f"{skill_scope_instruction}"
-        f"{few_shot_instruction}"
-        f"Only use MCP tools and only reference project context when the user explicitly requests it. "
-        f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
-        f"When an Elitea MCP tool requires a `project_id` or `user_id` argument, take the value from the "
-        f"<runtime_context> block in the conversation (<project_id>, <user_id>). Do not ask the user for it "
-        f"and do not guess. Agents, pipelines, skills and project context can only be read or changed in "
-        f"that project: never pass a different `project_id`. If the user asks you to work in another "
-        f"project, tell them to switch to it instead.\n"
-        f"When you use an Elitea MCP tool to create an entity, do not include a URL or link to it in your response. "
-        f"The UI will automatically display an interactive chip for the created entity."
-    )

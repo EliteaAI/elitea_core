@@ -3,10 +3,11 @@ from datetime import date
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .entity_schedule import (
     DESCRIPTION_MAX,
+    INDEX_NAME_MAX,
     NAME_MAX,
     ApprovalRule,
     RunMode,
@@ -41,8 +42,9 @@ class ScheduleFileItem(BaseModel):
     key: UUID | None = None  # the schedule uuid; version 1 files have none
     name: str = Field(min_length=1, max_length=NAME_MAX)
     description: str | None = Field(None, max_length=DESCRIPTION_MAX)
-    entity_type: Literal['agent', 'pipeline']
-    entity_name: str
+    entity_type: Literal['agent', 'pipeline', 'toolkit_index']
+    entity_name: str  # the agent, pipeline or toolkit name
+    index_name: str | None = Field(None, min_length=1, max_length=INDEX_NAME_MAX)  # Toolkit Index items only
     version_name: str | None = None
     run_mode: RunMode | None = None
     cron: str
@@ -51,3 +53,22 @@ class ScheduleFileItem(BaseModel):
     variables: list[ScheduleVariable] = []
     expires_at: date | None = None
     approval_rule: ApprovalRule = 'pause_and_ask'
+
+    @model_validator(mode='after')
+    def check_target_fields(self):
+        """A Toolkit Index item names its index and carries no run field; the other kinds carry no index name."""
+        if self.entity_type != 'toolkit_index':
+            if self.index_name is not None:
+                raise ValueError('Only a Toolkit Index schedule takes an index_name')
+            return self
+        if self.index_name is None:
+            raise ValueError('A Toolkit Index schedule needs an index_name')
+        run_fields = (
+            ('version_name', self.version_name is not None), ('run_mode', self.run_mode is not None),
+            ('prompt', self.prompt is not None), ('variables', bool(self.variables)),
+            ('approval_rule', self.approval_rule != 'pause_and_ask'),  # an index has no tool to approve
+        )
+        for field, is_set in run_fields:
+            if is_set:
+                raise ValueError(f'A Toolkit Index schedule takes no {field}')
+        return self

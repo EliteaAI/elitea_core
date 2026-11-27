@@ -4,6 +4,7 @@ Contract under test: utils/schedule_runs.py (pause_schedule_run, apply_schedule_
 run status to the schedule, so the Schedules list shows Waiting for approval, then Running (US-15 R1.6).
 Real models, in-memory SQLite.
 """
+import sys
 from datetime import UTC, datetime, timedelta
 
 # Shared fixtures of the US-09 and US-13 writer tests: pytest injects them by name
@@ -48,3 +49,26 @@ def test_el_7011_bug35_r1_6_a_pause_of_a_run_that_is_not_running_keeps_the_statu
     runs.pause_schedule_run(1, run.id, SENSITIVE)
 
     assert _status(runs, session, schedule.id) == "success"
+
+
+def test_manual_run_that_waits_keeps_last_run_and_next_run_and_shows_waiting(runs, session, sent):
+    claim = sys.modules["plugins.elitea_core.utils.schedule_claim"]
+    next_run = datetime(2999, 1, 1)
+    schedule = _schedule(runs, session, created_by=OWNER, next_run=next_run, cron="0 * * * *")
+
+    run_id = claim.insert_run(session, schedule.id, "manual", OWNER)
+    last_run = _read(runs, session, schedule.id).last_run
+    runs.pause_schedule_run(1, run_id, SENSITIVE)
+
+    stored = _read(runs, session, schedule.id)
+    assert session.get(runs.EntityScheduleRun, run_id).trigger == "manual"
+    assert stored.last_run_status == "waiting_for_approval"
+    assert stored.last_run == last_run
+    assert stored.last_run is not None
+    assert stored.next_run.replace(tzinfo=None) == next_run
+    assert stored.cron == "0 * * * *"
+
+
+def _read(runs, session, schedule_id):
+    session.expire_all()
+    return session.get(runs.EntitySchedule, schedule_id)

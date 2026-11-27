@@ -163,6 +163,10 @@ class ApplicationListModel(BaseModel):
     agent_type: Optional[AgentTypes] = None
     has_interrupt: bool = False
     has_swarm: bool = False
+    # Nesting depth of the default version; only filled when the list is asked for it
+    # (`include_nesting_tiers`), so the UI can disable agents that are too deep to add.
+    agent_subtree_tiers: Optional[int] = None
+    max_agent_nesting_tiers: Optional[int] = None
     is_pinned: bool = False
     folder_id: Optional[int] = None
     folder_name: Optional[str] = None
@@ -286,13 +290,14 @@ class ApplicationListModel(BaseModel):
 
     @model_validator(mode='after')
     def check_has_swarm(self) -> 'ApplicationListModel':
-        """Check if any version has swarm mode enabled in internal_tools."""
-        for v in self.versions:
-            meta = v.meta or {}
-            internal_tools = meta.get('internal_tools', [])
-            if 'swarm' in internal_tools:
-                self.has_swarm = True
-                break
+        """True only when EVERY version has swarm mode enabled in internal_tools (issue #7736).
+
+        Swarm agents can't be used as tools, but an agent that still has a version without swarm
+        mode can, so it stays selectable. Flag it only when no version is left to bind.
+        """
+        self.has_swarm = bool(self.versions) and all(
+            'swarm' in ((v.meta or {}).get('internal_tools') or []) for v in self.versions
+        )
         return self
 
     @model_validator(mode='after')

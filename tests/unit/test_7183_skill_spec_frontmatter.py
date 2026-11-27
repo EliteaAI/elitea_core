@@ -94,9 +94,9 @@ def md(monkeypatch):
     _install_packages(monkeypatch)
     recorder = ImportRecorder()
     for name in ('sqlalchemy', 'sqlalchemy.orm', f'{PKG}.models.skill', f'{PKG}.models.pd.skill',
-                 f'{PKG}.utils.export_import_utils', f'{PKG}.utils.skill_files'):
+                 f'{PKG}.utils.export_import_utils', f'{PKG}.utils.skill_files', f'{PKG}.utils.zip_safety'):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
-    skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
+    skill_utils = AnyModule(f'{PKG}.utils.skill_utils')
     skill_utils._skill_session = recorder.session
     skill_utils.import_skill = recorder.import_skill
     skill_utils.get_skill_details = recorder.get_skill_details
@@ -146,9 +146,7 @@ class TestImportKeepsForeignKeys:
             'compatibility': 'Requires GitHub access',
             'metadata': {'author': 'platform-team', 'version': '2.0'},
         }
-        assert result['unused_frontmatter_keys'] == [
-            'allowed-tools', 'argument-hint', 'compatibility', 'disable-model-invocation', 'metadata',
-        ]
+        assert result['unused_frontmatter_keys'] == ['allowed-tools', 'compatibility', 'metadata']
 
     def test_a_skill_with_only_elitea_keys_stores_no_frontmatter(self, md):
         _, _, version = imported_version(md, '---\nname: plain\ndescription: d\ntags: [a]\n---\nBody')
@@ -574,6 +572,7 @@ def agent_markdown(monkeypatch, md):
         f'{PKG}.utils.toolkit_meta', f'{PKG}.utils.utils',
     ):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
+    _load(monkeypatch, 'utils/trigger_write_rule.py', f'{PKG}.utils.trigger_write_rule')
     return _load(monkeypatch, 'utils/export_import.py', f'{PKG}.utils.export_import')
 
 
@@ -654,6 +653,7 @@ def agent_publish(monkeypatch, md):
         f'{PKG}.models.skill', f'{PKG}.utils.create_utils', f'{PKG}.utils.export_import',
         f'{PKG}.utils.toolkit_meta', f'{PKG}.utils.llm_judge', f'{PKG}.utils.utils',
         f'{PKG}.utils.category_utils', f'{PKG}.utils.application_utils',
+        f'{PKG}.utils.conversation_starters_utils',
     ):
         monkeypatch.setitem(sys.modules, name, AnyModule(name))
     sys.modules[f'{PKG}.utils.skill_utils'].attach_skill_to_public_copy = lambda **kwargs: None
@@ -733,7 +733,7 @@ def skill_models(monkeypatch):
 
 @pytest.mark.parametrize('name', ['my--skill', '-skill', 'skill-', 'Skill'])
 def test_the_skill_name_validator_rejects_names_the_spec_forbids(skill_models, name):
-    with pytest.raises(ValueError, match='no consecutive hyphens'):
+    with pytest.raises(ValueError, match='cannot start or end with a hyphen or contain consecutive hyphens$'):
         skill_models.validate_skill_name(name)
 
 

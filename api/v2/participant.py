@@ -5,7 +5,9 @@ from ...models.participants import Participant
 from ...models.pd.participant import ParticipantDetails
 from ...utils.participant_utils import delete_participant_from_conversation
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.conversation_access import check_conversation_access, find_user_participant_id
+from ...utils.conversation_access import (
+    check_conversation_access, find_user_participant_id, removes_other_user, check_owner,
+)
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -74,6 +76,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             denied = check_conversation_access(
                 project_id, conversation, user_id, needs_privilege=not is_self,
             )
+            if not denied and removes_other_user(conversation, participant_id, user_id):
+                denied = check_owner(conversation, user_id)
             if denied:
                 return denied
         ret, code = delete_participant_from_conversation(project_id, conversation_id, participant_id)

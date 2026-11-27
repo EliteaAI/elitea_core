@@ -168,9 +168,15 @@ def test_r3_1_el7011_owner_run_needs_permission_and_version(load, names, version
     assert "run" not in module.allowed_actions(_row(version_id=version_id), _scope(module, 5, *names))
 
 
-def test_r3_2_el7011_admin_gets_no_run_on_other_owner_row(load):
+def test_admin_gets_run_on_other_owner_row(load):
     module = load(FakeAuth())
-    assert "run" not in module.allowed_actions(_row(owner=5), _scope(module, 9, "admin", "run"))
+    assert "run" in module.allowed_actions(_row(owner=5), _scope(module, 9, "admin", "run"))
+
+
+def test_a_caller_without_the_run_permission_gets_no_run_on_any_row(load):
+    module = load(FakeAuth())
+    assert "run" not in module.allowed_actions(_row(owner=9), _scope(module, 9, "update"))
+    assert "run" not in module.allowed_actions(_row(owner=5), _scope(module, 9, "admin", "update"))
 
 
 def test_r3_3_el7011_admin_gets_change_owner_and_verbs_on_any_row(load):
@@ -194,3 +200,19 @@ def test_r3_4_el7011_regular_caller_gets_nothing_on_other_owner_row(load):
 def test_r3_3_el7011_regular_owner_never_gets_change_owner(load):
     module = load(FakeAuth())
     assert "change_owner" not in module.allowed_actions(_row(), _scope(module, 5, *VERBS))
+
+
+@pytest.mark.parametrize("owner, caller, is_admin, expected", [
+    (5, 5, False, True),
+    (5, 6, True, True),
+    (5, 6, False, False),
+    (None, 6, False, False),
+    (None, 6, True, True),
+])
+def test_may_run_is_the_owner_or_a_schedules_admin(owner, caller, is_admin, expected):
+    spec = importlib.util.spec_from_file_location(
+        "schedule_rights_7011", PLUGIN_ROOT / "utils" / "schedule_rights.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.may_run(owner, caller, is_admin) is expected

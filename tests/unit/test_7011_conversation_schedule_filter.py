@@ -4,14 +4,20 @@ The RPC and the API module are loaded from source with fake neighbours. The RPC 
 recording session over real SQLAlchemy columns, so the test compiles the filters it adds.
 """
 import contextlib
+import json
+import os
 import pathlib
+import re
 import sys
 import types
 from unittest import mock
 
 import pytest
+from pydantic import BaseModel
 from fixtures.helpers import load_module_with_stubs
-from sqlalchemy import Boolean, Integer, String, select
+from unit.models.test_7011_execution_type import META_SHAPES
+from sqlalchemy import Boolean, Integer, String, create_engine, select, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -45,6 +51,16 @@ class EntityScheduleRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     schedule_id: Mapped[int] = mapped_column(Integer)
     conversation_id: Mapped[int] = mapped_column(Integer)
+    trigger: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String)
+    version_id: Mapped[int] = mapped_column(Integer)
+    form: Mapped[dict] = mapped_column(JSONB)
+
+
+class EntitySchedule(Base):
+    __tablename__ = 'entity_schedules'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
 
 
 class Participant(Base):
@@ -144,13 +160,15 @@ def rpc_module(isolated_sys_modules):
     sys.modules['tools'] = types.SimpleNamespace(
         db=types.SimpleNamespace(get_session=contextlib.contextmanager(lambda project_id: (yield session))),
         config=mock.MagicMock(), auth=mock.MagicMock(), serialize=mock.MagicMock(),
-        rpc_tools=mock.MagicMock(), MinioClient=mock.MagicMock(),
+        rpc_tools=mock.MagicMock(), MinioClient=mock.MagicMock(), this=mock.MagicMock(),
     )
-    for name in ('models.enums.all', 'models.pd.conversation', 'models.pd.participant', 'models.pd.message',
+    for name in ('models.all', 'utils.sio_utils', 'models.enums.all', 'models.pd.conversation', 'models.pd.participant',
+                 'models.pd.message',
                  'models.message_group', 'models.message_items.text', 'utils.conversation_utils',
                  'utils.participant_utils', 'utils.chat_feature_flags', 'utils.context_analytics',
                  'utils.exceptions', 'utils.model_defaults', 'utils.chat_usage',
-                 'utils.context_window', 'utils.skill_run_history'):
+                 'utils.context_window', 'utils.skill_run_history', 'utils.skill_scratch', 'utils.internal_tools',
+                 'utils.running_conversations', 'utils.run_outcome'):
         _fuzzy(f'{PACKAGE}.{name}')
     _package(f'{PACKAGE}.models.enums')
     _package(f'{PACKAGE}.models.message_items')
@@ -159,9 +177,16 @@ def rpc_module(isolated_sys_modules):
     sys.modules[f'{PACKAGE}.models.conversation'] = types.SimpleNamespace(Conversation=Conversation)
     sys.modules[f'{PACKAGE}.models.folder'] = types.SimpleNamespace(ConversationFolder=mock.MagicMock())
     sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
-        EntitySchedule=mock.MagicMock(), EntityScheduleRun=EntityScheduleRun)
+        EntitySchedule=EntitySchedule, EntityScheduleRun=EntityScheduleRun,
+        RUN_FORM=EntityScheduleRun.__table__.c.form, RUN_APPLICATION_ID=None, ACTIVE_STATUSES=())
+    _fuzzy(f'{PACKAGE}.models.pd.entity_schedule')
+    # The real module, so the error-code tests below break when its psycopg3 `sqlstate` branch goes
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_test_runs.py', f'{PACKAGE}.utils.schedule_test_runs')
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
+    load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'schedule_list.py', f'{PACKAGE}.models.pd.schedule_list')
+    # The real module, so the execution type filter reads the same TriggerType values as the list rows
+    load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_execution.py', f'{PACKAGE}.utils.pipeline_execution')
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
                                     f'{PACKAGE}.rpc.chat_conversation')
     module.session = session
@@ -195,6 +220,31 @@ def test_7011_r2_2_rpc_keeps_participant_and_private_filters(rpc_module, is_admi
     participant = session.participant_query.sql()
     assert ('= 42' in participant) is not is_admin
     assert any('chat_conversations.is_private = false' in q.sql() for q in session.queries)
+
+
+def _skill_list(rpc_module, participant_id, entity_project_id):
+    # The skill branch reads two helpers that live in another module; they only need to be valid SQL parts
+    rpc_module.ParticipantTypes = types.SimpleNamespace(skill=types.SimpleNamespace(value='skill'),
+                                                        user=types.SimpleNamespace(value='user'))
+    rpc_module.openable_skill_chat_ids = lambda session, participant_id, entity_project_id, user_id: select(
+        Conversation.id)
+    rpc_module.skill_run_started_at = lambda session, participant_id, entity_project_id: Conversation.created_at
+    session = _list(rpc_module, participant_id=participant_id, entity_name='skill',
+                    entity_project_id=entity_project_id)
+    return ' '.join(session.base.sql().split())
+
+
+def test_the_participant_filter_compares_the_meta_id_as_text(rpc_module):
+    sql = ' '.join(_list(rpc_module, participant_id=70, entity_name='application').base.sql().split())
+    assert "->> 'id') AS VARCHAR) = '70'" in sql
+    assert 'AS INTEGER' not in sql
+
+
+def test_the_skill_owner_project_filter_compares_as_text(rpc_module):
+    sql = _skill_list(rpc_module, participant_id=70, entity_project_id=9)
+    assert "->> 'project_id') AS VARCHAR) = '9'" in sql
+    assert "->> 'id') AS VARCHAR) = '70'" in sql
+    assert 'AS INTEGER' not in sql
 
 
 class Args(dict):
@@ -238,6 +288,7 @@ def api(isolated_sys_modules):
     for name in ('models.pd.conversation', 'utils.conversation_utils', 'utils.skill_participant_utils',
                  'utils.constants'):
         _fuzzy(f'{PACKAGE}.{name}')
+    load_module_with_stubs(PLUGIN_ROOT / 'models' / 'pd' / 'schedule_list.py', f'{PACKAGE}.models.pd.schedule_list')
     module = load_module_with_stubs(PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py',
                                     f'{PACKAGE}.api.v2.conversations')
     return types.SimpleNamespace(args=flask.request.args, calls=calls, module=module)
@@ -268,3 +319,304 @@ def test_7011_r2_3_api_rejects_a_non_integer_schedule_id(api, value):
     assert body['field'] == 'schedule_id'
     assert body['error']
     assert api.calls == []
+
+
+def _run_filter_sql(rpc_module, **kwargs):
+    return ' '.join(_list(rpc_module, **kwargs).base.sql().split())
+
+
+def test_run_options_share_one_semi_join_on_the_run_row_with_the_schedule(rpc_module):
+    sql = _run_filter_sql(rpc_module, schedule_id=5, run_status='failed', run_trigger='cron',
+                          run_version_id=9)
+    assert (
+        "chat_conversations.id IN (SELECT entity_schedule_runs.conversation_id FROM entity_schedule_runs "
+        "WHERE entity_schedule_runs.schedule_id = 5 AND entity_schedule_runs.status = 'failed' "
+        "AND entity_schedule_runs.trigger = 'cron' AND entity_schedule_runs.version_id = 9)"
+    ) in sql
+    assert sql.count('entity_schedule_runs.conversation_id') == 1
+
+
+@pytest.mark.parametrize('trigger', ['cron', 'manual', 'test'])
+def test_the_trigger_filter_compares_the_stored_trigger(rpc_module, trigger):
+    sql = _run_filter_sql(rpc_module, run_trigger=trigger)
+    assert f"entity_schedule_runs.trigger = '{trigger}'" in sql
+    assert 'schedule_id' not in sql
+
+
+def test_the_old_trigger_type_names_are_gone(rpc_module, api):
+    assert not hasattr(rpc_module, 'RUN_TRIGGER_OF_TYPE')
+    names = dir(sys.modules[f'{PACKAGE}.models.pd.schedule_list'])
+    assert [n for n in names if n.startswith('RunTrigger')] == ['RunTrigger']
+
+
+class RecordingRunQuery:
+    """Query for the run records: it keeps the columns and the join kind, and returns fixed rows."""
+
+    def __init__(self, columns, rows, error=None):
+        self.columns, self.rows, self.error, self.outer = columns, rows, error, None
+
+    def outerjoin(self, *args):
+        self.outer = True
+        return self
+
+    def join(self, *args):
+        self.outer = False
+        return self
+
+    def filter(self, *args):
+        return self
+
+    def all(self):
+        if self.error:
+            raise self.error
+        return self.rows
+
+    def selected_sql(self):
+        return ' '.join(str(c.compile(dialect=postgresql.dialect())) for c in self.columns)
+
+
+class RunSession:
+    """Session for `_schedule_runs`: the run query has six columns, the form-name query has two."""
+
+    def __init__(self, run_rows, form_rows, form_error=None):
+        self.run_rows, self.form_rows, self.form_error, self.queries = run_rows, form_rows, form_error, []
+        self.savepoints = []
+
+    @contextlib.contextmanager
+    def begin_nested(self):
+        self.savepoints.append('open')
+        try:
+            yield
+        except BaseException:
+            self.savepoints[-1] = 'rolled back'
+            raise
+        self.savepoints[-1] = 'released'
+
+    def query(self, *columns):
+        if len(columns) == 6:
+            self.queries.append(RecordingRunQuery(columns, self.run_rows))
+        else:
+            self.queries.append(RecordingRunQuery(columns, self.form_rows, self.form_error))
+        return self.queries[-1]
+
+
+class RunRef(BaseModel):
+    id: int
+    schedule_id: int | None
+    schedule_name: str | None
+    status: str
+    trigger: str
+
+
+def test_a_run_without_a_schedule_is_listed_with_the_name_of_its_form(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, 'Draft form name', 'success', 'test')], [(9, 'Draft form name')])
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert session.queries[0].outer is True
+    assert runs == {4: {'id': 9, 'schedule_id': None, 'schedule_name': 'Draft form name', 'status': 'success',
+                        'trigger': 'test'}}
+
+
+def test_the_run_read_names_no_form_column_when_no_run_is_a_test_run(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, 5, 'Nightly', 'success', 'cron')], [])
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert len(session.queries) == 1
+    assert 'form' not in session.queries[0].selected_sql()
+    assert runs[4]['schedule_name'] == 'Nightly'
+
+
+def test_the_form_name_query_reads_only_the_runs_without_a_schedule(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversations = [types.SimpleNamespace(id=4, meta={'schedule_run_id': 9}),
+                     types.SimpleNamespace(id=5, meta={'schedule_run_id': 10})]
+    session = RunSession([(9, 4, 5, 'Nightly', 'success', 'cron'), (10, 5, None, None, 'success', 'test')],
+                         [(10, 'Draft form name')])
+    runs = rpc_module._schedule_runs(session, conversations)
+    assert len(session.queries) == 2
+    assert 'form' in session.queries[1].selected_sql()
+    assert [runs[4]['schedule_name'], runs[5]['schedule_name']] == ['Nightly', 'Draft form name']
+
+
+class DbOrig(Exception):
+    def __init__(self, pgcode):
+        super().__init__(pgcode)
+        self.pgcode = pgcode
+
+
+def _db_error(error_class, pgcode):
+    return error_class('SELECT form', {}, DbOrig(pgcode))
+
+
+class SqlstateOnly(Exception):
+    """A psycopg3 error: it has `sqlstate` and no `pgcode`."""
+
+    def __init__(self, sqlstate):
+        super().__init__(sqlstate)
+        self.sqlstate = sqlstate
+
+
+def _real_error_code(rpc_module):
+    return sys.modules[f'{PACKAGE}.utils.schedule_test_runs'].error_code
+
+
+def test_error_code_reads_the_sqlstate_of_a_psycopg3_error(rpc_module):
+    assert _real_error_code(rpc_module)(ProgrammingError('SELECT form', {}, SqlstateOnly('42703'))) == '42703'
+
+
+def test_error_code_reads_the_pgcode_of_a_psycopg2_error(rpc_module):
+    assert _real_error_code(rpc_module)(_db_error(ProgrammingError, '42703')) == '42703'
+
+
+def test_error_code_is_none_when_the_error_has_no_code(rpc_module):
+    assert _real_error_code(rpc_module)(ProgrammingError('SELECT form', {}, Exception('no code'))) is None
+
+
+def test_a_psycopg3_missing_form_column_lists_the_test_run_without_a_name(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, None, 'success', 'test')], [],
+                         form_error=ProgrammingError('SELECT form', {}, SqlstateOnly('42703')))
+    runs = rpc_module._schedule_runs(session, [conversation])
+    assert runs[4]['schedule_name'] is None
+    assert session.savepoints == ['rolled back']
+
+
+def test_a_missing_form_column_lists_the_test_run_without_a_name_and_logs_once(rpc_module):
+    rpc_module.ScheduleRunRef = RunRef
+    conversations = [types.SimpleNamespace(id=4, meta={'schedule_run_id': 9}),
+                     types.SimpleNamespace(id=5, meta={'schedule_run_id': 10}),
+                     types.SimpleNamespace(id=6, meta={'schedule_run_id': 11})]
+    session = RunSession([(9, 4, None, None, 'success', 'test'), (10, 5, 5, 'Nightly', 'success', 'cron'),
+                          (11, 6, None, None, 'failed', 'test')], [],
+                         form_error=_db_error(ProgrammingError, '42703'))
+    runs = rpc_module._schedule_runs(session, conversations)
+    assert [runs[4]['schedule_name'], runs[5]['schedule_name'], runs[6]['schedule_name']] == [None, 'Nightly', None]
+    assert [runs[4]['status'], runs[6]['status']] == ['success', 'failed']
+    assert session.savepoints == ['rolled back']
+    rpc_module.log.warning.assert_called_once()
+
+
+@pytest.mark.parametrize('error', [_db_error(ProgrammingError, '42P01'), _db_error(OperationalError, '42703'),
+                                   RuntimeError('boom')])
+def test_another_error_of_the_form_name_query_still_raises(rpc_module, error):
+    rpc_module.ScheduleRunRef = RunRef
+    conversation = types.SimpleNamespace(id=4, meta={'schedule_run_id': 9})
+    session = RunSession([(9, 4, None, None, 'success', 'test')], [], form_error=error)
+    with pytest.raises(type(error)):
+        rpc_module._schedule_runs(session, [conversation])
+    rpc_module.log.warning.assert_not_called()
+
+
+def test_a_list_without_run_options_adds_no_run_filter(rpc_module):
+    assert 'entity_schedule_runs' not in _run_filter_sql(rpc_module)
+
+
+@pytest.mark.parametrize(('args', 'field'), [
+    ({'status': 'done'}, 'status'), ({'trigger': 'scheduled'}, 'trigger'), ({'trigger': ''}, 'trigger'),
+    ({'version_id': 'x'}, 'version_id'), ({'version_id': '0'}, 'version_id'),
+])
+def test_an_unknown_run_option_is_400_and_the_rpc_is_not_called(api, args, field):
+    body, status = _get(api, **args)
+    assert (status, body['code'], body['field']) == (400, 'invalid_input', field)
+    assert api.calls == []
+
+
+def test_valid_run_options_reach_the_rpc(api):
+    _, status = _get(api, status='running', trigger='test', version_id='12', schedule_id='5')
+    assert status == 200
+    assert {k: api.calls[0][k] for k in ('schedule_id', 'run_status', 'run_trigger', 'run_version_id')} == {
+        'schedule_id': 5, 'run_status': 'running', 'run_trigger': 'test', 'run_version_id': 12}
+
+
+def test_the_trigger_option_does_not_take_the_old_query_name(api):
+    _get(api, trigger_type='test')
+    assert api.calls[0]['run_trigger'] is None
+
+
+STORED_TYPE = "chat_conversations.meta ->> 'execution_type'"
+
+
+@pytest.mark.parametrize('execution_type', ['api', 'mcp'])
+def test_the_execution_type_filter_compares_the_stored_type(rpc_module, execution_type):
+    sql = _run_filter_sql(rpc_module, execution_type=execution_type)
+    assert f"({STORED_TYPE}) = '{execution_type}'" in sql
+    assert 'entity_schedule_runs' not in sql
+
+
+def test_the_chat_filter_keeps_the_rows_that_read_as_chat_without_a_stored_type(rpc_module):
+    """A row without a known stored type and without scheduled_run lists as chat: the filter keeps it too."""
+    sql = _run_filter_sql(rpc_module, execution_type='chat')
+    assert f"({STORED_TYPE}) = 'chat'" in sql
+    assert f"({STORED_TYPE}) IS NULL" in sql
+    assert (f"({STORED_TYPE}) NOT IN ('chat', 'api', 'mcp', 'webhook', 'scheduled', 'schedule_manual', "
+            "'manual', 'schedule_test')") in sql
+    # SQLAlchemy 2.0 renders the JSONB index as `-> 'key'`, 2.1 as `['key']`: both read the same value
+    assert re.search(r"jsonb_typeof\(\(?chat_conversations\.meta(?: -> 'scheduled_run'|\['scheduled_run'\])\)?\) "
+                     r"IS DISTINCT FROM 'boolean' OR "
+                     r"\(chat_conversations\.meta ->> 'scheduled_run'\) IS DISTINCT FROM 'true'", sql)
+    assert 'entity_schedule_runs' not in sql
+
+
+def test_the_chat_filter_excludes_every_known_type_but_chat(rpc_module):
+    trigger_type = sys.modules[f'{PACKAGE}.utils.pipeline_execution'].TriggerType
+    sql = _run_filter_sql(rpc_module, execution_type='chat')
+    for value in trigger_type.VALUES:
+        assert f"'{value}'" in sql
+
+
+def test_a_list_without_an_execution_type_reads_no_stored_type(rpc_module):
+    assert 'execution_type' not in _run_filter_sql(rpc_module)
+
+
+def test_the_execution_type_combines_with_the_run_options(rpc_module):
+    sql = _run_filter_sql(rpc_module, execution_type='api', run_status='failed')
+    assert f"({STORED_TYPE}) = 'api'" in sql
+    assert "entity_schedule_runs.status = 'failed'" in sql
+
+
+@pytest.mark.parametrize('value', ['chat', 'api', 'mcp'])
+def test_a_valid_execution_type_reaches_the_rpc(api, value):
+    _, status = _get(api, execution_type=value)
+    assert status == 200
+    assert api.calls[0]['execution_type'] == value
+
+
+def test_a_list_without_an_execution_type_passes_none(api):
+    _get(api)
+    assert api.calls[0]['execution_type'] is None
+
+
+@pytest.mark.parametrize('value', ['webhook', 'scheduled', 'schedule_manual', 'manual', 'CHAT', ''])
+def test_an_unknown_execution_type_is_400_and_the_rpc_is_not_called(api, value):
+    body, status = _get(api, execution_type=value)
+    assert (status, body['code'], body['field']) == (400, 'invalid_input', 'execution_type')
+    assert api.calls == []
+
+
+def test_an_rpc_caller_cannot_filter_by_a_type_that_has_a_run_record(rpc_module):
+    with pytest.raises(ValueError):
+        rpc_module._execution_type_condition('scheduled')
+
+
+PG_DSN = os.environ.get('ELITEA_7011_PG_DSN')
+
+
+@pytest.mark.skipif(not PG_DSN, reason='ELITEA_7011_PG_DSN is not set')
+@pytest.mark.parametrize('execution_type', ['chat', 'api', 'mcp'])
+def test_the_filter_keeps_exactly_the_rows_the_column_shows_as_that_type(rpc_module, execution_type):
+    """On PostgreSQL: the filter over every meta shape the column test reads, in a temporary table."""
+    engine = create_engine(PG_DSN)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text('CREATE TEMPORARY TABLE chat_conversations (id integer, meta jsonb)'))
+            for row_id, (meta, _) in enumerate(META_SHAPES):
+                conn.execute(text('INSERT INTO chat_conversations VALUES (:id, CAST(:meta AS jsonb))'),
+                             {'id': row_id, 'meta': json.dumps(meta)})
+            kept = set(conn.scalars(
+                select(Conversation.id).where(rpc_module._execution_type_condition(execution_type))))
+    finally:
+        engine.dispose()
+    assert kept == {row_id for row_id, (_, shown) in enumerate(META_SHAPES) if shown == execution_type}

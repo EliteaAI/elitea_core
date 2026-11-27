@@ -42,6 +42,7 @@ from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.conversation import ConversationList
 from ...models.pd.folder import FolderCreate, FolderUpdate, FolderDetails, FolderList
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.running_conversations import running_conversation_ids
 
 
 POSITION_GAP = 1_000_000  # Large gap for ~20 halvings before collision
@@ -111,6 +112,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         2. Contents of folder 5: GET .../folder/prompt_lib/42?folder_id=5&limit=20
         3. Only today's conversations: GET .../folder/prompt_lib/42?date_group=today
         4. Search conversations in all folders: GET .../folder/prompt_lib/42?query=sprint
+
+        Each conversation item has has_running_task: true while an answer in it is still being generated.
         """,
         tags=["elitea_core/chat"],
         mcp_tool=True,
@@ -237,6 +240,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     ).group_by(ConversationMessageGroup.conversation_id).all()
                 ) if conv_ids else {}
                 shared_conv_ids = _get_shared_conv_ids(session, conv_ids)
+                running_ids = running_conversation_ids(session, conv_ids)
 
                 return {
                     "folder_id": folder_id_param,
@@ -251,6 +255,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             "messages_count": mg_counts.get(i.id, 0),
                             "users_count": sum(1 for p in i.participants if p.entity_name == ParticipantTypes.user.value),
                             "has_shared_links": i.id in shared_conv_ids,
+                            "has_running_task": i.id in running_ids,
                         } for i in result
                     ],
                 }, 200
@@ -288,6 +293,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     ).group_by(ConversationMessageGroup.conversation_id).all()
                 ) if ungrouped_ids else {}
                 shared_conv_ids_ungrouped = _get_shared_conv_ids(session, ungrouped_ids)
+                running_ids_ungrouped = running_conversation_ids(session, ungrouped_ids)
 
                 selected_conversation_id = None
                 existing_selection = session.query(SelectedConversations).filter(
@@ -310,6 +316,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             "messages_count": mg_counts_ungrouped.get(i.id, 0),
                             "users_count": sum(1 for p in i.participants if p.entity_name == ParticipantTypes.user.value),
                             "has_shared_links": i.id in shared_conv_ids_ungrouped,
+                            "has_running_task": i.id in running_ids_ungrouped,
                         } for i in result
                     ],
                 }, 200
@@ -371,6 +378,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     ).group_by(ConversationMessageGroup.conversation_id).all()
                 ) if folder_conv_ids else {}
                 shared_conv_ids_folder = _get_shared_conv_ids(session, folder_conv_ids)
+                running_ids_folder = running_conversation_ids(session, folder_conv_ids)
 
                 for folder in folders:
                     conversations = conv_by_folder.get(folder.id, [])
@@ -387,6 +395,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                            "messages_count": mg_counts_folder.get(conversation.id, 0),
                            "users_count": sum(1 for p in conversation.participants if p.entity_name == ParticipantTypes.user.value),
                            "has_shared_links": conversation.id in shared_conv_ids_folder,
+                           "has_running_task": conversation.id in running_ids_folder,
                            **serialize(ConversationList.from_orm(conversation)),
                        } for conversation in paginated_conversations
                     ]
@@ -453,6 +462,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     ).group_by(ConversationMessageGroup.conversation_id).all()
                 ) if all_conv_ids else {}
                 shared_conv_ids_grouped = _get_shared_conv_ids(session, all_conv_ids)
+                running_ids_grouped = running_conversation_ids(session, all_conv_ids)
 
                 def serialize_conversation(conv, folder_id=None):
                     return {
@@ -462,6 +472,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         "messages_count": mg_counts.get(conv.id, 0),
                         "users_count": sum(1 for p in conv.participants if p.entity_name == ParticipantTypes.user.value),
                         "has_shared_links": conv.id in shared_conv_ids_grouped,
+                        "has_running_task": conv.id in running_ids_grouped,
                     }
 
                 pinned_data["conversations"] = [
@@ -504,6 +515,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).group_by(ConversationMessageGroup.conversation_id).all()
             ) if ungrouped_ids else {}
             shared_conv_ids_compat = _get_shared_conv_ids(session, ungrouped_ids)
+            running_ids_compat = running_conversation_ids(session, ungrouped_ids)
 
             return {
                 "total_folders": total_folders,
@@ -519,6 +531,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         "messages_count": mg_counts_ungrouped.get(i.id, 0),
                         "users_count": sum(1 for p in i.participants if p.entity_name == ParticipantTypes.user.value),
                         "has_shared_links": i.id in shared_conv_ids_compat,
+                        "has_running_task": i.id in running_ids_compat,
                     } for i in result
                 ],
             }, 200

@@ -134,7 +134,7 @@ def test_skipping_a_sign_in_ends_the_run_as_rejected_by_the_owner(runs, session,
     runs.apply_schedule_decision(1, run.id, decision)
     session.refresh(run)
 
-    assert (decision, run.status, run.reason) == ("reject", "failed", "rejected by the owner")
+    assert (decision, run.status, run.reason) == ("reject", "failed", "rejected")
 
 
 def test_only_the_owner_answers_a_sign_in(runs, session, sent):
@@ -253,4 +253,44 @@ def test_the_owner_rejects_a_credential_wait_and_the_run_fails(runs, session, se
     runs.apply_schedule_decision(1, run.id, "reject")
     session.refresh(run)
 
-    assert (run.status, run.reason) == ("failed", "rejected by the owner")
+    assert (run.status, run.reason) == ("failed", "rejected")
+
+
+def _webhook(runs, session, rule):
+    """A webhook row (#7406 schema): no cron, no time zone; its run came through the door."""
+    schedule = _schedule(runs, session, created_by=12, approval_rule=rule, trigger_kind="webhook",
+                         cron=None, timezone=None, webhook_type="custom")
+    run = runs.EntityScheduleRun(schedule_id=schedule.id, trigger="webhook", status="running")
+    session.add(run)
+    session.flush()
+    return schedule, run
+
+
+@pytest.mark.parametrize("rule", ["pause_and_ask", "run_without_asking"])
+def test_7401_a_sign_in_mid_run_fails_a_webhook_run_under_both_rules(runs, session, sent, rule):
+    # #7401: a webhook fires too often to wait for a person to sign in, so it never parks for one
+    _, run = _webhook(runs, session, rule)
+
+    runs.pause_schedule_run(1, run.id, SIGN_IN)
+    session.refresh(run)
+
+    assert run.status == "failed" and run.approval_expires_at is None
+    assert run.reason == runs.WEBHOOK_SIGN_IN_REASON.format("SharePoint")
+    assert sent.notices == [(12, "schedule_run_failed", run.id)]
+
+
+def test_7401_a_sensitive_tool_still_parks_a_webhook_run(runs, session, sent):
+    # The one pause a webhook keeps: a sensitive tool call, resumed from its checkpoint
+    _, run = _webhook(runs, session, "pause_and_ask")
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupt": {"guardrail_type": "sensitive_tool",
+                                                           "toolkit_name": "Files", "tool_name": "create_file"}})
+    session.refresh(run)
+
+    assert run.status == "waiting_for_approval"
+
+
+def test_7401_a_cron_schedule_under_pause_and_ask_still_waits_for_a_sign_in(runs, session, sent):
+    run, _ = _pause(runs, session, SIGN_IN)  # the #7304 behaviour, unchanged
+
+    assert run.status == "waiting_for_approval"
