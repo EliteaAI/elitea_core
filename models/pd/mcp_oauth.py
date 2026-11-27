@@ -25,6 +25,10 @@ from .schedule_list import DbId
 
 # Regex pattern to match vault secret references like {{secret.my_secret}}
 VAULT_SECRET_PATTERN = re.compile(r'^\{\{secret\.[^}]+\}\}$')
+# A reference anywhere in a value: the vault replaces it wherever it stands (shared/tools/vault_tools.py
+# `_secret_pattern`, a narrower name set), so a guard that must catch every value the vault would resolve
+# searches with this one and never with the anchored pattern above
+VAULT_REFERENCE_IN_TEXT = re.compile(r'\{\{secret\.[^}]+\}\}')
 
 
 class McpOAuthTokenRequest(BaseModel):

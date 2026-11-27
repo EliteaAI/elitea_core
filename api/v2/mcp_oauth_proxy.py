@@ -22,7 +22,7 @@ from tools import api_tools, auth, config as c, db, VaultClient, register_openap
 from pylon.core.tools import log
 
 from ...models.elitea_tools import EliteATool
-from ...models.pd.mcp_oauth import VAULT_SECRET_PATTERN, McpOAuthTokenRequest
+from ...models.pd.mcp_oauth import VAULT_REFERENCE_IN_TEXT, McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import (
     credential_token_endpoint_allowed,
@@ -43,7 +43,10 @@ CREDENTIAL_REFERENCE_KEYS = frozenset({'elitea_title', 'private', 'configuration
 
 
 def _holds_reference(value, reference: str) -> bool:
-    """Whether the saved settings hold exactly ``reference`` as a value, at any depth."""
+    """Whether the saved settings hold exactly ``reference`` as a value, at any depth.
+
+    The value is compared whole, so a reference inside other text counts only when the row holds that same text.
+    """
     if isinstance(value, str):
         return value == reference
     if isinstance(value, dict):
@@ -285,7 +288,7 @@ class ProjectAPI(api_tools.APIModeHandler):
         # The server loads the credential itself, so a vault reference sent next to it is never resolved and the
         # browser's endpoint is checked against the type of the loaded credential
         if use_credential:
-            if client_secret and VAULT_SECRET_PATTERN.match(client_secret):
+            if client_secret and VAULT_REFERENCE_IN_TEXT.search(client_secret):
                 client_secret = None
             credential = {'configuration_uuid': data.configuration_uuid}
             if data.configuration_project_id:
@@ -325,7 +328,7 @@ class ProjectAPI(api_tools.APIModeHandler):
 
         # A vault reference needs a saved credential (served above, the reference dropped) or a saved toolkit that
         # holds that exact reference: any other names a secret the caller never proved to own
-        if (client_secret and client_secret == data.client_secret and VAULT_SECRET_PATTERN.match(client_secret)
+        if (client_secret and client_secret == data.client_secret and VAULT_REFERENCE_IN_TEXT.search(client_secret)
                 and not data.oauth_app_id and not toolkit_holds_reference):
             return {"error": "access_denied", "error_description": VAULT_REFERENCE_REFUSED}, 403
 

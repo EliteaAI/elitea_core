@@ -800,3 +800,118 @@ def test_the_credential_reference_fields_accept_their_cap(credential):
     body, status = credential.proxy.api.post(2)
 
     assert status == 200, body
+
+
+# A vault reference inside other text: the vault replaces it wherever it stands in the value, so every guard
+# counts it as a reference. The request model refuses most of these shapes already; the handler must not
+# depend on that, so the tests below let the value past the model.
+EMBEDDED_REFERENCES = [
+    '{{secret.shared}} ', ' {{secret.shared}}', 'abc{{secret.shared}}', '{{secret.shared}}abc',
+    '{{secret.shared}}{{secret.shared}}', '{{secret.shared}} {{secret.other}}', '{{secret.shared}}\n',
+]
+EMBEDDED = pytest.mark.parametrize('value', EMBEDDED_REFERENCES,
+                                   ids=['trailing space', 'leading space', 'leading text', 'trailing text',
+                                        'two references', 'two names', 'trailing newline'])
+
+
+@pytest.fixture
+def embedding_vault(toolkits, monkeypatch):
+    """A vault that replaces ``{{secret.shared}}`` wherever it stands in the text, as the real one does."""
+    calls = []
+
+    def unsecret(value):
+        calls.append(value)
+        return value.replace('{{secret.shared}}', 'vault-secret')
+
+    monkeypatch.setattr(toolkits.proxy.handler, 'VaultClient', lambda project_id: types.SimpleNamespace(unsecret=unsecret))
+    return calls
+
+
+@pytest.fixture
+def past_the_model(toolkits, monkeypatch):
+    """The request model passes the value on unchecked, so only the guards of the handler stand."""
+    model = toolkits.proxy.handler.McpOAuthTokenRequest
+    monkeypatch.setattr(toolkits.proxy.handler, 'McpOAuthTokenRequest', types.SimpleNamespace(
+        model_validate=lambda payload: model.model_construct(**payload)))
+
+
+@EMBEDDED
+@ROLES
+@BOTH_GRANTS
+def test_a_vault_reference_inside_other_text_without_a_toolkit_or_credential_is_refused(
+        toolkits, embedding_vault, past_the_model, permissions, grant, value):
+    toolkits.permissions = permissions
+    toolkits.proxy.request.json = {'token_endpoint': 'https://attacker.example/token', 'code': 'auth-code',
+                                   'redirect_uri': 'http://localhost/cb', 'client_secret': value, **grant}
+
+    body, status = toolkits.proxy.api.post(2)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': VAULT_REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == [] and embedding_vault == []
+
+
+@EMBEDDED
+@ROLES
+@BOTH_GRANTS
+def test_a_vault_reference_inside_other_text_a_plain_saved_toolkit_does_not_hold_is_refused(
+        toolkits, embedding_vault, past_the_model, permissions, grant, value):
+    toolkits.settings = {'client_id': 'cid', 'client_secret': 'plain', 'nested': [{'other': '{{secret.shared}}'}]}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, 'https://attacker.example/token', client_secret=value, grant=grant)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': VAULT_REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == [] and value not in embedding_vault
+
+
+@EMBEDDED
+@ROLES
+@BOTH_GRANTS
+def test_a_vault_reference_inside_other_text_next_to_a_credential_reference_is_dropped(
+        credential, embedding_vault, past_the_model, permissions, grant, value):
+    body, status = _credential_sign_in(credential, OPENAPI_TOKEN_URL, permissions, grant=grant,
+                                       extra={'client_secret': value})
+
+    assert status == 200, body
+    (_, form), = credential.proxy.posted
+    assert form['client_secret'] == 'real-secret'
+    assert embedding_vault == []
+
+
+@EMBEDDED
+@BOTH_GRANTS
+def test_an_editor_resolves_a_vault_reference_inside_other_text_the_saved_toolkit_holds(
+        toolkits, embedding_vault, past_the_model, grant, value):
+    toolkits.settings = {'client_id': 'cid', 'nested': [{'client_secret': value}]}
+    toolkits.permissions = EDITOR_OR_ADMIN
+
+    body, status = _sign_in(toolkits, 'https://mcp.example/token', client_secret=value, grant=grant)
+
+    assert status == 200, body
+    (_, form), = toolkits.proxy.posted
+    assert form['client_secret'] == value.replace('{{secret.shared}}', 'vault-secret')
+
+
+@EMBEDDED
+@BOTH_GRANTS
+def test_a_viewer_gets_no_vault_secret_inside_other_text_even_when_the_saved_toolkit_holds_it(
+        toolkits, embedding_vault, past_the_model, grant, value):
+    toolkits.settings = {'client_id': 'cid', 'client_secret': value}
+    toolkits.permissions = []
+
+    body, status = _sign_in(toolkits, 'https://mcp.example/token', client_secret=value, grant=grant)
+
+    assert (status, body['error']) == (403, 'access_denied')
+    assert toolkits.proxy.posted == []
+
+
+@pytest.mark.parametrize('value', EMBEDDED_REFERENCES[:-1])
+def test_the_request_model_refuses_a_vault_reference_inside_other_text(toolkits, embedding_vault, value):
+    toolkits.permissions = EDITOR_OR_ADMIN
+    toolkits.proxy.request.json = {'token_endpoint': 'https://attacker.example/token', 'code': 'auth-code',
+                                   'redirect_uri': 'http://localhost/cb', 'client_secret': value}
+
+    body, status = toolkits.proxy.api.post(2)
+
+    assert status == 400, body
+    assert toolkits.proxy.posted == [] and embedding_vault == []
