@@ -259,6 +259,21 @@ MESSAGES = {
 GENERIC_MESSAGE = "The run was not started."
 
 
+def storable_refusal(error) -> Optional[tuple]:
+    """``(code, text, ref)`` of a chat refusal worth keeping on the reply (#7228 follow-up), else None.
+
+    Only a ``{code, error}`` of a known admission code; the text is the table sentence (or the chat grant one), never the
+    caller's own string, so nothing a request carried is stored. ``ref`` only when it is a plain support reference."""
+    if not isinstance(error, dict) or error.get("code") not in MESSAGES:
+        return None
+    code = error["code"]
+    text = error.get("error")
+    if text not in (MESSAGES[code], CHAT_GRANT_MESSAGE):
+        text = MESSAGES[code]
+    ref = error.get("ref")
+    return code, text, ref if isinstance(ref, str) and re.fullmatch(r"[A-Za-z0-9-]{1,64}", ref) else None
+
+
 # --- configuration ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
