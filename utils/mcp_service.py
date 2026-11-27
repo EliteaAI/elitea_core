@@ -183,7 +183,7 @@ class McpApiToolExecutor:
                 try:
                     from .governance_requests import file_for_run  # pylint: disable=C0415
                     governance = file_for_run(this.module, claims, method, path, path_params.get("project_id"),
-                                              parsed["result"], path_params)
+                                              parsed["result"], path_params, body_params)
                 except Exception as exc:  # pylint: disable=W0703
                     log.error("MCP: the run's governance request was not filed (%s)", type(exc).__name__)
                     governance = None

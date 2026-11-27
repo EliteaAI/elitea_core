@@ -424,8 +424,9 @@ def test_a_change_a_run_makes_is_filed_for_its_user_and_the_model_reads_what_hap
     put = secret_tool("PUT", "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}", "tool_id")
     result = service.executor.execute(put, {"project_id": 1, "tool_id": "3", "settings": {}})
     assert result == {"result": {}, "governance_requests": summary}
-    [(_, claims, method, path, project_id, answer, path_params)] = asked
+    [(_, claims, method, path, project_id, answer, path_params, body)] = asked
     assert (method, path_params["tool_id"], project_id) == ("PUT", "3", 1)
+    assert body == {"settings": {}}   # (#7383) the body names a changed version for an agent's own PUT
     assert mcp_service_module._with_governance(result) == {"governance_requests": summary}   # pylint: disable=W0212
     assert mcp_service_module._with_governance({"result": [1]}) == [1]   # pylint: disable=W0212
     assert mcp_service_module._with_governance({"result": [1], "governance_requests": summary}) == {   # pylint: disable=W0212

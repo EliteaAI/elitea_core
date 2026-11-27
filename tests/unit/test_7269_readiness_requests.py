@@ -49,7 +49,7 @@ def ns(tmp_path_factory):
     def load(name):
         return load_module_with_stubs(PLUGIN_ROOT / "utils" / f"{name}.py", f"{PKG}.utils.{name}")
 
-    for name in ("constants", "schedule_risk"):
+    for name in ("constants", "schedule_risk", "builder_keys"):
         try:
             load(name)
         except Exception:  # pylint: disable=W0703   the risk scan needs the application tools; stubbed below
@@ -581,6 +581,24 @@ def test_a_version_a_run_changed_is_requested_again_for_its_user(ns, env, method
                                      "credential.") and "nothing more is needed from you" in result["next"]
 
 
+def test_an_agent_put_with_a_version_body_requests_that_version_and_a_rename_files_nothing(ns, env):
+    """(#7383) the Elitea Builder's ``update_application`` is ``PUT application``: a body naming a version changes that
+    version's definition, so what it now needs is filed; a rename (no version in the body) files nothing."""
+    credential(env)
+    claims = {"uid": MEMBER, "run": "run-83"}
+    path = "/api/v2/elitea_core/application/{mode}/{project_id}/{application_id}"
+    params = {"project_id": "1", "application_id": "7"}
+    answer = {"id": 7, "version_details": {"id": 71}}   # the answer's default version is not the changed one
+    result = ns.governance_requests.file_for_run(module(ns), claims, "PUT", path, "1", answer, params,
+                                                 {"name": "x", "version": {"id": 70, "application_id": 7}})
+    assert (result["entity_kind"], result["entity_id"]) == ("version", 70)
+    assert [item["kind"] for item in result["filed"]] == ["binding", "reference", "grant"]
+    before = list(env.recorded)
+    for body in (None, {"name": "renamed"}, {"version": {"id": True}}, {"version": {"id": "x"}}, {"version": 70}):
+        assert ns.governance_requests.file_for_run(module(ns), claims, "PUT", path, "1", answer, params, body) is None
+    assert env.recorded == before
+
+
 def test_a_toolkit_a_run_changed_is_asked_again_by_its_id_from_the_path(ns, env):
     tool_id = credential(env).tool_id
     claims = {"uid": MEMBER, "run": "run-79"}
@@ -1048,13 +1066,19 @@ def test_an_external_mcp_toolkit_is_not_the_internal_one(ns, env):
     env.add_toolkit(1, 70, 9, "mcp", {"url": "https://mcp.example.com/app/1/mcp", "headers": {}})
     assert ns.governance_readiness.proposed_operations(types.SimpleNamespace(meta={}), []) is None
     assert ns.governance_readiness.proposed_operations(
-        types.SimpleNamespace(meta={"internal_tools": ["internal_mcp"]}), []) == ["read", "build", "credentials", "run"]
+        types.SimpleNamespace(meta={"internal_tools": ["elitea_builder"]}), []) == ["read", "build", "credentials", "run"]
 
 
 def test_the_internal_tool_keys_match_the_injection(ns):
-    source = (PLUGIN_ROOT / "utils" / "internal_tools.py").read_text()
-    for key in ns.governance_readiness.INTERNAL_TOOL_KEYS:
-        assert f"= '{key}'" in source
+    """Since #7383 the internal Elitea toolkit is the one Elitea Builder: its key is the only one that proposes the
+    platform operations; an old builder key (migrated away) proposes nothing."""
+    assert ns.governance_readiness.INTERNAL_TOOL_KEYS == {"elitea_builder"}
+    assert "MCP_INTERNAL_TOOL_KEY = BUILDER_KEY" in (PLUGIN_ROOT / "utils" / "internal_tools.py").read_text()
+    version = types.SimpleNamespace(meta={"internal_tools": ["elitea_builder"]})
+    assert ns.governance_readiness.proposed_operations(version, []) == list(ns.internal_obo.OPERATIONS)
+    for old in ("internal_mcp", "skill_builder", "project_context_builder"):
+        assert ns.governance_readiness.proposed_operations(
+            types.SimpleNamespace(meta={"internal_tools": [old]}), []) is None
 
 
 # --- #7228 fix round 2: what a run's toolkit change files for the versions using it -----------------------------
@@ -1144,6 +1168,7 @@ def test_a_new_version_a_run_creates_is_requested_like_an_agent(ns, env):
 def test_every_build_write_on_a_toolkit_or_a_version_is_covered(ns):
     """The ``build`` writes of the operation map that create or change a toolkit or a version all file requests."""
     build = {key for key, operation in ns.internal_obo.ENDPOINT_OPERATIONS.items() if operation == "build"
+             and key[0] != "DELETE"   # a delete leaves nothing to request
              and any(part in key[1] for part in ("elitea_core/tool", "elitea_core/version", "application",
                                                  "elitea_core/applications"))}
     covered = set(ns.governance_requests.CREATIONS) | set(ns.governance_requests.UPDATES)

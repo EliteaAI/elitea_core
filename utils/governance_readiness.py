@@ -34,6 +34,7 @@ from .credential_decision import (
     read_configuration_facts, resolve_title_uses, toolkit_secret_fields, user_may_use_credentials, _governed_uses,
     _read_decision_facts,
 )
+from .builder_keys import BUILDER_KEY
 from .definition_digest import DigestError, digest_for_version, toolkit_rows
 from .governance import is_governed
 
@@ -127,8 +128,9 @@ def _binding_of(session, project_id, application_id, version_id, current_digest)
     return None, "missing"
 
 
-# (#7228) the version meta keys of the internal Elitea toolkit (``internal_tools.MCP_BUILDER_TOOL_KEYS``)
-INTERNAL_TOOL_KEYS = frozenset({"internal_mcp", "skill_builder", "project_context_builder"})
+# (#7228) the version meta key of the internal Elitea toolkit: the one Elitea Builder key since #7383 (the old keys are
+# migrated away and never accepted at run time)
+INTERNAL_TOOL_KEYS = frozenset({BUILDER_KEY})
 
 
 def proposed_operations(version, rows):

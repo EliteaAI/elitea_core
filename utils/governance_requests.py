@@ -221,6 +221,7 @@ CREATIONS = {
 # version given a toolkit (its readiness is asked again and what is now missing is filed: a rebind, a new grant)
 # Every ``build`` write of ``internal_obo.ENDPOINT_OPERATIONS`` that changes a toolkit or a version (a toolkit linked
 # to a version by ``PATCH tool`` changes that version's definition too: see ``file_for_run``)
+BODY_VERSION_ID = "body:version.id"   # the changed version named in the request body, not in the path
 UPDATES = {
     ("PUT", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): ("toolkit", "tool_id"),
     ("PATCH", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): ("toolkit", "tool_id"),
@@ -229,6 +230,9 @@ UPDATES = {
         ("version", "version_id"),
     ("POST", "elitea_core/version_instruction_patch/{mode}/{project_id}/{application_id}/{version_id}"):
         ("version", "version_id"),
+    # (#7383) an agent's own PUT (the Elitea Builder's ``update_application``) changes a version only when its body
+    # names one (``version.id``): a rename alone files nothing
+    ("PUT", "elitea_core/application/{mode}/{project_id}/{application_id}"): ("version", BODY_VERSION_ID),
 }
 MAX_TOOLKIT_VERSIONS = 16   # the versions using a changed toolkit whose requests are filed with it
 WAITING_TEXT = {"binding": "the agent's identity", "reference": "the credential", "grant": "your use of the credential",
@@ -301,8 +305,14 @@ def next_step(summary) -> str:
     return "Everything it needs to run governed is in place."
 
 
-def _changed_id(name, path_params):
-    value = (path_params or {}).get(name)
+def _changed_id(name, path_params, body=None):
+    if name == BODY_VERSION_ID:
+        version = body.get("version") if isinstance(body, dict) else None
+        value = version.get("id") if isinstance(version, dict) else None
+    else:
+        value = (path_params or {}).get(name)
+    if isinstance(value, bool):
+        return None
     try:
         value = int(str(value))
     except (TypeError, ValueError):
@@ -340,7 +350,7 @@ def _file_entity(module, project_id, kind, entity_id, user_id, run_id):
         return {"entity_kind": kind, "entity_id": entity_id, "filed": [], "refused": "DEPENDENCY_UNAVAILABLE"}
 
 
-def file_for_run(module, claims, method, path, project_id, answer, path_params=None):  # pylint: disable=R0913
+def file_for_run(module, claims, method, path, project_id, answer, path_params=None, body=None):  # pylint: disable=R0913
     """After a governed run's internal MCP created or changed an agent version, a toolkit or a credential: its
     readiness for the run's subject (the user, never the agent) and the request of what that user may request, filed as
     theirs with the run as its origin (``caller_ref run:<id>``). A run never approves. ``None`` for any other call, or
@@ -355,7 +365,7 @@ def file_for_run(module, claims, method, path, project_id, answer, path_params=N
     user_id, run_id, entity_id = claims.get("uid"), claims.get("run"), None
     try:
         project_id = int(project_id)
-        entity_id = _changed_id(param, path_params) if param else _created_id(kind, answer)
+        entity_id = _changed_id(param, path_params, body) if param else _created_id(kind, answer)
         if entity_id is None or not isinstance(user_id, int):
             return None
         if kind == "configuration":
