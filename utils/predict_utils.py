@@ -347,8 +347,11 @@ def generate_predict_payload(
     skill_argument: Optional[str] = None,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_run: bool = False,
+    prefetch_participants: bool = False,
 ) -> dict:
     """
+    :param prefetch_participants: (#7228 follow-up) a plain chat under enforce: its participants are prefetched as an
+        agent's sub-agents are, so admission decides each with the run and leaves out one that cannot run
     :param mandate_run: the run is admitted under an autonomous mandate (its ticket was taken): under enforce no token
         of its owner is looked up or put on the payload; the run token is its identity
     :param parsed: payload
@@ -706,6 +709,8 @@ def generate_predict_payload(
 
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
+    elif prefetch_participants:
+        attach_subagent_prefetch(payload, parsed.project_id, user_id)
 
     inject_stored_logins(payload, parsed.project_id, expansion_user_id)
 
