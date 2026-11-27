@@ -41,8 +41,19 @@ def topics() -> list:
     return [f"{TOPIC_PREFIX}{t['key']}" for t in list_topics()]
 
 
+# Rules that report several problems on one node and field, told apart only by the message: R36 reports each missing
+# required parameter with field `input_mapping`. For them the message is part of the key, so an old missing parameter
+# does not hide a new one. Other messages carry details that change with unrelated edits (a trigger name, a count, a
+# line number), so keying on them would make an old error look new.
+_PER_MESSAGE_RULES = frozenset({'R36'})
+
+
 def _key(finding):
-    return finding['rule'], finding['node_id'], finding['field']
+    key = (finding['rule'], finding['node_id'], finding['field'])
+    return key + (finding['message'],) if finding['rule'] in _PER_MESSAGE_RULES else key
+
+
+DOCUMENT_LEVEL = 'R20'  # "not a pipeline at all"
 
 
 def context_for(trigger=None, tool_schemas=None):
@@ -50,18 +61,18 @@ def context_for(trigger=None, tool_schemas=None):
     return ValidationContext(trigger=trigger, tool_schemas=tool_schemas) if trigger or tool_schemas else None
 
 
-def new_errors(before, after, context=None) -> list:
+def new_errors(before, after, after_context=None, before_context=None) -> list:
     """Validator errors in `after` that `before` did not have; every error when there is no `before`.
 
     An edit is refused only for what it breaks, so a pipeline saved before a rule existed can still be edited.
-    "Not a pipeline at all" shares one key and never counts as already present. `context` (trigger, attached tools'
-    parameter schemas) applies to both sides, so an old parameter mistake is not held against a new edit.
+    "Not a pipeline at all" never counts as already present. Each side is checked with its own context: a change that
+    also moves the trigger to a schedule must not excuse the HITL node the schedule makes fatal.
     """
     existing = set()
     if before:
-        document_level = ('R20', None, None)
-        existing = {_key(f) for f in validate_pipeline(before, context)['errors'] if _key(f) != document_level}
-    return [f for f in validate_pipeline(after or '', context)['errors'] if _key(f) not in existing]
+        existing = {_key(f) for f in validate_pipeline(before, before_context)['errors']
+                    if not (f['rule'] == DOCUMENT_LEVEL and f['node_id'] is None and f['field'] is None)}
+    return [f for f in validate_pipeline(after or '', after_context)['errors'] if _key(f) not in existing]
 
 
 def health(instructions, context=None) -> dict:

@@ -341,28 +341,36 @@ class BuilderService:
                             'raw_sha': (raw or {}).get('instructions_sha256'), 'destructive': False,
                             'name': display_name or after.get('name') or state.get('name')})
 
+    # A change to either one can introduce a validator error: the YAML itself, or the trigger it runs on (R31).
+    _PIPELINE_CHECKED_FIELDS = ('instructions', 'pipeline_settings')
+
     def _pipeline_refusal(self, entity_type, before, after, changes, entity_id=None):
         """#6388: a pipeline change that introduces validator errors is refused before the Changes card."""
-        if entity_type != 'pipeline' or 'instructions' not in (changes or {}):
+        if entity_type != 'pipeline' or not any(f in (changes or {}) for f in self._PIPELINE_CHECKED_FIELDS):
             return None
-        errors = pipelines.new_errors((before or {}).get('instructions'), (after or {}).get('instructions'),
-                                      self._pipeline_context(after, entity_id))
+        schemas = self._tool_schemas_for(after, entity_id)  # the attached toolkits are the same on both sides
+        errors = pipelines.new_errors(
+            (before or {}).get('instructions'), (after or {}).get('instructions'),
+            after_context=pipelines.context_for(pipelines.trigger_of(after), schemas),
+            before_context=pipelines.context_for(pipelines.trigger_of(before), schemas))
         return _invalid(pipelines.REFUSAL, pipelines.as_errors(errors)) if errors else None
 
     def _pipeline_context(self, state, entity_id=None):
         """The trigger and the attached toolkits' tool schemas, for the checks that need them."""
-        state = state or {}
-        schemas = None
-        attached = self._attached.get((entity_id, state.get('version_id'))) or []
+        return pipelines.context_for(pipelines.trigger_of(state), self._tool_schemas_for(state, entity_id))
+
+    def _tool_schemas_for(self, state, entity_id=None):
+        """``{toolkit_name: {tool: json_schema}}`` for the version's attached built-in toolkits, or None."""
+        attached = self._attached.get((entity_id, (state or {}).get('version_id'))) or []
         types_by_name = {t.get('name'): t.get('type') for t in attached
                          if isinstance(t, dict) and t.get('type') and t.get('name')}
-        if self.tool_schemas and types_by_name:
-            try:
-                by_type = self.tool_schemas(sorted(set(types_by_name.values()))) or {}
-                schemas = {name: by_type[kind] for name, kind in types_by_name.items() if by_type.get(kind)}
-            except Exception:  # pylint: disable=W0703
-                schemas = None  # a lookup failure never blocks a change; parameters are just not checked
-        return pipelines.context_for(pipelines.trigger_of(state), schemas)
+        if not (self.tool_schemas and types_by_name):
+            return None
+        try:
+            by_type = self.tool_schemas(sorted(set(types_by_name.values()))) or {}
+        except Exception:  # pylint: disable=W0703
+            return None  # a lookup failure never blocks a change; parameters are just not checked
+        return {name: by_type[kind] for name, kind in types_by_name.items() if by_type.get(kind)} or None
 
     def _propose_create(self, entity_type, fields):
         try:
