@@ -149,6 +149,8 @@ ENDPOINT_OPERATIONS = {
     ("DELETE", "elitea_core/project_context/{mode}/{project_id}/project-context"): "build",
     ("POST", "elitea_core/folder/{mode}/{project_id}"): "build",
     ("PUT", "elitea_core/folder/{mode}/{project_id}/{folder_id}"): "build",
+    # the registry exposes the folder create under the item path too (its ``folder_id`` segment is unused)
+    ("POST", "elitea_core/folder/{mode}/{project_id}/{folder_id}"): "build",
     ("POST", "elitea_core/conversations/{mode}/{project_id}"): "build",
     ("PUT", "elitea_core/conversation/{mode}/{project_id}/{conversation_id}"): "build",
     ("POST", "elitea_core/participants/{mode}/{project_id}/{conversation_id}"): "build",
@@ -174,6 +176,8 @@ ENDPOINT_OPERATIONS = {
     ("POST", "elitea_core/builder_propose/{mode}/{project_id}"): "read",
     ("POST", "elitea_core/builder_ref/{mode}/{project_id}"): "read",
     ("POST", "elitea_core/builder_apply/{mode}/{project_id}"): "build",
+    # (#7222) the Builder's pipeline validator: checks a YAML, writes nothing
+    ("POST", "elitea_core/validate_pipeline/{mode}/{project_id}"): "read",
 }
 # Credential material on the model path (#7228, C9-SEC-21). Every MCP-exposed route is ``material_in`` (its request
 # carries a secret value), ``material_out`` (its answer returns one) or ``none``. Derived from the OpenAPI registry: a

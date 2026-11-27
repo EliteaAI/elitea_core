@@ -1,6 +1,6 @@
 """C-1009 #7228 item 1: credential material never on the model path.
 
-Every MCP-exposed route of the live registry is classified (``mcp_registry_material_20261103.json``: tools/list of the
+Every MCP-exposed route of the live registry is classified (``mcp_registry_material_20261127.json``: tools/list of the
 local stack matched to /shared/openapi/?all=true, schemas inlined) and pinned by name; a route whose schema gains a
 secret-typed field is material on its own; a run token never executes a material call, whatever its scope
 (``CREDENTIALS_VIA_FORM``, recorded); the internal MCP toolkits of a run whose scope holds ``credentials`` carry the
@@ -19,7 +19,7 @@ from test_7214_internal_obo import (  # noqa: E402  pylint: disable=W0611
     BUILD_PERMISSION, CREDENTIAL_PERMISSION, admitted, call_kwargs, env, mint, ns, obo, seed)
 
 PLUGIN_ROOT = Path(__file__).parents[2]
-SNAPSHOT = json.loads((PLUGIN_ROOT / "tests" / "fixtures" / "mcp_registry_material_20261103.json").read_text())
+SNAPSHOT = json.loads((PLUGIN_ROOT / "tests" / "fixtures" / "mcp_registry_material_20261127.json").read_text())
 EXPECTED = {   # every MCP-exposed route whose class is not ``none``, by tool name
     "post_secrets_secrets": "material_in",
     "put_secrets_secret": "material_in",
@@ -63,7 +63,7 @@ def test_every_mcp_exposed_route_of_the_live_registry_has_its_class(ns, registry
     for name, entries in SNAPSHOT["routes"].items():
         [entry] = entries
         classes[name] = obo(ns).material_of(entry["method"], entry["path"])
-    assert len(classes) == 90
+    assert len(classes) == 107
     assert {name: found for name, found in classes.items() if found != "none"} == EXPECTED
 
 
@@ -108,6 +108,9 @@ def test_the_startup_guard_finds_nothing_on_the_live_registry(ns, registry):
     tools = [{"method": entry["method"].lower(), "path": entry["path"]}
              for entries in SNAPSHOT["routes"].values() for entry in entries]
     assert obo(ns).unclassified_material(tools) == []
+    # the Builder's pipeline validator reads, a folder create under its item path builds (both MCP-exposed since #7383)
+    assert obo(ns).operation_of("POST", "/api/v2/elitea_core/validate_pipeline/{mode}/{project_id}") == "read"
+    assert obo(ns).operation_of("POST", "/api/v2/elitea_core/folder/{mode}/{project_id}/{folder_id}") == "build"
     # pre-existing (#7185, not this change): the skill file writes are not in the operation map, so a run is refused them
     assert obo(ns).unmapped_writes(tools) == [
         "DELETE elitea_core/skill_file/{mode}/{project_id}/{skill_id}/{version_id}/{path}",

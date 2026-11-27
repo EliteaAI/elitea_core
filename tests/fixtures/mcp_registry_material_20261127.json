@@ -1,5 +1,5 @@
 {
- "generated": "2026-11-03 from the local stack: tools/list of /app/2/mcp (all API tools, form-admin session) matched to /shared/openapi/?all=true by the registry's naming rule; schemas with $refs inlined",
+ "generated": "2026-11-27 from the local stack (main with #7383 Elitea Builder + this branch): tools/list of /app/2/mcp (all API tools, form-admin session) matched to /shared/openapi/?all=true by the registry's naming rule; schemas with $refs inlined",
  "routes": {
   "delete_artifacts_artifacts": [
    {
@@ -145,6 +145,14 @@
     "response": null
    }
   ],
+  "get_elitea_core_builder_reference": [
+   {
+    "method": "GET",
+    "path": "/api/v2/elitea_core/builder_reference/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
   "get_elitea_core_conversation": [
    {
     "method": "GET",
@@ -164,7 +172,7 @@
   "get_elitea_core_folder": [
    {
     "method": "GET",
-    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}",
+    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}/{folder_id}",
     "request": null,
     "response": null
    }
@@ -188,7 +196,7 @@
   "get_elitea_core_participant": [
    {
     "method": "GET",
-    "path": "/api/v2/elitea_core/participant/{mode}/{project_id}/{participant_id}",
+    "path": "/api/v2/elitea_core/participant/{mode}/{project_id}/{conversation_id}/{participant_id}",
     "request": null,
     "response": null
    }
@@ -353,6 +361,14 @@
     "response": null
    }
   ],
+  "get_usage_analytics_agent_runs": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_agent_runs/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
   "get_usage_analytics_agents": [
    {
     "method": "GET",
@@ -361,10 +377,82 @@
     "response": null
    }
   ],
+  "get_usage_analytics_chat_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_chat_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_chat_runs": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_chat_runs/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_chats": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_chats/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_chats_summary": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_chats_summary/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_complexity": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_complexity/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_complexity_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_complexity_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
   "get_usage_analytics_costs": [
    {
     "method": "GET",
     "path": "/api/v2/usage/analytics_costs/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_run_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_run_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_skill_detail": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_skill_detail/{mode}/{project_id}",
+    "request": null,
+    "response": null
+   }
+  ],
+  "get_usage_analytics_skills": [
+   {
+    "method": "GET",
+    "path": "/api/v2/usage/analytics_skills/{mode}/{project_id}",
     "request": null,
     "response": null
    }
@@ -1288,12 +1376,237 @@
     "response": null
    }
   ],
+  "post_elitea_core_builder_apply": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/builder_apply/{mode}/{project_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "changeset_id": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "changeset_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_builder_find": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/builder_find/{mode}/{project_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "limit": {
+       "default": 10,
+       "maximum": 25,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "query": {
+       "default": "",
+       "type": "string"
+      },
+      "type": {
+       "enum": [
+        "agent",
+        "pipeline",
+        "skill",
+        "project_context",
+        "toolkit",
+        "model",
+        "configuration",
+        "operation"
+       ],
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_builder_propose": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/builder_propose/{mode}/{project_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "base_revision": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "changes": {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      "id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "name": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "op": {
+       "enum": [
+        "create",
+        "update",
+        "delete",
+        "call"
+       ],
+       "type": "string"
+      },
+      "type": {
+       "enum": [
+        "agent",
+        "pipeline",
+        "skill",
+        "project_context",
+        "toolkit",
+        "model",
+        "configuration",
+        "operation"
+       ],
+       "type": "string"
+      },
+      "version_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "type",
+      "op"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_builder_read": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/builder_read/{mode}/{project_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "type": {
+       "enum": [
+        "agent",
+        "pipeline",
+        "skill",
+        "project_context",
+        "toolkit",
+        "model",
+        "configuration",
+        "operation"
+       ],
+       "type": "string"
+      },
+      "version_id": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_builder_ref": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/builder_ref/{mode}/{project_id}",
+    "request": {
+     "additionalProperties": false,
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "topic"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
   "post_elitea_core_continue_predict": [
    {
     "method": "POST",
     "path": "/api/v2/elitea_core/continue_predict/{mode}/{project_id}/{conversation_uuid}",
     "request": {
      "properties": {
+      "approve_all": {
+       "default": false,
+       "type": "boolean"
+      },
       "authorization_request_id": {
        "anyOf": [
         {
@@ -1323,7 +1636,10 @@
           "reject",
           "edit",
           "block_with_comment",
-          "answer"
+          "answer",
+          "apply",
+          "cancel",
+          "created"
          ],
          "type": "string"
         },
@@ -1579,7 +1895,7 @@
   "post_elitea_core_folder": [
    {
     "method": "POST",
-    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}",
+    "path": "/api/v2/elitea_core/folder/{mode}/{project_id}/{folder_id}",
     "request": {
      "properties": {
       "meta": {
@@ -2585,6 +2901,35 @@
       "author_id",
       "project_id",
       "user_id"
+     ],
+     "type": "object"
+    },
+    "response": null
+   }
+  ],
+  "post_elitea_core_validate_pipeline": [
+   {
+    "method": "POST",
+    "path": "/api/v2/elitea_core/validate_pipeline/{mode}/{project_id}",
+    "request": {
+     "properties": {
+      "pipeline_yaml": {
+       "type": "string"
+      },
+      "trigger": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "pipeline_yaml"
      ],
      "type": "object"
     },
