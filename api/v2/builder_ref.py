@@ -4,5 +4,6 @@ from ...utils.builder.api_base import make_api
 
 API = make_api(
     "reference", BuilderReferenceModel,
-    "Elitea Builder: load a playbook (playbook:<type>) or the pipeline authoring reference (pipeline:overview).",
+    "Elitea Builder: load a playbook (playbook:<type>) or pipeline authoring pages "
+    "(pipeline:overview,node:<type>,pattern:<name>).",
 )
