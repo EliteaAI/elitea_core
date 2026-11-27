@@ -643,14 +643,24 @@ class RPC:
                 run_conditions.append(_any_of(EntityScheduleRun.status, run_status))
             if run_trigger is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.trigger, run_trigger))
+            version_in_meta = None
             if run_version_id is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.version_id, run_version_id))
+                # A test chat of the entity page has no run record: its version is the one the page wrote into the
+                # chat's meta, and the table shows that one. So a version filter reads it too, but only inside one
+                # entity's history (participant_id), where the entity match already narrows the rows. The meta is
+                # client-writable, like the entity id that match reads: a user can only move chats they may already
+                # see between the versions of that entity. Text compare, because the stored value may not be a number.
+                if participant_id is not None:
+                    version_in_meta = Conversation.meta['single_participant']['entity_settings'][
+                        'version_id'].astext.in_([str(value) for value in _as_values(run_version_id)])
             if run_conditions:
                 # One semi-join on the run row, which owns the link: the chat id column is indexed, and every
-                # option must hold for the same run. User-writable meta is never read for it.
-                base_query = base_query.filter(
-                    Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions))
-                )
+                # option must hold for the same run. Only a version alone may also read the chat's meta (above).
+                with_record = Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions))
+                only_version = len(run_conditions) == 1 and version_in_meta is not None
+                # A version alone also matches a chat without a record by its meta; any other run option needs the record
+                base_query = base_query.filter(or_(with_record, version_in_meta) if only_version else with_record)
 
             if execution_type is not None:
                 types = _as_values(execution_type)

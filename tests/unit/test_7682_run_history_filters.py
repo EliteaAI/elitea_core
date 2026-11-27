@@ -265,10 +265,17 @@ def test_the_api_answers_503_when_complexity_is_unavailable_and_400_without_an_e
     assert "complexity needs entity_meta_id and entity_meta_project_id" in source
 
 
-# --- PR 770 review: the version filter reads only the server-written run record, never the client-writable meta ----
+# --- PR 770 review: a test chat has no run record, so a version filter reads its meta, but only in one entity's history
 
-def test_the_version_filter_never_reads_the_chat_meta():
+def test_a_version_filter_also_matches_the_test_chats_own_meta_version():
+    """The table shows the version a test chat carries in its meta, so the filter finds it there too."""
     source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
-    assert "['entity_settings']['version_id']" not in source
-    assert "version_in_meta" not in source
-    assert "_any_of(EntityScheduleRun.version_id, run_version_id)" in source
+    assert "'version_id'].astext.in_([str(value) for value in _as_values(run_version_id)])" in source
+    # Only a version alone may match through the meta: any other run option still needs the run record
+    assert "only_version = len(run_conditions) == 1 and version_in_meta is not None" in source
+
+
+def test_the_meta_version_is_read_only_with_an_entity_filter():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    guard = source.index("if participant_id is not None:\n                    version_in_meta")
+    assert guard < source.index("'version_id'].astext.in_(")
