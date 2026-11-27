@@ -1,5 +1,6 @@
 import datetime
 import time
+import uuid
 from typing import get_args
 
 from pylon.core.tools import web, log
@@ -151,10 +152,12 @@ COMPLEXITY_FROM = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
 COMPLEXITY_TO = datetime.datetime(2100, 1, 1, tzinfo=datetime.timezone.utc)
 
 def _complexity_conversation_ids(rpc_manager, labels, entity_id, entity_project_id):
-    """The conversation ids of an entity's runs with one of the complexity labels, from usage (BE-2).
+    """The conversation uuids of an entity's runs with one of the complexity labels, from usage (BE-2).
 
-    None when the usage call fails or the entity is unknown, so the list says so instead of showing every run as a
-    match. The period is every run the entity keeps (usage retains a bounded window).
+    Returns (uuids, truncated), where truncated says usage held more runs than it returned (it returns the newest
+    ones). Returns None when the labels are not available: the entity is unknown, usage failed, or the feature is
+    off ("skipped"), so the list says so instead of showing an empty page as "no run matches". The period is every
+    run the entity keeps (usage retains a bounded window).
     """
     if entity_id is None or entity_project_id is None:
         return None
@@ -165,9 +168,15 @@ def _complexity_conversation_ids(rpc_manager, labels, entity_id, entity_project_
     except Exception:  # pylint: disable=W0703
         log.exception('complexity filter: the usage call failed')
         return None
-    if not isinstance(result, dict) or 'conversation_ids' not in result:
+    if not isinstance(result, dict) or 'conversation_ids' not in result or result.get('skipped'):
         return None
-    return [str(value) for value in result['conversation_ids']]
+    uuids = []
+    for value in result['conversation_ids']:
+        try:
+            uuids.append(uuid.UUID(str(value)))
+        except ValueError:  # usage stores the id as text; one that is not a uuid cannot be a conversation here
+            continue
+    return uuids, bool(result.get('truncated'))
 
 
 class RPC:
@@ -525,7 +534,7 @@ class RPC:
         participant_id: int = None,
         entity_name: str = None,
         entity_project_id: int = None,
-        schedule_id: int | None = None,
+        schedule_id: int | list[int] | None = None,
         run_status: str | list[str] | None = None,
         run_trigger: str | list[str] | None = None,
         run_version_id: int | list[int] | None = None,
@@ -544,7 +553,7 @@ class RPC:
         Args:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
-            schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
+            schedule_id: Optional schedule ID, or a list of them; keeps the conversations of those schedules' runs
             run_status, run_trigger, run_version_id: Optional run options (`run_trigger` is a stored trigger: cron, manual, test);
                 they combine with `schedule_id` and each other on the same run row
             execution_type: Optional list execution type of the conversation (chat, api, mcp): the runs that
@@ -629,39 +638,36 @@ class RPC:
 
             run_conditions = []
             if schedule_id is not None:
-                run_conditions.append(EntityScheduleRun.schedule_id == schedule_id)
+                run_conditions.append(_any_of(EntityScheduleRun.schedule_id, schedule_id))
             if run_status is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.status, run_status))
             if run_trigger is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.trigger, run_trigger))
-            version_in_meta = None
             if run_version_id is not None:
                 run_conditions.append(_any_of(EntityScheduleRun.version_id, run_version_id))
-                # A chat has no run record: the table shows its version from the chat's own meta, so the filter reads it
-                # there too. Text compare, because the meta is user-writable and may hold a non-integer.
-                version_in_meta = Conversation.meta['single_participant']['entity_settings']['version_id'].astext.in_(
-                    [str(value) for value in _as_values(run_version_id)]
-                )
             if run_conditions:
                 # One semi-join on the run row, which owns the link: the chat id column is indexed, and every
                 # option must hold for the same run. User-writable meta is never read for it.
-                with_record = Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions))
-                only_version = len(run_conditions) == 1 and version_in_meta is not None
-                # A version alone also matches a chat without a record by its meta; any other run option needs the record
-                base_query = base_query.filter(or_(with_record, version_in_meta) if only_version else with_record)
+                base_query = base_query.filter(
+                    Conversation.id.in_(select(EntityScheduleRun.conversation_id).where(*run_conditions))
+                )
 
             if execution_type is not None:
                 types = _as_values(execution_type)
                 base_query = base_query.filter(or_(*(_execution_type_condition(t) for t in types)))
 
+            complexity_flags = {}
             if complexity:  # BE-2: the rows whose run has one of the complexity labels, from usage
-                labelled = _complexity_conversation_ids(
+                found = _complexity_conversation_ids(
                     self.context.rpc_manager, _as_values(complexity), participant_id, entity_project_id,
                 )
-                if labelled is None:
+                if found is None:
                     return {'total': 0, 'rows': [], 'complexity_unavailable': True}
-                # Usage names a run by the conversation uuid, so the list matches the uuid column
-                base_query = base_query.filter(cast(Conversation.uuid, String).in_(labelled) if labelled else false())
+                labelled, truncated = found
+                if truncated:  # usage returned only the newest runs, so the page is partial
+                    complexity_flags['complexity_truncated'] = True
+                # Usage names a run by the conversation uuid: typed values match the uuid column and its index
+                base_query = base_query.filter(Conversation.uuid.in_(labelled) if labelled else false())
             if run_outcome:  # AC-24, AC-26: the derived status of each row, OR within the filter
                 base_query = base_query.filter(or_(*(outcome_condition(o) for o in _as_values(run_outcome))))
 
@@ -679,7 +685,7 @@ class RPC:
             conversations = base_query.limit(limit).offset(offset).all()
 
             if not conversations:
-                return {'total': total, 'rows': []}
+                return {'total': total, 'rows': [], **complexity_flags}
 
             conv_ids = [c.id for c in conversations]
             skip_duration = bool(source and 'elitea' in source)
@@ -753,7 +759,7 @@ class RPC:
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 
-            return {'total': total, 'rows': rows}
+            return {'total': total, 'rows': rows, **complexity_flags}
 
     @web.rpc("chat_run_history_facets_rpc", "run_history_facets_rpc")
     def run_history_facets_rpc(
