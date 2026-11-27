@@ -6,6 +6,9 @@ project with thousands of chats. `(conversation_id, id)` lets each lookup stop a
 
 `CREATE INDEX CONCURRENTLY` builds the index without locking writes to the table, and it cannot run inside a
 transaction, so each project's statement runs on an autocommit connection (the pattern of legacy_schedule_migration).
+
+A concurrent build that fails (a deadlock, a statement timeout, a cancel) leaves an INVALID index under the same name.
+The planner never uses it and `IF NOT EXISTS` would skip it, so a project holding one is dropped and built again.
 """
 
 from sqlalchemy import text
@@ -20,40 +23,62 @@ CREATE_STATEMENT = (
     'ON p_{pid}.chat_message_group (conversation_id, id)'
 )
 
-INDEX_EXISTS = text(
-    'SELECT 1 FROM pg_indexes WHERE schemaname = :schema AND indexname = :index'
+DROP_STATEMENT = 'DROP INDEX CONCURRENTLY IF EXISTS p_{pid}.{index}'
+
+# The index of this name in the project, with the flag the planner uses to decide whether it may read it
+INDEX_STATE = text(
+    'SELECT i.indisvalid FROM pg_index i '
+    'JOIN pg_class c ON c.oid = i.indexrelid '
+    'JOIN pg_namespace n ON n.oid = c.relnamespace '
+    'WHERE n.nspname = :schema AND c.relname = :index'
 )
 
+PRESENT = 'present'
+INVALID = 'invalid'
+MISSING = 'missing'
 
-def _index_present(connection, project_id):
-    return connection.execute(
-        INDEX_EXISTS, {'schema': f'p_{project_id}', 'index': INDEX_NAME},
-    ).first() is not None
+
+def _index_state(connection, project_id):
+    """MISSING, PRESENT (valid) or INVALID (left behind by a failed concurrent build)."""
+    row = connection.execute(INDEX_STATE, {'schema': f'p_{project_id}', 'index': INDEX_NAME}).first()
+    if row is None:
+        return MISSING
+    return PRESENT if row[0] else INVALID
 
 
 def _create_index(connection, project_id):
     connection.execute(text(CREATE_STATEMENT.format(index=INDEX_NAME, pid=project_id)))
 
 
-def run_message_group_index(project_ids, dry_run: bool) -> dict:
-    """Create the conversation index in each project; a project that has it already is left alone.
+def _drop_index(connection, project_id):
+    connection.execute(text(DROP_STATEMENT.format(index=INDEX_NAME, pid=project_id)))
 
-    Returns the projects that were changed (or would be, in a dry run), the ones that already had the index, and the
-    ones that failed. A failing project is listed and the run goes on.
+
+def run_message_group_index(project_ids, dry_run: bool) -> dict:
+    """Create the conversation index in each project; a project that has a valid one is left alone.
+
+    Returns the projects that were changed (or would be, in a dry run), the ones that already had a valid index, the
+    ones whose invalid index was rebuilt (or would be), and the ones that failed. A failing project is listed and the
+    run goes on. A rebuilt project is also listed under `changed`.
     """
     from tools import db  # imported here: tools.db needs the running plugin
 
-    changed, present, failed = [], [], []
+    changed, present, rebuilt, failed = [], [], [], []
     with db.engine.connect().execution_options(isolation_level='AUTOCOMMIT') as connection:
         for project_id in project_ids:
             try:
-                if _index_present(connection, project_id):
+                state = _index_state(connection, project_id)
+                if state == PRESENT:
                     present.append(project_id)
                     continue
+                if state == INVALID:
+                    rebuilt.append(project_id)
+                    if not dry_run:
+                        _drop_index(connection, project_id)
                 if not dry_run:
                     _create_index(connection, project_id)
                 changed.append(project_id)
             except Exception:  # pylint: disable=W0703
                 log.exception('message group index: failed for project %s', project_id)
                 failed.append({'project_id': project_id})
-    return {'changed': changed, 'present': present, 'failed': failed, 'dry_run': dry_run}
+    return {'changed': changed, 'present': present, 'rebuilt': rebuilt, 'failed': failed, 'dry_run': dry_run}

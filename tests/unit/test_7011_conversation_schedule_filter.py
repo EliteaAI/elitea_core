@@ -311,7 +311,18 @@ def test_7011_r2_1_api_without_schedule_id_passes_none(api):
     assert api.calls[0]['schedule_id'] is None
 
 
-@pytest.mark.parametrize('value', ['abc', '', '1.5', ' 5', '5x', '-1', '٣'])
+def test_the_api_passes_a_comma_list_of_schedule_ids_as_a_list(api):
+    _, status = _get(api, schedule_id='3,5')
+    assert status == 200
+    assert api.calls[0]['schedule_id'] == [3, 5]
+
+
+def test_the_rpc_matches_any_of_several_schedules(rpc_module):
+    sql = ' '.join(_list(rpc_module, schedule_id=[3, 5]).base.sql().split())
+    assert 'entity_schedule_runs.schedule_id IN (3, 5)' in sql
+
+
+@pytest.mark.parametrize('value', ['abc', '', '1.5', ' 5', '5x', '-1', '٣', '3,', ',3', '3,x', ','.join(['1'] * 21)])
 def test_7011_r2_3_api_rejects_a_non_integer_schedule_id(api, value):
     """TC-US16-07: a bad value answers 400 and the RPC is not called."""
     body, status = _get(api, schedule_id=value)

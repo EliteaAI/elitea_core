@@ -156,3 +156,155 @@ def test_a_flagged_last_group_reads_failed_in_the_filter_and_the_display():
     source = (PLUGIN_ROOT / 'utils' / 'run_outcome.py').read_text()
     assert "ConversationMessageGroup.meta['is_error'].as_boolean().is_(True)" in source
     assert "meta.get('is_error') is True" in source
+
+
+# --- BE-2: the complexity filter of the run list (labels from usage, failing closed) -------------------------------
+
+def test_a_complexity_label_is_a_scalar_or_a_list(schedule_list):
+    single = schedule_list.ConversationListFilters.model_validate({'complexity': 'L'})
+    assert single.complexity == 'L'
+    several = schedule_list.ConversationListFilters.model_validate({'complexity': 'L,not_scored'})
+    assert several.complexity == ['L', 'not_scored']
+
+
+def test_an_unknown_complexity_label_is_rejected(schedule_list):
+    with pytest.raises(Exception):
+        schedule_list.ConversationListFilters.model_validate({'complexity': 'bogus'})
+
+
+def test_the_list_route_passes_the_complexity_filter_on():
+    source = (PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py').read_text()
+    assert "complexity=run_filters.complexity," in source
+
+
+def test_the_complexity_lookup_fails_closed_when_usage_is_unreachable():
+    """A usage failure must not show every run as a match: the lookup returns None and the list says so."""
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "if found is None:" in source
+    assert "'complexity_unavailable': True" in source
+
+
+# --- the version and complexity filters match what the table shows (chats have no run record) ----------------------
+
+def _load_complexity_helper(log=None):
+    """`_complexity_conversation_ids` taken from the RPC source, so no plugin import is needed."""
+    import ast
+    import types
+    import uuid
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    function = next(n for n in ast.parse(source).body
+                    if isinstance(n, ast.FunctionDef) and n.name == '_complexity_conversation_ids')
+    namespace = {'uuid': uuid, 'log': log or types.SimpleNamespace(exception=lambda *a, **k: None),
+                 'RPC_TIMEOUT_SECONDS': 10, 'COMPLEXITY_FROM': 0, 'COMPLEXITY_TO': 1}
+    exec(compile(ast.Module([function], []), 'chat_conversation.py', 'exec'), namespace)  # pylint: disable=W0122
+    return namespace['_complexity_conversation_ids']
+
+
+def _rpc_manager(answer):
+    import types
+
+    def by_label(*_args, **_kwargs):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    return types.SimpleNamespace(timeout=lambda _seconds: types.SimpleNamespace(
+        usage_complexity_conversations_by_label=by_label))
+
+
+UUID_A = '9414e9bc-f506-412a-8635-114ac69c1d7b'
+UUID_B = '0f1ad0b4-0000-4000-8000-000000000001'
+
+
+def test_the_complexity_ids_are_typed_uuids_and_truncated_is_reported():
+    import uuid
+    helper = _load_complexity_helper()
+    found = helper(_rpc_manager({'conversation_ids': [UUID_A, UUID_B], 'truncated': True}), ['L'], 26, 3)
+    assert found == ([uuid.UUID(UUID_A), uuid.UUID(UUID_B)], True)
+
+
+def test_an_id_that_is_not_a_uuid_is_dropped_not_matched():
+    helper = _load_complexity_helper()
+    found = helper(_rpc_manager({'conversation_ids': ['12', 'x', UUID_A], 'truncated': False}), ['L'], 26, 3)
+    assert [str(value) for value in found[0]] == [UUID_A] and found[1] is False
+
+
+@pytest.mark.parametrize('answer', [
+    {'conversation_ids': [], 'truncated': False, 'skipped': 'disabled'},  # the feature is off: not "no match"
+    {'something': 'else'},
+    None,
+    RuntimeError('usage is down'),
+])
+def test_complexity_that_cannot_be_read_is_unavailable_not_empty(answer):
+    helper = _load_complexity_helper()
+    assert helper(_rpc_manager(answer), ['L'], 26, 3) is None
+
+
+@pytest.mark.parametrize(('entity_id', 'entity_project_id'), [(None, 3), (26, None), (None, None)])
+def test_complexity_needs_the_entity(entity_id, entity_project_id):
+    helper = _load_complexity_helper()
+    assert helper(_rpc_manager({'conversation_ids': []}), ['L'], entity_id, entity_project_id) is None
+
+
+def test_the_list_matches_the_uuid_column_with_typed_values_and_no_cast():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "Conversation.uuid.in_(labelled) if labelled else false()" in source
+    assert "cast(Conversation.uuid, String)" not in source
+
+
+def test_a_truncated_answer_is_flagged_on_the_page_it_returns():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "complexity_flags['complexity_truncated'] = True" in source
+    assert source.count("**complexity_flags") == 2  # the empty page and the full page
+
+
+# --- PR 770 review: the labels that cannot be read are an error, not an empty page ---------------------------------
+
+def test_the_api_answers_503_when_complexity_is_unavailable_and_400_without_an_entity():
+    source = (PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py').read_text()
+    assert "result.get('complexity_unavailable')" in source and "}, 503" in source
+    assert "complexity needs entity_meta_id and entity_meta_project_id" in source
+
+
+# --- PR 770 review: a test chat has no run record, so a version filter reads its meta, but only in one entity's history
+
+def test_a_version_filter_also_matches_the_test_chats_own_meta_version():
+    """The table shows the version a test chat carries in its meta, so the filter finds it there too."""
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "'version_id'].astext.in_([str(value) for value in _as_values(run_version_id)])" in source
+    # Only a version alone may match through the meta: any other run option still needs the run record
+    assert "only_version = len(run_conditions) == 1 and version_in_meta is not None" in source
+
+
+def test_the_meta_version_is_read_only_with_an_entity_filter():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    guard = source.index("if participant_id is not None:\n                    version_in_meta")
+    assert guard < source.index("'version_id'].astext.in_(")
+
+
+def test_the_list_names_its_project_so_usage_can_use_its_indexes():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "labels, project_id=project_id," in source
+    assert "participant_id, entity_project_id,\n                    project_id=project_id," in source
+
+
+def test_the_project_reaches_usage_with_the_labels():
+    import types
+    seen = {}
+
+    def by_label(*args, **kwargs):
+        seen['args'], seen['kwargs'] = args, kwargs
+        return {'conversation_ids': [], 'truncated': False}
+    manager = types.SimpleNamespace(timeout=lambda _s: types.SimpleNamespace(
+        usage_complexity_conversations_by_label=by_label))
+    _load_complexity_helper()(manager, ['L'], 26, 3, project_id=7)
+    assert seen['kwargs'] == {'project_id': 7} and seen['args'][:2] == (3, 26)
+
+
+def test_the_usage_wait_is_shorter_than_the_api_wait_so_the_503_can_be_reached():
+    import re
+    rpc_source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    api_source = (PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py').read_text()
+    inner = int(re.search(r'^RPC_TIMEOUT_SECONDS = (\d+)$', rpc_source, re.M).group(1))
+    outer = int(re.search(r'rpc\.timeout\((\d+)\)\.chat_list_conversations_rpc', api_source).group(1))
+    assert inner < outer
+    assert outer - inner >= 3  # room for the count and page queries that still run after a usage answer

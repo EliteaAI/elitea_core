@@ -7,7 +7,9 @@ from typing import get_args
 from pydantic import ValidationError
 
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
-from ...models.pd.schedule_list import ConversationListFilters, ExecutionType, RunStatus, RunTrigger
+from ...models.pd.schedule_list import (
+    MAX_FILTER_VALUES, ConversationListFilters, ExecutionType, RunStatus, RunTrigger,
+)
 from ...utils.conversation_utils import create_conversation, get_conversation_details
 from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.constants import PROMPT_LIB_MODE
@@ -54,7 +56,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "entity_meta_project_id", "in": "query", "required": False, "schema": {"type": "integer"},
              "description": "Owner project of a 'skill' participant; separates own skills from Catalog skills."},
             {"name": "schedule_id", "in": "query", "required": False, "schema": {"type": "integer"},
-             "description": "Only conversations started by this schedule (meta.schedule_id). Not an integer: 400."},
+             "description": "Only conversations started by this schedule (meta.schedule_id); a comma list matches any of "
+                            "them. Not an integer: 400."},
             {"name": "status", "in": "query", "required": False,
              "schema": {"type": "string", "enum": list(get_args(RunStatus))},
              "description": "Only conversations of a schedule run with this status. Unknown value: 400."},
@@ -89,9 +92,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         schedule_id = request.args.get('schedule_id')
         if schedule_id is not None:
-            if not (schedule_id.isascii() and schedule_id.isdecimal()):
-                return {'error': 'schedule_id must be an integer', 'field': 'schedule_id'}, 400
-            schedule_id = int(schedule_id)
+            # A comma list (OR within the filter) like the other run filters; each item must be a whole number
+            items = schedule_id.split(',')
+            if len(items) > MAX_FILTER_VALUES or not all(item.isascii() and item.isdecimal() for item in items):
+                return {'error': 'schedule_id must be an integer or a comma list of integers',
+                        'field': 'schedule_id'}, 400
+            schedule_id = int(items[0]) if len(items) == 1 else [int(item) for item in items]
 
         try:  # an unknown value is a 400, never ignored: an ignored filter would show every run as the match
             run_filters = ConversationListFilters.model_validate({
@@ -99,6 +105,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             first = e.errors()[0]
             return {'code': 'invalid_input', 'error': f"{first['loc'][0]} is not a valid value", 'field': first['loc'][0]}, 400
+
+        entity_project_id = request.args.get('entity_meta_project_id', type=int)
+        if run_filters.complexity and (entity_meta_id is None or entity_project_id is None):
+            # The labels are read per entity: without one the list could only answer "no run matches"
+            return {'code': 'invalid_input', 'field': 'complexity',
+                    'error': 'complexity needs entity_meta_id and entity_meta_project_id'}, 400
 
         result = rpc.timeout(10).chat_list_conversations_rpc(
             project_id=project_id,
@@ -113,7 +125,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             is_admin=user_is_admin,
             participant_id=entity_meta_id,
             entity_name=request.args.get('entity_name'),
-            entity_project_id=request.args.get('entity_meta_project_id', type=int),
+            entity_project_id=entity_project_id,
             schedule_id=schedule_id,
             run_status=run_filters.status,
             run_trigger=run_filters.trigger,
@@ -121,7 +133,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             execution_type=run_filters.execution_type,
             run_outcome=run_filters.run_outcome,
             tool_name=run_filters.tool_name,
+            complexity=run_filters.complexity,
         )
+
+        if isinstance(result, dict) and result.get('complexity_unavailable'):
+            # Not an empty page: "no run matches" and "the labels cannot be read" must look different
+            return {'code': 'complexity_unavailable', 'error': 'Complexity labels are not available right now'}, 503
 
         return result, 200
 
