@@ -16,6 +16,9 @@ TRANSITIONS = frozenset({
     ("draft", "retired"), ("provisioning", "retired"), ("pending_approval", "retired"),
     # rebind (#7105): a live binding is approved again for the definition as it is now
     ("active", "pending_approval"), ("suspended", "pending_approval"),
+    # (#7228) a waiting binding is brought up to date with the definition as it is now (the approver always approves
+    # the current one), and a retired binding is requested again: the same row, back to draft
+    ("pending_approval", "pending_approval"), ("retired", "draft"),
 })
 BUMPS_EPOCH = frozenset({"suspended", "retiring", "retired"})
 REBIND_FROM = frozenset({"active", "suspended"})
@@ -25,9 +28,31 @@ def is_rebind(expected: str, target: str) -> bool:
     return target == "pending_approval" and expected in REBIND_FROM
 
 
+def is_redigest(expected: str, target: str) -> bool:
+    """(#7228) a waiting binding takes the definition as it is now; it was never in use, so no epoch is raised."""
+    return expected == target == "pending_approval"
+
+
+def is_revival(expected: str, target: str) -> bool:
+    """(#7228) a retired binding requested again: back to draft for the definition as it is now. Its epoch stays
+    raised, so nothing admitted before the retirement is accepted again."""
+    return expected == "retired" and target == "draft"
+
+
 def bumps_epoch(expected: str, target: str) -> bool:
     """Entering a state that takes the binding out of use, or taking it back to approval (a rebind)."""
     return target in BUMPS_EPOCH or is_rebind(expected, target)
+
+
+def requester_of(state_changed_by, created_by):
+    """(#7228) Who made a waiting binding's current request: the operator who last moved it (submitted it, rebound it,
+    brought it up to date), else its creator. The one person its four-eyes rule excludes. A move that does not take the
+    request (``transition_binding(takes_request=False)``) clears ``state_changed_by``, so the creator stays it."""
+    return state_changed_by if state_changed_by is not None else created_by
+
+
+# the same, as SQL (the approval's guard and the inbox's escalation)
+REQUESTER = func.coalesce(AgentIdentityBinding.state_changed_by, AgentIdentityBinding.created_by)
 
 
 class InvalidTransition(ValueError):
@@ -41,6 +66,7 @@ class InvalidTransition(ValueError):
 def transition_binding(  # pylint: disable=R0913
     session, binding_id, expected: str, target: str, *, actor_user_id: int,
     approval_ref=None, policy_revision=None, current_digest=None, allow_runtime_domain_binding=False,
+    takes_request=True,
 ) -> bool:
     """Move a binding from ``expected`` to ``target``. True when this call made the change.
 
@@ -50,12 +76,13 @@ def transition_binding(  # pylint: disable=R0913
 
     ``current_digest`` is the definition the activation is checked against; for a rebind it is the definition the
     binding is approved for from now on. Approving (``pending_approval`` -> ``active``) is refused for the operator who
-    created the binding or who last changed its state (``SELF_APPROVAL``); resuming a suspended binding is not an
-    approval and has no such rule.
+    made its current request (``requester_of``: who last changed its state, else its creator; ``SELF_APPROVAL``,
+    #7228); resuming a suspended binding is not an approval and has no such rule. ``takes_request``: False for a move
+    into approval that does not make its mover that operator (automatic, or by a non-approver; #7228 C9-SEC-100).
     """
     if (expected, target) not in TRANSITIONS:
         raise InvalidTransition("INVALID_TRANSITION", f"{expected} -> {target} is not a legal binding change")
-    rebind = is_rebind(expected, target)
+    rebind = is_rebind(expected, target) or is_redigest(expected, target) or is_revival(expected, target)
     approving = expected == "pending_approval" and target == "active"
     if rebind and not current_digest:
         raise InvalidTransition("DIGEST_REQUIRED", "a rebind needs the current definition digest")
@@ -73,22 +100,32 @@ def transition_binding(  # pylint: disable=R0913
         if approving:
             if not actor_user_id:
                 raise InvalidTransition("SELF_APPROVAL", "approving needs an identified operator")
-            if actor_user_id in (row.created_by, row.state_changed_by):
+            # (#7228) four eyes on the request being approved: whoever made the current pending request (submitted or
+            # brought it up to date) never approves it; a creator who did not make it may
+            if actor_user_id == requester_of(row.state_changed_by, row.created_by):
                 raise InvalidTransition("SELF_APPROVAL", "another operator must approve this binding")
             # the same rule once more in the statement, so a change between the read and the write cannot slip by
-            guards = [AgentIdentityBinding.created_by.is_distinct_from(actor_user_id),
-                      AgentIdentityBinding.state_changed_by.is_distinct_from(actor_user_id)]
+            guards = [REQUESTER.is_distinct_from(actor_user_id),
+                      # (#7228, C9-SEC-98) and only the definition read above: a re-digest in place between the read
+                      # and this write leaves the row unchanged (CONCURRENT_CHANGE)
+                      AgentIdentityBinding.definition_digest == current_digest]
         if current_digest != row.definition_digest:
             raise InvalidTransition("BINDING_DIGEST_MISMATCH", "the definition changed since the binding was created")
         if row.identity_mode == "runtime_domain_binding" and not allow_runtime_domain_binding:
             raise InvalidTransition("DENIED_BINDING", "runtime domain bindings cannot be activated here")
 
     values = {"state": target, "state_changed_by": actor_user_id, "updated_at": func.now()}
+    if target == "pending_approval" and not takes_request:
+        # (#7228, C9-SEC-100) an automatic move into approval (a request the platform filed, a run's change) or one by
+        # someone who may not approve does not make its mover the request's actor: the creator stays excluded
+        values["state_changed_by"] = None
     if approving:   # only an approval writes the two columns; a resume keeps the stored ones
         values["approval_ref"] = approval_ref
         values["policy_revision"] = policy_revision
     if rebind:   # approved again from scratch, for the definition as it is now
         values.update(definition_digest=current_digest, approval_ref=None, policy_revision=None)
+    if is_revival(expected, target):   # who requests it again is its creator (four eyes: another operator approves)
+        values["created_by"] = actor_user_id or None
     if bumps_epoch(expected, target):
         values["revocation_epoch"] = AgentIdentityBinding.revocation_epoch + 1
     result = session.execute(

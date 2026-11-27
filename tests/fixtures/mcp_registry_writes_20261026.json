@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-26 from the local stack: tools/list of every internal MCP tag (run token), names matched to /shared/openapi/?all=true paths with the registry's naming rule",
+ "generated": "2026-10-26 from the local stack: tools/list of every internal MCP tag (run token), names matched to /shared/openapi/?all=true paths with the registry's naming rule | 2026-11-27 (#7228 after #7383, live stack): post_elitea_core_folder also registered under its item path; post_elitea_core_validate_pipeline added",
  "tools_per_tag": {
   "artifacts": [
    "get_artifacts_artifact",
@@ -39,7 +39,8 @@
    "get_elitea_core_version",
    "put_elitea_core_version",
    "post_elitea_core_version_instruction_patch",
-   "post_elitea_core_versions"
+   "post_elitea_core_versions",
+   "post_elitea_core_validate_pipeline"
   ],
   "elitea_core/chat": [
    "post_elitea_core_continue_predict",
@@ -174,7 +175,8 @@
    "POST elitea_core/conversations/{mode}/{project_id}"
   ],
   "post_elitea_core_folder": [
-   "POST elitea_core/folder/{mode}/{project_id}"
+   "POST elitea_core/folder/{mode}/{project_id}",
+   "POST elitea_core/folder/{mode}/{project_id}/{folder_id}"
   ],
   "post_elitea_core_generate_project_context_draft": [
    "POST elitea_core/generate_project_context_draft/{mode}/{project_id}"
@@ -265,6 +267,9 @@
   ],
   "post_elitea_core_builder_ref": [
    "POST elitea_core/builder_ref/{mode}/{project_id}"
+  ],
+  "post_elitea_core_validate_pipeline": [
+   "POST elitea_core/validate_pipeline/{mode}/{project_id}"
   ]
  },
  "builder_dispatched_writes": [

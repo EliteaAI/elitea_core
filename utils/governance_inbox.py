@@ -2,10 +2,11 @@
 
 A row waits for an approver while it is pending (a binding or a mandate in ``pending_approval``, a grant in
 ``pending_approval``, a credential reference ``pending`` or validated and not approved yet). Its approver is a project
-admin whom the kind's own four-eyes rule does not exclude: for a binding its creator and whoever last changed its state,
-for a mandate its creator and its owner, for a reference its creator and whoever wrote its value, for a grant its
-creator (``binding_state``, ``mandate_state``, secrets ``credential_onboarding`` / ``credential_grants``; nothing here
-changes those rules, a platform operator approves in administration mode as before). A row with no such admin (a
+admin whom the kind's own four-eyes rule does not exclude: for a binding the requester of its current request (whoever
+moved it into approval deliberately, else its creator; #7228), for a mandate its creator and its owner, for a reference
+its creator and whoever wrote its value, for a grant its creator (``binding_state``, ``mandate_state``, secrets
+``credential_onboarding`` / ``credential_grants``; nothing here changes those rules, a platform operator approves in
+administration mode as before). A row with no such admin (a
 private project has none, or the only admin is excluded) "needs a platform operator": it is ``escalated``, and the
 administration list shows exactly those rows with ``escalated=true``.
 

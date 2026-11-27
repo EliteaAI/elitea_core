@@ -14,7 +14,7 @@ import pathlib
 import sys
 import types
 from contextlib import contextmanager
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fixtures.cut_source import load_cut
@@ -681,7 +681,14 @@ def _continue_predict(schedule_meta, events, allowed=True, **request):
         'authoring_kwargs': lambda *_: {},
     })
     namespace = load_cut([*helpers, method], namespace, 'chat_all.py')
-    result = namespace['continue_predict_sio'](owner, None, **{'data': {}})
+    # (#7228) the method imports the credential-form gate lazily, relative to its package: resolve it to a
+    # pass-through (no credential form is pending in these runs)
+    namespace['__package__'] = 'plugins.elitea_core.rpc'
+    gate = types.SimpleNamespace(FormRefused=type('FormRefused', (Exception,), {}),
+                                 check_resume=lambda _owner, _pid, _mid, _action, value, decisions, _user: (
+                                     value, decisions))
+    with patch.dict(sys.modules, {'plugins.elitea_core.utils.credential_form': gate}):
+        result = namespace['continue_predict_sio'](owner, None, **{'data': {}})
     assert result == {'queued': True}
     return calls.sent
 
