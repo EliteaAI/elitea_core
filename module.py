@@ -26,6 +26,7 @@ from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
+from .utils.conversation_access import register_manage_shared_permission
 from .utils.schedule_access import register_schedule_permissions
 from .utils.schedule_settings import register_schedule_settings_type
 from .utils.eval_history_consent import register_eval_history_settings_type
@@ -1049,6 +1050,8 @@ class Module(module.ModuleModel):
 
         # Register schedule permissions for schedules permission family (EL-7011)
         register_schedule_permissions()
+        # Who may manage a chat its owner shared with them (#7757)
+        register_manage_shared_permission()
         register_schedule_settings_type()
         register_eval_history_settings_type()
         # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever

@@ -217,9 +217,10 @@ def test_7011_r2_2_rpc_keeps_participant_and_private_filters(rpc_module, is_admi
     base = ' '.join(session.base.sql().split())
     assert SCHEDULE_FILTER in base
     assert 'chat_conversations.id IN' in base
-    participant = session.participant_query.sql()
-    assert ('= 42' in participant) is not is_admin
+    # The caller's own chats always count; an admin also gets everyone's runs, never other people's chats (#7757)
+    assert '= 42' in session.participant_query.sql()
     assert any('chat_conversations.is_private = false' in q.sql() for q in session.queries)
+    assert any('single_participant' in q.sql() for q in session.queries) is is_admin
 
 
 def _skill_list(rpc_module, participant_id, entity_project_id):

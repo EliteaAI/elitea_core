@@ -199,6 +199,7 @@ class RPC:
         password: str = None,
         scope: str = 'all',
         message_group_ids: list = None,
+        can_manage: bool = False,
     ) -> dict | None:
         try:
             expiry_enum = ShareLinkExpiry(expiry)
@@ -218,8 +219,8 @@ class RPC:
             conv = session.get(Conversation, conversation_id)
             if conv is None:
                 return None
-            # Only the conversation author may create share tokens.
-            if conv.author_id != created_by:
+            # The author, or a manager the API has already checked (#7757)
+            if conv.author_id != created_by and not can_manage:
                 log.warning(
                     "create_share_token: user %s not owner of conversation %s",
                     created_by, conversation_id,
@@ -269,25 +270,26 @@ class RPC:
         return result
 
     @web.rpc("chat_list_share_tokens", "list_share_tokens")
-    def list_share_tokens(self, project_id: int, conversation_id: int, user_id: int) -> list:
+    def list_share_tokens(self, project_id: int, conversation_id: int, user_id: int, can_manage: bool = False) -> list:
         with db.get_session(project_id) as session:
             conv = session.get(Conversation, conversation_id)
             if conv is None:
                 return []
+            filters = {'conversation_id': conversation_id, 'is_revoked': False}
+            # The owner and the managers see every link of the chat, whoever made it (#7757)
+            if not can_manage:
+                filters['created_by'] = user_id
             tokens = (
                 session.query(ConversationShareToken)
-                .filter_by(
-                    conversation_id=conversation_id,
-                    created_by=user_id,
-                    is_revoked=False,
-                )
+                .filter_by(**filters)
                 .order_by(ConversationShareToken.created_at.desc())
                 .all()
             )
             return [_build_share_link_response(t, conv.name) for t in tokens]
 
     @web.rpc("chat_revoke_share_token", "revoke_share_token")
-    def revoke_share_token(self, project_id: int, token: str, user_id: int) -> bool:
+    def revoke_share_token(self, project_id: int, token: str, user_id: int,
+                           managed_conversation_id: int | None = None) -> bool:
         with db.get_session(project_id) as session:
             share = (
                 session.query(ConversationShareToken)
@@ -296,7 +298,8 @@ class RPC:
             )
             if share is None:
                 return False
-            if share.created_by != user_id:
+            # The owner and the managers of the link's chat revoke any of its links (#7757)
+            if share.created_by != user_id and share.conversation_id != managed_conversation_id:
                 log.warning(
                     "revoke_share_token: user %s not owner of token %s...",
                     user_id, token[:8],

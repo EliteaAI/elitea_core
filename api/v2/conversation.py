@@ -6,8 +6,9 @@ from pylon.core.tools import log
 from ...models.conversation import Conversation
 from ...models.pd.conversation import ConversationUpdate
 from ...utils.conversation_access import (
-    check_conversation_access, is_privileged_update, is_own_folder, changes_privacy, check_owner,
+    check_conversation_access, is_privileged_update, is_own_folder, moves_folder, check_owner, changes_privacy,
 )
+from ...utils.chat_access_notifications import notify_team_access_change, snapshot_conversation
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.chat_usage import strip_server_owned_meta
 from ...utils.context_window import keep_server_owned_strategy
@@ -128,14 +129,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 project_id, conversation, user_id,
                 needs_privilege=is_privileged_update(conversation, data),
             )
+            if not denied and moves_folder(conversation, data):
+                # A chat has one folder, and folders are personal: only the owner files it (#7757)
+                denied = check_owner(conversation, user_id, project_id)
             if denied:
                 return denied
-            if changes_privacy(conversation, data):
-                denied = check_owner(conversation, user_id)
-                if denied:
-                    return denied
             if data.get('folder_id') is not None and not is_own_folder(session, data['folder_id'], user_id):
                 return {'error': 'Folder not found'}, 404
+            # Whole team switched on or off changes access for the members who are not in the chat (#7757)
+            privacy_snapshot = snapshot_conversation(conversation) if changes_privacy(conversation, data) else None
             # Usage, budget and analytics are server-owned; the window mode and the summarization
             # triggers are validated and set via context_strategy PUT only
             strip_server_owned_meta(data.get('meta'), conversation.meta)
@@ -154,6 +156,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             'meta': data.get('meta'),
             'attachment_participant_id': data.get('attachment_participant_id'),
             'caller_id': user_id,
+            # The access check above refused anyone else's privileged change
+            'can_manage': True,
         }
 
         if 'folder_id' in data:
@@ -165,6 +169,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not result.get('success'):
             error = result.get('error', 'Failed to update conversation')
             return {"error": error}, 400
+
+        if privacy_snapshot is not None:
+            notify_team_access_change(
+                project_id, privacy_snapshot, made_public=not data['is_private'], initiator_id=user_id,
+            )
 
         return result.get('conversation'), 200
 
@@ -188,9 +197,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
             if not conversation:
                 return {'error': 'Conversation not found'}, 404
-            denied = check_conversation_access(
-                project_id, conversation, auth.current_user().get('id'), needs_privilege=True,
-            )
+            user_id = auth.current_user().get('id')
+            # Only the owner deletes; anyone else learns no more than the chat's existence
+            denied = check_conversation_access(project_id, conversation, user_id) \
+                or check_owner(conversation, user_id, project_id)
             if denied:
                 return denied
 

@@ -13,6 +13,8 @@ from .evaluation_usage import COST_RUNTIME, COST_UNPRICED
 USAGE_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens')
 # Written by the server only; client-supplied conversation meta never sets them
 SERVER_OWNED_META_KEYS = ('usage_totals', 'context_budget', 'context_analytics')
+# Written once, when the run starter creates the chat; an update never adds, changes or removes them (#7757)
+CREATE_ONLY_META_KEYS = ('single_participant',)
 PRICE_TTL_SECONDS = 600
 PRICE_RPC_TIMEOUT = 2
 _PRICE_UNIT_TOKENS = 1_000_000
@@ -190,11 +192,12 @@ def usage_count_key(response_meta: dict, delta: dict) -> str:
 
 
 def strip_server_owned_meta(incoming_meta: Optional[dict], stored_meta: Optional[dict]) -> Optional[dict]:
-    """Client-supplied meta with server-owned keys replaced by their stored values (dropped when unset)."""
+    """Client-supplied meta of an update with server-owned and create-only keys replaced by their stored values
+    (dropped when unset)."""
     if not isinstance(incoming_meta, dict):
         return incoming_meta
     stored_meta = stored_meta or {}
-    for key in SERVER_OWNED_META_KEYS:
+    for key in (*SERVER_OWNED_META_KEYS, *CREATE_ONLY_META_KEYS):
         incoming_meta.pop(key, None)
         if key in stored_meta:
             incoming_meta[key] = stored_meta[key]

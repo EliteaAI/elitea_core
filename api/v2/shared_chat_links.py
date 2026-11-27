@@ -11,6 +11,7 @@ from flask import request
 from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_access import EXTERNAL_SHARING_OFF, check_access_by_id, is_external_sharing_enabled
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -30,6 +31,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def post(self, project_id: int, conversation_id: int, **kwargs):
         user_id = auth.current_user().get("id")
+        # External links are for the owner or a manager (#7757)
+        denied = check_access_by_id(project_id, conversation_id, user_id, needs_privilege=True)
+        if denied:
+            return denied
+        # Links created before the switch was turned off keep working; only new ones are refused
+        if not is_external_sharing_enabled():
+            return EXTERNAL_SHARING_OFF
         try:
             from ...models.pd.shared_chat_link import SharedLinkCreate
             payload = SharedLinkCreate.model_validate(request.json or {})
@@ -45,6 +53,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             scope=payload.scope,
             message_group_ids=payload.message_group_ids,
             created_by=user_id,
+            can_manage=True,
         )
         if result is None:
             return {"error": "Conversation not found or access denied"}, 404
@@ -66,11 +75,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, project_id: int, conversation_id: int, **kwargs):
         user_id = auth.current_user().get("id")
+        denied = check_access_by_id(project_id, conversation_id, user_id)
+        if denied:
+            return denied
         rpc = rpc_tools.RpcMixin().rpc
         result = rpc.timeout(5).chat_list_share_tokens(
             project_id=project_id,
             conversation_id=conversation_id,
             user_id=user_id,
+            can_manage=check_access_by_id(project_id, conversation_id, user_id, needs_privilege=True) is None,
         )
         return result, 200
 

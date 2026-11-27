@@ -92,6 +92,26 @@ def _execution_type_condition(execution_type: str):
     )
 
 
+def _visible_conversation_ids(session, user_id: int, is_admin: bool):
+    """Public chats and those the caller is in; a project admin also sees everyone's runs (#6927), but not other
+    people's private chats (#7757)."""
+    own = session.query(Participant.id).filter(
+        Participant.entity_name == ParticipantTypes.user.value,
+        Participant.entity_meta['id'].astext.cast(Integer) == user_id,
+    ).subquery()
+    visible = [Conversation.is_private == False, Participant.id.in_(own)]  # noqa: E712
+    if is_admin:
+        people = session.query(Participant.id).filter(
+            Participant.entity_name == ParticipantTypes.user.value,
+        ).subquery()
+        visible.append(and_(Conversation.meta.has_key('single_participant'), Participant.id.in_(people)))
+    return session.query(Conversation.id).distinct().join(
+        ParticipantMapping, Conversation.id == ParticipantMapping.conversation_id,
+    ).join(
+        Participant, Participant.id == ParticipantMapping.participant_id,
+    ).filter(or_(*visible)).subquery()
+
+
 def _schedule_runs(session, conversations) -> dict[int, dict]:
     """The run record of each run row, keyed by conversation id (CR-22, US-38 D6).
 
@@ -309,9 +329,12 @@ class RPC:
         folder_id: int = None,
         update_folder: bool = False,
         caller_id: int = None,
+        can_manage: bool = False,
     ) -> dict:
         """
         Update conversation fields.
+
+        can_manage: the caller already passed the API's check for the owner or a manager (#7757).
 
         Returns dict with success status and updated conversation.
         """
@@ -339,7 +362,7 @@ class RPC:
                         return {'success': False, 'error': 'Public conversation cannot exist in public project'}
 
                     if is_private and not conversation.is_private:
-                        if caller_id is None or conversation.author_id != caller_id:
+                        if caller_id is None or (conversation.author_id != caller_id and not can_manage):
                             return {'success': False, 'error': 'Only the conversation creator can restrict access'}
 
                     conversation.is_private = is_private
@@ -566,28 +589,7 @@ class RPC:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
             sorting = desc if sort_order == 'desc' else asc
 
-            participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
-            if not is_admin:
-                participant_subquery_filters.append(
-                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
-                )
-
-            participant_subquery = session.query(Participant.id).filter(
-                *participant_subquery_filters
-            ).subquery()
-
-            distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
-                ParticipantMapping,
-                Conversation.id == ParticipantMapping.conversation_id
-            ).join(
-                Participant,
-                Participant.id == ParticipantMapping.participant_id
-            ).filter(
-                or_(
-                    Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery)
-                )
-            ).subquery()
+            distinct_conversation_subquery = _visible_conversation_ids(session, user_id, is_admin)
 
             base_query = session.query(Conversation).where(
                 Conversation.id.in_(distinct_conversation_subquery)
@@ -786,30 +788,13 @@ class RPC:
         """The filter options of one agent's or pipeline's Run History (AC-9, AC-47a).
 
         The conversations are limited by the same visibility as the run list: public conversations, and those
-        where the caller is a user participant (any user, for an admin). So a filter never names a run the caller
+        where the caller is a user participant (and everyone's runs, for an admin). So a filter never names a run the caller
         cannot list.
         """
         # Late import: the facets read depends on the schedule run tables only
         from ..utils.run_facets import run_facets
         with db.get_session(project_id) as session:
-            participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
-            if not is_admin:
-                participant_subquery_filters.append(
-                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
-                )
-            participant_subquery = session.query(Participant.id).filter(
-                *participant_subquery_filters
-            ).subquery()
-            visible = session.query(Conversation.id).distinct().join(
-                ParticipantMapping, Conversation.id == ParticipantMapping.conversation_id,
-            ).join(
-                Participant, Participant.id == ParticipantMapping.participant_id,
-            ).filter(
-                or_(
-                    Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery),
-                )
-            ).subquery()
+            visible = _visible_conversation_ids(session, user_id, is_admin)
             visible_ids = select(visible.c.id)
             return run_facets(session, entity_id, visible_ids)
 

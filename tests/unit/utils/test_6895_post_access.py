@@ -2,8 +2,8 @@
 
 Before the fix, sending a message to any conversation UUID silently made the sender a
 participant, so a non-member could join a private chat and then read it. Rules under test:
-- participant / author / project admin: may send
-- anyone else on a private conversation: rejected as 'not found', no admin lookup for members
+- participant / author: may send
+- anyone else on a private conversation: rejected as 'not found', a project Admin too (#7757)
 - public conversations keep auto-join on first message
 - support project is exempt
 """
@@ -15,7 +15,7 @@ import pytest
 
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[3] / 'utils' / 'conversation_access.py'
-FUNCS = ('decide_access', 'check_post_access', 'find_user_participant_id', '_admin_checker', '_is_support_project')
+FUNCS = ('check_post_access', 'find_user_participant_id', '_is_support_project')
 
 
 @pytest.fixture
@@ -27,20 +27,17 @@ def access():
         or (isinstance(node, ast.Assign) and node.targets[0].id.isupper())
     ]
     calls = []
-    admin = {'value': False}
 
-    def admin_check(project_id, user_id):
-        calls.append((project_id, user_id))
-        return admin['value']
+    def support_config():
+        calls.append('support')
+        return {'project_id': 99}
 
-    rpc = types.SimpleNamespace(timeout=lambda _t: types.SimpleNamespace(admin_check_user_is_admin=admin_check))
     namespace = {
-        'rpc_tools': types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=rpc)),
-        'get_support_config': lambda: {'project_id': 99},
+        'get_support_config': support_config,
         'ParticipantTypes': types.SimpleNamespace(user=types.SimpleNamespace(value='user')),
     }
     exec(compile(ast.Module(body=keep, type_ignores=[]), '<conversation_access>', 'exec'), namespace)
-    return types.SimpleNamespace(check=namespace['check_post_access'], admin=admin, calls=calls, ns=namespace)
+    return types.SimpleNamespace(check=namespace['check_post_access'], calls=calls, ns=namespace)
 
 
 def member(user_id, pid=10, name='user'):
@@ -63,10 +60,10 @@ def test_outsider_on_private_conversation_is_rejected_as_not_found(access):
     assert denied[0] == {'error': 'Conversation not found'}
 
 
-def test_project_admin_may_send_to_private_conversation(access):
-    access.admin['value'] = True
-    assert access.check(5, conv(members=[member(1)]), 2) is None
-    assert access.calls == [(5, 2)]
+def test_outsider_lookup_is_only_the_support_check(access):
+    # No role lookup: a project Admin who was not invited is an outsider too (#7757)
+    access.check(5, conv(members=[member(1)]), 2)
+    assert access.calls == ['support']
 
 
 def test_author_who_is_not_a_participant_may_send(access):
@@ -81,7 +78,6 @@ def test_public_conversation_keeps_auto_join(access):
 
 def test_support_project_is_exempt(access):
     assert access.check(99, conv(), 2) is None
-    assert access.calls == []
 
 
 def test_missing_conversation_is_not_found(access):

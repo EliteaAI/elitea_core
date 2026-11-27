@@ -194,6 +194,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except SkillParticipantError as e:
             return {'error': str(e)}, 400
 
+        # A new chat may be shared with members of its project only (#7757)
+        from ...utils.conversation_access import (  # pylint: disable=C0415
+            check_run_people, outside_project_error, users_outside_project,
+        )
+        denied = check_run_people(parsed.meta, parsed.participants, user_id)
+        if denied:
+            return denied
+        outsiders = users_outside_project(project_id, parsed.participants, user_id)
+        if outsiders:
+            return outside_project_error(outsiders)
+
         with db.get_session(project_id) as session:
             try:
                 new_conversation, context_strategy = create_conversation(session, project_id, user_id, parsed)
@@ -208,6 +219,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 session, new_conversation.id, project_id, user_id
             )
             serialized = serialize(conversation)
+            # A chat opened to the whole team at once gives every member access (#7757)
+            if not parsed.is_private:
+                from ...utils.chat_access_notifications import (  # pylint: disable=C0415
+                    notify_team_access_change, snapshot_conversation,
+                )
+                notify_team_access_change(
+                    project_id, snapshot_conversation(new_conversation), made_public=True, initiator_id=user_id,
+                )
             # Ensure context_strategy is included in response (may have been set by RPC after session cache)
             if context_strategy and 'meta' in serialized:
                 serialized['meta']['context_strategy'] = context_strategy
