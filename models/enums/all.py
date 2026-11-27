@@ -49,6 +49,7 @@ class NotificationEventTypes(StrEnum):
     prompt_moderation_reject = 'prompt_moderation_reject'
     chat_user_added = 'chat_user_added'
     chat_user_mentioned = 'chat_user_mentioned'
+    chat_user_removed = 'chat_user_removed'
     private_project_created = 'private_project_created'
     index_data_changed = 'index_data_changed'
     agent_unpublished = 'agent_unpublished'

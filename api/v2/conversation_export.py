@@ -76,11 +76,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).filter(Conversation.id == conversation_id).first()
             if conversation is None:
                 return NOT_FOUND
-            # Whoever can open the chat can export it: public chats are open to the whole project (#7165)
-            if conversation.is_private:
-                denied = check_conversation_access(project_id, conversation, current_user['id'])
-                if denied:
-                    return denied
+            # The summary only counts what the reader already sees; exporting is for the owner or a manager (#7757)
+            denied = check_conversation_access(
+                project_id, conversation, current_user['id'], needs_privilege=not summary_only,
+            )
+            if denied:
+                return denied
             conversation_dict, participants, groups = load_conversation_export_data(
                 session, project_id, conversation
             )

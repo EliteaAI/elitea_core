@@ -1352,6 +1352,14 @@
       "section": "voice_features",
       "default": false
     },
+    "chat_sharing_external_enabled": {
+      "type": "boolean",
+      "title": "Enable External Chat Sharing",
+      "description": "When disabled, the Externally tab of Share Chat is hidden and new external links cannot be created, in team and private projects. Links created before keep working; sharing with the team stays available.",
+      "path": "extra_ui_config.chat_sharing.external_enabled",
+      "section": "chat_sharing",
+      "default": true
+    },
     "chat_mentions_slash_trigger": {
       "type": "string",
       "title": "Toolkit/Tool Trigger",

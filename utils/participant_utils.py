@@ -264,33 +264,12 @@ def notify_user_added_to_conversation(
         conversation: Conversation,
         initiator_id: Optional[int] = None
 ):
-    event_manager = rpc_tools.EventManagerMixin().event_manager
-    user_id = participant_model.entity_meta['id']
-    if user_id == initiator_id:
+    # In a chat open to the whole project this person had access already: nothing changed for them (#7757)
+    if not conversation.is_private:
         return
-
-    initiator_name = None
-    try:
-        initiator_name = auth.get_user(user_id=initiator_id)['name']
-    except Exception as ex:
-        log.warning(ex)
-
-    event_manager.fire_event(
-        'notifications_stream', {
-            'project_id': project_id,
-            'user_id': user_id,
-            'meta': {
-                "conversation_id": conversation.id,
-                "conversation_name": conversation.name,
-                "initiator_name": initiator_name,
-                "message": (
-                    f"{initiator_name} added you to [{conversation.name}]()"
-                    if initiator_name
-                    else f"You were added to [{conversation.name}]()"
-                ),
-            },
-            'event_type': NotificationEventTypes.chat_user_added.value
-        }
+    from .chat_access_notifications import notify_chat_access  # pylint: disable=C0415
+    notify_chat_access(
+        project_id, conversation, [participant_model.entity_meta['id']], added=True, initiator_id=initiator_id,
     )
 
 

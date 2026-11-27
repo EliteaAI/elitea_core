@@ -19,7 +19,7 @@ TRACE_APIS = {
     'chat_get_trace_step': PLUGIN_ROOT / 'api' / 'v2' / 'message_trace.py',
 }
 FUNCS = ('decide_access', 'check_conversation_access', 'check_read_access', 'find_user_participant_id',
-         '_admin_checker', '_is_support_project')
+         '_manage_checker', '_is_support_project', '_admin_checker', 'is_run_conversation')
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def access():
         if (isinstance(node, ast.FunctionDef) and node.name in FUNCS)
         or (isinstance(node, ast.Assign) and node.targets[0].id.isupper())
     ]
-    state = {'admin': False, 'support_project': 99}
+    state = {'support_project': 99, 'admin': False}
     rpc = types.SimpleNamespace(timeout=lambda _t: types.SimpleNamespace(
         admin_check_user_is_admin=lambda project_id, user_id: state['admin']))
     namespace = {
@@ -42,9 +42,9 @@ def access():
     return types.SimpleNamespace(check=namespace['check_read_access'], state=state, ns=namespace)
 
 
-def conv(author_id=1, private=True, member_ids=()):
+def conv(author_id=1, private=True, member_ids=(), meta=None):
     members = [types.SimpleNamespace(id=i, entity_name='user', entity_meta={'id': m}) for i, m in enumerate(member_ids)]
-    return types.SimpleNamespace(author_id=author_id, is_private=private, participants=members)
+    return types.SimpleNamespace(author_id=author_id, is_private=private, participants=members, meta=meta or {})
 
 
 def test_missing_conversation_is_not_found(access):
@@ -64,9 +64,18 @@ def test_outsider_cannot_read_private_traces(access):
     assert access.check(5, conv(member_ids=[3]), 2) == access.ns['NOT_FOUND']
 
 
-def test_admin_can_read_private_traces(access):
+def test_project_role_alone_does_not_open_private_chat_traces(access):
+    # #7757: a project Admin who was not invited is an outsider
     access.state['admin'] = True
-    assert access.check(5, conv(member_ids=[3]), 2) is None
+    assert access.check(5, conv(member_ids=[3]), 2) == access.ns['NOT_FOUND']
+
+
+def test_project_admin_reads_traces_of_someone_elses_run(access):
+    # Run history (#6927): a run is not a chat, its traces stay open to project admins
+    run = conv(member_ids=[3], meta={'single_participant': {'id': 7}})
+    assert access.check(5, run, 2) == access.ns['NOT_FOUND']
+    access.state['admin'] = True
+    assert access.check(5, run, 2) is None
 
 
 def test_support_project_can_read_private_traces(access):

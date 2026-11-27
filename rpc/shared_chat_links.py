@@ -199,6 +199,7 @@ class RPC:
         password: str = None,
         scope: str = 'all',
         message_group_ids: list = None,
+        can_manage: bool = False,
     ) -> dict | None:
         try:
             expiry_enum = ShareLinkExpiry(expiry)
@@ -218,8 +219,8 @@ class RPC:
             conv = session.get(Conversation, conversation_id)
             if conv is None:
                 return None
-            # Only the conversation author may create share tokens.
-            if conv.author_id != created_by:
+            # The author, or a manager the API has already checked (#7757)
+            if conv.author_id != created_by and not can_manage:
                 log.warning(
                     "create_share_token: user %s not owner of conversation %s",
                     created_by, conversation_id,

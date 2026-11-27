@@ -4,8 +4,8 @@ Before the fix, chat_enter_room joined any conversation in the project by sequen
 so a Viewer could enumerate ids and receive another user's private live stream. Rules:
 - public conversation: anyone in the project may join, no lookups at all
 - private: author / participant may join without any RPC
-- private non-member: only project admin (one RPC) or support project; RPC failure denies
-- the decision reuses decide_access, so it cannot drift from the REST rules
+- private non-member: only the support project; a project Admin is an outsider (#7757),
+  except on a run (single_participant), whose history project admins read (#6927)
 - the participant lookup only runs for private conversations the user does not own
 """
 import ast
@@ -17,8 +17,8 @@ import pytest
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[3] / 'utils' / 'conversation_access.py'
 FUNCS = (
-    'can_join_room', 'room_access_facts', 'decide_access', 'find_user_participant_id',
-    '_admin_checker', '_is_support_project',
+    'can_join_room', 'room_access_facts', 'find_user_participant_id', '_is_support_project',
+    '_admin_checker', 'is_run_conversation',
 )
 
 
@@ -32,13 +32,17 @@ def access():
     ]
     calls = []
     lookups = []
-    state = {'admin': False, 'raise': False, 'support': 99, 'participant': False}
+    state = {'support': 99, 'participant': False, 'admin': False, 'raise': False}
 
     def admin_check(project_id, user_id):
-        calls.append((project_id, user_id))
+        calls.append('admin')
         if state['raise']:
             raise TimeoutError('rpc timeout')
         return state['admin']
+
+    def support_config():
+        calls.append('support')
+        return {'project_id': state['support']}
 
     def is_conversation_participant(session, conversation_id, user_id):
         lookups.append((conversation_id, user_id))
@@ -47,7 +51,7 @@ def access():
     rpc = types.SimpleNamespace(timeout=lambda _t: types.SimpleNamespace(admin_check_user_is_admin=admin_check))
     namespace = {
         'rpc_tools': types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=rpc)),
-        'get_support_config': lambda: {'project_id': state['support']},
+        'get_support_config': support_config,
         'ParticipantTypes': types.SimpleNamespace(user=types.SimpleNamespace(value='user')),
         'log': types.SimpleNamespace(warning=lambda *a, **k: None),
         'is_conversation_participant': is_conversation_participant,
@@ -59,8 +63,8 @@ def access():
     )
 
 
-def facts(private=True, author=False, participant=False):
-    return {'is_private': private, 'is_author': author, 'is_participant': participant}
+def facts(private=True, author=False, participant=False, run=False):
+    return {'is_private': private, 'is_author': author, 'is_participant': participant, 'is_run': run}
 
 
 def test_public_conversation_is_joinable_without_lookup(access):
@@ -75,25 +79,29 @@ def test_author_and_participant_join_private_without_lookup(access):
 
 
 def test_outsider_is_denied_private_room(access):
-    # The original repro: a Viewer enumerating conversation ids
+    # The original repro: a Viewer enumerating conversation ids; a project Admin fares no better (#7757)
     assert access.join(5, 2, **facts()) is False
-    assert access.calls == [(5, 2)]
+    assert access.calls == ['support']
 
 
-def test_project_admin_may_join_private_room(access):
-    access.state['admin'] = True
-    assert access.join(5, 2, **facts()) is True
-
-
-def test_support_project_is_exempt_after_the_admin_check_denies(access):
+def test_support_project_is_exempt(access):
     # Same ordering as check_conversation_access: support is only consulted about to deny
     assert access.join(99, 2, **facts()) is True
-    assert access.calls == [(99, 2)]
 
 
-def test_admin_rpc_failure_fails_closed(access):
-    access.state['raise'] = True
+def test_project_admin_joins_a_run_room_but_not_a_chat_room(access):
+    access.state['admin'] = True
+    assert access.join(5, 2, **facts(run=True)) is True
     assert access.join(5, 2, **facts()) is False
+
+
+def test_admin_rpc_failure_on_a_run_fails_closed(access):
+    access.state['raise'] = True
+    assert access.join(5, 2, **facts(run=True)) is False
+
+
+def test_run_flag_comes_from_single_participant(access):
+    assert access.facts(None, 7, False, 1, 2, meta={'single_participant': {'id': 3}}) == facts(private=False, run=True)
 
 
 def test_public_conversation_skips_participant_lookup(access):

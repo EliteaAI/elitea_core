@@ -12,7 +12,7 @@ from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.conversation_access import check_conversation_access, adds_other_users, check_owner
+from ...utils.conversation_access import check_conversation_access, outside_project_error, users_outside_project
 from ...utils.sio_utils import SioEvents
 
 from pylon.core.tools import log
@@ -83,11 +83,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {'error': f'No such conversation with id {conversation_id}'}, 400
 
             current_user_id = auth.current_user().get("id")
-            denied = check_conversation_access(project_id, conversation, current_user_id)
-            if not denied and adds_other_users(participants, current_user_id):
-                denied = check_owner(conversation, current_user_id)
+            # Adding people, agents or tools changes the chat for everyone: the owner or a manager (#7757)
+            denied = check_conversation_access(project_id, conversation, current_user_id, needs_privilege=True)
             if denied:
                 return denied
+            # A chat is shared within its project only
+            outsiders = users_outside_project(project_id, participants, current_user_id)
+            if outsiders:
+                return outside_project_error(outsiders)
 
             try:
                 validate_skill_participants(participants, project_id)

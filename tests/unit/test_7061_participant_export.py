@@ -1,7 +1,7 @@
-"""Conversation export is participant-level (#7061), public chats are open to the project (#7165).
+"""Conversation export (#7061, #7165, #7723, #7757).
 
-Every current participant may export (JSON, ZIP, size summary); outsiders are still denied
-like on other participant-level endpoints.
+The size summary is open to everyone who can open the chat (the Share window reads it). The
+export itself (JSON, ZIP) is for the owner or a manager; an invited Viewer is refused (#7723).
 
     python tests/run_tests.py unit/test_7061_participant_export.py -v
 """
@@ -38,35 +38,36 @@ def access():
     return types.SimpleNamespace(**namespace)
 
 
-def test_export_checks_access_once():
-    # JSON, ZIP and ?summary=true share this single check
-    assert len(_access_calls()) == 1
-
-
-def test_export_does_not_require_owner_privilege():
+def test_export_checks_access_once_for_every_chat():
+    # JSON, ZIP and ?summary=true share this single check; public chats are not skipped any more
     call, = _access_calls()
-    privileged = [kw for kw in call.keywords if kw.arg == 'needs_privilege']
-    assert not privileged or ast.literal_eval(privileged[0].value) is False
+    guards = [
+        node for node in ast.walk(ast.parse(EXPORT_API.read_text()))
+        if isinstance(node, ast.If) and node.lineno < call.lineno <= node.end_lineno
+    ]
+    assert not guards
+
+
+def test_export_needs_privilege_unless_it_is_the_summary():
+    call, = _access_calls()
+    privileged, = [kw for kw in call.keywords if kw.arg == 'needs_privilege']
+    assert ast.unparse(privileged.value) == 'not summary_only'
 
 
 @pytest.mark.parametrize('private', [True, False])
-def test_participant_can_export(access, private):
+def test_manager_can_export(access, private):
+    assert access.decide_access(private, False, True, lambda: True, True) is None
+
+
+@pytest.mark.parametrize('private', [True, False])
+def test_invited_viewer_cannot_export(access, private):
+    assert access.decide_access(private, False, True, lambda: False, True) == access.NOT_MANAGER
+
+
+@pytest.mark.parametrize('private', [True, False])
+def test_anyone_with_access_reads_the_summary(access, private):
     assert access.decide_access(private, False, True, lambda: False, False) is None
 
 
 def test_outsider_on_private_conversation_sees_not_found(access):
-    assert access.decide_access(True, False, False, lambda: False, False) == access.NOT_FOUND
-
-
-def test_outsider_on_public_conversation_is_forbidden(access):
-    assert access.decide_access(False, False, False, lambda: False, False) == access.NOT_PARTICIPANT
-
-
-def test_public_conversation_export_skips_participant_check():
-    # #7165: anyone who can open a chat can export it, and public chats open for the whole project
-    call, = _access_calls()
-    guard, = [
-        node for node in ast.walk(ast.parse(EXPORT_API.read_text()))
-        if isinstance(node, ast.If) and node.lineno < call.lineno <= node.end_lineno
-    ]
-    assert ast.unparse(guard.test) == 'conversation.is_private'
+    assert access.decide_access(True, False, False, lambda: True, True) == access.NOT_FOUND

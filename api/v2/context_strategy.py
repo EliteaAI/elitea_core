@@ -12,6 +12,7 @@ from ...utils.context_analytics import (
 )
 from ...utils.context_window import LEGACY_TRIGGER_KEY, MANUAL_TOKENS_KEYS, manual_change_denied, normalize_mode
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_access import check_access_by_id
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -38,6 +39,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 validated = ContextStrategyUpdate.model_validate(data)
             except ValidationError as e:
                 return {"error": e.errors(include_context=False, include_url=False)}, 400
+
+            # The context settings apply to everyone in the chat: the owner or a manager (#7757)
+            denied = check_access_by_id(
+                project_id, conversation_id, auth.current_user().get('id'), needs_privilege=True,
+            )
+            if denied:
+                return denied
 
             meta = get_conversation_meta(project_id, conversation_id, missing=False)
             if meta is False:

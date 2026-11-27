@@ -16,6 +16,7 @@ from ...utils.participant_utils import make_query_filter_for_entity, invalid_llm
 from ...utils.sio_utils import get_chat_room
 from ...utils.skill_participant_utils import SkillParticipantError, pinned_skill_version_id
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_access import check_access_by_id
 from ...utils.sio_utils import SioEvents
 from ...utils.utils import get_public_project_id
 
@@ -30,6 +31,10 @@ INVALID_REASONING_MODEL_LLM_SETTINGS_ERROR = (
 class PromptLibAPI(api_tools.APIModeHandler):
     def _put(self, project_id: int, conversation_id: int, participant_id: int, **kwargs):
         """Update entity_settings for a participant in a conversation."""
+        # Using the chat's participants is open to everyone with access to the chat (#7757)
+        denied = check_access_by_id(project_id, conversation_id, auth.current_user().get('id'))
+        if denied:
+            return denied
         with db.get_session(project_id) as session:
             data = dict(request.json)
 

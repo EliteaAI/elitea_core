@@ -309,9 +309,12 @@ class RPC:
         folder_id: int = None,
         update_folder: bool = False,
         caller_id: int = None,
+        can_manage: bool = False,
     ) -> dict:
         """
         Update conversation fields.
+
+        can_manage: the caller already passed the API's check for the owner or a manager (#7757).
 
         Returns dict with success status and updated conversation.
         """
@@ -339,7 +342,7 @@ class RPC:
                         return {'success': False, 'error': 'Public conversation cannot exist in public project'}
 
                     if is_private and not conversation.is_private:
-                        if caller_id is None or conversation.author_id != caller_id:
+                        if caller_id is None or (conversation.author_id != caller_id and not can_manage):
                             return {'success': False, 'error': 'Only the conversation creator can restrict access'}
 
                     conversation.is_private = is_private

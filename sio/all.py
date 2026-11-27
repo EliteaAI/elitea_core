@@ -104,7 +104,9 @@ class SIO:
             return
         with db.get_session(parsed.project_id) as session:
             conv_id = parsed.conversation_id
-            columns = (Conversation.id, Conversation.uuid, Conversation.is_private, Conversation.author_id)
+            columns = (
+                Conversation.id, Conversation.uuid, Conversation.is_private, Conversation.author_id, Conversation.meta,
+            )
             if isinstance(conv_id, int):
                 conversation = session.query(*columns).filter(Conversation.id == conv_id).first()
             else:
@@ -113,7 +115,8 @@ class SIO:
                 return
             conversation_uuid = conversation.uuid
             facts = room_access_facts(
-                session, conversation.id, conversation.is_private, conversation.author_id, user_id
+                session, conversation.id, conversation.is_private, conversation.author_id, user_id,
+                meta=conversation.meta,
             )
         # Denial stays silent, same as an unknown conversation, so private chats don't leak existence
         if not can_join_room(parsed.project_id, user_id, **facts):

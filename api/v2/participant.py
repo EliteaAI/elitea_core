@@ -3,10 +3,11 @@ from tools import api_tools, auth, db, config as c, serialize, register_openapi
 from ...models.conversation import Conversation
 from ...models.participants import Participant
 from ...models.pd.participant import ParticipantDetails
+from ...utils.chat_access_notifications import notify_chat_access, removed_user_id, snapshot_conversation
 from ...utils.participant_utils import delete_participant_from_conversation
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.conversation_access import (
-    check_conversation_access, find_user_participant_id, removes_other_user, check_owner,
+    check_conversation_access, find_user_participant_id, is_owner_participant, OWNER_NOT_REMOVABLE,
 )
 
 
@@ -71,16 +72,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
             conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
             if not conversation:
                 return {'error': 'Conversation not found'}, 404
-            # Leaving a conversation yourself is allowed; removing others is author/admin only
+            # Leaving a conversation yourself is allowed; removing others needs the owner or a manager (#7757)
             is_self = find_user_participant_id(conversation.participants, user_id) == participant_id
             denied = check_conversation_access(
                 project_id, conversation, user_id, needs_privilege=not is_self,
             )
-            if not denied and removes_other_user(conversation, participant_id, user_id):
-                denied = check_owner(conversation, user_id)
             if denied:
                 return denied
+            if is_owner_participant(conversation, participant_id):
+                return OWNER_NOT_REMOVABLE
+            snapshot = snapshot_conversation(conversation)
         ret, code = delete_participant_from_conversation(project_id, conversation_id, participant_id)
+        # Only a private chat is closed to someone taken off it; leaving yourself is no news (#7757)
+        if code < 300 and snapshot.is_private and not is_self:
+            removed = removed_user_id(snapshot, participant_id)
+            if removed is not None:
+                notify_chat_access(project_id, snapshot, [removed], added=False, initiator_id=user_id)
         return ret, code
 
 
