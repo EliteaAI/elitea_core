@@ -5,6 +5,7 @@
 from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_access import managed_link_conversation
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -29,6 +30,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             project_id=project_id,
             token=token,
             user_id=user_id,
+            managed_conversation_id=managed_link_conversation(project_id, token, user_id),
         )
         if not ok:
             return {"error": "Token not found or access denied"}, 404

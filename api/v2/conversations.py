@@ -195,7 +195,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {'error': str(e)}, 400
 
         # A new chat may be shared with members of its project only (#7757)
-        from ...utils.conversation_access import outside_project_error, users_outside_project  # pylint: disable=C0415
+        from ...utils.conversation_access import (  # pylint: disable=C0415
+            check_run_people, outside_project_error, users_outside_project,
+        )
+        denied = check_run_people(parsed.meta, parsed.participants, user_id)
+        if denied:
+            return denied
         outsiders = users_outside_project(project_id, parsed.participants, user_id)
         if outsiders:
             return outside_project_error(outsiders)

@@ -125,7 +125,8 @@ def test_delete_and_folder_moves_are_owner_only():
     ('shared_chat_links.py', 'get', None),
 ])
 def test_endpoint_checks_access_before_acting(module, method, privileged):
-    call, = _calls(_function(API / module, method), 'check_access_by_id')
+    # The first check guards the endpoint; the link list then asks whether the caller manages the chat
+    call = _calls(_function(API / module, method), 'check_access_by_id')[0]
     assert _keyword(call, 'needs_privilege') == privileged
 
 

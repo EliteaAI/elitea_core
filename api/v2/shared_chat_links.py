@@ -83,6 +83,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             project_id=project_id,
             conversation_id=conversation_id,
             user_id=user_id,
+            can_manage=check_access_by_id(project_id, conversation_id, user_id, needs_privilege=True) is None,
         )
         return result, 200
 

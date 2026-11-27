@@ -14,6 +14,7 @@ NOT_MANAGER = ({'error': 'Only the chat owner or an editor with access can do th
 NOT_OWNER = ({'error': 'Only the chat owner can do this'}, 403)
 EXTERNAL_SHARING_OFF = ({'error': 'External chat sharing is turned off'}, 403)
 OWNER_NOT_REMOVABLE = ({'error': 'The chat owner cannot be removed'}, 400)
+PEOPLE_IN_RUN = ({'error': 'A run cannot be shared with other people'}, 400)
 MENTION_REFUSED = "{names} can't be mentioned: they don't have access to this chat."
 
 # Lets someone the owner shared the chat with manage it as well (#7757)
@@ -94,6 +95,18 @@ def check_access_by_id(project_id: int, conversation_id: int, user_id: int, need
         if conversation is None:
             return NOT_FOUND
         return check_conversation_access(project_id, conversation, user_id, needs_privilege=needs_privilege)
+
+
+def managed_link_conversation(project_id: int, token: str, user_id: int) -> int | None:
+    """The chat of a share link, when the caller is its owner or a manager; else None (#7757)."""
+    from ..models.all import ConversationShareToken  # pylint: disable=C0415
+    with db.get_session(project_id) as session:
+        share = session.query(ConversationShareToken.conversation_id).filter_by(token=token, is_revoked=False).first()
+    if share is None:
+        return None
+    if check_access_by_id(project_id, share.conversation_id, user_id, needs_privilege=True):
+        return None
+    return share.conversation_id
 
 
 def check_read_access(project_id: int, conversation, user_id: int):
@@ -197,6 +210,21 @@ def users_outside_project(project_id: int, participants, caller_id: int) -> list
         str(uid) for uid in rpc_tools.RpcMixin().rpc.timeout(5).admin_get_users_ids_in_project(project_id=project_id) or []
     }
     return [uid for uid in user_ids if str(uid) not in members]
+
+
+def invites_people(participants, caller_id: int) -> bool:
+    return any(
+        getattr(p.entity_name, 'value', p.entity_name) == ParticipantTypes.user.value
+        and str(p.entity_meta.id) != str(caller_id)
+        for p in participants or []
+    )
+
+
+def check_run_people(meta, participants, caller_id: int):
+    # Project admins read every run (#6927), so a run holds no one else's messages
+    if is_run_conversation(meta) and invites_people(participants, caller_id):
+        return PEOPLE_IN_RUN
+    return None
 
 
 def outside_project_error(user_ids: list[int]):
