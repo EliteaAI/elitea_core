@@ -180,23 +180,102 @@ def test_the_list_route_passes_the_complexity_filter_on():
 def test_the_complexity_lookup_fails_closed_when_usage_is_unreachable():
     """A usage failure must not show every run as a match: the lookup returns None and the list says so."""
     source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
-    assert "if labelled is None:" in source
+    assert "if found is None:" in source
     assert "'complexity_unavailable': True" in source
 
 
 # --- the version and complexity filters match what the table shows (chats have no run record) ----------------------
 
+def _load_complexity_helper(log=None):
+    """`_complexity_conversation_ids` taken from the RPC source, so no plugin import is needed."""
+    import ast
+    import types
+    import uuid
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    function = next(n for n in ast.parse(source).body
+                    if isinstance(n, ast.FunctionDef) and n.name == '_complexity_conversation_ids')
+    namespace = {'uuid': uuid, 'log': log or types.SimpleNamespace(exception=lambda *a, **k: None),
+                 'RPC_TIMEOUT_SECONDS': 10, 'COMPLEXITY_FROM': 0, 'COMPLEXITY_TO': 1}
+    exec(compile(ast.Module([function], []), 'chat_conversation.py', 'exec'), namespace)  # pylint: disable=W0122
+    return namespace['_complexity_conversation_ids']
+
+
+def _rpc_manager(answer):
+    import types
+
+    def by_label(*_args):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    return types.SimpleNamespace(timeout=lambda _seconds: types.SimpleNamespace(
+        usage_complexity_conversations_by_label=by_label))
+
+
+UUID_A = '9414e9bc-f506-412a-8635-114ac69c1d7b'
+UUID_B = '0f1ad0b4-0000-4000-8000-000000000001'
+
+
+def test_the_complexity_ids_are_typed_uuids_and_truncated_is_reported():
+    import uuid
+    helper = _load_complexity_helper()
+    found = helper(_rpc_manager({'conversation_ids': [UUID_A, UUID_B], 'truncated': True}), ['L'], 26, 3)
+    assert found == ([uuid.UUID(UUID_A), uuid.UUID(UUID_B)], True)
+
+
+def test_an_id_that_is_not_a_uuid_is_dropped_not_matched():
+    helper = _load_complexity_helper()
+    found = helper(_rpc_manager({'conversation_ids': ['12', 'x', UUID_A], 'truncated': False}), ['L'], 26, 3)
+    assert [str(value) for value in found[0]] == [UUID_A] and found[1] is False
+
+
+@pytest.mark.parametrize('answer', [
+    {'conversation_ids': [], 'truncated': False, 'skipped': 'disabled'},  # the feature is off: not "no match"
+    {'something': 'else'},
+    None,
+    RuntimeError('usage is down'),
+])
+def test_complexity_that_cannot_be_read_is_unavailable_not_empty(answer):
+    helper = _load_complexity_helper()
+    assert helper(_rpc_manager(answer), ['L'], 26, 3) is None
+
+
+@pytest.mark.parametrize(('entity_id', 'entity_project_id'), [(None, 3), (26, None), (None, None)])
+def test_complexity_needs_the_entity(entity_id, entity_project_id):
+    helper = _load_complexity_helper()
+    assert helper(_rpc_manager({'conversation_ids': []}), ['L'], entity_id, entity_project_id) is None
+
+
+def test_the_list_matches_the_uuid_column_with_typed_values_and_no_cast():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "Conversation.uuid.in_(labelled) if labelled else false()" in source
+    assert "cast(Conversation.uuid, String)" not in source
+
+
+def test_a_truncated_answer_is_flagged_on_the_page_it_returns():
+    source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
+    assert "complexity_flags['complexity_truncated'] = True" in source
+    assert source.count("**complexity_flags") == 2  # the empty page and the full page
+
+
+# --- PR 770 review: the labels that cannot be read are an error, not an empty page ---------------------------------
+
+def test_the_api_answers_503_when_complexity_is_unavailable_and_400_without_an_entity():
+    source = (PLUGIN_ROOT / 'api' / 'v2' / 'conversations.py').read_text()
+    assert "result.get('complexity_unavailable')" in source and "}, 503" in source
+    assert "complexity needs entity_meta_id and entity_meta_project_id" in source
+
+
+# --- PR 770 review: the version filter reads the chat meta only inside one entity's history -------------------------
+
 def test_a_version_filter_also_matches_the_chats_own_meta_version():
     """A chat has no schedule run record; the table reads its version from the chat meta, so the filter does too."""
     source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
-    assert "Conversation.meta['single_participant']['entity_settings']['version_id'].astext.in_(" in source
+    assert "'version_id'].astext.in_(" in source
     # Only a version alone may match through the meta: any other run option still needs the run record
     assert "only_version = len(run_conditions) == 1 and version_in_meta is not None" in source
 
 
-def test_the_complexity_filter_matches_conversations_by_uuid():
-    """Usage names a run by the conversation uuid, so the ids are kept as strings and matched on the uuid column."""
+def test_the_meta_version_is_read_only_with_an_entity_filter():
     source = (PLUGIN_ROOT / 'rpc' / 'chat_conversation.py').read_text()
-    assert "return [str(value) for value in result['conversation_ids']]" in source
-    assert "cast(Conversation.uuid, String).in_(labelled)" in source
-    assert "str(value).isdigit()" not in source
+    guard = source.index("if participant_id is not None:\n                    version_in_meta")
+    assert guard < source.index("'version_id'].astext.in_(")
