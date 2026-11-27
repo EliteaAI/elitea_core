@@ -196,6 +196,10 @@ class ProjectAPI(api_tools.APIModeHandler):
                         config_title = oauth_config.get('elitea_title')
                         if config_title and not oauth_config.get('client_id'):
                             log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
+                            # The expansion overlays the shared credential on this dict, so a key it does not
+                            # hold would stay: an editor could plant the endpoint the secret is sent to
+                            oauth_config.pop('token_url', None)
+                            oauth_config.pop('token_endpoint', None)
                             try:
                                 # Get user_id from auth context for private configuration lookup
                                 user_id = auth.current_user().get('id') if oauth_config.get('private') else None

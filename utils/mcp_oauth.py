@@ -69,6 +69,7 @@ def is_microsoft_login_url(url: str | None) -> bool:
     """Whether ``url`` is an https address on the Microsoft login host, with no user info and port 443 at most.
 
     Only the host is pinned, so the tenant (a GUID or a domain name) and the path may be of any shape.
+    Copy of the host check of ``entra_obo._post``: the two must agree.
     """
     if not isinstance(url, str) or any(char.isspace() or char == '\\' or ord(char) < 32 for char in url):
         return False

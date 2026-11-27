@@ -2,8 +2,9 @@
 
 A credential (Dataverse, Teams, Outlook, SharePoint, MS Graph, OpenAPI) can be shared in a project, and the
 proxy loads its client secret from the toolkit row. A caller who can edit toolkits, an admin included, must
-not be able to point the proxy at another host and read the secret from the request it posts. The real proxy handler and token helpers run against a recorded token endpoint
-(the harness of the resource-indicator tests); only the toolkit row and the caller's rights are faked.
+not be able to point the proxy at another host and read the secret from the request it posts. The real
+proxy handler and token helpers run against a recorded token endpoint (the harness of the
+resource-indicator tests); only the toolkit row and the caller's rights are faked.
 """
 import contextlib
 import types
@@ -82,7 +83,7 @@ def test_a_dataverse_toolkit_refuses_any_other_endpoint_whatever_the_callers_rig
 
     body, status = _sign_in(toolkits, endpoint)
 
-    assert (status, body['error']) == (403, 'access_denied')
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
     assert toolkits.proxy.posted == []
 
 
@@ -158,7 +159,8 @@ def test_a_toolkit_editor_resolves_a_vault_reference_at_the_own_endpoint(toolkit
     assert form['client_secret'] == 'vault-secret'
 
 
-MS_GUID_ENDPOINT = 'https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/oauth2/v2.0/token'
+SOME_GUID = '11111111-2222-3333-4444-555555555555'
+MS_GUID_ENDPOINT = f'https://login.microsoftonline.com/{SOME_GUID}/oauth2/v2.0/token'
 MS_DOMAIN_ENDPOINT = 'https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0/oauth2/token'
 OPENAPI_TOKEN_URL = 'https://idp.example/oauth/token'
 REFUSED_TEXT = 'token_endpoint is not the sign-in address of this credential'
@@ -292,6 +294,60 @@ def test_the_teams_secret_goes_to_the_microsoft_host_and_never_to_a_foreign_one(
     assert [(url, form.get('client_secret')) for url, form in toolkits.proxy.posted] == [
         (MS_GUID_ENDPOINT, 'real-secret'),
     ]
+
+
+@pytest.fixture
+def shared_credential(toolkits, monkeypatch):
+    """Expanding a titled credential overlays the shared values on the inline dict, as the real one does."""
+    shared = {'client_id': 'cid', 'client_secret': 'real-secret', 'token_url': OPENAPI_TOKEN_URL}
+
+    def expand(payload, **_kwargs):
+        payload.update(shared)
+
+    monkeypatch.setattr(toolkits.proxy.handler, 'expand_configuration', expand)
+    return shared
+
+
+@ROLES
+@pytest.mark.parametrize('planted', ['token_url', 'token_endpoint'])
+@BOTH_GRANTS
+def test_an_endpoint_planted_in_the_inline_credential_is_not_the_saved_one(
+        toolkits, shared_credential, permissions, planted, grant):
+    shared_credential.pop('token_url')  # the shared credential saves no endpoint of its own
+    toolkits.settings = {'openapi_configuration': {'elitea_title': 'shared', planted: 'https://attacker.example/token'}}
+    toolkits.permissions = permissions
+
+    body, status = _sign_in(toolkits, 'https://attacker.example/token', grant=grant)
+
+    assert (status, body) == (403, {'error': 'access_denied', 'error_description': REFUSED_TEXT}), body
+    assert toolkits.proxy.posted == []
+
+
+def test_a_shared_credential_still_signs_in_at_its_own_saved_endpoint(toolkits, shared_credential):
+    toolkits.settings = {'openapi_configuration': {'elitea_title': 'shared', 'token_url': 'https://attacker.example/t'}}
+    toolkits.permissions = EDITOR_OR_ADMIN
+
+    _, status = _sign_in(toolkits, OPENAPI_TOKEN_URL)
+
+    assert status == 200
+    (url, form), = toolkits.proxy.posted
+    assert (url, form['client_secret']) == (OPENAPI_TOKEN_URL, 'real-secret')
+
+
+@ROLES
+def test_a_sharepoint_app_sign_in_replaces_a_foreign_endpoint_with_the_app_endpoint(
+        toolkits, monkeypatch, permissions):
+    app = ('app-cid', 'app-secret', MS_GUID_ENDPOINT, 'offline_access Sites.Read.All')
+    monkeypatch.setattr(toolkits.proxy.handler, '_resolve_oauth_app_client', lambda *_: app)
+    toolkits.settings = {'sharepoint_configuration': {'oauth_app_id': 'app-1'}}
+    toolkits.permissions = permissions
+
+    _, status = _sign_in(toolkits, 'https://attacker.example/token',
+                         grant={'oauth_app_id': 'app-1', 'credential_type': 'sharepoint'})
+
+    assert status == 200
+    (url, form), = toolkits.proxy.posted
+    assert (url, form['client_id'], form['client_secret']) == (MS_GUID_ENDPOINT, 'app-cid', 'app-secret')
 
 
 def test_a_toolkit_without_an_oauth_credential_keeps_the_edit_right_rule(toolkits):

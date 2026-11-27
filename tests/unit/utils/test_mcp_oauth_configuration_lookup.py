@@ -136,7 +136,8 @@ def test_an_endpoint_is_the_same_only_when_it_is_the_pinned_one(mcp_oauth, given
     assert mcp_oauth.is_same_endpoint('https://login.microsoftonline.com/t/oauth2/v2.0/token', given) is same
 
 
-MS_TOKEN = 'https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/oauth2/v2.0/token'
+SOME_GUID = '11111111-2222-3333-4444-555555555555'
+MS_TOKEN = f'https://login.microsoftonline.com/{SOME_GUID}/oauth2/v2.0/token'
 
 
 @pytest.mark.parametrize('url', [
