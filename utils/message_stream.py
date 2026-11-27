@@ -5,6 +5,7 @@ from tools import rpc_tools
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..models.message_group import ConversationMessageGroup
+from ..models.message_items.text import TextMessageItem
 
 from pylon.core.tools import log
 
@@ -26,6 +27,22 @@ def safe_decode_bytes_in_dict(obj):
         return obj.replace('\x00', '')
     else:
         return obj
+
+
+def persist_run_refusal(session, response_group, code: str, text: str, ref: str | None = None) -> None:
+    """Keep a refused run's card on its reply: after a reload the UI parses ``meta.error`` into the same card, and the
+    one text item stops the next send from clearing the empty closed reply (#7228 follow-up)."""
+    error = {'code': code, 'error': text, **({'ref': ref} if ref else {})}
+    response_group.meta = {**(response_group.meta or {}), 'is_error': True, 'error': json.dumps(error)}
+    flag_modified(response_group, 'meta')
+    session.add(TextMessageItem(
+        message_group=response_group,
+        item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+        content=text,
+        order_index=0,
+    ))
+    response_group.is_streaming = False
+    session.commit()
 
 
 def update_message_group_meta(

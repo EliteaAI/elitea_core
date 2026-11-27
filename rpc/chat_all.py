@@ -36,6 +36,8 @@ from ..utils.chat_history import (
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..utils.admission import storable_refusal
+from ..utils.message_stream import persist_run_refusal
 from ..utils.run_status import RunStatus, build_notice, send_notice
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
@@ -1873,10 +1875,17 @@ class RPC:
                             **_chat_trigger_kwargs(rpc_func),
 
                         )
-                    except (PoolSaturationError, SioValidationError):
+                    except (PoolSaturationError, SioValidationError) as refused:
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
                         response_msg.is_streaming = False
                         session.commit()
+                        # an admission refusal also stays on the reply, so a reload shows its card (#7228 follow-up)
+                        if isinstance(refused, SioValidationError) and (kept := storable_refusal(refused.error)):
+                            try:
+                                persist_run_refusal(session, response_msg, *kept)
+                            except Exception:  # pylint: disable=W0703
+                                log.exception('Failed to keep the refusal on the reply')
+                                session.rollback()
                         raise
 
                     self.finalize_timed_out_response(
