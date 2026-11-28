@@ -23,6 +23,8 @@ from typing import Optional
 import requests
 from urllib.parse import parse_qs
 
+from .entra_host import is_entra_authority_url
+
 
 # Toolkit settings keys that reference a credential carrying the OAuth client
 # (client_id / client_secret / scopes) for the delegated flow. Order is lookup priority.
@@ -32,11 +34,13 @@ OAUTH_CONFIGURATION_KEYS = (
     'teams_configuration',
     'outlook_configuration',
     'ms_graph_configuration',
-    'dataverse_configuration',  # its token endpoint is pinned: see dataverse_token_endpoint
+    'dataverse_configuration',  # its token endpoint is pinned: see token_endpoint_allowed
 )
 
 
 DATAVERSE_CONFIGURATION_KEY = 'dataverse_configuration'
+# Credentials whose sign-in always runs at the Microsoft login host
+_MICROSOFT_LOGIN_KEYS = ('teams_configuration', 'outlook_configuration', 'ms_graph_configuration')
 # Same shape the SDK accepts for a tenant: a GUID or a domain name, never a path or a host
 _TENANT_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]{0,99}')
 
@@ -59,6 +63,50 @@ def dataverse_token_endpoint(settings: dict) -> Optional[str]:
 def is_same_endpoint(expected: str, given: Optional[str]) -> bool:
     """Whether ``given`` is ``expected``, ignoring a trailing slash; an empty ``expected`` matches nothing."""
     return bool(expected) and expected.rstrip('/') == (given or '').strip().rstrip('/')
+
+
+def token_endpoint_allowed(settings: dict, token_endpoint: str | None) -> bool | None:
+    """Whether the stored secret of every OAuth credential of the toolkit may go to ``token_endpoint``.
+
+    None when the settings hold no credential of OAUTH_CONFIGURATION_KEYS: no rule applies. The caller's
+    rights play no part here, so the answer is the same for a viewer, an editor and an admin.
+    A key with no rule of its own (one added to OAUTH_CONFIGURATION_KEYS later) accepts only the endpoint
+    saved in its credential, never a caller-chosen one.
+    """
+    verdicts = []
+    for key in OAUTH_CONFIGURATION_KEYS:
+        config = settings.get(key)
+        if not isinstance(config, dict) or not config:
+            continue
+        if key == DATAVERSE_CONFIGURATION_KEY:
+            verdicts.append(is_same_endpoint(dataverse_token_endpoint(settings), token_endpoint))
+        elif key in _MICROSOFT_LOGIN_KEYS:
+            verdicts.append(is_entra_authority_url(token_endpoint))
+        elif key == 'sharepoint_configuration':
+            # Without a discovery endpoint or an app it is ACS app-only: no sign-in, so no endpoint
+            delegated = bool(config.get('oauth_discovery_endpoint') or config.get('oauth_app_id'))
+            verdicts.append(delegated and is_entra_authority_url(token_endpoint))
+        else:
+            saved = config.get('token_url') or config.get('token_endpoint')
+            verdicts.append(is_same_endpoint(saved if isinstance(saved, str) else '', token_endpoint))
+    return all(verdicts) if verdicts else None
+
+
+def credential_token_endpoint_allowed(credential_type: str | None, data: dict, token_endpoint: str | None) -> bool:
+    """Whether the stored secret of one loaded credential may go to ``token_endpoint``.
+
+    ``credential_type`` is the type of the credential row, never a value of the request. The same rules as
+    ``token_endpoint_allowed``: the Microsoft types sign in at the Microsoft host, SharePoint only when
+    delegated, Dataverse at its tenant. Any other type accepts only the endpoint it saved. The answer is
+    never None, so a type nobody wrote a rule for is refused, not let through.
+    """
+    key = f'{credential_type}_configuration'
+    if key in OAUTH_CONFIGURATION_KEYS:
+        verdict = token_endpoint_allowed({key: data}, token_endpoint)
+        if verdict is not None:
+            return verdict
+    saved = (data or {}).get('token_url') or (data or {}).get('token_endpoint')
+    return is_same_endpoint(saved if isinstance(saved, str) else '', token_endpoint)
 
 
 class TokenRefreshError(ValueError):

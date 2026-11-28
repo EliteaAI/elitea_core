@@ -24,13 +24,13 @@ import re
 import threading
 import time
 from typing import Optional
-from urllib.parse import urlsplit
 
 import requests
 from pylon.core.tools import log
 
+from .entra_host import AUTHORITY_HOST, is_entra_authority_url
+
 GRAPH_RESOURCE = "https://graph.microsoft.com"
-AUTHORITY_HOST = "login.microsoftonline.com"
 PLATFORM_APP = "platform"                  # the interim app: the platform's own API client (env-configured)
 DEFAULT_SECRET_ENV = "ELITEA_API_CLIENT_SECRET"
 CREDENTIAL_TYPE = "sharepoint"             # the credential type an admin app must serve (#7149)
@@ -186,8 +186,7 @@ def app_client(module, delegation: dict, project_id) -> tuple:
     except Exception as exc:  # pylint: disable=W0703
         log.info("entra obo: the oauth app was not resolved (%s)", type(exc).__name__)
         raise DelegationRefused(APP_UNAVAILABLE) from None
-    endpoint = urlsplit(str((app or {}).get("token_endpoint") or ""))
-    if endpoint.scheme != "https" or endpoint.hostname != AUTHORITY_HOST or not app.get("client_id") \
+    if not is_entra_authority_url((app or {}).get("token_endpoint")) or not app.get("client_id") \
             or not app.get("client_secret"):
         raise DelegationRefused(APP_UNAVAILABLE)   # an app's secret goes only to the Entra authority
     return app["client_id"], app["client_secret"]
@@ -315,8 +314,7 @@ def _session() -> requests.Session:
 
 def _post(url, data, timeout=HTTP_TIMEOUT_S) -> requests.Response:
     """One form POST to the Entra authority: https, the authority host only, no redirect, a timeout."""
-    parts = urlsplit(url)
-    if parts.scheme != "https" or parts.hostname != AUTHORITY_HOST or parts.port not in (None, 443):
+    if not is_entra_authority_url(url):
         raise DelegationRefused(APP_UNAVAILABLE)
     with _session() as session:
         return session.post(url, data=data, timeout=timeout, allow_redirects=False, verify=True)

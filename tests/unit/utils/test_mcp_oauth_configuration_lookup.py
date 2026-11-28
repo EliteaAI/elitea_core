@@ -16,20 +16,23 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope='module')
 def mcp_oauth():
-    spec = importlib.util.spec_from_file_location(
-        'mcp_oauth_under_test', PLUGIN_ROOT / 'utils' / 'mcp_oauth.py'
-    )
-    module = importlib.util.module_from_spec(spec)
+    # mcp_oauth imports its sibling entra_host with a relative import, so both load under one
+    # throwaway package whose path is the utils folder (the package __init__ is never run).
+    package = types.ModuleType('mcp_oauth_pkg_under_test')
+    package.__path__ = [str(PLUGIN_ROOT / 'utils')]
+    sys.modules[package.__name__] = package
     # The helpers under test never touch the network; `requests` is only needed by the
     # token functions and is not in tests/requirements-dev.txt, so stub it while loading.
     stub_requests = 'requests' not in sys.modules and importlib.util.find_spec('requests') is None
     if stub_requests:
-        sys.modules['requests'] = types.ModuleType('requests')
+        sys.modules['requests'] = types.SimpleNamespace(Response=object, Session=object)
     try:
-        spec.loader.exec_module(module)
+        module = importlib.import_module(f'{package.__name__}.mcp_oauth')
     finally:
         if stub_requests:
             sys.modules.pop('requests', None)
+        for name in [n for n in sys.modules if n.startswith(f'{package.__name__}.') or n == package.__name__]:
+            sys.modules.pop(name, None)
     return module
 
 
@@ -131,3 +134,117 @@ def test_a_dataverse_credential_with_a_bad_tenant_pins_no_acceptable_endpoint(mc
 ])
 def test_an_endpoint_is_the_same_only_when_it_is_the_pinned_one(mcp_oauth, given, same):
     assert mcp_oauth.is_same_endpoint('https://login.microsoftonline.com/t/oauth2/v2.0/token', given) is same
+
+
+SOME_GUID = '11111111-2222-3333-4444-555555555555'
+MS_TOKEN = f'https://login.microsoftonline.com/{SOME_GUID}/oauth2/v2.0/token'
+
+
+OPENAPI_SAVED = 'https://idp.example/oauth/token'
+CREDENTIALS = {
+    'teams': {'teams_configuration': {'client_id': 'cid', 'oauth_discovery_endpoint': 'https://x'}},
+    'outlook': {'outlook_configuration': {'client_id': 'cid', 'oauth_discovery_endpoint': 'https://x'}},
+    'ms_graph': {'ms_graph_configuration': {'client_id': 'cid', 'oauth_discovery_endpoint': 'https://x'}},
+    'sharepoint discovery': {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://x'}},
+    'sharepoint app': {'sharepoint_configuration': {'oauth_app_id': 'app-1', 'client_id': 'cid'}},
+}
+
+
+@pytest.mark.parametrize('settings', CREDENTIALS.values(), ids=list(CREDENTIALS))
+def test_a_microsoft_credential_accepts_only_the_microsoft_login_host(mcp_oauth, settings):
+    assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is True
+    assert mcp_oauth.token_endpoint_allowed(settings, 'https://attacker.example/token') is False
+    assert mcp_oauth.token_endpoint_allowed(settings, None) is False
+
+
+def test_a_sharepoint_app_only_credential_accepts_no_endpoint(mcp_oauth):
+    settings = {'sharepoint_configuration': {'client_id': 'cid', 'client_secret': 's', 'site_url': 'https://x'}}
+
+    assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is False
+
+
+@pytest.mark.parametrize('key', ['token_url', 'token_endpoint'])
+def test_an_openapi_credential_accepts_only_its_saved_endpoint(mcp_oauth, key):
+    settings = {'openapi_configuration': {key: OPENAPI_SAVED}}
+
+    assert mcp_oauth.token_endpoint_allowed(settings, OPENAPI_SAVED) is True
+    assert mcp_oauth.token_endpoint_allowed(settings, OPENAPI_SAVED + '/') is True
+    assert mcp_oauth.token_endpoint_allowed(settings, 'https://attacker.example/token') is False
+    assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is False
+
+
+@pytest.mark.parametrize('saved', [None, '', ['x'], 5])
+def test_an_openapi_credential_with_no_usable_saved_endpoint_is_refused(mcp_oauth, saved):
+    settings = {'openapi_configuration': {'oauth_discovery_endpoint': 'https://x', 'token_url': saved}}
+
+    assert mcp_oauth.token_endpoint_allowed(settings, OPENAPI_SAVED) is False
+    assert mcp_oauth.token_endpoint_allowed(settings, '') is False
+
+
+def test_a_dataverse_credential_accepts_only_the_endpoint_of_its_tenant(mcp_oauth):
+    settings = {'dataverse_configuration': {'tenant_id': 'tenant-1', 'client_id': 'cid'}}
+
+    assert mcp_oauth.token_endpoint_allowed(
+        settings, 'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token') is True
+    assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is False
+
+
+def test_a_key_with_no_rule_of_its_own_accepts_only_its_saved_endpoint(mcp_oauth, monkeypatch):
+    monkeypatch.setattr(mcp_oauth, 'OAUTH_CONFIGURATION_KEYS', ('new_configuration',))
+    settings = {'new_configuration': {'token_endpoint': OPENAPI_SAVED}}
+
+    assert mcp_oauth.token_endpoint_allowed(settings, OPENAPI_SAVED) is True
+    assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is False
+    assert mcp_oauth.token_endpoint_allowed({'new_configuration': {'client_id': 'c'}}, MS_TOKEN) is False
+
+
+@pytest.mark.parametrize('settings', [{}, {'server_name': 'x'}, {'teams_configuration': None},
+                                      {'teams_configuration': {}}, {'openapi_configuration': 'x'}])
+def test_a_toolkit_without_an_oauth_credential_has_no_rule(mcp_oauth, settings):
+    assert mcp_oauth.token_endpoint_allowed(settings, 'https://attacker.example/token') is None
+
+
+def test_every_credential_of_a_toolkit_must_accept_the_endpoint(mcp_oauth):
+    settings = {'teams_configuration': {'client_id': 'c'},
+                'openapi_configuration': {'token_url': OPENAPI_SAVED}}
+
+    assert mcp_oauth.token_endpoint_allowed(settings, OPENAPI_SAVED) is False
+    assert mcp_oauth.token_endpoint_allowed(settings, MS_TOKEN) is False
+
+
+TENANT_TOKEN = 'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token'
+DISCOVERY = 'https://login.microsoftonline.com/common/v2.0'
+# (credential type, the loaded credential data, the endpoint asked for, accepted)
+CREDENTIAL_RULE_CASES = [
+    ('teams', {'client_id': 'c'}, MS_TOKEN, True),
+    ('outlook', {'client_id': 'c'}, MS_TOKEN, True),
+    ('ms_graph', {'client_id': 'c'}, MS_TOKEN, True),
+    ('teams', {'client_id': 'c'}, 'https://attacker.example/token', False),
+    ('ms_graph', {'client_id': 'c'}, OPENAPI_SAVED, False),
+    ('sharepoint', {'oauth_discovery_endpoint': DISCOVERY}, MS_TOKEN, True),
+    ('sharepoint', {'oauth_app_id': 'app-1'}, MS_TOKEN, True),
+    ('sharepoint', {'oauth_discovery_endpoint': DISCOVERY}, 'https://attacker.example/token', False),
+    ('sharepoint', {'site_url': 'https://contoso.sharepoint.com'}, MS_TOKEN, False),
+    ('openapi', {'token_url': OPENAPI_SAVED}, OPENAPI_SAVED + '/', True),
+    ('openapi', {'token_endpoint': OPENAPI_SAVED}, OPENAPI_SAVED, True),
+    ('openapi', {'token_url': OPENAPI_SAVED}, 'https://attacker.example/token', False),
+    ('openapi', {'token_url': OPENAPI_SAVED}, MS_TOKEN, False),
+    ('openapi', {'oauth_discovery_endpoint': 'https://idp.example/.well-known'}, OPENAPI_SAVED, False),
+    ('openapi', {'token_url': ['not', 'a', 'string']}, OPENAPI_SAVED, False),
+    ('openapi', {'token_url': OPENAPI_SAVED}, None, False),
+    ('openapi', {}, OPENAPI_SAVED, False),
+    ('dataverse', {'tenant_id': 'tenant-1'}, TENANT_TOKEN, True),
+    ('dataverse', {'tenant_id': 'tenant-1'}, MS_TOKEN, False),
+    ('dataverse', {'tenant_id': 'a/../b'}, 'https://login.microsoftonline.com/a/../b/oauth2/v2.0/token', False),
+    ('dataverse', {}, TENANT_TOKEN, False),
+    ('jira', {'token_url': OPENAPI_SAVED}, OPENAPI_SAVED, True),
+    ('jira', {'token_url': OPENAPI_SAVED}, 'https://attacker.example/token', False),
+    ('jira', {'client_id': 'c'}, OPENAPI_SAVED, False),
+    ('', {'token_url': OPENAPI_SAVED}, OPENAPI_SAVED, True),
+    (None, {'client_id': 'c'}, OPENAPI_SAVED, False),
+]
+
+
+@pytest.mark.parametrize('credential_type, data, endpoint, accepted', CREDENTIAL_RULE_CASES)
+def test_credential_token_endpoint_allowed_follows_the_rule_of_its_type(mcp_oauth, credential_type, data, endpoint, accepted):
+    assert mcp_oauth.credential_token_endpoint_allowed(credential_type, data, endpoint) is accepted

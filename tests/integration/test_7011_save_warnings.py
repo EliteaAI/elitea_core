@@ -72,6 +72,7 @@ def real_scan(harness):
     pd_package = types.ModuleType(f'{PACKAGE}.models.pd')
     pd_package.__path__ = []
     sys.modules[pd_package.__name__] = pd_package
+    load_module_with_stubs(PLUGIN_ROOT / 'models/pd/schedule_list.py', f'{PACKAGE}.models.pd.schedule_list')
     load_module_with_stubs(PLUGIN_ROOT / 'models/pd/mcp_oauth.py', f'{PACKAGE}.models.pd.mcp_oauth')
     load_module_with_stubs(PLUGIN_ROOT / 'utils/stored_oauth_tokens.py', f'{PACKAGE}.utils.stored_oauth_tokens')
     sys.modules[f'{PACKAGE}.utils.schedule_risk'] = load_module_with_stubs(

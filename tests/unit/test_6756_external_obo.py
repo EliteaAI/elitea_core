@@ -407,6 +407,20 @@ def test_an_admin_app_resolves_through_the_7149_seam_and_its_secret_goes_to_entr
         ns.entra_obo.app_client(env.module(), descriptor(oauth_app_id=app_id), 1)
 
 
+@pytest.mark.parametrize("endpoint", [
+    f"https://user@login.microsoftonline.com/{TID}/oauth2/v2.0/token",
+    f"https://login.microsoftonline.com:8443/{TID}/oauth2/v2.0/token",
+    f"https://login.microsoftonline.com/{TID}/oauth2/v2.0/token\\@evil.example",
+    None,
+], ids=["user info", "port 8443", "backslash", "missing"])
+def test_an_admin_app_endpoint_the_one_host_rule_refuses_gets_no_secret(ns, env, monkeypatch, endpoint):
+    app = {"client_id": "admin-app", "client_secret": "admin-secret-made-up", "token_endpoint": endpoint}
+    monkeypatch.setattr(ns.entra_obo, "_resolver", lambda: lambda *a: app)
+    with pytest.raises(ns.entra_obo.DelegationRefused) as refused:
+        ns.entra_obo.app_client(env.module(), descriptor(oauth_app_id=str(uuid.uuid4())), 1)
+    assert refused.value.code == "DENIED_OAUTH_APP_UNAVAILABLE"
+
+
 # --- readiness gap 2: the paths that hold a long-lived token never serve a delegated credential --------------------
 
 def test_a_mandate_is_refused_a_delegated_credential_at_decision_time(ns, env):
@@ -507,6 +521,30 @@ def test_the_token_endpoint_is_reached_only_over_https_on_the_authority_without_
     [(_, kwargs, trust_env, redirects, proxies)] = sent
     assert (kwargs["allow_redirects"], kwargs["verify"], kwargs["timeout"]) == (False, True, ns.entra_obo.HTTP_TIMEOUT_S)
     assert (trust_env, redirects, proxies) == (False, 0, {})
+
+
+@pytest.mark.parametrize("url", [
+    "https://user@login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://user:pw@login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://evil.example\\@login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://login.microsoftonline.com/t\n/oauth2/v2.0/token",
+    "https://login.microsoftonline.com\x00.evil.example/t",
+    "https://login.microsoftonline.com:notaport/t",
+    "https://[::1/t",
+    "", None, 5,
+])
+def test_the_authority_check_refuses_user_info_and_unusual_characters(ns, url):
+    assert ns.entra_host.is_entra_authority_url(url) is False
+    with pytest.raises(ns.entra_obo.DelegationRefused):
+        ns.entra_obo._post(url, {})   # pylint: disable=W0212
+
+
+@pytest.mark.parametrize("url", [
+    "https://login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://LOGIN.MICROSOFTONLINE.COM:443/t/oauth2/v2.0/token",
+])
+def test_the_authority_check_accepts_the_authority_host_with_no_port_or_443(ns, url):
+    assert ns.entra_host.is_entra_authority_url(url) is True
 
 
 def test_the_cache_is_bounded_and_serves_only_tokens_with_life_left(ns):
