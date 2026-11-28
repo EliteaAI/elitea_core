@@ -22,17 +22,38 @@ from tools import api_tools, auth, config as c, db, VaultClient, register_openap
 from pylon.core.tools import log
 
 from ...models.elitea_tools import EliteATool
-from ...models.pd.mcp_oauth import McpOAuthTokenRequest
+from ...models.pd.mcp_oauth import VAULT_REFERENCE_IN_TEXT, McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import (
+    credential_token_endpoint_allowed,
     dataverse_token_endpoint,
     exchange_token,
     get_oauth_configurations,
-    is_same_endpoint,
     pick_oauth_setting,
     refresh_token,
+    token_endpoint_allowed,
 )
 from ....configurations.utils import expand_configuration
+
+TOKEN_ENDPOINT_REFUSED = "token_endpoint is not the sign-in address of this credential"
+VAULT_REFERENCE_REFUSED = "a vault reference needs a saved credential or toolkit"
+# The fields that name a shared credential: the same set a toolkit may hold for it
+# (utils/application_tools.py `_expand_toolkit_settings`)
+CREDENTIAL_REFERENCE_KEYS = frozenset({'elitea_title', 'private', 'configuration_uuid', 'configuration_project_id'})
+
+
+def _holds_reference(value, reference: str) -> bool:
+    """Whether the saved settings hold exactly ``reference`` as a value, at any depth.
+
+    The value is compared whole, so a reference inside other text counts only when the row holds that same text.
+    """
+    if isinstance(value, str):
+        return value == reference
+    if isinstance(value, dict):
+        return any(_holds_reference(item, reference) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_reference(item, reference) for item in value)
+    return False
 
 
 def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str):
@@ -146,6 +167,7 @@ class ProjectAPI(api_tools.APIModeHandler):
 
         vault_client = VaultClient(project_id)
         credential_sources = []
+        endpoint_from_app = False
 
         # Default app mode: the browser knows only the app reference, never its secret
         if data.oauth_app_id and not data.used_dcr:
@@ -154,11 +176,17 @@ class ProjectAPI(api_tools.APIModeHandler):
                 client_id, client_secret, app_token_endpoint, scope = _resolve_oauth_app_client(
                     data.oauth_app_id, project_id, data.credential_type)
                 data.token_endpoint = app_token_endpoint
+                endpoint_from_app = True
             except LookupError as e:  # OAuthAppUnavailable
                 return {"error": "app_unavailable", "error_description": str(e)}, 400
 
+        # A sign-in that names a saved credential is served from that credential alone, a saved toolkit next to
+        # it included: the form may have picked another credential than the one the toolkit row still holds
+        use_credential = bool(data.configuration_uuid) and saved_login is None and not endpoint_from_app
+        toolkit_holds_reference = False
+
         # If toolkit_id is provided, fetch credentials from database
-        if data.toolkit_id:
+        if data.toolkit_id and not use_credential:
             try:
                 with db.with_project_schema_session(project_id) as session:
                     toolkit = session.query(EliteATool).filter(
@@ -170,6 +198,9 @@ class ProjectAPI(api_tools.APIModeHandler):
                     
                     settings = toolkit.settings or {}
                     server_name = settings.get('server_name', '')
+                    # Before the vault is read: a reference the caller sends counts only when the row holds it
+                    toolkit_holds_reference = bool(
+                        data.client_secret and _holds_reference(settings, data.client_secret))
 
                     # Unsecret the settings to resolve any vault secret references (e.g., {{secret.my_secret}})
                     try:
@@ -192,8 +223,16 @@ class ProjectAPI(api_tools.APIModeHandler):
                     oauth_configs = get_oauth_configurations(settings)
                     for oauth_config in oauth_configs:
                         config_title = oauth_config.get('elitea_title')
-                        if config_title and not oauth_config.get('client_id'):
-                            log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
+                        # A reference by uuid alone is a reference too (the form saves it without a title)
+                        if config_title or oauth_config.get('configuration_uuid'):
+                            log.debug(f"MCP OAuth proxy: expanding configuration: {config_title or oauth_config.get('configuration_uuid')}")
+                            # The expansion overlays the shared credential on this dict, so a key it does not
+                            # hold would stay: an editor could plant the endpoint the secret is sent to, or
+                            # a key that decides the sign-in kind. Only the reference stays, an inline
+                            # client_id included: a toolkit type with no credential field in its schema is
+                            # saved without the reference-only check.
+                            for key in [key for key in oauth_config if key not in CREDENTIAL_REFERENCE_KEYS]:
+                                del oauth_config[key]
                             try:
                                 # Get user_id from auth context for private configuration lookup
                                 user_id = auth.current_user().get('id') if oauth_config.get('private') else None
@@ -205,13 +244,15 @@ class ProjectAPI(api_tools.APIModeHandler):
 
                     credential_sources = [settings, *oauth_configs]
 
-                    # A Dataverse credential can be shared with every toolkit editor, so its secret never
-                    # leaves for a caller-chosen host: only the Entra endpoint of its own tenant is served.
-                    dataverse_endpoint = dataverse_token_endpoint(settings)
-                    if dataverse_endpoint is not None and not is_same_endpoint(dataverse_endpoint, data.token_endpoint):
-                        log.warning(f"MCP OAuth proxy: token_endpoint refused for Dataverse toolkit {data.toolkit_id}")
+                    # A stored credential can be shared with every toolkit editor, so its secret never leaves
+                    # for a caller-chosen host: only the sign-in address of its own identity provider is
+                    # served, whatever the caller's rights.
+                    # An endpoint taken from the admin app is the app's own: the admin may run a sovereign
+                    # cloud or a custom authority, and the app secret goes only there.
+                    if not endpoint_from_app and token_endpoint_allowed(settings, data.token_endpoint) is False:
+                        log.warning(f"MCP OAuth proxy: token_endpoint refused for toolkit {data.toolkit_id}")
                         return {"error": "access_denied",
-                                "error_description": "token_endpoint does not match the Dataverse credential"}, 403
+                                "error_description": TOKEN_ENDPOINT_REFUSED}, 403
 
                     # FE always sends the DCR client_id in the same request, so the guard below
                     # is not hit in practice, but is included for symmetry with the secret guard
@@ -243,6 +284,53 @@ class ProjectAPI(api_tools.APIModeHandler):
             except Exception as e:
                 log.error(f"MCP OAuth proxy: error fetching toolkit - {e}")
                 return {"error": "Database error", "details": str(e)}, 500
+
+        # The server loads the credential itself, so a vault reference sent next to it is never resolved and the
+        # browser's endpoint is checked against the type of the loaded credential
+        if use_credential:
+            if client_secret and VAULT_REFERENCE_IN_TEXT.search(client_secret):
+                client_secret = None
+            credential = {'configuration_uuid': data.configuration_uuid}
+            if data.configuration_project_id:
+                # A credential of another project is visible only as the caller's own personal one or a shared
+                # one; `private` makes the expansion count the personal project
+                credential.update(configuration_project_id=data.configuration_project_id, private=True)
+            try:
+                expand_configuration(credential, current_project_id=project_id,
+                                     user_id=auth.current_user().get('id'), unsecret=True)
+            except Exception as e:  # noqa: BLE001  pylint: disable=W0703
+                # Any failure, a missing project or schema included, gives the same fixed 404, so the status
+                # does not tell which project ids exist; only the type of the error is logged
+                log.warning(f"MCP OAuth proxy: credential lookup failed ({type(e).__name__})")
+                return {"error": "not_found", "error_description": "Credential not found"}, 404
+            credential_type = credential.get('configuration_type')
+            if data.credential_type is not None and data.credential_type != credential_type:
+                return {"error": "invalid_request",
+                        "error_description": "credential_type is not the type of this credential"}, 400
+            # Before any secret is read: the caller chooses token_endpoint, the credential decides where its secret goes
+            if not credential_token_endpoint_allowed(credential_type, credential, data.token_endpoint):
+                log.warning(f"MCP OAuth proxy: token_endpoint refused for a {credential_type} credential")
+                return {"error": "access_denied", "error_description": TOKEN_ENDPOINT_REFUSED}, 403
+            if not client_id and not data.used_dcr:
+                client_id = credential.get('client_id')
+            if not client_secret and not data.used_dcr:
+                client_secret = credential.get('client_secret')
+                # the wrapper first: a Dataverse credential saves no endpoint, its tenant endpoint counts as the declared one
+                sources = [{f'{credential_type}_configuration': credential}, credential]
+                if client_secret and not _may_send_stored_secret(project_id, data.token_endpoint, sources):
+                    log.warning(f"MCP OAuth proxy: stored client_secret withheld for a {credential_type} credential, "
+                                f"token_endpoint is not its saved one and caller cannot edit toolkits")
+                    client_secret = None
+            if not scope:
+                scope = credential.get('scopes') or credential.get('scope')
+                if isinstance(scope, list):
+                    scope = ' '.join(scope)
+
+        # A vault reference needs a saved credential (served above, the reference dropped) or a saved toolkit that
+        # holds that exact reference: any other names a secret the caller never proved to own
+        if (client_secret and client_secret == data.client_secret and VAULT_REFERENCE_IN_TEXT.search(client_secret)
+                and not data.oauth_app_id and not toolkit_holds_reference):
+            return {"error": "access_denied", "error_description": VAULT_REFERENCE_REFUSED}, 403
 
         # Unsecret vault references sent in the request (e.g., {{secret.my_secret}})
         if client_secret and data.client_secret and client_secret == data.client_secret and not data.oauth_app_id:

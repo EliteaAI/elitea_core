@@ -575,6 +575,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.internal_base_url = load("utils", "internal_base_url")   # the internal toolkits' base URL (#7278)
     ns.internal_base_url.host_resolves = lambda host: True   # no real DNS in a unit test
     ns.internal_obo = load("utils", "internal_obo")   # the run token admission mints (#7214)
+    ns.entra_host = load("utils", "entra_host")   # the host rule that entra_obo imports
     ns.entra_obo = load("utils", "entra_obo")   # the on-behalf-of exchange of Entra-delegated credentials (#6756)
     ns.mandate_identity = load("utils", "mandate_identity")   # a mandate owner's offline consent (#7131)
     ns.token_models = load("models", "api_token_identity")   # a scoped token owner's offline consent (#7337)

@@ -21,8 +21,14 @@ import re
 from typing import Optional, Literal, List
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
+from .schedule_list import DbId
+
 # Regex pattern to match vault secret references like {{secret.my_secret}}
 VAULT_SECRET_PATTERN = re.compile(r'^\{\{secret\.[^}]+\}\}$')
+# A reference anywhere in a value: the vault replaces it wherever it stands (shared/tools/vault_tools.py
+# `_secret_pattern`, a narrower name set), so a guard that must catch every value the vault would resolve
+# searches with this one and never with the anchored pattern above
+VAULT_REFERENCE_IN_TEXT = re.compile(r'\{\{secret\.[^}]+\}\}')
 
 
 class McpOAuthTokenRequest(BaseModel):
@@ -42,9 +48,10 @@ class McpOAuthTokenRequest(BaseModel):
     resource: Optional[str] = Field(default=None, description="RFC 8707 resource indicator: the MCP server the token is for")
     toolkit_id: Optional[int] = Field(default=None, description="Toolkit ID to fetch credentials from DB")
     toolkit_type: Optional[str] = Field(default=None, description="Toolkit type for fetching credentials (e.g., mcp_github, etc.)")
-    configuration_uuid: Optional[str] = Field(default=None, description="Configuration UUID for token storage key (frontend use only)")
+    configuration_uuid: str | None = Field(default=None, max_length=64, description="Saved credential to sign in with: the server loads its client and stored secret and sends the secret only to the sign-in address of that credential type. With save_login it is the mcp_login credential that keeps the login")
+    configuration_project_id: DbId | None = Field(default=None, description="Project that holds the credential of configuration_uuid (the personal project for a private credential); the credential must be visible to the caller")
     oauth_app_id: Optional[str] = Field(default=None, description="Admin-managed OAuth app (Default app mode); its client is resolved server-side")
-    credential_type: Optional[str] = Field(default=None, description="Credential type signing in with oauth_app_id (teams, outlook, sharepoint, ms_graph); the app must serve it")
+    credential_type: str | None = Field(default=None, max_length=100, description="Credential type signing in: with oauth_app_id (teams, outlook, sharepoint, ms_graph) the app must serve it; with configuration_uuid it must equal the type of the saved credential")
     used_dcr: bool = Field(default=False, description="True when the client_id was obtained via Dynamic Client Registration (RFC 7591). Prevents loading client_secret from toolkit DB settings since DCR-registered public clients have no secret.")
     save_login: bool = Field(default=False, description="Save the login on the mcp_login credential `configuration_uuid` for unattended runs; the refresh token is kept server-side only")
 
